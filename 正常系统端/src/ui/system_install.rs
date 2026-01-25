@@ -24,6 +24,22 @@ impl App {
 
         let is_pe = self.is_pe_environment();
         
+        // 显示小白模式提示（非PE环境下，且未关闭提示）
+        if !is_pe && !self.app_config.easy_mode_tip_dismissed {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 181, 246),
+                    "💡 新手用户？可以在\"关于\"页面中开启小白模式，获得更简单的操作体验",
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("×").clicked() {
+                        self.app_config.dismiss_easy_mode_tip();
+                    }
+                });
+            });
+            ui.add_space(10.0);
+        }
+        
         // 判断是否需要通过PE安装
         let needs_pe = self.check_if_needs_pe_for_install();
         
@@ -526,7 +542,7 @@ impl App {
         });
     }
 
-    fn check_iso_mount_status(&mut self) {
+    pub fn check_iso_mount_status(&mut self) {
         // 检查 ISO 挂载状态
         if self.iso_mounting {
             unsafe {
@@ -566,16 +582,43 @@ impl App {
                                 println!("[IMAGE INFO] 加载完成，找到 {} 个卷", volumes.len());
                                 self.image_volumes = volumes;
                                 
-                                // 自动选择第一个可安装的系统镜像
-                                self.selected_volume = self.image_volumes
-                                    .iter()
-                                    .enumerate()
-                                    .find(|(_, vol)| Self::is_installable_image(vol))
-                                    .map(|(i, _)| i);
-                                
-                                if self.selected_volume.is_none() && !self.image_volumes.is_empty() {
-                                    // 如果没有可用的系统版本，仍然设为 None
-                                    log::warn!("镜像中没有可安装的系统版本（全部为 PE 环境或安装媒体）");
+                                // 检查是否需要小白模式自动安装
+                                if self.easy_mode_pending_auto_start {
+                                    log::info!("[EASY MODE] 镜像加载完成，准备自动安装");
+                                    
+                                    // 根据预设的 install_volume_index 找到对应的分卷索引
+                                    let target_volume_index = self.install_volume_index;
+                                    self.selected_volume = self.image_volumes
+                                        .iter()
+                                        .enumerate()
+                                        .find(|(_, vol)| vol.index == target_volume_index)
+                                        .map(|(i, _)| i);
+                                    
+                                    if self.selected_volume.is_some() {
+                                        log::info!("[EASY MODE] 找到目标分卷 {}，开始安装", target_volume_index);
+                                        
+                                        // 重置标志
+                                        self.easy_mode_pending_auto_start = false;
+                                        
+                                        // 开始安装
+                                        self.start_installation();
+                                    } else {
+                                        log::error!("[EASY MODE] 未找到目标分卷 {}，自动安装失败", target_volume_index);
+                                        self.easy_mode_pending_auto_start = false;
+                                        self.show_error(&format!("未找到目标分卷 {}，请手动选择", target_volume_index));
+                                    }
+                                } else {
+                                    // 普通模式：自动选择第一个可安装的系统镜像
+                                    self.selected_volume = self.image_volumes
+                                        .iter()
+                                        .enumerate()
+                                        .find(|(_, vol)| Self::is_installable_image(vol))
+                                        .map(|(i, _)| i);
+                                    
+                                    if self.selected_volume.is_none() && !self.image_volumes.is_empty() {
+                                        // 如果没有可用的系统版本，仍然设为 None
+                                        log::warn!("镜像中没有可安装的系统版本（全部为 PE 环境或安装媒体）");
+                                    }
                                 }
                             }
                             ImageInfoResult::Error(error) => {
@@ -771,6 +814,7 @@ impl App {
                     println!("[INSTALL] PE文件不存在，开始下载: {}", pe.filename);
                     self.pending_download_url = Some(pe.download_url.clone());
                     self.pending_download_filename = Some(pe.filename.clone());
+                    self.pending_pe_md5 = pe.md5.clone();  // 设置MD5校验值
                     let pe_dir = crate::utils::path::get_exe_dir()
                         .join("PE")
                         .to_string_lossy()

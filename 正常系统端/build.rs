@@ -13,8 +13,8 @@ fn main() {
         res.set("ProductName", "LetRecovery");
         res.set("FileDescription", "Windows系统一键重装工具");
         res.set("LegalCopyright", "Copyright (C) 2026 NORMAL-EX");
-        res.set("ProductVersion", "2026.1.18");
-        res.set("FileVersion", "2026.1.18");
+        res.set("ProductVersion", "2026.1.25");
+        res.set("FileVersion", "2026.1.25");
 
         // 请求管理员权限
         res.set_manifest(r#"

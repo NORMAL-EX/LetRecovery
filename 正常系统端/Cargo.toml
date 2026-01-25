@@ -1,6 +1,6 @@
 [package]
 name = "LetRecovery"
-version = "2026.1.18"
+version = "2026.1.25"
 edition = "2021"
 authors = ["NORMAL-EX"]
 description = "Windows系统一键重装工具"
@@ -82,6 +82,9 @@ walkdir = "2"
 rfd = "0.15"
 single-instance = "0.3"
 image = "0.25"
+
+# SVG渲染
+resvg = "0.44"
 
 [build-dependencies]
 winres = "0.1"

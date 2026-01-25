@@ -12,8 +12,8 @@ fn main() {
         res.set("ProductName", "LetRecovery PE");
         res.set("FileDescription", "LetRecovery PE安装助手");
         res.set("LegalCopyright", "Copyright © 2026 NORMAL-EX");
-        res.set("ProductVersion", "2026.1.0");
-        res.set("FileVersion", "2026.1.0");
+        res.set("ProductVersion", "2026.1.25");
+        res.set("FileVersion", "2026.1.25");
 
         // 包含 Common Controls 6.0 和管理员权限
         res.set_manifest(r#"

@@ -1,3 +1,4 @@
+pub mod app_config;
 pub mod bcdedit;
 pub mod disk;
 pub mod dism;

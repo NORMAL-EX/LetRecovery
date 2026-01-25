@@ -17,8 +17,52 @@ impl App {
                 // 版本信息
                 ui.horizontal(|ui| {
                     ui.label("版本:");
-                    ui.strong("v2026.1.18");
+                    ui.strong("v2026.1.25");
                 });
+
+                ui.add_space(15.0);
+                
+                // 小白模式设置
+                ui.separator();
+                ui.add_space(10.0);
+                ui.heading("模式设置");
+                ui.add_space(10.0);
+                
+                let is_pe = self.system_info.as_ref()
+                    .map(|info| info.is_pe_environment)
+                    .unwrap_or(false);
+                
+                ui.horizontal(|ui| {
+                    let mut easy_mode = self.app_config.easy_mode_enabled;
+                    
+                    ui.add_enabled_ui(!is_pe, |ui| {
+                        if ui.checkbox(&mut easy_mode, "启用小白模式").changed() {
+                            self.app_config.set_easy_mode(easy_mode);
+                        }
+                    });
+                    
+                    if is_pe {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 165, 0),
+                            "(PE环境下不可用)",
+                        );
+                    }
+                });
+                
+                ui.add_space(5.0);
+                ui.indent("easy_mode_desc", |ui| {
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        "小白模式提供简化的系统重装界面，自动应用推荐设置，",
+                    );
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        "适合不熟悉系统重装操作的用户。",
+                    );
+                });
+                
+                ui.add_space(10.0);
+                ui.separator();
 
                 ui.add_space(15.0);
 

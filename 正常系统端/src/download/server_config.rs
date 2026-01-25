@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 /// 全局服务器地址
-pub const SERVER_BASE_URL: &str = "https://letrecovery.cloud-pe.cn/";
+pub const SERVER_BASE_URL: &str = "https://letrecovery.cloud-pe.cn/v2/";
 
 /// 服务器配置响应
 #[derive(Debug, Clone, Deserialize)]
@@ -22,6 +22,9 @@ pub struct ServerConfigData {
     pub dl: String,
     #[serde(default)]
     pub soft: Option<String>,
+    /// 小白模式配置路径
+    #[serde(default)]
+    pub easy: Option<String>,
 }
 
 /// 远程配置
@@ -33,6 +36,8 @@ pub struct RemoteConfig {
     pub dl_content: Option<String>,
     /// 软件列表内容（从服务器获取）
     pub soft_content: Option<String>,
+    /// 小白模式配置内容（从服务器获取）
+    pub easy_content: Option<String>,
     /// 是否加载成功
     pub loaded: bool,
     /// 错误信息
@@ -51,10 +56,11 @@ impl RemoteConfig {
         
         // 尝试加载配置
         match Self::fetch_config() {
-            Ok((pe_content, dl_content, soft_content)) => {
+            Ok((pe_content, dl_content, soft_content, easy_content)) => {
                 config.pe_content = pe_content;
                 config.dl_content = dl_content;
                 config.soft_content = soft_content;
+                config.easy_content = easy_content;
                 config.loaded = true;
                 log::info!("远程配置加载成功");
             }
@@ -69,7 +75,7 @@ impl RemoteConfig {
     }
     
     /// 获取服务器配置
-    fn fetch_config() -> Result<(Option<String>, Option<String>, Option<String>)> {
+    fn fetch_config() -> Result<(Option<String>, Option<String>, Option<String>, Option<String>)> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -102,11 +108,15 @@ impl RemoteConfig {
         let pe_url = Self::resolve_url(&data.pe);
         let dl_url = Self::resolve_url(&data.dl);
         let soft_url = data.soft.as_ref().map(|s| Self::resolve_url(s));
+        let easy_url = data.easy.as_ref().map(|s| Self::resolve_url(s));
         
         log::info!("PE 配置 URL: {}", pe_url);
         log::info!("DL 配置 URL: {}", dl_url);
         if let Some(ref url) = soft_url {
             log::info!("Soft 配置 URL: {}", url);
+        }
+        if let Some(ref url) = easy_url {
+            log::info!("Easy 配置 URL: {}", url);
         }
         
         // 获取 PE 配置内容
@@ -118,7 +128,10 @@ impl RemoteConfig {
         // 获取 Soft 配置内容
         let soft_content = soft_url.and_then(|url| Self::fetch_text_content(&client, &url).ok());
         
-        Ok((pe_content, dl_content, soft_content))
+        // 获取 Easy 配置内容
+        let easy_content = easy_url.and_then(|url| Self::fetch_text_content(&client, &url).ok());
+        
+        Ok((pe_content, dl_content, soft_content, easy_content))
     }
     
     /// 解析 URL，支持完整 URL 和相对路径
@@ -170,7 +183,7 @@ mod tests {
     fn test_resolve_url_relative() {
         assert_eq!(
             RemoteConfig::resolve_url("config/pe"),
-            "https://letrecovery.cloud-pe.cn/config/pe"
+            "https://letrecovery.cloud-pe.cn/v2/config/pe"
         );
     }
     

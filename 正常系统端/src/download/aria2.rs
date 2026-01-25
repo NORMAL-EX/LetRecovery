@@ -1,10 +1,25 @@
+//! aria2下载管理器模块
+//!
+//! 优化点：
+//! - 支持预启动aria2进程
+//! - 更快的RPC连接（减少等待时间）
+//! - 全局单例模式，避免重复启动
+
 use anyhow::Result;
 use aria2_ws::response::TaskStatus;
 use std::process::Child;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::utils::cmd::create_command;
 use crate::utils::path::get_bin_dir;
+
+/// 全局aria2管理器（延迟初始化）
+static GLOBAL_ARIA2: OnceLock<Arc<TokioMutex<Option<Aria2Manager>>>> = OnceLock::new();
+
+/// aria2是否已预热
+static ARIA2_WARMED_UP: AtomicBool = AtomicBool::new(false);
 
 /// 下载进度信息
 #[derive(Debug, Clone)]
@@ -33,8 +48,61 @@ pub struct Aria2Manager {
 }
 
 impl Aria2Manager {
-    /// 启动 aria2c 进程并连接
-    pub async fn start() -> Result<Self> {
+    /// 预热aria2（在后台启动进程并建立连接）
+    /// 
+    /// 可以在应用启动时或用户选择PE时调用，提前准备好aria2
+    pub async fn warmup() -> Result<()> {
+        if ARIA2_WARMED_UP.load(Ordering::SeqCst) {
+            log::info!("[aria2] 已经预热过，跳过");
+            return Ok(());
+        }
+
+        log::info!("[aria2] 开始预热...");
+        
+        // 获取或创建全局管理器
+        let global = GLOBAL_ARIA2.get_or_init(|| Arc::new(TokioMutex::new(None)));
+        let mut guard = global.lock().await;
+        
+        if guard.is_some() {
+            log::info!("[aria2] 全局管理器已存在");
+            ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        
+        // 启动新的管理器
+        match Self::start_internal().await {
+            Ok(manager) => {
+                *guard = Some(manager);
+                ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
+                log::info!("[aria2] 预热完成");
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("[aria2] 预热失败: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    /// 获取全局aria2管理器（如果已预热）或创建新的
+    pub async fn get_or_start() -> Result<Arc<TokioMutex<Option<Aria2Manager>>>> {
+        let global = GLOBAL_ARIA2.get_or_init(|| Arc::new(TokioMutex::new(None)));
+        
+        {
+            let mut guard = global.lock().await;
+            if guard.is_none() {
+                log::info!("[aria2] 全局管理器不存在，正在创建...");
+                let manager = Self::start_internal().await?;
+                *guard = Some(manager);
+                ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
+            }
+        }
+        
+        Ok(Arc::clone(global))
+    }
+
+    /// 内部启动方法
+    async fn start_internal() -> Result<Self> {
         let bin_dir = get_bin_dir();
         let aria2c_path = bin_dir.join("aria2c.exe");
 
@@ -42,10 +110,12 @@ impl Aria2Manager {
             anyhow::bail!("aria2c.exe not found at {:?}", aria2c_path);
         }
 
+        log::info!("[aria2] 正在启动 aria2c 进程...");
+        let start_time = std::time::Instant::now();
+
         // 启动 aria2c 进程，启用 RPC
         let process = create_command(&aria2c_path)
             .args([
-                // 以 daemon 方式运行，否则在没有任务时 aria2c 会直接退出，导致 RPC 端口未监听
                 "--daemon=true",
                 "--enable-rpc=true",
                 "--rpc-listen-port=6800",
@@ -61,24 +131,33 @@ impl Aria2Manager {
             ])
             .spawn()?;
 
-        log::info!("aria2c 进程已启动，正在等待 RPC 服务就绪...");
+        log::info!("[aria2] aria2c 进程已启动，正在等待 RPC 服务就绪...");
 
-        // 重试连接，最多尝试 15 次，每次间隔 500ms（总共约 7.5 秒）
+        // 优化：使用更短的初始等待时间和更快的重试
+        // 第一次等待100ms，之后每次等待200ms，最多尝试20次（约4秒）
         let mut client = None;
         let mut last_error = String::new();
 
-        for i in 0..15 {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // 先短暂等待进程启动
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+        for i in 0..20 {
             match aria2_ws::Client::connect("ws://127.0.0.1:6800/jsonrpc", None).await {
                 Ok(c) => {
                     client = Some(c);
-                    log::info!("aria2c RPC 连接成功 (第 {} 次尝试)", i + 1);
+                    let elapsed = start_time.elapsed();
+                    log::info!("[aria2] RPC 连接成功 (第 {} 次尝试)，总耗时: {:?}", i + 1, elapsed);
                     break;
                 }
                 Err(e) => {
                     last_error = e.to_string();
-                    log::warn!("aria2c RPC 连接失败 (第 {} 次尝试): {}", i + 1, e);
+                    if i < 5 {
+                        // 前5次尝试，每200ms重试一次
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    } else {
+                        // 之后每300ms重试一次
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
                 }
             }
         }
@@ -93,12 +172,28 @@ impl Aria2Manager {
         })
     }
 
+    /// 启动 aria2c 进程并连接（公开接口，向后兼容）
+    pub async fn start() -> Result<Self> {
+        Self::start_internal().await
+    }
+
     /// 添加下载任务
     pub async fn add_download(
         &self,
         url: &str,
         save_dir: &str,
         filename: Option<&str>,
+    ) -> Result<String> {
+        self.add_download_with_headers(url, save_dir, filename, None).await
+    }
+
+    /// 添加下载任务（支持自定义headers）
+    pub async fn add_download_with_headers(
+        &self,
+        url: &str,
+        save_dir: &str,
+        filename: Option<&str>,
+        headers: Option<Vec<String>>,
     ) -> Result<String> {
         let client = self
             .client
@@ -108,12 +203,26 @@ impl Aria2Manager {
         let mut options = aria2_ws::TaskOptions::default();
         options.dir = Some(save_dir.to_string());
         options.split = Some(32);
-        // aria2c 的 --max-connection-per-server 取值范围通常为 1-16（不同 build 可能不同），
-        // 这里保持与启动参数一致，避免任务级别参数导致 aria2c 侧报错。
         options.max_connection_per_server = Some(16);
 
         if let Some(name) = filename {
             options.out = Some(name.to_string());
+        }
+
+        // 设置自定义headers
+        if let Some(hdrs) = headers {
+            if !hdrs.is_empty() {
+                log::info!("[aria2] 设置自定义headers到请求选项，数量: {}", hdrs.len());
+                for (i, h) in hdrs.iter().enumerate() {
+                    let header_name = h.split(':').next().unwrap_or("Unknown");
+                    log::info!("[aria2] 设置Header[{}]: {}", i, header_name);
+                }
+                options.header = Some(hdrs);
+            } else {
+                log::warn!("[aria2] 收到空的headers列表");
+            }
+        } else {
+            log::info!("[aria2] 未提供自定义headers");
         }
 
         let gid = client
@@ -211,5 +320,16 @@ impl Drop for Aria2Manager {
         if let Some(mut process) = self.aria2_process.take() {
             let _ = process.kill();
         }
+    }
+}
+
+/// 清理全局aria2管理器
+pub async fn cleanup_global_aria2() {
+    if let Some(global) = GLOBAL_ARIA2.get() {
+        let mut guard = global.lock().await;
+        if let Some(mut manager) = guard.take() {
+            let _ = manager.shutdown().await;
+        }
+        ARIA2_WARMED_UP.store(false, Ordering::SeqCst);
     }
 }

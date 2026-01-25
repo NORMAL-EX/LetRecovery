@@ -432,6 +432,37 @@ pub struct App {
     pub quick_partition_disks_rx: Option<Receiver<Vec<crate::core::quick_partition::PhysicalDisk>>>,
     pub quick_partition_result_rx: Option<Receiver<crate::core::quick_partition::QuickPartitionResult>>,
     pub resize_existing_result_rx: Option<Receiver<crate::core::quick_partition::ResizePartitionResult>>,
+    
+    // 应用配置（小白模式等）
+    pub app_config: crate::core::app_config::AppConfig,
+    
+    // PE下载待校验的MD5
+    pub pending_pe_md5: Option<String>,
+    
+    // MD5校验状态
+    pub md5_verify_state: crate::ui::download_progress::Md5VerifyState,
+    
+    // 小白模式相关
+    pub easy_mode_selected_system: Option<usize>,
+    pub easy_mode_selected_volume: Option<usize>,
+    pub easy_mode_show_confirm_dialog: bool,
+    pub easy_mode_system_logo_cache: HashMap<String, EasyModeLogoState>,
+    pub easy_mode_logo_loading: HashSet<String>,
+    /// 小白模式自动安装标志：下载完成后自动开始安装
+    pub easy_mode_auto_install: bool,
+    /// 小白模式待自动开始标志：镜像加载完成后自动开始安装
+    pub easy_mode_pending_auto_start: bool,
+    
+    // 内嵌资源管理器
+    pub embedded_assets: crate::ui::EmbeddedAssets,
+}
+
+/// 小白模式Logo状态
+#[derive(Clone)]
+pub enum EasyModeLogoState {
+    Loading,
+    Loaded(egui::TextureHandle),
+    Failed,
 }
 
 /// 在线下载页面选项卡
@@ -657,6 +688,22 @@ impl Default for App {
             quick_partition_disks_rx: None,
             quick_partition_result_rx: None,
             resize_existing_result_rx: None,
+            // 应用配置（小白模式等）
+            app_config: crate::core::app_config::AppConfig::load(),
+            // PE下载待校验的MD5
+            pending_pe_md5: None,
+            // MD5校验状态
+            md5_verify_state: crate::ui::download_progress::Md5VerifyState::NotStarted,
+            // 小白模式相关
+            easy_mode_selected_system: None,
+            easy_mode_selected_volume: None,
+            easy_mode_show_confirm_dialog: false,
+            easy_mode_system_logo_cache: HashMap::new(),
+            easy_mode_logo_loading: HashSet::new(),
+            easy_mode_auto_install: false,
+            easy_mode_pending_auto_start: false,
+            // 内嵌资源管理器
+            embedded_assets: crate::ui::EmbeddedAssets::new(),
         }
     }
 }
@@ -732,7 +779,7 @@ impl App {
         dark_style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         dark_style.spacing.button_padding = egui::vec2(10.0, 5.0);
         // 滚动条设置 - 使滚动条更明显
-        dark_style.spacing.scroll.bar_width = 5.0;
+        dark_style.spacing.scroll.bar_width = 2.0;
         dark_style.spacing.scroll.bar_inner_margin = 2.0;
         dark_style.spacing.scroll.bar_outer_margin = 2.0;
         dark_style.spacing.scroll.floating = false; // 不使用浮动滚动条，始终显示
@@ -864,10 +911,11 @@ impl App {
             self.remote_config_loading = false;
             
             if remote_config.loaded {
-                self.config = Some(ConfigManager::load_from_content_with_soft(
+                self.config = Some(ConfigManager::load_from_content_full(
                     remote_config.dl_content.as_deref(),
                     remote_config.pe_content.as_deref(),
                     remote_config.soft_content.as_deref(),
+                    remote_config.easy_content.as_deref(),
                 ));
                 log::info!("使用预加载的远程配置");
                 
@@ -970,10 +1018,11 @@ impl App {
                 self.remote_config_rx = None;
                 
                 if remote_config.loaded {
-                    self.config = Some(ConfigManager::load_from_content_with_soft(
+                    self.config = Some(ConfigManager::load_from_content_full(
                         remote_config.dl_content.as_deref(),
                         remote_config.pe_content.as_deref(),
                         remote_config.soft_content.as_deref(),
+                        remote_config.easy_content.as_deref(),
                     ));
                     log::info!("远程配置加载成功");
                     
@@ -994,6 +1043,14 @@ impl App {
                             }
                             if self.selected_pe_for_backup.is_none() {
                                 self.selected_pe_for_backup = Some(0);
+                            }
+                            
+                            // 预热PE下载连接（在后台进行，不阻塞UI）
+                            if let Some(first_pe) = config.pe_list.first() {
+                                let warmup_url = first_pe.download_url.clone();
+                                std::thread::spawn(move || {
+                                    crate::download::pe_url_resolver::warmup_connection_blocking(&warmup_url);
+                                });
                             }
                         }
                     }
@@ -1055,6 +1112,9 @@ impl eframe::App for App {
         
         // 处理图标加载结果
         self.process_icon_load_results(ctx);
+        
+        // 处理小白模式Logo加载结果
+        self.process_easy_mode_logo_results(ctx);
         
         // 检查工具箱异步操作结果
         self.check_tools_async_operations();
@@ -1125,6 +1185,12 @@ impl eframe::App for App {
 
                 // 检查是否有操作正在进行
                 let is_busy = self.is_installing || self.is_backing_up || self.current_download.is_some();
+                
+                // 检查是否启用小白模式（PE环境下强制禁用）
+                let is_pe = self.system_info.as_ref()
+                    .map(|info| info.is_pe_environment)
+                    .unwrap_or(false);
+                let easy_mode = self.app_config.easy_mode_enabled && !is_pe;
 
                 if is_busy {
                     ui.colored_label(
@@ -1134,54 +1200,59 @@ impl eframe::App for App {
                     ui.add_space(5.0);
                 }
 
+                // 小白模式显示"系统重装"，普通模式显示"系统安装"
+                let system_install_label = if easy_mode { "系统重装" } else { "系统安装" };
                 if ui
                     .add_enabled(
                         !is_busy || self.current_panel == Panel::SystemInstall,
-                        egui::SelectableLabel::new(self.current_panel == Panel::SystemInstall, "系统安装"),
+                        egui::SelectableLabel::new(self.current_panel == Panel::SystemInstall, system_install_label),
                     )
                     .clicked()
                 {
                     self.current_panel = Panel::SystemInstall;
                 }
 
-                if ui
-                    .add_enabled(
-                        !is_busy || self.current_panel == Panel::SystemBackup,
-                        egui::SelectableLabel::new(self.current_panel == Panel::SystemBackup, "系统备份"),
-                    )
-                    .clicked()
-                {
-                    self.current_panel = Panel::SystemBackup;
-                }
+                // 小白模式下隐藏以下菜单
+                if !easy_mode {
+                    if ui
+                        .add_enabled(
+                            !is_busy || self.current_panel == Panel::SystemBackup,
+                            egui::SelectableLabel::new(self.current_panel == Panel::SystemBackup, "系统备份"),
+                        )
+                        .clicked()
+                    {
+                        self.current_panel = Panel::SystemBackup;
+                    }
 
-                if ui
-                    .add_enabled(
-                        !is_busy || self.current_panel == Panel::OnlineDownload,
-                        egui::SelectableLabel::new(self.current_panel == Panel::OnlineDownload, "在线下载"),
-                    )
-                    .clicked()
-                {
-                    self.current_panel = Panel::OnlineDownload;
-                }
+                    if ui
+                        .add_enabled(
+                            !is_busy || self.current_panel == Panel::OnlineDownload,
+                            egui::SelectableLabel::new(self.current_panel == Panel::OnlineDownload, "在线下载"),
+                        )
+                        .clicked()
+                    {
+                        self.current_panel = Panel::OnlineDownload;
+                    }
 
-                if ui
-                    .add_enabled(
-                        !is_busy || self.current_panel == Panel::Tools,
-                        egui::SelectableLabel::new(self.current_panel == Panel::Tools, "工具箱"),
-                    )
-                    .clicked()
-                {
-                    self.current_panel = Panel::Tools;
-                }
+                    if ui
+                        .add_enabled(
+                            !is_busy || self.current_panel == Panel::Tools,
+                            egui::SelectableLabel::new(self.current_panel == Panel::Tools, "工具箱"),
+                        )
+                        .clicked()
+                    {
+                        self.current_panel = Panel::Tools;
+                    }
 
-                if ui
-                    .add_enabled(
-                        !is_busy || self.current_panel == Panel::HardwareInfo,
-                        egui::SelectableLabel::new(self.current_panel == Panel::HardwareInfo, "硬件信息"),
-                    )
-                    .clicked()
-                {
-                    self.current_panel = Panel::HardwareInfo;
+                    if ui
+                        .add_enabled(
+                            !is_busy || self.current_panel == Panel::HardwareInfo,
+                            egui::SelectableLabel::new(self.current_panel == Panel::HardwareInfo, "硬件信息"),
+                        )
+                        .clicked()
+                    {
+                        self.current_panel = Panel::HardwareInfo;
+                    }
                 }
 
                 if ui
@@ -1196,8 +1267,20 @@ impl eframe::App for App {
             });
 
         // 主面板
+        // 检查是否启用小白模式（PE环境下强制禁用）
+        let is_pe_for_panel = self.system_info.as_ref()
+            .map(|info| info.is_pe_environment)
+            .unwrap_or(false);
+        let easy_mode_for_panel = self.app_config.easy_mode_enabled && !is_pe_for_panel;
+        
         egui::CentralPanel::default().show(ctx, |ui| match self.current_panel {
-            Panel::SystemInstall => self.show_system_install(ui),
+            Panel::SystemInstall => {
+                if easy_mode_for_panel {
+                    self.show_easy_mode_install(ui, ctx);
+                } else {
+                    self.show_system_install(ui);
+                }
+            }
             Panel::SystemBackup => self.show_system_backup(ui),
             Panel::OnlineDownload => self.show_online_download(ui),
             Panel::Tools => self.show_tools(ui),

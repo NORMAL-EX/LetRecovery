@@ -15,6 +15,9 @@ pub struct OnlinePE {
     pub download_url: String,
     pub display_name: String,
     pub filename: String,
+    /// MD5校验值（可选）
+    #[serde(default)]
+    pub md5: Option<String>,
 }
 
 /// 本地缓存的PE配置（不含下载链接）
@@ -22,6 +25,9 @@ pub struct OnlinePE {
 pub struct CachedPE {
     pub display_name: String,
     pub filename: String,
+    /// MD5校验值（可选）
+    #[serde(default)]
+    pub md5: Option<String>,
 }
 
 impl From<&OnlinePE> for CachedPE {
@@ -29,6 +35,7 @@ impl From<&OnlinePE> for CachedPE {
         Self {
             display_name: pe.display_name.clone(),
             filename: pe.filename.clone(),
+            md5: pe.md5.clone(),
         }
     }
 }
@@ -40,6 +47,7 @@ impl CachedPE {
             download_url: String::new(),
             display_name: self.display_name.clone(),
             filename: self.filename.clone(),
+            md5: self.md5.clone(),
         }
     }
 }
@@ -158,6 +166,8 @@ pub struct ConfigManager {
     pub systems: Vec<OnlineSystem>,
     pub pe_list: Vec<OnlinePE>,
     pub software_list: Vec<OnlineSoftware>,
+    /// 小白模式配置
+    pub easy_mode_config: Option<EasyModeConfig>,
 }
 
 impl ConfigManager {
@@ -189,7 +199,7 @@ impl ConfigManager {
             Vec::new()
         };
 
-        Ok(Self { systems, pe_list, software_list: Vec::new() })
+        Ok(Self { systems, pe_list, software_list: Vec::new(), easy_mode_config: None })
     }
     
     /// 从远程配置内容加载
@@ -206,7 +216,7 @@ impl ConfigManager {
             .map(|c| Self::parse_pe_list(c))
             .unwrap_or_default();
         
-        Self { systems, pe_list, software_list: Vec::new() }
+        Self { systems, pe_list, software_list: Vec::new(), easy_mode_config: None }
     }
     
     /// 从远程配置内容加载（包含软件列表）
@@ -232,7 +242,38 @@ impl ConfigManager {
             .map(|c| Self::parse_software_list(c))
             .unwrap_or_default();
         
-        Self { systems, pe_list, software_list }
+        Self { systems, pe_list, software_list, easy_mode_config: None }
+    }
+    
+    /// 从远程配置内容加载（完整版，包含所有配置）
+    /// 
+    /// # Arguments
+    /// * `dl_content` - 系统镜像列表内容
+    /// * `pe_content` - PE 列表内容
+    /// * `soft_content` - 软件列表内容（JSON格式）
+    /// * `easy_content` - 小白模式配置内容（JSON格式）
+    pub fn load_from_content_full(
+        dl_content: Option<&str>, 
+        pe_content: Option<&str>,
+        soft_content: Option<&str>,
+        easy_content: Option<&str>,
+    ) -> Self {
+        let systems = dl_content
+            .map(|c| Self::parse_system_list(c))
+            .unwrap_or_default();
+        
+        let pe_list = pe_content
+            .map(|c| Self::parse_pe_list(c))
+            .unwrap_or_default();
+        
+        let software_list = soft_content
+            .map(|c| Self::parse_software_list(c))
+            .unwrap_or_default();
+        
+        let easy_mode_config = easy_content
+            .and_then(|c| EasyModeConfig::parse(c));
+        
+        Self { systems, pe_list, software_list, easy_mode_config }
     }
 
     /// 解析系统列表
@@ -263,18 +304,33 @@ impl ConfigManager {
     }
 
     /// 解析 PE 列表
-    /// 格式: URL,显示名称,文件名
+    /// 格式: URL,显示名称,文件名[,MD5]
     pub fn parse_pe_list(content: &str) -> Vec<OnlinePE> {
         content
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
             .filter_map(|line| {
                 let parts: Vec<&str> = line.split(',').collect();
-                if parts.len() >= 3 {
+                if parts.len() >= 4 {
+                    // 4字段格式: URL,显示名称,文件名,MD5
+                    let md5_str = parts[3].trim();
+                    let md5 = if md5_str.is_empty() {
+                        None
+                    } else {
+                        Some(md5_str.to_uppercase())
+                    };
                     Some(OnlinePE {
                         download_url: parts[0].trim().to_string(),
                         display_name: parts[1].trim().to_string(),
                         filename: parts[2].trim().to_string(),
+                        md5,
+                    })
+                } else if parts.len() >= 3 {
+                    Some(OnlinePE {
+                        download_url: parts[0].trim().to_string(),
+                        display_name: parts[1].trim().to_string(),
+                        filename: parts[2].trim().to_string(),
+                        md5: None,
                     })
                 } else if parts.len() >= 2 {
                     let url = parts[0].trim();
@@ -283,6 +339,7 @@ impl ConfigManager {
                         download_url: url.to_string(),
                         display_name: parts[1].trim().to_string(),
                         filename,
+                        md5: None,
                     })
                 } else {
                     None
@@ -310,5 +367,58 @@ impl ConfigManager {
     /// 检查软件列表是否为空
     pub fn has_software(&self) -> bool {
         !self.software_list.is_empty()
+    }
+}
+
+/// 小白模式分卷信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EasyModeVolume {
+    /// 实际分卷号（WIM索引）
+    pub number: u32,
+    /// 分卷显示名称
+    pub name: String,
+}
+
+/// 小白模式系统信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EasyModeSystem {
+    /// 系统Logo URL
+    pub os_logo: String,
+    /// 系统下载链接
+    pub os_download: String,
+    /// 分卷列表
+    pub volume: Vec<EasyModeVolume>,
+}
+
+/// 小白模式配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EasyModeConfig {
+    /// 系统列表，每个元素是一个HashMap，键为系统名称
+    pub system: Vec<std::collections::HashMap<String, EasyModeSystem>>,
+}
+
+impl EasyModeConfig {
+    /// 从JSON字符串解析
+    pub fn parse(content: &str) -> Option<Self> {
+        match serde_json::from_str::<EasyModeConfig>(content) {
+            Ok(config) => {
+                log::info!("小白模式配置加载成功，共 {} 个系统", config.system.len());
+                Some(config)
+            }
+            Err(e) => {
+                log::warn!("解析小白模式配置失败: {}", e);
+                None
+            }
+        }
+    }
+    
+    /// 获取所有系统（展平为Vec）
+    pub fn get_systems(&self) -> Vec<(String, EasyModeSystem)> {
+        self.system
+            .iter()
+            .flat_map(|map| {
+                map.iter().map(|(name, sys)| (name.clone(), sys.clone()))
+            })
+            .collect()
     }
 }
