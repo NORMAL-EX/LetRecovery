@@ -779,7 +779,7 @@ impl App {
         dark_style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         dark_style.spacing.button_padding = egui::vec2(10.0, 5.0);
         // 滚动条设置 - 使滚动条更明显
-        dark_style.spacing.scroll.bar_width = 2.0;
+        dark_style.spacing.scroll.bar_width = 5.0;
         dark_style.spacing.scroll.bar_inner_margin = 2.0;
         dark_style.spacing.scroll.bar_outer_margin = 2.0;
         dark_style.spacing.scroll.floating = false; // 不使用浮动滚动条，始终显示
