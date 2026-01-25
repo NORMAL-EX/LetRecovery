@@ -1,0 +1,100 @@
+[package]
+name = "LetRecovery"
+version = "2026.1.25"
+edition = "2021"
+authors = ["NORMAL-EX"]
+description = "Windows系统一键重装工具"
+
+[dependencies]
+# GUI
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["image"] }
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+
+# aria2 WebSocket 客户端
+aria2-ws = "0.5"
+futures = "0.3"
+
+# 网络请求
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Windows API
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Vhd",
+    "Win32_System_SystemInformation",
+    "Win32_System_Registry",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    # WMI COM 支持 (替代 wmic 命令行)
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
+    # Windows Runtime - APPX包管理
+    "Foundation",
+    "Foundation_Collections",
+    "Management_Deployment",
+    "ApplicationModel",
+    # 系统时间设置
+    "Win32_System_Time",
+    # 磁盘格式化和BitLocker支持
+    "Win32_System_LibraryLoader",
+    "Win32_Security_Cryptography",
+    # SetupAPI - 设备驱动管理
+    "Win32_Devices_DeviceAndDriverInstallation",
+] }
+winreg = "0.52"
+
+# wimgapi.dll 动态加载
+libloading = "0.8"
+
+# 编码转换
+encoding_rs = "0.8"
+
+# 日志
+log = "0.4"
+env_logger = "0.11"
+
+# 错误处理
+anyhow = "1"
+thiserror = "1"
+
+# 其他工具
+chrono = "0.4"
+dirs = "5"
+walkdir = "2"
+rfd = "0.15"
+single-instance = "0.3"
+image = "0.25"
+
+# SVG渲染
+resvg = "0.44"
+
+[build-dependencies]
+winres = "0.1"
+
+[[bin]]
+name = "LetRecovery"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
