@@ -6,6 +6,7 @@ pub enum InstallStep {
     FormatPartition,
     ApplyImage,
     ImportDrivers,
+    InstallCabPackages,
     RepairBoot,
     ApplyAdvancedOptions,
     GenerateUnattend,
@@ -19,6 +20,7 @@ impl InstallStep {
             InstallStep::FormatPartition => "格式化分区",
             InstallStep::ApplyImage => "释放系统镜像",
             InstallStep::ImportDrivers => "导入驱动",
+            InstallStep::InstallCabPackages => "安装更新包",
             InstallStep::RepairBoot => "修复引导",
             InstallStep::ApplyAdvancedOptions => "应用高级选项",
             InstallStep::GenerateUnattend => "生成无人值守配置",
@@ -32,16 +34,17 @@ impl InstallStep {
             InstallStep::FormatPartition => 0,
             InstallStep::ApplyImage => 1,
             InstallStep::ImportDrivers => 2,
-            InstallStep::RepairBoot => 3,
-            InstallStep::ApplyAdvancedOptions => 4,
-            InstallStep::GenerateUnattend => 5,
-            InstallStep::Cleanup => 6,
-            InstallStep::Complete => 7,
+            InstallStep::InstallCabPackages => 3,
+            InstallStep::RepairBoot => 4,
+            InstallStep::ApplyAdvancedOptions => 5,
+            InstallStep::GenerateUnattend => 6,
+            InstallStep::Cleanup => 7,
+            InstallStep::Complete => 8,
         }
     }
 
     pub fn total() -> usize {
-        8
+        9
     }
 
     pub fn all() -> Vec<InstallStep> {
@@ -49,6 +52,7 @@ impl InstallStep {
             InstallStep::FormatPartition,
             InstallStep::ApplyImage,
             InstallStep::ImportDrivers,
+            InstallStep::InstallCabPackages,
             InstallStep::RepairBoot,
             InstallStep::ApplyAdvancedOptions,
             InstallStep::GenerateUnattend,

@@ -196,7 +196,7 @@ impl SystemInfo {
                 let mut objects = [None];
                 let mut returned: u32 = 0;
                 
-                if enumerator.Next(WBEM_INFINITE, &mut objects, &mut returned).is_ok() && returned > 0 {
+                if enumerator.Next(5000, &mut objects, &mut returned).is_ok() && returned > 0 {
                     if let Some(obj) = objects[0].take() {
                         // 获取 IsEnabled_InitialValue 属性
                         let prop_name = BSTR::from("IsEnabled_InitialValue");

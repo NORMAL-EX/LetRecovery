@@ -294,10 +294,19 @@ impl App {
             );
         }
 
-        // 显示备份完成
+        // 显示备份完成（仅当用户从进度页面返回时显示）
         if self.backup_progress >= 100 && !self.is_backing_up {
             ui.add_space(10.0);
-            ui.colored_label(egui::Color32::GREEN, "✓ 备份完成！");
+            match self.backup_mode {
+                BackupMode::Direct => {
+                    ui.colored_label(egui::Color32::GREEN, "✓ 备份完成！");
+                }
+                BackupMode::ViaPE => {
+                    // ViaPE模式完成提示在 BackupProgress 页面显示
+                    // 这里只显示简单状态
+                    ui.colored_label(egui::Color32::GREEN, "✓ PE环境准备完成，请重启进入PE继续备份");
+                }
+            }
         }
 
         // 显示备份错误
@@ -397,6 +406,9 @@ impl App {
 
         // 执行实际的备份
         self.start_backup_internal();
+        
+        // 跳转到备份进度页面
+        self.current_panel = crate::app::Panel::BackupProgress;
     }
     
     /// 内部备份函数，PE下载完成后调用

@@ -1,14 +1,16 @@
 //! 镜像操作模块
 //!
-//! 该模块封装了 Windows 系统镜像操作功能，完全基于 Windows API，不依赖 DISM 命令行：
+//! 该模块封装了 Windows 系统镜像操作功能：
 //! - 镜像释放/应用：使用 wimgapi.dll
 //! - 镜像备份/捕获：使用 wimgapi.dll
-//! - 驱动导出/导入：使用 setupapi.dll/newdev.dll
+//! - 驱动导入：使用 dism.exe 命令行（PE 环境兼容性最佳）
+//! - CAB 包安装：使用 dism.exe 命令行
 
 use anyhow::Result;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 
+use crate::core::dism_exe::{DismExe, DismExeProgress};
 use crate::core::driver::DriverManager;
 use crate::core::wimgapi::{WimManager, WimProgress, WIM_COMPRESS_LZX, WIM_COMPRESS_LZMS};
 
@@ -308,40 +310,194 @@ impl Dism {
     }
 
     // ========================================================================
-    // 驱动操作 - 使用 setupapi.dll/newdev.dll
+    // 驱动操作 - 使用 dism.exe 命令行
     // ========================================================================
 
     /// 导入驱动到离线系统 (PE环境下使用)
-    /// 使用 Windows API 直接复制到驱动存储
+    /// 使用 dism.exe 命令行实现，在 PE 环境下兼容性最佳
     pub fn add_drivers_offline(&self, image_path: &str, driver_path: &str) -> Result<()> {
-        log::info!("[Dism] 使用 Windows API 离线导入驱动: {} -> {}", driver_path, image_path);
-
-        let manager = DriverManager::new()
-            .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
-
-        let (success, fail) = manager.import_drivers_offline(
-            Path::new(image_path),
-            Path::new(driver_path),
-        )?;
-
         log::info!(
-            "[Dism] 离线驱动导入完成: 成功 {}, 失败 {}",
-            success, fail
+            "[Dism] 使用 dism.exe 离线导入驱动: {} -> {}",
+            driver_path,
+            image_path
         );
 
-        if fail > 0 && success == 0 {
-            anyhow::bail!("所有驱动导入失败");
-        }
+        // 使用 dism.exe 命令行方式导入驱动
+        let dism_exe = DismExe::new()
+            .map_err(|e| anyhow::anyhow!("dism.exe 初始化失败: {}", e))?;
+
+        dism_exe.add_driver_offline(image_path, driver_path, true, false, None)?;
+
+        log::info!("[Dism] 离线驱动导入完成");
         Ok(())
     }
 
+    /// 导入驱动到离线系统（带进度回调）
+    pub fn add_drivers_offline_with_progress(
+        &self,
+        image_path: &str,
+        driver_path: &str,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<()> {
+        log::info!(
+            "[Dism] 使用 dism.exe 离线导入驱动（带进度）: {} -> {}",
+            driver_path,
+            image_path
+        );
+
+        let dism_exe = DismExe::new()
+            .map_err(|e| anyhow::anyhow!("dism.exe 初始化失败: {}", e))?;
+
+        // 创建进度转换通道
+        let (exe_tx, exe_rx) = std::sync::mpsc::channel::<DismExeProgress>();
+
+        // 启动进度转发线程
+        let progress_tx_clone = progress_tx.clone();
+        let forward_thread = std::thread::spawn(move || {
+            while let Ok(progress) = exe_rx.recv() {
+                if let Some(ref tx) = progress_tx_clone {
+                    let _ = tx.send(DismProgress {
+                        percentage: progress.percentage,
+                        status: progress.status,
+                    });
+                }
+            }
+        });
+
+        let result = dism_exe.add_driver_offline(image_path, driver_path, true, false, Some(exe_tx));
+
+        // 等待转发线程结束
+        let _ = forward_thread.join();
+
+        match result {
+            Ok(_) => {
+                log::info!("[Dism] 离线驱动导入成功");
+                Ok(())
+            }
+            Err(e) => {
+                anyhow::bail!("离线驱动导入失败: {}", e)
+            }
+        }
+    }
+
+    /// 添加 CAB 更新包到离线系统
+    /// 使用 dism.exe 命令行实现
+    pub fn add_package_offline(&self, image_path: &str, cab_path: &str) -> Result<()> {
+        log::info!(
+            "[Dism] 使用 dism.exe 安装 CAB 更新包: {} -> {}",
+            cab_path,
+            image_path
+        );
+
+        let dism_exe = DismExe::new()
+            .map_err(|e| anyhow::anyhow!("dism.exe 初始化失败: {}", e))?;
+
+        dism_exe.add_package_offline(image_path, cab_path, false, None)?;
+
+        log::info!("[Dism] CAB 更新包安装完成");
+        Ok(())
+    }
+
+    /// 批量添加 CAB 更新包到离线系统
+    pub fn add_packages_offline_from_dir(
+        &self,
+        image_path: &str,
+        cab_dir: &str,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<(usize, usize)> {
+        log::info!(
+            "[Dism] 使用 dism.exe 批量安装 CAB 更新包: {} -> {}",
+            cab_dir,
+            image_path
+        );
+
+        let dism_exe = DismExe::new()
+            .map_err(|e| anyhow::anyhow!("dism.exe 初始化失败: {}", e))?;
+
+        // 创建进度转换通道
+        let (exe_tx, exe_rx) = std::sync::mpsc::channel::<DismExeProgress>();
+
+        // 启动进度转发线程
+        let progress_tx_clone = progress_tx.clone();
+        let forward_thread = std::thread::spawn(move || {
+            while let Ok(progress) = exe_rx.recv() {
+                if let Some(ref tx) = progress_tx_clone {
+                    let _ = tx.send(DismProgress {
+                        percentage: progress.percentage,
+                        status: progress.status,
+                    });
+                }
+            }
+        });
+
+        let result = dism_exe.add_packages_from_directory(
+            image_path,
+            Path::new(cab_dir),
+            Some(exe_tx),
+        );
+
+        // 等待转发线程结束
+        let _ = forward_thread.join();
+
+        match result {
+            Ok((success, fail)) => {
+                log::info!(
+                    "[Dism] 批量 CAB 更新包安装完成: 成功 {}, 失败 {}",
+                    success,
+                    fail
+                );
+                Ok((success, fail))
+            }
+            Err(e) => {
+                anyhow::bail!("批量 CAB 更新包安装失败: {}", e)
+            }
+        }
+    }
+
+    /// 检测当前是否在 PE 环境中运行
+    pub fn is_pe_environment(&self) -> bool {
+        // 检查 X: 盘是否存在（PE 环境的典型特征）
+        if Path::new("X:\\Windows\\System32").exists() {
+            return true;
+        }
+
+        // 检查系统盘符是否为 X:
+        if let Ok(system_root) = std::env::var("SystemRoot") {
+            if system_root.to_uppercase().starts_with("X:") {
+                return true;
+            }
+        }
+
+        // 检查是否存在 PE 特有的文件
+        let pe_markers = [
+            "X:\\Windows\\System32\\winpeshl.exe",
+            "X:\\Windows\\System32\\wpeinit.exe",
+            "X:\\sources\\boot.wim",
+        ];
+
+        for marker in &pe_markers {
+            if Path::new(marker).exists() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    // ========================================================================
+    // 驱动导出操作 - 使用 Windows API (导出不需要 dism.exe)
+    // ========================================================================
+
     /// 从指定系统分区导出驱动 (PE环境下使用)
     /// 使用 Windows API 直接读取驱动存储
-    #[allow(dead_code)]
     pub fn export_drivers_from_system(&self, system_partition: &str, destination: &str) -> Result<()> {
         std::fs::create_dir_all(destination)?;
 
-        log::info!("[Dism] 使用 Windows API 从 {} 导出驱动到: {}", system_partition, destination);
+        log::info!(
+            "[Dism] 使用 Windows API 从 {} 导出驱动到: {}",
+            system_partition,
+            destination
+        );
 
         let manager = DriverManager::new()
             .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
@@ -350,6 +506,24 @@ impl Dism {
             Path::new(system_partition),
             Path::new(destination),
         )?;
+        log::info!("[Dism] 成功导出 {} 个驱动", count);
+        Ok(())
+    }
+
+    /// 导出当前系统驱动
+    /// 使用 Windows API 导出在线系统的驱动
+    pub fn export_drivers(&self, destination: &str) -> Result<()> {
+        std::fs::create_dir_all(destination)?;
+
+        log::info!(
+            "[Dism] 使用 Windows API 导出当前系统驱动到: {}",
+            destination
+        );
+
+        let manager = DriverManager::new()
+            .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
+
+        let count = manager.export_drivers(Path::new(destination), true)?;
         log::info!("[Dism] 成功导出 {} 个驱动", count);
         Ok(())
     }
@@ -476,10 +650,11 @@ impl Dism {
                 if let Some(image_end) = xml[abs_start..].find("</IMAGE>") {
                     let image_block = &xml[abs_start..abs_start + image_end + 8];
                     
-                    // 优先使用 DISPLAYNAME，其次使用 NAME
+                    // 优先使用 DISPLAYNAME，其次使用 NAME，最后使用默认名称
                     let name = Self::extract_xml_tag(image_block, "DISPLAYNAME")
                         .or_else(|| Self::extract_xml_tag(image_block, "NAME"))
-                        .unwrap_or_default();
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| format!("镜像 {}", index));
                     
                     let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
                         .and_then(|s| s.parse().ok())
@@ -488,7 +663,7 @@ impl Dism {
                     let installation_type = Self::extract_xml_tag(image_block, "INSTALLATIONTYPE")
                         .unwrap_or_default();
 
-                    if index > 0 && !name.is_empty() {
+                    if index > 0 {
                         images.push(ImageInfo {
                             index,
                             name,

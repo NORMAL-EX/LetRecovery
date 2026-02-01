@@ -48,6 +48,18 @@ pub struct InstallConfig {
     pub custom_username: String,
     /// 自定义系统盘卷标
     pub volume_label: String,
+    
+    // Win7 专用选项
+    /// Win7 UEFI 补丁（使用 UefiSeven）
+    pub win7_uefi_patch: bool,
+    /// Win7 注入USB3驱动
+    pub win7_inject_usb3_driver: bool,
+    /// Win7 注入NVMe驱动
+    pub win7_inject_nvme_driver: bool,
+    /// Win7 修复ACPI蓝屏
+    pub win7_fix_acpi_bsod: bool,
+    /// Win7 修复存储控制器蓝屏
+    pub win7_fix_storage_bsod: bool,
 }
 
 impl InstallConfig {
@@ -317,6 +329,13 @@ RemoveUWPApps={}
 ImportStorageControllerDrivers={}
 CustomUsername={}
 VolumeLabel={}
+
+[Win7]
+Win7UefiPatch={}
+Win7InjectUsb3Driver={}
+Win7InjectNvmeDriver={}
+Win7FixAcpiBsod={}
+Win7FixStorageBsod={}
 "#,
             config.unattended,
             config.restore_drivers,
@@ -339,6 +358,11 @@ VolumeLabel={}
             config.import_storage_controller_drivers,
             config.custom_username,
             config.volume_label,
+            config.win7_uefi_patch,
+            config.win7_inject_usb3_driver,
+            config.win7_inject_nvme_driver,
+            config.win7_fix_acpi_bsod,
+            config.win7_fix_storage_bsod,
         )
     }
 
@@ -400,6 +424,11 @@ SwmSplitSize={}
                     "ImportStorageControllerDrivers" => config.import_storage_controller_drivers = value.parse().unwrap_or(false),
                     "CustomUsername" => config.custom_username = value.to_string(),
                     "VolumeLabel" => config.volume_label = value.to_string(),
+                    "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
+                    "Win7InjectUsb3Driver" => config.win7_inject_usb3_driver = value.parse().unwrap_or(false),
+                    "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
+                    "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
+                    "Win7FixStorageBsod" => config.win7_fix_storage_bsod = value.parse().unwrap_or(false),
                     _ => {}
                 }
             }

@@ -384,7 +384,7 @@ impl Iterator for WmiQueryResult {
             let mut returned: u32 = 0;
 
             let result = self.enumerator.Next(
-                WBEM_INFINITE,
+                5000, // 5秒超时，避免无限等待
                 &mut objects,
                 &mut returned,
             );

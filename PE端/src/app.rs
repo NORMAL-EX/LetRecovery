@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -8,6 +9,31 @@ use crate::core::config::{ConfigFileManager, OperationType};
 use crate::core::dism::DismProgress;
 use crate::ui::progress::{InstallStep, BackupStep, ProgressState, ProgressUI};
 use crate::utils::reboot_pe;
+
+/// 递归查找目录中的所有 CAB 文件
+fn find_cab_files_in_directory(dir: &str) -> Vec<PathBuf> {
+    let mut cab_files = Vec::new();
+    find_cab_files_recursive(Path::new(dir), &mut cab_files);
+    cab_files
+}
+
+/// 递归搜索 CAB 文件的辅助函数
+fn find_cab_files_recursive(dir: &Path, cab_files: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext.to_string_lossy().to_lowercase() == "cab" {
+                        cab_files.push(path);
+                    }
+                }
+            } else if path.is_dir() {
+                find_cab_files_recursive(&path, cab_files);
+            }
+        }
+    }
+}
 
 /// 工作线程消息
 #[derive(Debug, Clone)]
@@ -290,23 +316,74 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     // 根据 driver_action_mode 决定是否导入驱动
     // 0 = 无, 1 = 仅保存（不导入）, 2 = 自动导入
-    if config.should_import_drivers() {
+    let driver_path = format!("{}\\drivers", data_dir);
+    let driver_path_exists = std::path::Path::new(&driver_path).exists();
+    
+    if config.should_import_drivers() && driver_path_exists {
         let _ = tx.send(WorkerMessage::SetStatus("正在导入驱动...".to_string()));
-        let driver_path = format!("{}\\drivers", data_dir);
-        if std::path::Path::new(&driver_path).exists() {
+        
+        // 创建进度通道
+        let (driver_progress_tx, driver_progress_rx) = channel::<DismProgress>();
+        let tx_driver = tx.clone();
+        
+        // 启动进度监控线程
+        let driver_progress_handle = thread::spawn(move || {
+            while let Ok(progress) = driver_progress_rx.recv() {
+                let _ = tx_driver.send(WorkerMessage::SetProgress(progress.percentage));
+                let _ = tx_driver.send(WorkerMessage::SetStatus(format!("导入驱动: {}", progress.status)));
+            }
+        });
+        
+        let dism = Dism::new();
+        match dism.add_drivers_offline_with_progress(&apply_dir, &driver_path, Some(driver_progress_tx)) {
+            Ok(_) => {
+                log::info!("驱动导入成功");
+            }
+            Err(e) => {
+                log::warn!("导入驱动失败: {}", e);
+                // 不中断安装流程，继续执行
+            }
+        }
+        
+        // 等待进度监控线程结束
+        let _ = driver_progress_handle.join();
+        
+        // 同时检查驱动目录中是否有 CAB 文件并安装
+        let cab_files_in_driver_dir = find_cab_files_in_directory(&driver_path);
+        if !cab_files_in_driver_dir.is_empty() {
+            log::info!("在驱动目录中发现 {} 个 CAB 文件，将一并安装", cab_files_in_driver_dir.len());
+            let _ = tx.send(WorkerMessage::SetStatus(format!(
+                "正在安装驱动目录中的 {} 个 CAB 更新包...", 
+                cab_files_in_driver_dir.len()
+            )));
+            
+            // 创建进度通道
+            let (cab_progress_tx, cab_progress_rx) = channel::<DismProgress>();
+            let tx_cab = tx.clone();
+            
+            // 启动进度监控线程
+            let cab_progress_handle = thread::spawn(move || {
+                while let Ok(progress) = cab_progress_rx.recv() {
+                    let _ = tx_cab.send(WorkerMessage::SetProgress(progress.percentage));
+                    let _ = tx_cab.send(WorkerMessage::SetStatus(format!("安装CAB: {}", progress.status)));
+                }
+            });
+            
             let dism = Dism::new();
-            match dism.add_drivers_offline(&apply_dir, &driver_path) {
-                Ok(_) => {
-                    log::info!("驱动导入成功");
+            match dism.add_packages_offline_from_dir(&apply_dir, &driver_path, Some(cab_progress_tx)) {
+                Ok((success, fail)) => {
+                    log::info!("驱动目录中的CAB安装完成: {} 成功, {} 失败", success, fail);
                 }
                 Err(e) => {
-                    log::warn!("导入驱动失败: {}", e);
-                    // 不中断安装流程，继续执行
+                    log::warn!("驱动目录中的CAB安装失败: {}", e);
                 }
             }
-        } else {
-            log::info!("驱动目录不存在，跳过驱动导入: {}", driver_path);
+            
+            let _ = cab_progress_handle.join();
         }
+    } else if config.should_import_drivers() && !driver_path_exists {
+        log::info!("驱动目录不存在，跳过驱动导入: {}", driver_path);
+        let _ = tx.send(WorkerMessage::SetStatus("跳过驱动导入（目录不存在）".to_string()));
     } else if config.has_driver_data() {
         // SaveOnly 模式：驱动已保存但不导入
         let _ = tx.send(WorkerMessage::SetStatus("跳过驱动导入（仅保存模式）".to_string()));
@@ -317,7 +394,53 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
-    // Step 4: 修复引导
+    // Step 4: 安装CAB更新包
+    let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::InstallCabPackages));
+
+    if config.install_cab_packages {
+        let cab_path = format!("{}\\updates", data_dir);
+        if std::path::Path::new(&cab_path).exists() {
+            let _ = tx.send(WorkerMessage::SetStatus("正在安装更新包...".to_string()));
+            
+            // 创建进度通道
+            let (cab_progress_tx, cab_progress_rx) = channel::<DismProgress>();
+            let tx_cab = tx.clone();
+            
+            // 启动进度监控线程
+            let cab_progress_handle = thread::spawn(move || {
+                while let Ok(progress) = cab_progress_rx.recv() {
+                    let _ = tx_cab.send(WorkerMessage::SetProgress(progress.percentage));
+                    let _ = tx_cab.send(WorkerMessage::SetStatus(format!("安装更新: {}", progress.status)));
+                }
+            });
+            
+            let dism = Dism::new();
+            match dism.add_packages_offline_from_dir(&apply_dir, &cab_path, Some(cab_progress_tx)) {
+                Ok((success, fail)) => {
+                    log::info!("CAB更新包安装完成: {} 成功, {} 失败", success, fail);
+                    let _ = tx.send(WorkerMessage::SetStatus(
+                        format!("更新包安装完成: {} 成功, {} 失败", success, fail)
+                    ));
+                }
+                Err(e) => {
+                    log::warn!("CAB更新包安装失败: {}", e);
+                    // 不中断安装流程，继续执行
+                }
+            }
+            
+            // 等待进度监控线程结束
+            let _ = cab_progress_handle.join();
+        } else {
+            log::info!("更新包目录不存在，跳过CAB安装: {}", cab_path);
+            let _ = tx.send(WorkerMessage::SetStatus("跳过更新包安装（目录不存在）".to_string()));
+        }
+    } else {
+        let _ = tx.send(WorkerMessage::SetStatus("跳过更新包安装".to_string()));
+        log::info!("未启用CAB更新包安装");
+    }
+    let _ = tx.send(WorkerMessage::SetProgress(100));
+
+    // Step 5: 修复引导
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::RepairBoot));
     let _ = tx.send(WorkerMessage::SetStatus("正在修复引导...".to_string()));
 
@@ -330,7 +453,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
-    // Step 5: 应用高级选项
+    // Step 6: 应用高级选项
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::ApplyAdvancedOptions));
     let _ = tx.send(WorkerMessage::SetStatus("正在应用高级选项...".to_string()));
 
@@ -339,7 +462,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
-    // Step 6: 生成无人值守配置
+    // Step 7: 生成无人值守配置
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::GenerateUnattend));
 
     if config.unattended {
@@ -352,7 +475,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
-    // Step 7: 清理临时文件
+    // Step 8: 清理临时文件
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Cleanup));
     let _ = tx.send(WorkerMessage::SetStatus("正在清理临时文件...".to_string()));
 
@@ -575,12 +698,20 @@ fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
 
 /// 生成无人值守XML
 /// 
-/// 包含完整的无人值守配置：
+/// 包含完整的无人值守配置，并根据目标系统版本自动适配：
+/// - Windows 10/11: 完整的 OOBE 跳过设置
+/// - Windows 7/8/8.1: 兼容的简化配置
+/// 
+/// 同时自动检测目标系统架构（x86/amd64/arm64）
+/// 
+/// 配置内容包括：
 /// - windowsPE pass: 基本设置
 /// - specialize pass: 部署脚本执行
 /// - oobeSystem pass: OOBE设置、用户账户、首次登录命令
 fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::InstallConfig) -> anyhow::Result<()> {
     use crate::ui::advanced_options::get_scripts_dir_name;
+    use crate::core::system_utils::{get_file_version, get_offline_system_architecture};
+    use std::path::Path;
     
     let username = if config.custom_username.is_empty() { 
         "User".to_string() 
@@ -589,6 +720,28 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
     };
 
     let scripts_dir = get_scripts_dir_name();
+
+    // 检测目标系统架构
+    let arch = get_offline_system_architecture(Path::new(target_partition));
+    let arch_str = arch.as_unattend_str();
+    log::info!("[UNATTEND] 检测到目标系统架构: {}", arch_str);
+
+    // 通过 ntdll.dll 文件版本检测目标系统版本
+    // Windows 7: 6.1.x, Windows 8: 6.2.x, Windows 8.1: 6.3.x, Windows 10/11: 10.0.x
+    let ntdll_path = Path::new(target_partition).join("Windows").join("System32").join("ntdll.dll");
+    let (is_win7, is_win8) = match get_file_version(&ntdll_path) {
+        Some((major, minor, build, _)) => {
+            log::info!("[UNATTEND] 检测到目标系统版本 (ntdll.dll): {}.{}.{}", major, minor, build);
+            
+            let is_win7 = major == 6 && minor == 1;
+            let is_win8 = major == 6 && (minor == 2 || minor == 3);
+            (is_win7, is_win8)
+        }
+        None => {
+            log::warn!("[UNATTEND] 无法读取 ntdll.dll 版本: {:?}, 默认使用 Win10/11 配置", ntdll_path);
+            (false, false)
+        }
+    };
 
     // 构建 FirstLogonCommands
     let mut first_logon_commands = String::new();
@@ -603,8 +756,8 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
                 </SynchronousCommand>"#, order, scripts_dir, scripts_dir));
     order += 1;
 
-    // 如果需要删除UWP应用
-    if config.remove_uwp_apps {
+    // 如果需要删除UWP应用（仅 Win10/11 支持）
+    if config.remove_uwp_apps && !is_win7 && !is_win8 {
         first_logon_commands.push_str(&format!(r#"
                 <SynchronousCommand wcm:action="add">
                     <Order>{}</Order>
@@ -622,10 +775,54 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
                     <Description>Cleanup scripts directory</Description>
                 </SynchronousCommand>"#, order, scripts_dir));
 
-    let xml_content = format!(r#"<?xml version="1.0" encoding="utf-8"?>
+    // 根据系统版本生成不同的 XML 内容
+    let xml_content = if is_win7 {
+        // Windows 7 专用无人值守配置
+        // Win7 不支持: HideOnlineAccountScreens, HideWirelessSetupInOOBE, SkipMachineOOBE, SkipUserOOBE, HideLocalAccountScreen, HideOEMRegistrationScreen(家庭版)
+        generate_win7_unattend_xml(&username, &scripts_dir, &first_logon_commands, arch_str)
+    } else if is_win8 {
+        // Windows 8/8.1 无人值守配置
+        // Win8 支持部分 Win10 的选项，但不支持所有
+        generate_win8_unattend_xml(&username, &scripts_dir, &first_logon_commands, arch_str)
+    } else {
+        // Windows 10/11 无人值守配置（默认）
+        generate_win10_unattend_xml(&username, &scripts_dir, &first_logon_commands, arch_str)
+    };
+
+    let panther_dir = format!("{}\\Windows\\Panther", target_partition);
+    std::fs::create_dir_all(&panther_dir)?;
+
+    let unattend_path = format!("{}\\unattend.xml", panther_dir);
+    std::fs::write(&unattend_path, &xml_content)?;
+    log::info!("[UNATTEND] 已写入: {} ({})", unattend_path, 
+        if is_win7 { "Win7配置" } else if is_win8 { "Win8配置" } else { "Win10/11配置" });
+
+    // 同时写入到 Sysprep 目录
+    let sysprep_dir = format!("{}\\Windows\\System32\\Sysprep", target_partition);
+    if std::path::Path::new(&sysprep_dir).exists() {
+        let sysprep_unattend = format!("{}\\unattend.xml", sysprep_dir);
+        let _ = std::fs::write(&sysprep_unattend, &xml_content);
+        log::info!("[UNATTEND] 已写入: {}", sysprep_unattend);
+    }
+
+    Ok(())
+}
+
+/// 生成 Windows 7 专用的无人值守配置
+/// 
+/// Win7 的 OOBE 配置与 Win10/11 有显著差异：
+/// - 不支持 HideOnlineAccountScreens
+/// - 不支持 HideWirelessSetupInOOBE  
+/// - 不支持 SkipMachineOOBE / SkipUserOOBE
+/// - 不支持 HideLocalAccountScreen
+/// - 不支持 HideOEMRegistrationScreen（家庭版不支持）
+/// - 需要设置 NetworkLocation 来跳过网络位置选择
+fn generate_win7_unattend_xml(username: &str, scripts_dir: &str, first_logon_commands: &str, arch: &str) -> String {
+    // Win7 使用最小化的OOBE配置以确保兼容所有版本（包括家庭版）
+    format!(r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
-        <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <UserData>
                 <ProductKey>
                     <WillShowUI>OnError</WillShowUI>
@@ -635,25 +832,168 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
         </component>
     </settings>
     <settings pass="specialize">
-        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <ComputerName>*</ComputerName>
         </component>
-        <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <RunSynchronous>
                 <RunSynchronousCommand wcm:action="add">
                     <Order>1</Order>
-                    <Path>cmd /c if exist %SystemDrive%\{}\deploy.bat call %SystemDrive%\{}\deploy.bat</Path>
+                    <Path>cmd /c if exist %SystemDrive%\{scripts_dir}\deploy.bat call %SystemDrive%\{scripts_dir}\deploy.bat</Path>
                     <Description>Run custom deploy script</Description>
                 </RunSynchronousCommand>
             </RunSynchronous>
         </component>
     </settings>
     <settings pass="oobeSystem">
-        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <ProtectYourPC>3</ProtectYourPC>
+                <NetworkLocation>Home</NetworkLocation>
+            </OOBE>
+            <UserAccounts>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Password>
+                            <Value></Value>
+                            <PlainText>true</PlainText>
+                        </Password>
+                        <Description>Local User</Description>
+                        <DisplayName>{username}</DisplayName>
+                        <Group>Administrators</Group>
+                        <Name>{username}</Name>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>
+            <AutoLogon>
+                <Password>
+                    <Value></Value>
+                    <PlainText>true</PlainText>
+                </Password>
+                <Enabled>true</Enabled>
+                <LogonCount>1</LogonCount>
+                <Username>{username}</Username>
+            </AutoLogon>
+            <FirstLogonCommands>{first_logon_commands}
+            </FirstLogonCommands>
+        </component>
+    </settings>
+</unattend>"#, arch = arch, scripts_dir = scripts_dir, username = username, first_logon_commands = first_logon_commands)
+}
+
+/// 生成 Windows 8/8.1 专用的无人值守配置
+/// 
+/// Win8/8.1 支持部分 Win10 的选项：
+/// - 支持 HideLocalAccountScreen
+/// - 不支持 HideOnlineAccountScreens
+/// - 不支持 HideWirelessSetupInOOBE
+/// - 不支持 SkipMachineOOBE / SkipUserOOBE
+fn generate_win8_unattend_xml(username: &str, scripts_dir: &str, first_logon_commands: &str, arch: &str) -> String {
+    format!(r#"<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+    <settings pass="windowsPE">
+        <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <UserData>
+                <ProductKey>
+                    <WillShowUI>OnError</WillShowUI>
+                </ProductKey>
+                <AcceptEula>true</AcceptEula>
+            </UserData>
+        </component>
+    </settings>
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <ComputerName>*</ComputerName>
+        </component>
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Path>cmd /c if exist %SystemDrive%\{scripts_dir}\deploy.bat call %SystemDrive%\{scripts_dir}\deploy.bat</Path>
+                    <Description>Run custom deploy script</Description>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
+    </settings>
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <OOBE>
                 <HideEULAPage>true</HideEULAPage>
                 <HideLocalAccountScreen>true</HideLocalAccountScreen>
-                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                <ProtectYourPC>3</ProtectYourPC>
+                <NetworkLocation>Home</NetworkLocation>
+            </OOBE>
+            <UserAccounts>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Password>
+                            <Value></Value>
+                            <PlainText>true</PlainText>
+                        </Password>
+                        <Description>Local User</Description>
+                        <DisplayName>{username}</DisplayName>
+                        <Group>Administrators</Group>
+                        <Name>{username}</Name>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>
+            <AutoLogon>
+                <Password>
+                    <Value></Value>
+                    <PlainText>true</PlainText>
+                </Password>
+                <Enabled>true</Enabled>
+                <LogonCount>1</LogonCount>
+                <Username>{username}</Username>
+            </AutoLogon>
+            <FirstLogonCommands>{first_logon_commands}
+            </FirstLogonCommands>
+        </component>
+    </settings>
+</unattend>"#, arch = arch, scripts_dir = scripts_dir, username = username, first_logon_commands = first_logon_commands)
+}
+
+/// 生成 Windows 10/11 无人值守配置
+/// 
+/// 完整支持所有 OOBE 跳过选项：
+/// - HideLocalAccountScreen
+/// - HideOnlineAccountScreens
+/// - HideWirelessSetupInOOBE
+/// - SkipMachineOOBE
+/// - SkipUserOOBE
+fn generate_win10_unattend_xml(username: &str, scripts_dir: &str, first_logon_commands: &str, arch: &str) -> String {
+    format!(r#"<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+    <settings pass="windowsPE">
+        <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <UserData>
+                <ProductKey>
+                    <WillShowUI>OnError</WillShowUI>
+                </ProductKey>
+                <AcceptEula>true</AcceptEula>
+            </UserData>
+        </component>
+    </settings>
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <ComputerName>*</ComputerName>
+        </component>
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Path>cmd /c if exist %SystemDrive%\{scripts_dir}\deploy.bat call %SystemDrive%\{scripts_dir}\deploy.bat</Path>
+                    <Description>Run custom deploy script</Description>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
+    </settings>
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
@@ -668,9 +1008,9 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
                             <PlainText>true</PlainText>
                         </Password>
                         <Description>Local User</Description>
-                        <DisplayName>{}</DisplayName>
+                        <DisplayName>{username}</DisplayName>
                         <Group>Administrators</Group>
-                        <Name>{}</Name>
+                        <Name>{username}</Name>
                     </LocalAccount>
                 </LocalAccounts>
             </UserAccounts>
@@ -681,32 +1021,11 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
                 </Password>
                 <Enabled>true</Enabled>
                 <LogonCount>1</LogonCount>
-                <Username>{}</Username>
+                <Username>{username}</Username>
             </AutoLogon>
-            <FirstLogonCommands>{}
+            <FirstLogonCommands>{first_logon_commands}
             </FirstLogonCommands>
         </component>
     </settings>
-</unattend>"#, 
-        scripts_dir, scripts_dir,
-        username, username, username,
-        first_logon_commands
-    );
-
-    let panther_dir = format!("{}\\Windows\\Panther", target_partition);
-    std::fs::create_dir_all(&panther_dir)?;
-
-    let unattend_path = format!("{}\\unattend.xml", panther_dir);
-    std::fs::write(&unattend_path, &xml_content)?;
-    log::info!("[UNATTEND] 已写入: {}", unattend_path);
-
-    // 同时写入到 Sysprep 目录
-    let sysprep_dir = format!("{}\\Windows\\System32\\Sysprep", target_partition);
-    if std::path::Path::new(&sysprep_dir).exists() {
-        let sysprep_unattend = format!("{}\\unattend.xml", sysprep_dir);
-        let _ = std::fs::write(&sysprep_unattend, &xml_content);
-        log::info!("[UNATTEND] 已写入: {}", sysprep_unattend);
-    }
-
-    Ok(())
+</unattend>"#, arch = arch, scripts_dir = scripts_dir, username = username, first_logon_commands = first_logon_commands)
 }

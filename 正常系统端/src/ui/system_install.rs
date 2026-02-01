@@ -1,7 +1,7 @@
 use egui;
 use std::sync::mpsc;
 
-use crate::app::{App, BootModeSelection, InstallMode};
+use crate::app::{App, BootModeSelection, InstallMode, UnattendCheckResult};
 use crate::core::disk::{Partition, PartitionStyle};
 use crate::core::dism::ImageInfo;
 
@@ -243,7 +243,12 @@ impl App {
         if let Some(i) = partition_clicked {
             self.selected_partition = Some(i);
             self.update_install_options_for_partition();
+            // 触发无人值守检测
+            self.start_unattend_check_for_partition(i);
         }
+        
+        // 检查无人值守检测状态
+        self.check_unattend_status();
 
         ui.add_space(10.0);
         ui.separator();
@@ -252,7 +257,31 @@ impl App {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.format_partition, "格式化分区");
             ui.checkbox(&mut self.repair_boot, "添加引导");
-            ui.checkbox(&mut self.unattended_install, "无人值守");
+            
+            // 无人值守选项 - 根据检测结果处理
+            // 如果勾选了格式化分区，则无人值守不受限制（因为格式化会清除现有配置）
+            let unattend_disabled = self.partition_has_unattend && !self.format_partition;
+            let unattend_tooltip = if self.partition_has_unattend && !self.format_partition {
+                "目标分区已存在无人值守配置文件，无法启用此选项以避免冲突。\n勾选「格式化分区」可解除此限制。"
+            } else if self.partition_has_unattend && self.format_partition {
+                "格式化将清除现有配置文件，可以启用无人值守"
+            } else {
+                "启用无人值守安装"
+            };
+            
+            if unattend_disabled {
+                // 显示禁用状态的复选框
+                let response = ui.add_enabled(false, egui::Checkbox::new(&mut false, "无人值守"))
+                    .on_disabled_hover_text(unattend_tooltip);
+                
+                // 如果用户点击了禁用的复选框，显示提示对话框
+                if response.clicked() {
+                    self.show_unattend_conflict_modal = true;
+                }
+            } else {
+                ui.checkbox(&mut self.unattended_install, "无人值守")
+                    .on_hover_text(unattend_tooltip);
+            }
             
             // 驱动操作下拉框
             ui.label("驱动:");
@@ -636,20 +665,38 @@ impl App {
     }
 
     /// 判断镜像是否为可安装的系统镜像
-    /// 排除以下类型：
-    /// 1. installation_type 为 "WindowsPE" 的镜像
-    /// 2. 名称包含 "Windows PE" 或 "Windows Setup" 的镜像（PE环境/安装程序）
-    /// 3. 名称为 "Windows Setup Media" 的镜像（安装媒体元数据）
+    /// 
+    /// 使用新的 image_type 字段进行快速判断，同时保留传统的关键词检测作为后备
+    /// 
+    /// 可安装的类型：
+    /// - StandardInstall: 标准Windows安装镜像
+    /// - FullBackup: 整盘备份镜像 (包含完整Windows目录结构)
+    /// - Unknown: 未知类型但满足基本条件
+    /// 
+    /// 排除的类型：
+    /// - WindowsPE: PE环境镜像
     fn is_installable_image(vol: &ImageInfo) -> bool {
+        use crate::core::wimgapi::WimImageType;
+        
+        // 1. 优先使用 image_type 字段判断
+        match vol.image_type {
+            WimImageType::StandardInstall => return true,
+            WimImageType::FullBackup => return true,
+            WimImageType::WindowsPE => return false,
+            WimImageType::Unknown => {
+                // 继续使用传统检测方法
+            }
+        }
+        
         let name_lower = vol.name.to_lowercase();
         let install_type_lower = vol.installation_type.to_lowercase();
         
-        // 1. 排除 installation_type 为 WindowsPE 的
+        // 2. 排除 installation_type 为 WindowsPE 的
         if install_type_lower == "windowspe" {
             return false;
         }
         
-        // 2. 排除名称包含特定关键词的（PE环境、安装程序、安装媒体）
+        // 3. 排除名称包含特定关键词的（PE环境、安装程序、安装媒体）
         let excluded_keywords = [
             "windows pe",
             "windows setup",
@@ -663,26 +710,36 @@ impl App {
             }
         }
         
-        // 3. 如果 installation_type 为空，进行额外检查
+        // 4. 如果 installation_type 为空，进行额外检查
+        // 整盘备份型WIM通常缺失 INSTALLATIONTYPE / DISPLAYNAME
+        // 这时如果能拿到版本号（MAJOR/MINOR），就认为它是可安装系统镜像
         if vol.installation_type.is_empty() {
-            // 名称必须包含系统版本标识（Windows 10/11/Server 等）
+            if vol.major_version.is_some() {
+                return true;
+            }
+
+            // 名称包含系统版本标识（Windows 10/11/Server 等）或备份标识
             let is_valid_system = name_lower.contains("windows 10") 
                 || name_lower.contains("windows 11")
                 || name_lower.contains("windows server")
                 || name_lower.contains("windows 8")
-                || name_lower.contains("windows 7");
+                || name_lower.contains("windows 7")
+                || name_lower.contains("backup")
+                || name_lower.contains("备份")
+                || name_lower.contains("系统镜像")
+                || name_lower.contains("镜像");  // 默认生成的名称
             
             if !is_valid_system {
                 return false;
             }
         }
         
-        // 4. 如果 installation_type 明确是 Client 或 Server，直接通过
+        // 5. 如果 installation_type 明确是 Client 或 Server，直接通过
         if install_type_lower == "client" || install_type_lower == "server" {
             return true;
         }
         
-        // 5. 其他情况（installation_type 为空但名称包含有效系统标识），通过
+        // 6. 其他情况（installation_type 为空但名称包含有效系统标识），通过
         true
     }
 
@@ -761,9 +818,12 @@ impl App {
                 if windows_partitions.len() == 1 {
                     // 只有一个系统分区，默认选择它
                     self.selected_partition = Some(windows_partitions[0]);
+                    // 触发无人值守检测
+                    self.start_unattend_check_for_partition(windows_partitions[0]);
                 } else {
                     // 有多个或没有系统分区，不默认选择
                     self.selected_partition = None;
+                    self.partition_has_unattend = false;
                 }
             } else {
                 // 非PE环境，选择当前系统分区
@@ -771,6 +831,10 @@ impl App {
                     .partitions
                     .iter()
                     .position(|p| p.is_system_partition);
+                // 触发无人值守检测
+                if let Some(idx) = self.selected_partition {
+                    self.start_unattend_check_for_partition(idx);
+                }
             }
         }
     }
@@ -853,7 +917,146 @@ impl App {
 
         self.install_step = 0;
     }
+    
+    /// 开始异步检测分区中的无人值守配置文件
+    fn start_unattend_check_for_partition(&mut self, partition_index: usize) {
+        let partition = match self.partitions.get(partition_index) {
+            Some(p) => p,
+            None => return,
+        };
+        
+        // 如果分区没有 Windows 系统，不需要检测
+        if !partition.has_windows {
+            self.partition_has_unattend = false;
+            self.last_unattend_check_partition = Some(partition.letter.clone());
+            // 默认勾选无人值守
+            self.unattended_install = true;
+            return;
+        }
+        
+        // 避免重复检测同一分区
+        let partition_id = partition.letter.clone();
+        if self.last_unattend_check_partition.as_ref() == Some(&partition_id) {
+            return;
+        }
+        
+        println!("[UNATTEND CHECK] 开始检测分区 {} 的无人值守配置", partition_id);
+        
+        self.unattend_check_loading = true;
+        self.last_unattend_check_partition = Some(partition_id.clone());
+        
+        let (tx, rx) = mpsc::channel::<UnattendCheckResult>();
+        
+        unsafe {
+            UNATTEND_CHECK_RESULT_RX = Some(rx);
+        }
+        
+        let partition_letter = partition_id;
+        
+        std::thread::spawn(move || {
+            let result = Self::check_unattend_files_in_partition(&partition_letter);
+            let _ = tx.send(result);
+        });
+    }
+    
+    /// 检查分区中的无人值守配置文件（在后台线程执行）
+    fn check_unattend_files_in_partition(partition_letter: &str) -> UnattendCheckResult {
+        use std::path::Path;
+        
+        // 常见的无人值守配置文件位置
+        let unattend_locations = [
+            // Windows 安装后的位置
+            format!("{}\\Windows\\Panther\\unattend.xml", partition_letter),
+            format!("{}\\Windows\\Panther\\Unattend.xml", partition_letter),
+            format!("{}\\Windows\\Panther\\autounattend.xml", partition_letter),
+            format!("{}\\Windows\\Panther\\Autounattend.xml", partition_letter),
+            // Sysprep 位置
+            format!("{}\\Windows\\System32\\Sysprep\\unattend.xml", partition_letter),
+            format!("{}\\Windows\\System32\\Sysprep\\Unattend.xml", partition_letter),
+            format!("{}\\Windows\\System32\\Sysprep\\Panther\\unattend.xml", partition_letter),
+            // 根目录位置（安装媒体）
+            format!("{}\\unattend.xml", partition_letter),
+            format!("{}\\Unattend.xml", partition_letter),
+            format!("{}\\autounattend.xml", partition_letter),
+            format!("{}\\Autounattend.xml", partition_letter),
+            format!("{}\\AutoUnattend.xml", partition_letter),
+        ];
+        
+        let mut detected_paths = Vec::new();
+        
+        for location in &unattend_locations {
+            if Path::new(location).exists() {
+                println!("[UNATTEND CHECK] 发现无人值守配置: {}", location);
+                detected_paths.push(location.clone());
+            }
+        }
+        
+        let has_unattend = !detected_paths.is_empty();
+        
+        if has_unattend {
+            println!("[UNATTEND CHECK] 分区 {} 存在 {} 个无人值守配置文件", 
+                partition_letter, detected_paths.len());
+        } else {
+            println!("[UNATTEND CHECK] 分区 {} 无无人值守配置文件", partition_letter);
+        }
+        
+        UnattendCheckResult {
+            partition_letter: partition_letter.to_string(),
+            has_unattend,
+            detected_paths,
+        }
+    }
+    
+    /// 检查无人值守检测状态
+    fn check_unattend_status(&mut self) {
+        if !self.unattend_check_loading {
+            return;
+        }
+        
+        unsafe {
+            if let Some(ref rx) = UNATTEND_CHECK_RESULT_RX {
+                if let Ok(result) = rx.try_recv() {
+                    self.unattend_check_loading = false;
+                    UNATTEND_CHECK_RESULT_RX = None;
+                    
+                    // 确保结果对应当前选中的分区
+                    let current_partition = self.selected_partition
+                        .and_then(|idx| self.partitions.get(idx))
+                        .map(|p| p.letter.clone());
+                    
+                    if current_partition.as_ref() == Some(&result.partition_letter) {
+                        self.partition_has_unattend = result.has_unattend;
+                        
+                        if result.has_unattend {
+                            // 存在无人值守配置，自动取消勾选
+                            self.unattended_install = false;
+                            println!("[UNATTEND CHECK] 已自动取消勾选无人值守选项");
+                        } else {
+                            // 不存在无人值守配置，默认勾选
+                            self.unattended_install = true;
+                            println!("[UNATTEND CHECK] 已自动勾选无人值守选项");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /// 判断无人值守选项是否被禁用（考虑格式化状态）
+    pub fn is_unattend_option_disabled(&self) -> bool {
+        self.partition_has_unattend && !self.format_partition
+    }
+    
+    /// 获取依赖无人值守的高级选项提示
+    pub fn get_unattend_dependent_options_hint(&self) -> &'static str {
+        "以下选项依赖无人值守配置：\n\
+         • OOBE绕过强制联网\n\
+         • 自定义用户名\n\
+         • 删除预装UWP应用\n\n\
+         由于目标分区已存在无人值守配置文件，这些选项可能无法正常生效。"
+    }
 }
 
 static mut ISO_MOUNT_RESULT_RX: Option<mpsc::Receiver<IsoMountResult>> = None;
 static mut IMAGE_INFO_RESULT_RX: Option<mpsc::Receiver<ImageInfoResult>> = None;
+static mut UNATTEND_CHECK_RESULT_RX: Option<mpsc::Receiver<UnattendCheckResult>> = None;

@@ -19,13 +19,21 @@ impl App {
             }
         }
 
-        // 复制按钮
-        if ui.button("📋 复制全部信息").clicked() {
-            if let Some(hw_info) = &self.hardware_info {
-                let formatted_text = hw_info.to_formatted_text(self.system_info.as_ref());
-                ui.ctx().copy_text(formatted_text);
+        // 操作按钮区域
+        ui.horizontal(|ui| {
+            // 复制按钮
+            if ui.button("📋 复制全部信息").clicked() {
+                if let Some(hw_info) = &self.hardware_info {
+                    let formatted_text = hw_info.to_formatted_text(self.system_info.as_ref());
+                    ui.ctx().copy_text(formatted_text);
+                }
             }
-        }
+            
+            // 导出按钮
+            if ui.button("💾 导出为TXT").clicked() {
+                self.export_hardware_info_to_txt();
+            }
+        });
         
         ui.add_space(10.0);
 
@@ -398,5 +406,120 @@ impl App {
                     ui.label("正在加载硬件信息...");
                 }
             });
+    }
+    
+    /// 导出硬件信息为TXT文件
+    fn export_hardware_info_to_txt(&self) {
+        let Some(hw_info) = &self.hardware_info else {
+            return;
+        };
+        
+        // 生成完整的硬件信息文本（包含分区信息）
+        let export_content = self.generate_full_hardware_report(hw_info);
+        
+        // 生成默认文件名（包含计算机名和日期）
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let computer_name = if hw_info.computer_name.is_empty() {
+            "Computer"
+        } else {
+            &hw_info.computer_name
+        };
+        let default_filename = format!("硬件信息_{}_{}.txt", computer_name, timestamp);
+        
+        // 显示文件保存对话框
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("文本文件", &["txt"])
+            .set_file_name(&default_filename)
+            .save_file()
+        {
+            // 写入文件
+            if let Err(e) = std::fs::write(&path, export_content) {
+                log::error!("导出硬件信息失败: {}", e);
+            } else {
+                log::info!("硬件信息已导出至: {}", path.display());
+            }
+        }
+    }
+    
+    /// 生成完整的硬件信息报告文本
+    fn generate_full_hardware_report(&self, hw_info: &crate::core::hardware_info::HardwareInfo) -> String {
+        use std::fmt::Write;
+        
+        let mut report = String::with_capacity(4096);
+        
+        // 报告头部
+        let _ = writeln!(report, "╔══════════════════════════════════════════════════════════════╗");
+        let _ = writeln!(report, "║                      系统与硬件信息报告                      ║");
+        let _ = writeln!(report, "╠══════════════════════════════════════════════════════════════╣");
+        let _ = writeln!(report, "║  生成时间: {}                          ║", 
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        let _ = writeln!(report, "╚══════════════════════════════════════════════════════════════╝");
+        let _ = writeln!(report);
+        
+        // 基础硬件信息
+        let _ = writeln!(report, "{}", hw_info.to_formatted_text(self.system_info.as_ref()));
+        
+        // 分区信息
+        if !self.partitions.is_empty() {
+            let _ = writeln!(report);
+            let _ = writeln!(report, "═══════════════════════════════════════════════════════════════");
+            let _ = writeln!(report, "                         磁盘分区详情");
+            let _ = writeln!(report, "═══════════════════════════════════════════════════════════════");
+            let _ = writeln!(report);
+            let _ = writeln!(report, "{:<10} {:<15} {:>12} {:>12} {:>10}", 
+                "分区", "卷标", "总容量", "可用", "使用率");
+            let _ = writeln!(report, "{}", "-".repeat(63));
+            
+            let is_pe = self.system_info.as_ref().map(|s| s.is_pe_environment).unwrap_or(false);
+            
+            for partition in &self.partitions {
+                let used = partition.total_size_mb - partition.free_size_mb;
+                let usage = if partition.total_size_mb > 0 {
+                    (used as f64 / partition.total_size_mb as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                let label = if is_pe {
+                    if partition.letter.to_uppercase() == "X:" {
+                        format!("{} (PE)", partition.letter)
+                    } else if partition.has_windows {
+                        format!("{} (Win)", partition.letter)
+                    } else {
+                        partition.letter.clone()
+                    }
+                } else if partition.is_system_partition {
+                    format!("{} (系统)", partition.letter)
+                } else {
+                    partition.letter.clone()
+                };
+                
+                let _ = writeln!(report, "{:<10} {:<15} {:>12} {:>12} {:>9.0}%",
+                    label,
+                    Self::truncate_string(&partition.label, 13),
+                    Self::format_size(partition.total_size_mb),
+                    Self::format_size(partition.free_size_mb),
+                    usage
+                );
+            }
+        }
+        
+        // 报告尾部
+        let _ = writeln!(report);
+        let _ = writeln!(report, "═══════════════════════════════════════════════════════════════");
+        let _ = writeln!(report, "                    由 LetRecovery 生成");
+        let _ = writeln!(report, "═══════════════════════════════════════════════════════════════");
+        
+        report
+    }
+    
+    /// 截断字符串到指定长度，超出部分用省略号表示
+    fn truncate_string(s: &str, max_len: usize) -> String {
+        if s.chars().count() <= max_len {
+            s.to_string()
+        } else {
+            let truncated: String = s.chars().take(max_len.saturating_sub(2)).collect();
+            format!("{}…", truncated)
+        }
     }
 }

@@ -823,7 +823,7 @@ pub fn execute_quick_partition(
 
             // 格式化
             let label = if layout.label.is_empty() {
-                "NewVolume".to_string()
+                "新加卷".to_string()
             } else {
                 layout.label.clone()
             };
@@ -1000,7 +1000,7 @@ pub fn create_single_partition(
         script.push_str("create partition primary\n");
     }
 
-    let vol_label = if label.is_empty() { "NewVolume" } else { label };
+    let vol_label = if label.is_empty() { "OS" } else { label };
     script.push_str(&format!("format fs=ntfs quick label=\"{}\"\n", vol_label));
 
     if let Some(letter) = drive_letter {

@@ -1,6 +1,6 @@
 [package]
 name = "letrecovery-pe"
-version = "2026.1.25"
+version = "2026.2.1"
 edition = "2021"
 authors = ["NORMAL-EX"]
 description = "LetRecovery PE安装助手"
@@ -24,6 +24,7 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
 ] }
 
 # wimgapi.dll / setupapi.dll 动态加载

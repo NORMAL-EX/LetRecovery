@@ -219,6 +219,16 @@ impl App {
                 }
 
                 ui.end_row();
+
+                // ========== 第五行 ==========
+                if ui
+                    .add(egui::Button::new("SpaceSniffer").min_size(button_size))
+                    .clicked()
+                {
+                    self.launch_space_sniffer_tool();
+                }
+
+                ui.end_row();
             });
 
         // ========== 对话框渲染 ==========
@@ -261,6 +271,18 @@ impl App {
         match actions::launch_wandrv() {
             Ok(_) => {
                 self.tool_message = "已启动: QDZC.exe".to_string();
+            }
+            Err(e) => {
+                self.tool_message = e;
+            }
+        }
+    }
+
+    /// 启动 SpaceSniffer 磁盘空间分析工具
+    fn launch_space_sniffer_tool(&mut self) {
+        match actions::launch_space_sniffer() {
+            Ok(_) => {
+                self.tool_message = "已启动: SpaceSniffer.exe".to_string();
             }
             Err(e) => {
                 self.tool_message = e;

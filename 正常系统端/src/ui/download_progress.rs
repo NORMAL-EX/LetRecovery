@@ -287,8 +287,9 @@ impl App {
                                             self.start_installation();
                                         }
                                         Some(crate::app::PeDownloadThenAction::Backup) => {
-                                            // 继续备份
+                                            // 继续备份，并切换到备份进度页面
                                             self.start_backup_internal();
+                                            self.current_panel = crate::app::Panel::BackupProgress;
                                         }
                                         None => {
                                             self.current_panel = crate::app::Panel::OnlineDownload;

@@ -1,6 +1,6 @@
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
 use crate::core::disk::Partition;
@@ -11,6 +11,15 @@ use crate::download::aria2::DownloadProgress;
 use crate::download::config::ConfigManager;
 use crate::download::manager::DownloadManager;
 use crate::ui::advanced_options::AdvancedOptions;
+use crate::tr;
+
+// 异步加载系统/硬件信息的通道
+static ASYNC_INFO_RX: std::sync::OnceLock<Mutex<Option<mpsc::Receiver<AsyncInfoResult>>>> = std::sync::OnceLock::new();
+
+struct AsyncInfoResult {
+    system_info: Option<SystemInfo>,
+    hardware_info: Option<HardwareInfo>,
+}
 
 /// 应用面板
 #[derive(Debug, Clone, PartialEq)]
@@ -201,6 +210,11 @@ pub struct App {
     pub image_volumes: Vec<ImageInfo>,
     pub selected_volume: Option<usize>,
 
+
+    // Win7检测日志去重（仅在结果变化时输出）
+    pub last_is_win7: Option<bool>,
+    // UEFI模式检测追踪（用于自动勾选Win7 UEFI补丁）
+    pub last_is_uefi_mode: Option<bool>,
     // 安装选项
     pub format_partition: bool,
     pub repair_boot: bool,
@@ -455,6 +469,18 @@ pub struct App {
     
     // 内嵌资源管理器
     pub embedded_assets: crate::ui::EmbeddedAssets,
+    
+    // 无人值守检测相关
+    /// 当前选中分区是否存在无人值守配置文件
+    pub partition_has_unattend: bool,
+    /// 无人值守检测是否正在进行
+    pub unattend_check_loading: bool,
+    /// 无人值守检测结果接收器
+    pub unattend_check_rx: Option<Receiver<UnattendCheckResult>>,
+    /// 上次检测的分区标识（用于避免重复检测）
+    pub last_unattend_check_partition: Option<String>,
+    /// 是否显示无人值守冲突提示对话框
+    pub show_unattend_conflict_modal: bool,
 }
 
 /// 小白模式Logo状态
@@ -504,6 +530,17 @@ pub enum BitLockerUnlockMode {
     RecoveryKey,
 }
 
+/// 无人值守配置文件检测结果
+#[derive(Debug, Clone)]
+pub struct UnattendCheckResult {
+    /// 分区盘符
+    pub partition_letter: String,
+    /// 是否存在无人值守配置文件
+    pub has_unattend: bool,
+    /// 检测到的配置文件路径（如果存在）
+    pub detected_paths: Vec<String>,
+}
+
 impl Default for App {
     fn default() -> Self {
         let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -524,6 +561,8 @@ impl Default for App {
             local_image_path: String::new(),
             image_volumes: Vec::new(),
             selected_volume: None,
+            last_is_win7: None,
+            last_is_uefi_mode: None,
             format_partition: true,
             repair_boot: true,
             unattended_install: true,
@@ -704,6 +743,12 @@ impl Default for App {
             easy_mode_pending_auto_start: false,
             // 内嵌资源管理器
             embedded_assets: crate::ui::EmbeddedAssets::new(),
+            // 无人值守检测相关
+            partition_has_unattend: false,
+            unattend_check_loading: false,
+            unattend_check_rx: None,
+            last_unattend_check_partition: None,
+            show_unattend_conflict_modal: false,
         }
     }
 }
@@ -723,14 +768,23 @@ impl App {
 
     /// 使用预加载的配置创建应用
     pub fn new_with_preloaded(cc: &eframe::CreationContext<'_>, preloaded: &crate::PreloadedConfig) -> Self {
+        log::info!("App::new_with_preloaded 开始");
+        
         // 设置中文字体
+        log::info!("设置字体...");
         Self::setup_fonts(&cc.egui_ctx);
 
         // 设置视觉样式
+        log::info!("设置样式...");
         Self::setup_style(&cc.egui_ctx);
 
+        log::info!("创建App实例...");
         let mut app = Self::default();
+        
+        log::info!("加载预加载数据...");
         app.load_initial_data_with_preloaded(preloaded);
+        
+        log::info!("App::new_with_preloaded 完成");
         app
     }
 
@@ -872,14 +926,19 @@ impl App {
 
     /// 使用预加载的配置初始化数据
     fn load_initial_data_with_preloaded(&mut self, preloaded: &crate::PreloadedConfig) {
-        // 使用预加载的系统信息
+        // 使用预加载的系统信息（可能为 None，稍后异步加载）
         self.system_info = preloaded.system_info.clone();
 
-        // 使用预加载的硬件信息
+        // 使用预加载的硬件信息（可能为 None，稍后异步加载）
         self.hardware_info = preloaded.hardware_info.clone();
 
         // 使用预加载的分区列表
         self.partitions = preloaded.partitions.clone();
+        
+        // 如果系统信息或硬件信息为空，启动异步加载
+        if self.system_info.is_none() || self.hardware_info.is_none() {
+            self.start_async_info_loading();
+        }
 
         // 判断是否为PE环境
         let is_pe = self.system_info.as_ref().map(|s| s.is_pe_environment).unwrap_or(false);
@@ -985,6 +1044,54 @@ impl App {
         
         // 预加载Windows分区信息（后台异步）
         self.start_load_windows_partitions();
+    }
+    
+    /// 启动异步加载系统/硬件信息
+    fn start_async_info_loading(&mut self) {
+        log::info!("启动异步加载系统/硬件信息...");
+        
+        let (tx, rx) = mpsc::channel();
+        
+        // 存储接收端
+        let _ = ASYNC_INFO_RX.get_or_init(|| Mutex::new(Some(rx)));
+        
+        std::thread::spawn(move || {
+            log::info!("异步线程: 开始收集系统信息...");
+            let system_info = crate::core::system_info::SystemInfo::collect().ok();
+            log::info!("异步线程: 系统信息收集完成");
+            
+            log::info!("异步线程: 开始收集硬件信息...");
+            let hardware_info = crate::core::hardware_info::HardwareInfo::collect().ok();
+            log::info!("异步线程: 硬件信息收集完成");
+            
+            let _ = tx.send(AsyncInfoResult {
+                system_info,
+                hardware_info,
+            });
+        });
+    }
+    
+    /// 处理异步加载的系统/硬件信息结果
+    fn process_async_info_results(&mut self) {
+        if let Some(mutex) = ASYNC_INFO_RX.get() {
+            if let Ok(mut guard) = mutex.try_lock() {
+                if let Some(ref rx) = *guard {
+                    if let Ok(result) = rx.try_recv() {
+                        log::info!("收到异步加载的系统/硬件信息");
+                        
+                        if self.system_info.is_none() {
+                            self.system_info = result.system_info;
+                        }
+                        if self.hardware_info.is_none() {
+                            self.hardware_info = result.hardware_info;
+                        }
+                        
+                        // 清除接收端，避免重复处理
+                        *guard = None;
+                    }
+                }
+            }
+        }
     }
     
     /// 开始异步加载远程配置
@@ -1110,6 +1217,9 @@ impl eframe::App for App {
         // 检查远程配置加载状态
         self.check_remote_config_loading();
         
+        // 处理异步加载的系统/硬件信息
+        self.process_async_info_results();
+        
         // 处理图标加载结果
         self.process_icon_load_results(ctx);
         
@@ -1138,6 +1248,53 @@ impl eframe::App for App {
                         }
                         ui.add_space(10.0);
                     });
+                });
+        }
+        
+        // 无人值守冲突提示对话框
+        if self.show_unattend_conflict_modal {
+            egui::Window::new("无人值守选项不可用")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .min_width(400.0)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(10.0);
+                        ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "⚠");
+                        ui.add_space(10.0);
+                    });
+                    
+                    ui.label("目标分区的系统文件中已存在无人值守配置文件（unattend.xml）。");
+                    ui.add_space(10.0);
+                    ui.label("为避免配置冲突导致安装失败，无人值守选项已被禁用。");
+                    ui.add_space(10.0);
+                    
+                    ui.separator();
+                    ui.add_space(5.0);
+                    
+                    ui.label(egui::RichText::new("以下高级选项也将受到影响：").strong());
+                    ui.add_space(5.0);
+                    ui.label("• OOBE绕过强制联网");
+                    ui.label("• 自定义用户名");
+                    ui.label("• 删除预装UWP应用");
+                    
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(5.0);
+                    
+                    ui.label(egui::RichText::new("解决方法：").small());
+                    ui.label(egui::RichText::new("勾选「格式化分区」选项，安装时将清除现有配置文件。").small());
+                    
+                    ui.add_space(15.0);
+                    
+                    ui.vertical_centered(|ui| {
+                        if ui.button("我知道了").clicked() {
+                            self.show_unattend_conflict_modal = false;
+                        }
+                    });
+                    
+                    ui.add_space(10.0);
                 });
         }
 
@@ -1195,13 +1352,13 @@ impl eframe::App for App {
                 if is_busy {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 操作进行中...",
+                        format!("⚠ {}", tr!("操作进行中...")),
                     );
                     ui.add_space(5.0);
                 }
 
                 // 小白模式显示"系统重装"，普通模式显示"系统安装"
-                let system_install_label = if easy_mode { "系统重装" } else { "系统安装" };
+                let system_install_label = if easy_mode { tr!("系统重装") } else { tr!("系统安装") };
                 if ui
                     .add_enabled(
                         !is_busy || self.current_panel == Panel::SystemInstall,
@@ -1217,7 +1374,7 @@ impl eframe::App for App {
                     if ui
                         .add_enabled(
                             !is_busy || self.current_panel == Panel::SystemBackup,
-                            egui::SelectableLabel::new(self.current_panel == Panel::SystemBackup, "系统备份"),
+                            egui::SelectableLabel::new(self.current_panel == Panel::SystemBackup, tr!("系统备份")),
                         )
                         .clicked()
                     {
@@ -1227,7 +1384,7 @@ impl eframe::App for App {
                     if ui
                         .add_enabled(
                             !is_busy || self.current_panel == Panel::OnlineDownload,
-                            egui::SelectableLabel::new(self.current_panel == Panel::OnlineDownload, "在线下载"),
+                            egui::SelectableLabel::new(self.current_panel == Panel::OnlineDownload, tr!("在线下载")),
                         )
                         .clicked()
                     {
@@ -1237,7 +1394,7 @@ impl eframe::App for App {
                     if ui
                         .add_enabled(
                             !is_busy || self.current_panel == Panel::Tools,
-                            egui::SelectableLabel::new(self.current_panel == Panel::Tools, "工具箱"),
+                            egui::SelectableLabel::new(self.current_panel == Panel::Tools, tr!("工具箱")),
                         )
                         .clicked()
                     {
@@ -1247,7 +1404,7 @@ impl eframe::App for App {
                     if ui
                         .add_enabled(
                             !is_busy || self.current_panel == Panel::HardwareInfo,
-                            egui::SelectableLabel::new(self.current_panel == Panel::HardwareInfo, "硬件信息"),
+                            egui::SelectableLabel::new(self.current_panel == Panel::HardwareInfo, tr!("硬件信息")),
                         )
                         .clicked()
                     {
@@ -1258,7 +1415,7 @@ impl eframe::App for App {
                 if ui
                     .add_enabled(
                         !is_busy || self.current_panel == Panel::About,
-                        egui::SelectableLabel::new(self.current_panel == Panel::About, "关于"),
+                        egui::SelectableLabel::new(self.current_panel == Panel::About, tr!("关于")),
                     )
                     .clicked()
                 {
@@ -1293,13 +1450,126 @@ impl eframe::App for App {
 
         // 高级选项窗口
         if self.show_advanced_options {
+            // 如果勾选了格式化，则不禁用无人值守相关选项
+            let unattend_disabled = self.partition_has_unattend && !self.format_partition;
+            
+            // 检测当前选择的镜像是否为 Win7
+            let is_win7 = self.selected_volume
+                .and_then(|idx| self.image_volumes.get(idx))
+                .map(|img| {
+                    log::debug!("Win7检测: name={}, major_version={:?}", img.name, img.major_version);
+                    
+                    // 1. 如果有版本号信息，优先用版本号判断
+                    if let Some(major) = img.major_version {
+                        // Win7 = 6.1, Vista = 6.0, Win8 = 6.2, Win8.1 = 6.3
+                        if major == 6 {
+                            if let Some(minor) = img.minor_version {
+                                let result = minor == 1;
+                                log::debug!("Win7检测: major={}, minor={}, 结果={}", major, minor, result);
+                                return result;
+                            }
+
+                            // 只有 major，没有 minor（或元数据不全）时再回退到名称判断
+                            let result = img.name.contains("7")
+                                || img.name.to_lowercase().contains("win7")
+                                || img.name.to_lowercase().contains("windows 7");
+                            log::debug!("Win7检测: major={}, 无minor, 名称匹配, 结果={}", major, result);
+                            return result;
+                        }
+
+                        // major != 6 (如 10/11)，肯定不是 Win7
+                        log::debug!("Win7检测: major={}, 结果=false", major);
+                        return false;
+                    }
+                    
+                    // 2. 如果没有 major_version（可能是整盘备份），检查名称
+                    if img.name.to_lowercase().contains("win7") || img.name.to_lowercase().contains("windows 7") {
+                        log::debug!("Win7检测: 名称包含win7，返回true");
+                        return true;
+                    }
+                    
+                    // 3. 如果是 "镜像 N" 这样的默认名称，说明是整盘备份，显示 Win7 选项让用户自己选
+                    if img.name.starts_with("镜像 ") && img.major_version.is_none() {
+                        log::debug!("Win7检测: 默认名称且无版本，返回true");
+                        return true; // 对于无法识别的镜像，显示 Win7 选项
+                    }
+                    
+                    log::debug!("Win7检测: 不满足条件，返回false");
+                    false
+                })
+                .unwrap_or_else(|| {
+                    log::debug!("Win7检测: selected_volume为None或image_volumes为空");
+                    false
+                });
+            
+            // 检测当前是否为 UEFI 安装模式
+            let is_uefi_mode = self.selected_partition
+                .and_then(|idx| self.partitions.get(idx))
+                .map(|partition| {
+                    use crate::core::disk::PartitionStyle;
+                    match self.selected_boot_mode {
+                        BootModeSelection::UEFI => true,
+                        BootModeSelection::Legacy => false,
+                        BootModeSelection::Auto => matches!(partition.partition_style, PartitionStyle::GPT),
+                    }
+                })
+                .unwrap_or(false);
+            
+            // 当Win7状态或UEFI模式变化时，自动设置Win7相关选项
+            let win7_changed = self.last_is_win7 != Some(is_win7);
+            let uefi_changed = self.last_is_uefi_mode != Some(is_uefi_mode);
+            
+            if win7_changed || uefi_changed {
+                log::info!("状态变化检测: is_win7={} (changed={}), is_uefi_mode={} (changed={})", 
+                    is_win7, win7_changed, is_uefi_mode, uefi_changed);
+                
+                if is_win7 {
+                    // 当首次检测到Win7或Win7状态变化时，自动勾选所有Win7相关选项
+                    if win7_changed {
+                        log::info!("[AUTO] 检测到Win7镜像，自动勾选Win7专用选项");
+                        self.advanced_options.win7_inject_usb3_driver = true;
+                        self.advanced_options.win7_inject_nvme_driver = true;
+                        self.advanced_options.win7_fix_acpi_bsod = true;
+                        self.advanced_options.win7_fix_storage_bsod = true;
+                    }
+                    
+                    // 当是Win7且UEFI模式时，自动勾选UEFI修补选项
+                    // 当UEFI模式变化时也需要更新
+                    if is_uefi_mode {
+                        if uefi_changed || win7_changed {
+                            log::info!("[AUTO] 检测到UEFI模式，自动勾选Win7 UEFI修补选项");
+                            self.advanced_options.win7_uefi_patch = true;
+                        }
+                    } else {
+                        // 非UEFI模式，取消勾选UEFI修补选项
+                        if uefi_changed {
+                            log::info!("[AUTO] 非UEFI模式，自动取消Win7 UEFI修补选项");
+                            self.advanced_options.win7_uefi_patch = false;
+                        }
+                    }
+                } else {
+                    // 非Win7镜像，重置所有Win7选项
+                    if win7_changed {
+                        log::info!("[AUTO] 非Win7镜像，重置Win7专用选项");
+                        self.advanced_options.win7_inject_usb3_driver = false;
+                        self.advanced_options.win7_inject_nvme_driver = false;
+                        self.advanced_options.win7_fix_acpi_bsod = false;
+                        self.advanced_options.win7_fix_storage_bsod = false;
+                        self.advanced_options.win7_uefi_patch = false;
+                    }
+                }
+                
+                self.last_is_win7 = Some(is_win7);
+                self.last_is_uefi_mode = Some(is_uefi_mode);
+            }
+            
             egui::Window::new("高级选项")
                 .open(&mut self.show_advanced_options)
                 .min_width(500.0)
                 .min_height(400.0)
                 .show(ctx, |ui| {
                     self.advanced_options
-                        .show_ui(ui, self.hardware_info.as_ref());
+                        .show_ui(ui, self.hardware_info.as_ref(), unattend_disabled, is_win7, is_uefi_mode);
                 });
         }
 
@@ -1314,7 +1584,8 @@ impl eframe::App for App {
             || self.partition_copy_partitions_loading
             || self.partition_copy_copying
             || self.quick_partition_state.loading
-            || self.quick_partition_state.executing;
+            || self.quick_partition_state.executing
+            || self.unattend_check_loading;
         
         if self.is_installing || self.is_backing_up || self.current_download.is_some() 
             || self.iso_mounting || self.pe_downloading || self.remote_config_loading 

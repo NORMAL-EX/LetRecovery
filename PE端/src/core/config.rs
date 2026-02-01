@@ -60,6 +60,8 @@ pub struct InstallConfig {
     pub image_path: String,
     /// 是否为GHO格式
     pub is_gho: bool,
+    /// CAB更新包安装: true=安装, false=不安装
+    pub install_cab_packages: bool,
 
     // 高级选项
     /// 移除快捷方式小箭头
@@ -86,6 +88,18 @@ pub struct InstallConfig {
     pub custom_username: String,
     /// 自定义系统盘卷标
     pub volume_label: String,
+    
+    // Win7 专用选项
+    /// Win7 UEFI 补丁（使用 UefiSeven）
+    pub win7_uefi_patch: bool,
+    /// Win7 注入USB3驱动
+    pub win7_inject_usb3_driver: bool,
+    /// Win7 注入NVMe驱动
+    pub win7_inject_nvme_driver: bool,
+    /// Win7 修复ACPI蓝屏
+    pub win7_fix_acpi_bsod: bool,
+    /// Win7 修复存储控制器蓝屏
+    pub win7_fix_storage_bsod: bool,
 }
 
 impl InstallConfig {
@@ -371,6 +385,7 @@ impl ConfigFileManager {
                     "TargetPartition" => config.target_partition = value.to_string(),
                     "ImagePath" => config.image_path = value.to_string(),
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
+                    "InstallCabPackages" => config.install_cab_packages = value.parse().unwrap_or(false),
                     "RemoveShortcutArrow" => {
                         config.remove_shortcut_arrow = value.parse().unwrap_or(false)
                     }
@@ -397,6 +412,11 @@ impl ConfigFileManager {
                     }
                     "CustomUsername" => config.custom_username = value.to_string(),
                     "VolumeLabel" => config.volume_label = value.to_string(),
+                    "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
+                    "Win7InjectUsb3Driver" => config.win7_inject_usb3_driver = value.parse().unwrap_or(false),
+                    "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
+                    "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
+                    "Win7FixStorageBsod" => config.win7_fix_storage_bsod = value.parse().unwrap_or(false),
                     _ => {}
                 }
             }

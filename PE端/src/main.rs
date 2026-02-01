@@ -106,6 +106,29 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
     use core::ghost::Ghost;
     use ui::advanced_options::apply_advanced_options;
 
+    /// 递归查找目录中的所有 CAB 文件
+    fn find_cab_files_in_dir(dir: &str) -> Vec<std::path::PathBuf> {
+        fn find_recursive(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(ext) = path.extension() {
+                            if ext.to_string_lossy().to_lowercase() == "cab" {
+                                files.push(path);
+                            }
+                        }
+                    } else if path.is_dir() {
+                        find_recursive(&path, files);
+                    }
+                }
+            }
+        }
+        let mut files = Vec::new();
+        find_recursive(std::path::Path::new(dir), &mut files);
+        files
+    }
+
     if is_install {
         println!("[PE INSTALL] ========== PE自动安装模式 ==========");
 
@@ -183,16 +206,63 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
         // Step 3: 导入驱动
         println!("[PE INSTALL] Step 3: 导入驱动");
-        if config.restore_drivers {
-            let driver_path = format!("{}\\drivers", data_dir);
-            if std::path::Path::new(&driver_path).exists() {
-                let dism = Dism::new();
-                let _ = dism.add_drivers_offline(&apply_dir, &driver_path);
+        let driver_path = format!("{}\\drivers", data_dir);
+        let driver_path_exists = std::path::Path::new(&driver_path).exists();
+        
+        if config.should_import_drivers() && driver_path_exists {
+            let dism = Dism::new();
+            match dism.add_drivers_offline_with_progress(&apply_dir, &driver_path, None) {
+                Ok(_) => println!("[PE INSTALL] 驱动导入成功"),
+                Err(e) => {
+                    eprintln!("[PE INSTALL] 警告: 驱动导入失败: {} (继续安装)", e);
+                    log::warn!("驱动导入失败: {}", e);
+                }
             }
+            
+            // 同时检查驱动目录中是否有 CAB 文件并安装
+            let cab_files = find_cab_files_in_dir(&driver_path);
+            if !cab_files.is_empty() {
+                println!("[PE INSTALL] 在驱动目录中发现 {} 个 CAB 文件，一并安装", cab_files.len());
+                match dism.add_packages_offline_from_dir(&apply_dir, &driver_path, None) {
+                    Ok((success, fail)) => {
+                        println!("[PE INSTALL] 驱动目录中的CAB安装完成: {} 成功, {} 失败", success, fail);
+                    }
+                    Err(e) => {
+                        eprintln!("[PE INSTALL] 警告: 驱动目录中的CAB安装失败: {} (继续安装)", e);
+                        log::warn!("驱动目录中的CAB安装失败: {}", e);
+                    }
+                }
+            }
+        } else if config.should_import_drivers() && !driver_path_exists {
+            println!("[PE INSTALL] 驱动目录不存在，跳过驱动导入");
+        } else {
+            println!("[PE INSTALL] 跳过驱动导入");
         }
 
-        // Step 4: 修复引导
-        println!("[PE INSTALL] Step 4: 修复引导");
+        // Step 4: 安装CAB更新包
+        println!("[PE INSTALL] Step 4: 安装CAB更新包");
+        if config.install_cab_packages {
+            let cab_path = format!("{}\\updates", data_dir);
+            if std::path::Path::new(&cab_path).exists() {
+                let dism = Dism::new();
+                match dism.add_packages_offline_from_dir(&apply_dir, &cab_path, None) {
+                    Ok((success, fail)) => {
+                        println!("[PE INSTALL] CAB更新包安装完成: {} 成功, {} 失败", success, fail);
+                    }
+                    Err(e) => {
+                        eprintln!("[PE INSTALL] 警告: CAB更新包安装失败: {} (继续安装)", e);
+                        log::warn!("CAB更新包安装失败: {}", e);
+                    }
+                }
+            } else {
+                println!("[PE INSTALL] 更新包目录不存在，跳过CAB安装");
+            }
+        } else {
+            println!("[PE INSTALL] 跳过CAB更新包安装");
+        }
+
+        // Step 5: 修复引导
+        println!("[PE INSTALL] Step 5: 修复引导");
         let boot_manager = BootManager::new();
         let use_uefi = DiskManager::detect_uefi_mode();
 
@@ -202,22 +272,35 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             return Ok(());
         }
 
-        // Step 5: 应用高级选项
-        println!("[PE INSTALL] Step 5: 应用高级选项");
+        // Step 5.5: 如果启用了 Win7 UEFI 补丁，应用 UefiSeven
+        if use_uefi && config.win7_uefi_patch {
+            println!("[PE INSTALL] Step 5.5: 应用 Win7 UEFI 补丁 (UefiSeven)");
+            match ui::advanced_options::apply_uefiseven_patch(&data_partition, &target_partition) {
+                Ok(_) => println!("[PE INSTALL] UefiSeven 补丁应用成功"),
+                Err(e) => {
+                    // UefiSeven 补丁失败不中断安装，只记录警告
+                    eprintln!("[PE INSTALL] 警告: UefiSeven 补丁应用失败: {} (继续安装)", e);
+                    log::warn!("UefiSeven 补丁应用失败: {}", e);
+                }
+            }
+        }
+
+        // Step 6: 应用高级选项
+        println!("[PE INSTALL] Step 6: 应用高级选项");
         let _ = apply_advanced_options(&target_partition, &config);
 
-        // Step 6: 生成无人值守配置
+        // Step 7: 生成无人值守配置
         if config.unattended {
-            println!("[PE INSTALL] Step 6: 生成无人值守配置");
+            println!("[PE INSTALL] Step 7: 生成无人值守配置");
             let _ = generate_unattend_xml(&target_partition, &config.custom_username);
         }
 
-        // Step 7: 清理
-        println!("[PE INSTALL] Step 7: 清理临时文件");
+        // Step 8: 清理
+        println!("[PE INSTALL] Step 8: 清理临时文件");
         ConfigFileManager::cleanup_all(&data_partition, &target_partition);
 
-        // Step 8: 清理自动创建的数据分区并扩展目标分区
-        println!("[PE INSTALL] Step 8: 清理自动创建的分区");
+        // Step 9: 清理自动创建的数据分区并扩展目标分区
+        println!("[PE INSTALL] Step 9: 清理自动创建的分区");
         match DiskManager::cleanup_auto_created_partition_and_extend(&target_partition) {
             Ok(_) => println!("[PE INSTALL] 自动创建分区清理完成"),
             Err(e) => {

@@ -171,6 +171,16 @@ type FnWimGetAttributes = unsafe extern "system" fn(
     cbWimInfo: u32,
 ) -> i32;
 
+/// WIMSplitFile 函数指针类型
+/// 用于将 WIM 文件分割为多个 SWM 分卷
+/// 参考: https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/wim/wimsplitfile
+type FnWimSplitFile = unsafe extern "system" fn(
+    hWim: Handle,
+    pszPartPath: Pcwstr,
+    pliPartSize: *const i64,
+    dwFlags: u32,
+) -> i32;
+
 // ============================================================================
 // 原始结构体定义
 // ============================================================================
@@ -233,6 +243,30 @@ pub struct WimInfo {
     pub wim_flags_and_attr: u32,
 }
 
+/// WIM 镜像类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WimImageType {
+    /// 标准Windows安装镜像 (有完整元数据，如INSTALLATIONTYPE=Client/Server)
+    StandardInstall,
+    /// 整盘备份型WIM (直接包含Windows目录，通常缺少INSTALLATIONTYPE)
+    FullBackup,
+    /// PE环境镜像
+    WindowsPE,
+    /// 未知类型
+    Unknown,
+}
+
+impl std::fmt::Display for WimImageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WimImageType::StandardInstall => write!(f, "标准安装镜像"),
+            WimImageType::FullBackup => write!(f, "整盘备份镜像"),
+            WimImageType::WindowsPE => write!(f, "PE环境镜像"),
+            WimImageType::Unknown => write!(f, "未知类型"),
+        }
+    }
+}
+
 /// 镜像信息
 #[derive(Debug, Clone)]
 pub struct ImageInfo {
@@ -246,6 +280,12 @@ pub struct ImageInfo {
     pub installation_type: String,
     /// 镜像描述
     pub description: String,
+    /// Windows 主版本号 (如 10 表示 Win10/Win11，6 表示 Win7/Win8)
+    pub major_version: Option<u16>,
+    /// Windows 次版本号 (如 Win7 为 1，对应版本 6.1)
+    pub minor_version: Option<u16>,
+    /// 镜像类型 (标准安装/整盘备份/PE等)
+    pub image_type: WimImageType,
 }
 
 /// 操作进度
@@ -327,6 +367,7 @@ pub struct Wimgapi {
     wim_unregister_message_callback: FnWimUnregisterMessageCallback,
     wim_set_image_information: FnWimSetImageInformation,
     wim_get_attributes: FnWimGetAttributes,
+    wim_split_file: Option<FnWimSplitFile>,
 }
 
 /// 将字符串转换为以 NUL 结尾的 UTF-16 Vec
@@ -417,6 +458,14 @@ impl Wimgapi {
         let lib = unsafe { Library::new(&lib_path) }?;
 
         unsafe {
+            // WIMSplitFile 是可选的，某些旧版本 wimgapi.dll 可能不包含此函数
+            let wim_split_file: Option<FnWimSplitFile> = lib.get(b"WIMSplitFile").ok().map(|f| *f);
+            if wim_split_file.is_some() {
+                log::info!("[WIMGAPI] WIMSplitFile 函数已加载");
+            } else {
+                log::warn!("[WIMGAPI] WIMSplitFile 函数未找到，将使用备用方案");
+            }
+            
             Ok(Self {
                 wim_create_file: *lib.get(b"WIMCreateFile")?,
                 wim_close_handle: *lib.get(b"WIMCloseHandle")?,
@@ -430,6 +479,7 @@ impl Wimgapi {
                 wim_unregister_message_callback: *lib.get(b"WIMUnregisterMessageCallback")?,
                 wim_set_image_information: *lib.get(b"WIMSetImageInformation")?,
                 wim_get_attributes: *lib.get(b"WIMGetAttributes")?,
+                wim_split_file,
                 _lib: lib,
             })
         }
@@ -639,11 +689,68 @@ impl Wimgapi {
         })
     }
 
+    /// 分割 WIM 文件为 SWM 分卷
+    /// 
+    /// 使用 WIMSplitFile API 将大型 WIM 文件分割为多个较小的 SWM 分卷。
+    /// 这对于将文件存储在有大小限制的介质（如 FAT32 文件系统）上非常有用。
+    /// 
+    /// # 参数
+    /// - `wim_handle`: 已打开的 WIM 文件句柄（必须以只读方式打开）
+    /// - `swm_path`: 输出的 SWM 文件路径（如 "D:\\backup.swm"，后续分卷将自动命名为 backup2.swm, backup3.swm...）
+    /// - `split_size_bytes`: 每个分卷的最大大小（字节）
+    /// 
+    /// # 返回
+    /// - `Ok(())`: 分割成功
+    /// - `Err(WimApiError)`: 分割失败，包含错误信息
+    pub fn split_file(
+        &self,
+        wim_handle: Handle,
+        swm_path: &Path,
+        split_size_bytes: i64,
+    ) -> Result<(), WimApiError> {
+        let split_fn = self.wim_split_file.ok_or_else(|| {
+            WimApiError::Message("WIMSplitFile 函数不可用，此版本的 wimgapi.dll 不支持分割功能".to_string())
+        })?;
+
+        log::info!(
+            "[WIMGAPI] split_file: 即将调用 WIMSplitFile(path={:?}, size={} bytes)...",
+            swm_path,
+            split_size_bytes
+        );
+
+        let wide_path = path_to_wide(swm_path);
+        let result = unsafe { (split_fn)(wim_handle, wide_path.as_ptr(), &split_size_bytes, 0) };
+
+        log::info!("[WIMGAPI] split_file: 返回 result={}", result);
+
+        if result == 0 {
+            let err = get_last_error();
+            log::error!("[WIMGAPI] split_file: 失败, 错误码={}", err);
+            return Err(WimApiError::Win32Error(err));
+        }
+
+        log::info!("[WIMGAPI] split_file: 分割成功");
+        Ok(())
+    }
+
+    /// 检查是否支持 WIM 分割功能
+    pub fn supports_split(&self) -> bool {
+        self.wim_split_file.is_some()
+    }
+
     /// 解析镜像 XML 获取镜像信息列表
+    /// 
+    /// 支持多种WIM格式：
+    /// - 标准Windows安装镜像 (带完整元数据)
+    /// - 整盘备份型WIM (可能元数据不完整，如截图中直接包含Windows目录的WIM)
+    /// - 各种非标准格式
     pub fn parse_image_info_from_xml(xml: &str) -> Vec<ImageInfo> {
         let mut images = Vec::new();
         let mut pos = 0;
 
+        println!("[WIMGAPI] XML预览:\n{}", &xml[..xml.len().min(2000)]);
+
+        // 首先尝试标准格式解析 (INDEX="...")
         while let Some(start) = xml[pos..].find("<IMAGE INDEX=\"") {
             let abs_start = pos + start;
             let index_start = abs_start + 14;
@@ -654,30 +761,9 @@ impl Wimgapi {
 
                 if let Some(image_end) = xml[abs_start..].find("</IMAGE>") {
                     let image_block = &xml[abs_start..abs_start + image_end + 8];
-
-                    // 优先使用 DISPLAYNAME，其次使用 NAME
-                    let name = Self::extract_xml_tag(image_block, "DISPLAYNAME")
-                        .or_else(|| Self::extract_xml_tag(image_block, "NAME"))
-                        .unwrap_or_default();
-
-                    let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-
-                    let installation_type = Self::extract_xml_tag(image_block, "INSTALLATIONTYPE")
-                        .unwrap_or_default();
-
-                    let description = Self::extract_xml_tag(image_block, "DESCRIPTION")
-                        .unwrap_or_default();
-
-                    if index > 0 {
-                        images.push(ImageInfo {
-                            index,
-                            name,
-                            size_bytes,
-                            installation_type,
-                            description,
-                        });
+                    
+                    if let Some(info) = Self::parse_single_image_block(image_block, index) {
+                        images.push(info);
                     }
 
                     pos = abs_start + image_end + 8;
@@ -688,8 +774,291 @@ impl Wimgapi {
                 pos = abs_start + 14;
             }
         }
+        
+        // 如果标准格式解析失败，尝试备用解析策略
+        if images.is_empty() {
+            images = Self::parse_image_info_fallback(xml);
+        }
+
+        // 对解析结果进行后处理，确定镜像类型
+        for img in &mut images {
+            img.image_type = Self::determine_image_type(img);
+        }
+
+        println!("[WIMGAPI] 解析出 {} 个镜像", images.len());
+        for img in &images {
+            println!("[WIMGAPI]   镜像 {}: {} ({}) - 版本: {}.{}", 
+                img.index, img.name, img.image_type,
+                img.major_version.unwrap_or(0), img.minor_version.unwrap_or(0));
+        }
 
         images
+    }
+
+    /// 解析单个IMAGE块
+    fn parse_single_image_block(image_block: &str, index: u32) -> Option<ImageInfo> {
+        if index == 0 {
+            return None;
+        }
+
+        let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let installation_type = Self::extract_xml_tag(image_block, "INSTALLATIONTYPE")
+            .unwrap_or_default();
+
+        let description = Self::extract_xml_tag(image_block, "DESCRIPTION")
+            .unwrap_or_default();
+
+        // 提取版本信息 - 多种格式支持
+        let major_version = Self::extract_version_number(image_block, "MAJOR");
+        let minor_version = Self::extract_version_number(image_block, "MINOR");
+
+        // 智能构建镜像名称
+        let name = Self::build_image_name(image_block, &description, index);
+
+        Some(ImageInfo {
+            index,
+            name,
+            size_bytes,
+            installation_type,
+            description,
+            major_version,
+            minor_version,
+            image_type: WimImageType::Unknown, // 后续会更新
+        })
+    }
+
+    /// 智能构建镜像名称
+    /// 
+    /// 按优先级尝试以下来源：
+    /// 1. DISPLAYNAME 标签
+    /// 2. NAME 标签
+    /// 3. WINDOWS 块中的 PRODUCTNAME + EDITIONID 组合
+    /// 4. DESCRIPTION + FLAGS 组合
+    /// 5. 仅 DESCRIPTION
+    /// 6. 仅 FLAGS
+    /// 7. 默认 "镜像 {index}"
+    fn build_image_name(image_block: &str, description: &str, index: u32) -> String {
+        // 1. 优先使用 DISPLAYNAME
+        if let Some(display_name) = Self::extract_xml_tag(image_block, "DISPLAYNAME") {
+            if !display_name.is_empty() {
+                return display_name;
+            }
+        }
+
+        // 2. 其次使用 NAME
+        if let Some(name) = Self::extract_xml_tag(image_block, "NAME") {
+            if !name.is_empty() {
+                return name;
+            }
+        }
+
+        // 3. 尝试从 WINDOWS 块中组合 PRODUCTNAME + EDITIONID
+        if let Some(windows_block) = Self::extract_xml_tag(image_block, "WINDOWS") {
+            let product_name = Self::extract_xml_tag(&windows_block, "PRODUCTNAME");
+            let edition_id = Self::extract_xml_tag(&windows_block, "EDITIONID");
+
+            match (product_name, edition_id) {
+                (Some(prod), Some(ed)) if !prod.is_empty() && !ed.is_empty() => {
+                    // 避免重复：如果 PRODUCTNAME 已经包含 EDITIONID，直接返回
+                    if prod.to_lowercase().contains(&ed.to_lowercase()) {
+                        return prod;
+                    }
+                    return format!("{} {}", prod, ed);
+                }
+                (Some(prod), _) if !prod.is_empty() => return prod,
+                (_, Some(ed)) if !ed.is_empty() => return format!("Windows {}", ed),
+                _ => {}
+            }
+        }
+
+        // 4. 尝试使用 DESCRIPTION + FLAGS 组合
+        let flags = Self::extract_xml_tag(image_block, "FLAGS").unwrap_or_default();
+        
+        if !description.is_empty() && !flags.is_empty() {
+            // 避免重复：如果 DESCRIPTION 已经包含 FLAGS 内容
+            if description.to_lowercase().contains(&flags.to_lowercase()) {
+                return description.to_string();
+            }
+            return format!("{} {}", description, flags);
+        }
+
+        // 5. 仅使用 DESCRIPTION
+        if !description.is_empty() {
+            return description.to_string();
+        }
+
+        // 6. 仅使用 FLAGS
+        if !flags.is_empty() {
+            return format!("Windows {}", flags);
+        }
+
+        // 7. 最后使用默认名称
+        format!("镜像 {}", index)
+    }
+
+    /// 提取版本号 (支持多种XML结构)
+    fn extract_version_number(image_block: &str, tag: &str) -> Option<u16> {
+        // 先尝试从 VERSION 块中获取
+        Self::extract_xml_tag(image_block, "VERSION")
+            .and_then(|version_block| Self::extract_xml_tag(&version_block, tag))
+            .or_else(|| {
+                // 然后尝试从 WINDOWS/VERSION 路径获取
+                Self::extract_xml_tag(image_block, "WINDOWS")
+                    .and_then(|win_block| Self::extract_xml_tag(&win_block, "VERSION"))
+                    .and_then(|ver_block| Self::extract_xml_tag(&ver_block, tag))
+            })
+            .or_else(|| {
+                // 最后直接从 IMAGE 块获取
+                Self::extract_xml_tag(image_block, tag)
+            })
+            .and_then(|s| s.parse::<u16>().ok())
+    }
+
+    /// 备用解析策略 - 处理非标准格式的WIM
+    fn parse_image_info_fallback(xml: &str) -> Vec<ImageInfo> {
+        let mut images = Vec::new();
+        
+        // 检查是否有 IMAGE 标签但格式不同
+        let image_count = xml.matches("<IMAGE ").count();
+        if image_count == 0 {
+            return images;
+        }
+
+        println!("[WIMGAPI] XML中发现 {} 个 IMAGE 标签，使用备用解析策略", image_count);
+        
+        let mut backup_pos = 0;
+        let mut backup_index = 1u32;
+        
+        while let Some(img_start) = xml[backup_pos..].find("<IMAGE ") {
+            let abs_img_start = backup_pos + img_start;
+            
+            // 查找IMAGE块的结束位置
+            let block_end = xml[abs_img_start..].find("</IMAGE>")
+                .map(|e| abs_img_start + e + 8)
+                .or_else(|| {
+                    // 查找下一个 <IMAGE 或 </WIM>
+                    xml[abs_img_start + 7..].find("<IMAGE ")
+                        .map(|e| abs_img_start + 7 + e)
+                        .or_else(|| xml[abs_img_start..].find("</WIM>").map(|e| abs_img_start + e))
+                })
+                .unwrap_or(xml.len());
+            
+            let image_block = &xml[abs_img_start..block_end];
+            
+            // 尝试从属性中提取索引
+            let parsed_index = Self::extract_index_from_attributes(image_block)
+                .unwrap_or(backup_index);
+            
+            let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            
+            let installation_type = Self::extract_xml_tag(image_block, "INSTALLATIONTYPE")
+                .unwrap_or_default();
+            
+            let description = Self::extract_xml_tag(image_block, "DESCRIPTION")
+                .unwrap_or_default();
+            
+            let major_version = Self::extract_version_number(image_block, "MAJOR");
+            let minor_version = Self::extract_version_number(image_block, "MINOR");
+            
+            // 使用智能名称构建
+            let name = Self::build_image_name(image_block, &description, parsed_index);
+            
+            images.push(ImageInfo {
+                index: parsed_index,
+                name,
+                size_bytes,
+                installation_type,
+                description,
+                major_version,
+                minor_version,
+                image_type: WimImageType::Unknown,
+            });
+            
+            backup_index += 1;
+            backup_pos = block_end;
+        }
+
+        images
+    }
+
+    /// 从IMAGE标签的属性中提取索引
+    fn extract_index_from_attributes(image_block: &str) -> Option<u32> {
+        // 尝试 INDEX="N" 格式
+        if let Some(idx_pos) = image_block.find("INDEX=\"") {
+            let idx_start = idx_pos + 7;
+            if let Some(idx_end) = image_block[idx_start..].find('"') {
+                return image_block[idx_start..idx_start + idx_end].parse().ok();
+            }
+        }
+        
+        // 尝试 INDEX='N' 格式 (单引号)
+        if let Some(idx_pos) = image_block.find("INDEX='") {
+            let idx_start = idx_pos + 7;
+            if let Some(idx_end) = image_block[idx_start..].find('\'') {
+                return image_block[idx_start..idx_start + idx_end].parse().ok();
+            }
+        }
+        
+        // 尝试 INDEX=N 格式 (无引号)
+        if let Some(idx_pos) = image_block.find("INDEX=") {
+            let idx_start = idx_pos + 6;
+            let idx_str: String = image_block[idx_start..].chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !idx_str.is_empty() {
+                return idx_str.parse().ok();
+            }
+        }
+        
+        None
+    }
+
+    /// 根据镜像信息确定镜像类型
+    fn determine_image_type(info: &ImageInfo) -> WimImageType {
+        let name_lower = info.name.to_lowercase();
+        let install_type_lower = info.installation_type.to_lowercase();
+        
+        // 检测 PE 环境
+        if install_type_lower == "windowspe" 
+            || name_lower.contains("windows pe")
+            || name_lower.contains("winpe")
+            || name_lower.contains("windows setup") {
+            return WimImageType::WindowsPE;
+        }
+        
+        // 检测标准安装镜像 (有完整的安装类型和版本信息)
+        if !info.installation_type.is_empty() 
+            && info.major_version.is_some() 
+            && (install_type_lower == "client" || install_type_lower == "server") {
+            return WimImageType::StandardInstall;
+        }
+        
+        // 检测整盘备份型 (通常缺少installation_type或名称特殊)
+        // 像截图中那种直接包含Windows目录的WIM通常是这种类型
+        if info.installation_type.is_empty() && info.size_bytes > 1_000_000_000 {
+            // 大于1GB且缺少安装类型，很可能是整盘备份
+            return WimImageType::FullBackup;
+        }
+        
+        // 名称暗示是备份
+        if name_lower.contains("backup") 
+            || name_lower.contains("备份")
+            || name_lower.contains("ghost")
+            || name_lower.contains("clone") {
+            return WimImageType::FullBackup;
+        }
+        
+        // 有版本信息但缺少安装类型，可能是非标准安装镜像或备份
+        if info.major_version.is_some() && info.installation_type.is_empty() {
+            return WimImageType::FullBackup;
+        }
+        
+        WimImageType::Unknown
     }
 
     /// 从 XML 块中提取指定标签的内容
@@ -972,9 +1341,30 @@ impl WimManager {
         )?;
 
         self.wimgapi.set_temp_path(wim_handle, &temp_dir)?;
+        
+        // 先获取镜像数量作为后备
+        let image_count = self.wimgapi.get_image_count(wim_handle);
+        println!("[WIMGAPI] WIM文件包含 {} 个镜像", image_count);
 
         let xml = self.wimgapi.get_image_information(wim_handle)?;
-        let images = Wimgapi::parse_image_info_from_xml(&xml);
+        let mut images = Wimgapi::parse_image_info_from_xml(&xml);
+        
+        // 如果 XML 解析失败但 WIM 确实有镜像，使用 image_count 创建基本信息
+        if images.is_empty() && image_count > 0 {
+            println!("[WIMGAPI] XML解析失败，使用镜像数量创建基本信息");
+            for i in 1..=image_count {
+                images.push(ImageInfo {
+                    index: i,
+                    name: format!("镜像 {}", i),
+                    size_bytes: 0,
+                    installation_type: String::new(),
+                    description: String::new(),
+                    major_version: None,
+                    minor_version: None,
+                    image_type: WimImageType::Unknown,
+                });
+            }
+        }
 
         self.wimgapi.close(wim_handle)?;
 
@@ -999,47 +1389,117 @@ impl WimManager {
         Ok(info)
     }
     
-    /// 分割WIM文件为SWM分卷
-    /// 使用DISM命令行进行分割（wimgapi不直接支持分割）
+    /// 分割 WIM 文件为 SWM 分卷
+    /// 
+    /// 使用 Windows API (WIMSplitFile) 进行分割，完全不依赖 dism.exe。
+    /// 
+    /// # 参数
+    /// - `wim_file`: 源 WIM 文件路径
+    /// - `swm_file`: 输出的 SWM 文件路径（第一个分卷）
+    /// - `split_size_mb`: 每个分卷的最大大小（MB）
+    /// 
+    /// # 返回
+    /// - `Ok(())`: 分割成功
+    /// - `Err(WimApiError)`: 分割失败
     pub fn split_wim(&self, wim_file: &str, swm_file: &str, split_size_mb: u64) -> Result<(), WimApiError> {
-        use crate::utils::command::new_command;
-        use crate::utils::encoding::gbk_to_utf8;
-        
-        log::info!("[WIMGAPI] 分割WIM文件: {} -> {} (每卷 {}MB)", wim_file, swm_file, split_size_mb);
-        
-        // 使用DISM命令进行分割
-        // dism /Split-Image /ImageFile:xxx.wim /SWMFile:xxx.swm /FileSize:size
-        let output = new_command("dism.exe")
-            .args([
-                "/Split-Image",
-                &format!("/ImageFile:{}", wim_file),
-                &format!("/SWMFile:{}", swm_file),
-                &format!("/FileSize:{}", split_size_mb),
-            ])
-            .output()
-            .map_err(|e| WimApiError::Message(format!("执行DISM失败: {}", e)))?;
-        
-        let stdout = gbk_to_utf8(&output.stdout);
-        let stderr = gbk_to_utf8(&output.stderr);
-        
-        log::info!("[WIMGAPI] DISM分割输出: {}", stdout);
-        if !stderr.is_empty() {
-            log::warn!("[WIMGAPI] DISM分割错误: {}", stderr);
+        log::info!(
+            "[WIMGAPI] 分割WIM文件: {} -> {} (每卷 {}MB)",
+            wim_file,
+            swm_file,
+            split_size_mb
+        );
+
+        // 检查 WIMSplitFile 是否可用
+        if !self.wimgapi.supports_split() {
+            return Err(WimApiError::Message(
+                "当前 wimgapi.dll 版本不支持 WIMSplitFile 功能，请使用较新版本的 Windows PE 或将新版 wimgapi.dll 放到程序目录".to_string()
+            ));
         }
-        
-        if !output.status.success() {
+
+        // 检查源文件是否存在
+        let wim_path = Path::new(wim_file);
+        if !wim_path.exists() {
             return Err(WimApiError::Message(format!(
-                "DISM分割失败: {}",
-                if stderr.is_empty() { &stdout } else { &stderr }
+                "源 WIM 文件不存在: {}",
+                wim_file
             )));
         }
-        
-        // 验证分卷文件是否创建
-        if !Path::new(swm_file).exists() {
-            return Err(WimApiError::Message("分卷文件未创建".to_string()));
+
+        // 以只读方式打开 WIM 文件
+        let wim_handle = self.wimgapi.open(
+            wim_path,
+            WIM_GENERIC_READ,
+            WIM_OPEN_EXISTING,
+            WIM_COMPRESS_NONE,
+        )?;
+
+        // 计算分卷大小（转换为字节）
+        // 注意：WIMSplitFile 的 size 参数单位是字节
+        let split_size_bytes = (split_size_mb as i64) * 1024 * 1024;
+
+        // 设置临时目录（可选，提高性能）
+        let temp_dir = std::env::temp_dir();
+        if let Err(e) = self.wimgapi.set_temp_path(wim_handle, &temp_dir) {
+            log::warn!("[WIMGAPI] 设置临时目录失败: {}, 继续使用默认路径", e);
         }
+
+        // 注册进度回调
+        self.wimgapi.register_callback(wim_handle);
+
+        // 执行分割操作
+        let swm_path = Path::new(swm_file);
+        let result = self.wimgapi.split_file(wim_handle, swm_path, split_size_bytes);
+
+        // 取消注册回调并关闭句柄
+        self.wimgapi.unregister_callback(wim_handle);
+        let _ = self.wimgapi.close(wim_handle);
+
+        // 检查分割结果
+        if let Err(e) = result {
+            return Err(WimApiError::Message(format!(
+                "WIM 分割失败: {}",
+                e
+            )));
+        }
+
+        // 验证分卷文件是否创建
+        if !swm_path.exists() {
+            return Err(WimApiError::Message(
+                "分卷文件未创建，分割可能失败".to_string()
+            ));
+        }
+
+        // 统计生成的分卷数量
+        let swm_dir = swm_path.parent().unwrap_or(Path::new("."));
+        let swm_stem = swm_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let swm_ext = swm_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("swm");
+
+        let mut part_count = 1;
+        loop {
+            let next_part = if part_count == 1 {
+                swm_path.to_path_buf()
+            } else {
+                swm_dir.join(format!("{}{}.{}", swm_stem, part_count, swm_ext))
+            };
+            
+            if next_part.exists() {
+                part_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        log::info!(
+            "[WIMGAPI] WIM 分割完成，共生成 {} 个分卷",
+            part_count - 1
+        );
         
-        log::info!("[WIMGAPI] WIM分割完成");
         Ok(())
     }
 }

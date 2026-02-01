@@ -4,6 +4,7 @@
 //! - 离线注册表读取 (advapi32.dll - RegLoadKey/RegUnLoadKey)
 //! - 组件存储清理 (Task Scheduler API)
 //! - 系统信息获取
+//! - PE文件架构检测
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -36,6 +37,27 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const SE_RESTORE_NAME: &str = "SeRestorePrivilege";
 const SE_BACKUP_NAME: &str = "SeBackupPrivilege";
+
+/// 系统架构类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemArchitecture {
+    X86,
+    Amd64,
+    Arm64,
+    Unknown,
+}
+
+impl SystemArchitecture {
+    /// 返回用于unattend.xml的processorArchitecture字符串
+    pub fn as_unattend_str(&self) -> &'static str {
+        match self {
+            SystemArchitecture::X86 => "x86",
+            SystemArchitecture::Amd64 => "amd64",
+            SystemArchitecture::Arm64 => "arm64",
+            SystemArchitecture::Unknown => "amd64", // 默认amd64
+        }
+    }
+}
 
 // ============================================================================
 // 辅助函数
@@ -119,6 +141,112 @@ pub fn get_file_version(path: &Path) -> Option<(u16, u16, u16, u16)> {
 #[cfg(not(windows))]
 pub fn get_file_version(_path: &Path) -> Option<(u16, u16, u16, u16)> {
     None
+}
+
+/// 检测PE文件的CPU架构
+/// 
+/// 通过读取PE文件头来判断目标系统是32位还是64位
+/// 
+/// # 参数
+/// - `path`: PE文件路径（通常是ntdll.dll或kernel32.dll）
+/// 
+/// # 返回
+/// - `SystemArchitecture`: 系统架构枚举
+pub fn get_pe_architecture(path: &Path) -> SystemArchitecture {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+    
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return SystemArchitecture::Unknown,
+    };
+    
+    // 读取DOS头，检查MZ签名
+    let mut dos_header = [0u8; 64];
+    if file.read_exact(&mut dos_header).is_err() {
+        return SystemArchitecture::Unknown;
+    }
+    
+    // 检查MZ签名
+    if dos_header[0] != b'M' || dos_header[1] != b'Z' {
+        return SystemArchitecture::Unknown;
+    }
+    
+    // 获取PE头偏移（位于DOS头的0x3C处）
+    let pe_offset = u32::from_le_bytes([
+        dos_header[0x3C],
+        dos_header[0x3D],
+        dos_header[0x3E],
+        dos_header[0x3F],
+    ]) as u64;
+    
+    // 定位到PE头
+    if file.seek(SeekFrom::Start(pe_offset)).is_err() {
+        return SystemArchitecture::Unknown;
+    }
+    
+    // 读取PE签名和COFF头
+    let mut pe_header = [0u8; 6];
+    if file.read_exact(&mut pe_header).is_err() {
+        return SystemArchitecture::Unknown;
+    }
+    
+    // 检查PE签名 "PE\0\0"
+    if pe_header[0] != b'P' || pe_header[1] != b'E' || pe_header[2] != 0 || pe_header[3] != 0 {
+        return SystemArchitecture::Unknown;
+    }
+    
+    // 读取Machine字段（COFF头的前2字节）
+    let machine = u16::from_le_bytes([pe_header[4], pe_header[5]]);
+    
+    match machine {
+        0x014c => SystemArchitecture::X86,      // IMAGE_FILE_MACHINE_I386
+        0x8664 => SystemArchitecture::Amd64,    // IMAGE_FILE_MACHINE_AMD64
+        0xAA64 => SystemArchitecture::Arm64,    // IMAGE_FILE_MACHINE_ARM64
+        _ => SystemArchitecture::Unknown,
+    }
+}
+
+/// 检测目标系统的架构
+/// 
+/// 通过检测系统目录下的ntdll.dll或kernel32.dll来判断架构
+/// 
+/// # 参数
+/// - `system_root`: 系统根目录（如 "C:\\"）
+/// 
+/// # 返回
+/// - `SystemArchitecture`: 系统架构
+pub fn get_system_architecture(system_root: &str) -> SystemArchitecture {
+    let system_root_path = Path::new(system_root);
+    
+    // 优先检测 ntdll.dll
+    let ntdll_path = system_root_path
+        .join("Windows")
+        .join("System32")
+        .join("ntdll.dll");
+    
+    if ntdll_path.exists() {
+        let arch = get_pe_architecture(&ntdll_path);
+        if arch != SystemArchitecture::Unknown {
+            return arch;
+        }
+    }
+    
+    // 备选：检测 kernel32.dll
+    let kernel32_path = system_root_path
+        .join("Windows")
+        .join("System32")
+        .join("kernel32.dll");
+    
+    if kernel32_path.exists() {
+        let arch = get_pe_architecture(&kernel32_path);
+        if arch != SystemArchitecture::Unknown {
+            return arch;
+        }
+    }
+    
+    // 默认返回 amd64
+    SystemArchitecture::Amd64
 }
 
 // ============================================================================

@@ -322,7 +322,7 @@ impl DiskManager {
         // 卷标处理
         let vol_label = match volume_label {
             Some(label) if !label.is_empty() => label,
-            _ => "NewVolume",
+            _ => "本地磁盘",
         };
 
         // 使用 cmd /c format 命令: format D: /FS:NTFS /V:Label /Q /Y

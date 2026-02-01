@@ -1,6 +1,6 @@
 [package]
 name = "LetRecovery"
-version = "2026.1.25"
+version = "2026.2.1"
 edition = "2021"
 authors = ["NORMAL-EX"]
 description = "Windows系统一键重装工具"
@@ -58,6 +58,8 @@ windows = { version = "0.58", features = [
     "Win32_Security_Cryptography",
     # SetupAPI - 设备驱动管理
     "Win32_Devices_DeviceAndDriverInstallation",
+    # 进程管理 - ToolHelp
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 winreg = "0.52"
 
@@ -70,6 +72,10 @@ encoding_rs = "0.8"
 # 日志
 log = "0.4"
 env_logger = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "std"] }
+tracing-appender = "0.2"
+parking_lot = "0.12"
 
 # 错误处理
 anyhow = "1"

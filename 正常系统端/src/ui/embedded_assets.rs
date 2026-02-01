@@ -357,7 +357,7 @@ mod tests {
     fn test_normalize_physical_size() {
         // 测试各种输入尺寸
         assert_eq!(normalize_physical_size(50), 64);
-        assert_eq!(normalize_physical_size(72), 96);  // 72 * 1.25 = 90 -> 96
+        assert_eq!(normalize_physical_size(72), 96);  // 72 * 2.1 = 90 -> 96
         assert_eq!(normalize_physical_size(108), 128); // 72 * 1.5 = 108 -> 128
         assert_eq!(normalize_physical_size(144), 144); // 72 * 2.0 = 144
         assert_eq!(normalize_physical_size(200), 256);

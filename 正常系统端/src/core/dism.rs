@@ -1,9 +1,10 @@
 //! 镜像操作模块
 //!
-//! 该模块封装了 Windows 系统镜像操作功能，完全基于 Windows API，不依赖 DISM 命令行：
+//! 该模块封装了 Windows 系统镜像操作功能：
 //! - 镜像释放/应用：使用 wimgapi.dll
 //! - 镜像备份/捕获：使用 wimgapi.dll
-//! - 驱动导出/导入：使用 setupapi.dll/newdev.dll
+//! - 离线驱动导入：使用 dism.exe 命令行（优先使用 {程序目录}\bin\Dism\dism.exe）
+//! - 离线 CAB 包导入：使用 dism.exe 命令行
 //! - 镜像信息获取：使用 wimgapi.dll + WIM XML 解析
 //! - 系统信息获取：使用 advapi32.dll (离线注册表)
 
@@ -11,6 +12,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
+use crate::core::dism_cmd::DismCmd;
 use crate::core::driver::DriverManager;
 use crate::core::system_utils;
 use crate::core::wimgapi::{WimManager, WimProgress, WIM_COMPRESS_LZX, Wimgapi};
@@ -33,6 +35,12 @@ pub struct ImageInfo {
     pub installation_type: String,
     /// Windows 主版本号 (如 10 表示 Win10/Win11)
     pub major_version: Option<u16>,
+    /// Windows 次版本号 (如 Win7 为 1，对应版本 6.1)
+    pub minor_version: Option<u16>,
+    /// 镜像类型 (标准安装/整盘备份/PE等)
+    pub image_type: crate::core::wimgapi::WimImageType,
+    /// 是否已验证可安装
+    pub verified_installable: bool,
 }
 
 pub struct Dism {
@@ -249,27 +257,56 @@ impl Dism {
     }
 
     /// 导入驱动到离线系统 (PE和正常环境都可用)
-    /// 使用 Windows API 直接复制到驱动存储
+    /// 
+    /// 使用 dism.exe 命令行进行离线驱动注入：
+    /// - 支持普通驱动（.inf 文件）
+    /// - 支持 CAB 包（Windows 更新）
+    /// 
+    /// 优先使用 {程序目录}\bin\Dism\dism.exe
     pub fn add_drivers_offline(&self, image_path: &str, driver_path: &str) -> Result<()> {
-        println!("[Dism] 使用 Windows API 离线导入驱动: {} -> {}", driver_path, image_path);
+        println!("[Dism] 离线导入驱动: {} -> {}", driver_path, image_path);
 
-        let manager = DriverManager::new()
-            .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
+        // 规范化路径：移除尾部的反斜杠
+        let image_path_clean = image_path.trim_end_matches('\\').trim_end_matches('/');
+        
+        // 使用 dism.exe 命令行进行离线驱动注入
+        // 这将使用 DISM 的 /Add-Driver 和 /Add-Package 功能
+        println!("[Dism] 使用 dism.exe 命令行进行离线驱动注入...");
+        
+        let dism_cmd = DismCmd::new()
+            .map_err(|e| anyhow::anyhow!("DISM 命令行初始化失败: {}", e))?;
 
-        let (success, fail) = manager.import_drivers_offline(
-            Path::new(image_path),
-            Path::new(driver_path),
-        )?;
+        // 智能导入：自动识别并处理驱动文件和 CAB 包
+        match dism_cmd.import_drivers_smart(image_path_clean, driver_path, None) {
+            Ok(_) => {
+                println!("[Dism] 离线驱动注入完成");
+                Ok(())
+            }
+            Err(e) => {
+                println!("[Dism] dism.exe 导入失败: {}", e);
+                
+                // 尝试回退到 DriverManager（仅当 DISM 完全失败时）
+                println!("[Dism] 尝试使用备用方法（DriverManager）...");
+                
+                let manager = DriverManager::new()
+                    .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
 
-        println!(
-            "[Dism] 离线驱动导入完成: 成功 {}, 失败 {}",
-            success, fail
-        );
+                let (success, fail) = manager.import_drivers_offline(
+                    Path::new(image_path_clean),
+                    Path::new(driver_path),
+                )?;
 
-        if fail > 0 && success == 0 {
-            anyhow::bail!("所有驱动导入失败");
+                println!(
+                    "[Dism] 备用方法完成: 成功 {}, 失败 {}",
+                    success, fail
+                );
+
+                if fail > 0 && success == 0 {
+                    anyhow::bail!("所有驱动导入失败");
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     // ========================================================================
@@ -294,6 +331,9 @@ impl Dism {
                             size_bytes: img.size_bytes,
                             installation_type: img.installation_type,
                             major_version: img.major_version,
+                            minor_version: img.minor_version,
+                            image_type: img.image_type,
+                            verified_installable: img.verified_installable,
                         }).collect());
                     }
                     Err(e) => {
@@ -512,6 +552,8 @@ impl Dism {
 
     /// 解析 WIM XML 元数据字符串
     fn parse_wim_xml(xml: &str) -> Result<Vec<ImageInfo>> {
+        use crate::core::wimgapi::WimImageType;
+        
         let mut images = Vec::new();
 
         let mut pos = 0;
@@ -526,10 +568,11 @@ impl Dism {
                 if let Some(image_end) = xml[abs_start..].find("</IMAGE>") {
                     let image_block = &xml[abs_start..abs_start + image_end + 8];
                     
-                    // 优先使用 DISPLAYNAME，其次使用 NAME
+                    // 优先使用 DISPLAYNAME，其次使用 NAME，最后使用默认名称
                     let name = Self::extract_xml_tag(image_block, "DISPLAYNAME")
                         .or_else(|| Self::extract_xml_tag(image_block, "NAME"))
-                        .unwrap_or_default();
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| format!("镜像 {}", index));
                     
                     let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
                         .and_then(|s| s.parse().ok())
@@ -544,13 +587,26 @@ impl Dism {
                         .or_else(|| Self::extract_xml_tag(image_block, "MAJOR"))
                         .and_then(|s| s.parse::<u16>().ok());
 
-                    if index > 0 && !name.is_empty() {
+                    let minor_version = Self::extract_xml_tag(image_block, "VERSION")
+                        .and_then(|version_block| Self::extract_xml_tag(&version_block, "MINOR"))
+                        .or_else(|| Self::extract_xml_tag(image_block, "MINOR"))
+                        .and_then(|s| s.parse::<u16>().ok());
+
+                    // 确定镜像类型
+                    let image_type = Self::determine_image_type_from_info(
+                        &name, &installation_type, major_version, size_bytes
+                    );
+
+                    if index > 0 {
                         images.push(ImageInfo {
                             index,
                             name,
                             size_bytes,
                             installation_type,
                             major_version,
+                            minor_version,
+                            image_type,
+                            verified_installable: false,
                         });
                     }
 
@@ -568,6 +624,52 @@ impl Dism {
         }
 
         Ok(images)
+    }
+
+    /// 根据镜像信息确定镜像类型
+    fn determine_image_type_from_info(
+        name: &str,
+        installation_type: &str,
+        major_version: Option<u16>,
+        size_bytes: u64
+    ) -> crate::core::wimgapi::WimImageType {
+        use crate::core::wimgapi::WimImageType;
+        
+        let name_lower = name.to_lowercase();
+        let install_type_lower = installation_type.to_lowercase();
+        
+        // 检测 PE 环境
+        if install_type_lower == "windowspe" 
+            || name_lower.contains("windows pe")
+            || name_lower.contains("winpe")
+            || name_lower.contains("windows setup") {
+            return WimImageType::WindowsPE;
+        }
+        
+        // 检测标准安装镜像
+        if !installation_type.is_empty() 
+            && major_version.is_some() 
+            && (install_type_lower == "client" || install_type_lower == "server") {
+            return WimImageType::StandardInstall;
+        }
+        
+        // 检测整盘备份型
+        if installation_type.is_empty() && size_bytes > 1_000_000_000 {
+            return WimImageType::FullBackup;
+        }
+        
+        if name_lower.contains("backup") 
+            || name_lower.contains("备份")
+            || name_lower.contains("ghost")
+            || name_lower.contains("clone") {
+            return WimImageType::FullBackup;
+        }
+        
+        if major_version.is_some() && installation_type.is_empty() {
+            return WimImageType::FullBackup;
+        }
+        
+        WimImageType::Unknown
     }
 
     /// 从 XML 块中提取指定标签的内容

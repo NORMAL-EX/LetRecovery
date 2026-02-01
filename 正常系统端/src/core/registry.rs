@@ -94,6 +94,30 @@ impl OfflineRegistry {
         Ok(())
     }
 
+    /// 写入可扩展字符串值 (REG_EXPAND_SZ)
+    /// 用于包含环境变量引用的路径，如 %SystemRoot%\System32\drivers\xxx.sys
+    pub fn set_expand_string(key_path: &str, value_name: &str, data: &str) -> Result<()> {
+        let output = create_command("reg.exe")
+            .args([
+                "add",
+                key_path,
+                "/v",
+                value_name,
+                "/t",
+                "REG_EXPAND_SZ",
+                "/d",
+                data,
+                "/f",
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = gbk_to_utf8(&output.stderr);
+            anyhow::bail!("Failed to set registry expand string value: {}", stderr);
+        }
+        Ok(())
+    }
+
     /// 删除注册表键
     pub fn delete_key(key_path: &str) -> Result<()> {
         let _ = create_command("reg.exe")

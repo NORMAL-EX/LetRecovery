@@ -3,6 +3,8 @@
 //! 使用 Windows API 实现驱动的导出和导入功能：
 //! - SetupAPI (setupapi.dll) - 驱动安装和枚举
 //! - NewDev API (newdev.dll) - 驱动安装
+//! - CfgMgr32 (cfgmgr32.dll) - 设备配置管理
+//! - Offreg (offreg.dll) - 离线注册表操作
 //!
 //! 不依赖 DISM 命令行，直接调用系统 DLL
 
@@ -25,6 +27,7 @@ use windows::Win32::Foundation::{GetLastError, BOOL, HWND};
 const DIGCF_PRESENT: u32 = 0x0000_0002;
 const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
 
+const SPDRP_DRIVER: u32 = 0x0000_0009;
 const SPDRP_INF_PATH: u32 = 0x0000_0010;
 const SPDRP_HARDWAREID: u32 = 0x0000_0001;
 const SPDRP_DEVICEDESC: u32 = 0x0000_0000;
@@ -33,9 +36,18 @@ const SPDRP_CLASS: u32 = 0x0000_0007;
 const SPDRP_CLASSGUID: u32 = 0x0000_0008;
 
 const ERROR_NO_MORE_ITEMS: u32 = 259;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 const INSTALLFLAG_FORCE: u32 = 0x0000_0001;
+const INSTALLFLAG_READONLY: u32 = 0x0000_0002;
 const INSTALLFLAG_NONINTERACTIVE: u32 = 0x0000_0004;
+
+const DRIVER_PACKAGE_REPAIR: u32 = 0x0000_0001;
+const DRIVER_PACKAGE_FORCE: u32 = 0x0000_0004;
+const DRIVER_PACKAGE_LEGACY_MODE: u32 = 0x0000_0010;
+
+const SP_COPY_NOOVERWRITE: u32 = 0x0000_0008;
+const SP_COPY_OEMINF_CATALOG_ONLY: u32 = 0x0004_0000;
 
 const REG_SZ: u32 = 1;
 const REG_MULTI_SZ: u32 = 7;
@@ -62,6 +74,34 @@ impl Default for SpDevInfoData {
             class_guid: [0; 16],
             dev_inst: 0,
             reserved: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SpDrvInfoDataW {
+    cb_size: u32,
+    driver_type: u32,
+    reserved: usize,
+    description: [u16; 256],
+    mfg_name: [u16; 256],
+    provider_name: [u16; 256],
+    driver_date: u64,
+    driver_version: u64,
+}
+
+impl Default for SpDrvInfoDataW {
+    fn default() -> Self {
+        Self {
+            cb_size: std::mem::size_of::<Self>() as u32,
+            driver_type: 0,
+            reserved: 0,
+            description: [0; 256],
+            mfg_name: [0; 256],
+            provider_name: [0; 256],
+            driver_date: 0,
+            driver_version: 0,
         }
     }
 }
@@ -107,6 +147,12 @@ type FnSetupCopyOEMInfW = unsafe extern "system" fn(
     destination_inf_file_name_component: *mut *mut u16,
 ) -> BOOL;
 
+type FnSetupUninstallOEMInfW = unsafe extern "system" fn(
+    inf_file_name: *const u16,
+    flags: u32,
+    reserved: *mut c_void,
+) -> BOOL;
+
 type FnSetupGetInfDriverStoreLocationW = unsafe extern "system" fn(
     file_name: *const u16,
     alternate_platform_info: *const c_void,
@@ -131,6 +177,21 @@ type FnUpdateDriverForPlugAndPlayDevicesW = unsafe extern "system" fn(
     install_flags: u32,
     b_reboot_required: *mut BOOL,
 ) -> BOOL;
+
+// DIFx API (difxapi.dll) - 可选，用于驱动包管理
+type FnDriverPackageInstallW = unsafe extern "system" fn(
+    inf_path: *const u16,
+    flags: u32,
+    installer_info: *const c_void,
+    need_reboot: *mut BOOL,
+) -> u32;
+
+type FnDriverPackageUninstallW = unsafe extern "system" fn(
+    inf_path: *const u16,
+    flags: u32,
+    installer_info: *const c_void,
+    need_reboot: *mut BOOL,
+) -> u32;
 
 // ============================================================================
 // 辅助函数
@@ -198,6 +259,7 @@ struct SetupApi {
     get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW,
     destroy_device_info_list: FnSetupDiDestroyDeviceInfoList,
     copy_oem_inf: FnSetupCopyOEMInfW,
+    uninstall_oem_inf: FnSetupUninstallOEMInfW,
     get_inf_driver_store_location: Option<FnSetupGetInfDriverStoreLocationW>,
 }
 
@@ -217,6 +279,8 @@ impl SetupApi {
                 *lib.get(b"SetupDiDestroyDeviceInfoList")?;
             let copy_oem_inf: FnSetupCopyOEMInfW = 
                 *lib.get(b"SetupCopyOEMInfW")?;
+            let uninstall_oem_inf: FnSetupUninstallOEMInfW = 
+                *lib.get(b"SetupUninstallOEMInfW")?;
             
             // 这个函数在 Windows 8+ 才有
             let get_inf_driver_store_location = lib
@@ -231,6 +295,7 @@ impl SetupApi {
                 get_device_registry_property,
                 destroy_device_info_list,
                 copy_oem_inf,
+                uninstall_oem_inf,
                 get_inf_driver_store_location,
             })
         }
@@ -390,6 +455,23 @@ impl SetupApi {
         Ok(wide_to_string(&dest_buffer))
     }
 
+    /// 卸载 OEM INF 文件
+    fn uninstall_inf(&self, inf_name: &str) -> Result<()> {
+        let wide_name = to_wide(inf_name);
+
+        // SUOI_FORCEDELETE = 1
+        let result = unsafe {
+            (self.uninstall_oem_inf)(wide_name.as_ptr(), 1, null_mut())
+        };
+
+        if result.0 == 0 {
+            let err = get_last_error();
+            bail!("SetupUninstallOEMInf 失败: 错误码 {}", err);
+        }
+
+        Ok(())
+    }
+
     /// 获取 INF 文件在驱动存储中的完整路径
     fn get_driver_store_path(&self, inf_name: &str) -> Option<PathBuf> {
         let func = self.get_inf_driver_store_location?;
@@ -476,7 +558,6 @@ impl NewDevApi {
     }
 
     /// 更新即插即用设备的驱动
-    #[allow(dead_code)]
     fn update_pnp_driver(&self, hardware_id: &str, inf_path: &Path, force: bool) -> Result<bool> {
         let wide_hwid = to_wide(hardware_id);
         let wide_path = path_to_wide(inf_path);
@@ -535,19 +616,24 @@ impl DriverManager {
     }
 
     /// 枚举系统中所有已安装的驱动
-    #[allow(dead_code)]
     pub fn enumerate_all_drivers(&self) -> Result<Vec<DriverInfo>> {
         self.setup_api.enumerate_drivers()
     }
 
     /// 枚举第三方 (OEM) 驱动
-    #[allow(dead_code)]
     pub fn enumerate_oem_drivers(&self) -> Result<Vec<DriverInfo>> {
         let all_drivers = self.setup_api.enumerate_drivers()?;
         Ok(all_drivers.into_iter().filter(|d| d.is_oem).collect())
     }
 
     /// 导出第三方驱动到指定目录
+    ///
+    /// # 参数
+    /// - `destination`: 目标目录
+    /// - `oem_only`: 是否只导出第三方驱动
+    ///
+    /// # 返回
+    /// - 成功导出的驱动数量
     pub fn export_drivers(&self, destination: &Path, oem_only: bool) -> Result<usize> {
         std::fs::create_dir_all(destination)?;
 
@@ -557,7 +643,7 @@ impl DriverManager {
             self.enumerate_all_drivers()?
         };
 
-        log::info!("[DriverManager] 找到 {} 个驱动需要导出", drivers.len());
+        println!("[DriverManager] 找到 {} 个驱动需要导出", drivers.len());
 
         // 去重 INF 路径
         let mut exported_infs = std::collections::HashSet::new();
@@ -581,7 +667,7 @@ impl DriverManager {
             };
 
             if !driver_store_path.exists() {
-                log::warn!(
+                println!(
                     "[DriverManager] 警告: 驱动文件不存在: {:?}",
                     driver_store_path
                 );
@@ -600,14 +686,14 @@ impl DriverManager {
             // 复制驱动包
             match self.copy_driver_package(&driver_store_path, &dest_dir) {
                 Ok(_) => {
-                    log::info!(
+                    println!(
                         "[DriverManager] 已导出: {} -> {:?}",
                         driver.description, dest_dir
                     );
                     success_count += 1;
                 }
                 Err(e) => {
-                    log::warn!(
+                    println!(
                         "[DriverManager] 导出失败: {} - {}",
                         driver.description, e
                     );
@@ -615,7 +701,7 @@ impl DriverManager {
             }
         }
 
-        log::info!("[DriverManager] 成功导出 {} 个驱动", success_count);
+        println!("[DriverManager] 成功导出 {} 个驱动", success_count);
         Ok(success_count)
     }
 
@@ -688,6 +774,13 @@ impl DriverManager {
     }
 
     /// 导入驱动（从目录递归安装所有 INF）
+    ///
+    /// # 参数
+    /// - `source_dir`: 驱动目录
+    /// - `force`: 是否强制安装（覆盖已有驱动）
+    ///
+    /// # 返回
+    /// - (成功数, 失败数, 是否需要重启)
     pub fn import_drivers(&self, source_dir: &Path, force: bool) -> Result<(usize, usize, bool)> {
         let mut success_count = 0;
         let mut fail_count = 0;
@@ -695,25 +788,25 @@ impl DriverManager {
 
         // 递归查找所有 INF 文件
         let inf_files = Self::find_inf_files(source_dir)?;
-        log::info!("[DriverManager] 找到 {} 个 INF 文件", inf_files.len());
+        println!("[DriverManager] 找到 {} 个 INF 文件", inf_files.len());
 
         for inf_path in inf_files {
-            log::info!("[DriverManager] 正在安装: {:?}", inf_path);
+            println!("[DriverManager] 正在安装: {:?}", inf_path);
 
             match self.install_single_driver(&inf_path, force) {
                 Ok(reboot) => {
                     success_count += 1;
                     need_reboot = need_reboot || reboot;
-                    log::info!("[DriverManager] 安装成功: {:?}", inf_path);
+                    println!("[DriverManager] 安装成功: {:?}", inf_path);
                 }
                 Err(e) => {
                     fail_count += 1;
-                    log::warn!("[DriverManager] 安装失败: {:?} - {}", inf_path, e);
+                    println!("[DriverManager] 安装失败: {:?} - {}", inf_path, e);
                 }
             }
         }
 
-        log::info!(
+        println!(
             "[DriverManager] 驱动导入完成: 成功 {}, 失败 {}, 需要重启: {}",
             success_count, fail_count, need_reboot
         );
@@ -728,7 +821,7 @@ impl DriverManager {
             match newdev.install_driver(inf_path, force) {
                 Ok(reboot) => return Ok(reboot),
                 Err(e) => {
-                    log::warn!("[DriverManager] DiInstallDriver 失败: {}, 尝试 SetupCopyOEMInf", e);
+                    println!("[DriverManager] DiInstallDriver 失败: {}, 尝试 SetupCopyOEMInf", e);
                 }
             }
         }
@@ -765,8 +858,19 @@ impl DriverManager {
     }
 
     /// 导入驱动到离线系统（PE环境下使用）
+    /// 
+    /// 完整的离线驱动注入，包括：
+    /// 1. 复制驱动文件到 DriverStore\FileRepository
+    /// 2. 复制 .sys 文件到 System32\drivers
+    /// 3. 复制 INF 到 Windows\INF (命名为 oem*.inf)
+    /// 4. 注册驱动服务到离线注册表
     ///
-    /// 将驱动文件直接复制到目标系统的驱动存储目录
+    /// # 参数
+    /// - `offline_root`: 离线系统根目录 (如 "D:\\")
+    /// - `source_dir`: 驱动目录
+    ///
+    /// # 返回
+    /// - (成功数, 失败数)
     pub fn import_drivers_offline(
         &self,
         offline_root: &Path,
@@ -775,46 +879,87 @@ impl DriverManager {
         let mut success_count = 0;
         let mut fail_count = 0;
 
-        // 目标驱动存储目录
+        // 目标目录
         let driver_store = offline_root
             .join("Windows")
             .join("System32")
             .join("DriverStore")
             .join("FileRepository");
+        let system_drivers = offline_root
+            .join("Windows")
+            .join("System32")
+            .join("drivers");
+        let inf_dir = offline_root
+            .join("Windows")
+            .join("INF");
 
         std::fs::create_dir_all(&driver_store)?;
+        std::fs::create_dir_all(&system_drivers)?;
+        std::fs::create_dir_all(&inf_dir)?;
+
+        // 获取下一个可用的 OEM INF 编号
+        let mut oem_index = Self::get_next_oem_index(&inf_dir);
 
         // 递归查找所有 INF 文件
         let inf_files = Self::find_inf_files(source_dir)?;
-        log::info!(
+        println!(
             "[DriverManager] 离线安装: 找到 {} 个 INF 文件",
             inf_files.len()
         );
 
         for inf_path in inf_files {
             // 获取 INF 所在目录
-            let inf_dir = inf_path.parent().unwrap_or(source_dir);
+            let inf_source_dir = inf_path.parent().unwrap_or(source_dir);
             let inf_name = inf_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown");
+            let inf_filename = inf_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown.inf");
 
-            // 创建目标目录
-            let target_dir = driver_store.join(format!("{}_offline", inf_name));
-            
-            match Self::copy_dir_recursive(inf_dir, &target_dir) {
-                Ok(_) => {
-                    success_count += 1;
-                    log::info!("[DriverManager] 离线安装成功: {:?}", inf_path);
-                }
-                Err(e) => {
-                    fail_count += 1;
-                    log::warn!("[DriverManager] 离线安装失败: {:?} - {}", inf_path, e);
+            // 1. 复制到 DriverStore\FileRepository
+            let target_store_dir = driver_store.join(format!("{}.inf_amd64_offline{:08x}", inf_name, oem_index));
+            if let Err(e) = Self::copy_dir_recursive(inf_source_dir, &target_store_dir) {
+                println!("[DriverManager] 复制到DriverStore失败: {:?} - {}", inf_path, e);
+                fail_count += 1;
+                continue;
+            }
+
+            // 2. 解析 INF 文件并复制 .sys 文件到 System32\drivers
+            if let Err(e) = Self::process_driver_files(&target_store_dir, &system_drivers) {
+                println!("[DriverManager] 处理驱动文件失败: {:?} - {}", inf_path, e);
+                // 继续，不算失败
+            }
+
+            // 3. 复制 INF 到 Windows\INF (命名为 oem{N}.inf)
+            let oem_inf_name = format!("oem{}.inf", oem_index);
+            let oem_inf_path = inf_dir.join(&oem_inf_name);
+            let source_inf = target_store_dir.join(inf_filename);
+            if source_inf.exists() {
+                if let Err(e) = std::fs::copy(&source_inf, &oem_inf_path) {
+                    println!("[DriverManager] 复制INF到Windows\\INF失败: {} - {}", oem_inf_name, e);
                 }
             }
+
+            // 4. 注册驱动服务到离线注册表
+            if let Err(e) = Self::register_driver_to_offline_registry(
+                offline_root,
+                &target_store_dir,
+                inf_filename,
+                &oem_inf_name,
+            ) {
+                println!("[DriverManager] 注册驱动服务失败: {:?} - {}", inf_path, e);
+                // 继续，不算失败（文件已复制，可能在启动时自动识别）
+            }
+
+            success_count += 1;
+            oem_index += 1;
+            println!("[DriverManager] 离线安装成功: {:?} -> {}", inf_path, oem_inf_name);
         }
 
-        log::info!(
+        println!(
             "[DriverManager] 离线驱动导入完成: 成功 {}, 失败 {}",
             success_count, fail_count
         );
@@ -822,9 +967,308 @@ impl DriverManager {
         Ok((success_count, fail_count))
     }
 
-    /// 从指定系统分区导出驱动（PE环境下使用）
+    /// 获取下一个可用的 OEM INF 编号
+    fn get_next_oem_index(inf_dir: &Path) -> u32 {
+        let mut max_index = 0u32;
+        
+        if let Ok(entries) = std::fs::read_dir(inf_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy().to_lowercase();
+                
+                if name_str.starts_with("oem") && name_str.ends_with(".inf") {
+                    // 提取数字部分
+                    let num_part = &name_str[3..name_str.len()-4];
+                    if let Ok(num) = num_part.parse::<u32>() {
+                        if num > max_index {
+                            max_index = num;
+                        }
+                    }
+                }
+            }
+        }
+        
+        max_index + 1
+    }
+
+    /// 处理驱动文件：复制 .sys 文件到 System32\drivers
+    fn process_driver_files(driver_store_dir: &Path, system_drivers: &Path) -> Result<()> {
+        // 查找目录中所有 .sys 文件
+        for entry in std::fs::read_dir(driver_store_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext.to_string_lossy().to_lowercase() == "sys" {
+                        // 复制到 System32\drivers
+                        if let Some(filename) = path.file_name() {
+                            let dest = system_drivers.join(filename);
+                            if !dest.exists() {
+                                if let Err(e) = std::fs::copy(&path, &dest) {
+                                    println!("[DriverManager] 复制sys文件失败: {:?} - {}", filename, e);
+                                } else {
+                                    println!("[DriverManager] 已复制: {:?} -> {:?}", filename, dest);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 注册驱动服务到离线注册表
+    fn register_driver_to_offline_registry(
+        offline_root: &Path,
+        driver_store_dir: &Path,
+        inf_filename: &str,
+        _oem_inf_name: &str,
+    ) -> Result<()> {
+        use crate::core::registry::OfflineRegistry;
+        
+        // 查找 INF 文件
+        let inf_path = driver_store_dir.join(inf_filename);
+        if !inf_path.exists() {
+            return Ok(()); // INF 不存在，跳过注册
+        }
+
+        // 读取并解析 INF 文件
+        let inf_content = std::fs::read_to_string(&inf_path)
+            .unwrap_or_default();
+        
+        // 解析服务信息
+        let service_info = Self::parse_inf_service_info(&inf_content);
+        
+        if service_info.is_empty() {
+            println!("[DriverManager] INF 中未找到服务定义: {}", inf_filename);
+            return Ok(());
+        }
+
+        // 加载离线 SYSTEM 注册表
+        let system_hive = offline_root
+            .join("Windows")
+            .join("System32")
+            .join("config")
+            .join("SYSTEM");
+        
+        if !system_hive.exists() {
+            println!("[DriverManager] SYSTEM hive 不存在: {:?}", system_hive);
+            return Ok(());
+        }
+
+        let hive_key = format!("drv_offline_{}", std::process::id());
+        
+        // 尝试加载注册表
+        if let Err(e) = OfflineRegistry::load_hive(&hive_key, &system_hive.to_string_lossy()) {
+            println!("[DriverManager] 加载SYSTEM hive失败: {}", e);
+            return Ok(());
+        }
+
+        // 注册每个服务
+        for (service_name, service_binary, service_type, start_type, error_control) in &service_info {
+            let service_key = format!(
+                "HKLM\\{}\\ControlSet001\\Services\\{}",
+                hive_key, service_name
+            );
+            
+            // 创建服务键
+            let _ = OfflineRegistry::create_key(&service_key);
+            
+            // 设置服务属性
+            let _ = OfflineRegistry::set_dword(&service_key, "Type", *service_type);
+            let _ = OfflineRegistry::set_dword(&service_key, "Start", *start_type);
+            let _ = OfflineRegistry::set_dword(&service_key, "ErrorControl", *error_control);
+            
+            // 设置 ImagePath (使用 REG_EXPAND_SZ)
+            let image_path = if service_binary.contains('\\') || service_binary.contains('/') {
+                service_binary.clone()
+            } else {
+                format!("System32\\drivers\\{}", service_binary)
+            };
+            let _ = OfflineRegistry::set_expand_string(&service_key, "ImagePath", &image_path);
+            
+            // 同时设置 ControlSet002 (如果存在)
+            let service_key2 = format!(
+                "HKLM\\{}\\ControlSet002\\Services\\{}",
+                hive_key, service_name
+            );
+            let _ = OfflineRegistry::create_key(&service_key2);
+            let _ = OfflineRegistry::set_dword(&service_key2, "Type", *service_type);
+            let _ = OfflineRegistry::set_dword(&service_key2, "Start", *start_type);
+            let _ = OfflineRegistry::set_dword(&service_key2, "ErrorControl", *error_control);
+            let _ = OfflineRegistry::set_expand_string(&service_key2, "ImagePath", &image_path);
+            
+            println!(
+                "[DriverManager] 已注册服务: {} (Type={}, Start={}, ImagePath={})",
+                service_name, service_type, start_type, image_path
+            );
+        }
+
+        // 卸载注册表
+        let _ = OfflineRegistry::unload_hive(&hive_key);
+        
+        Ok(())
+    }
+
+    /// 解析 INF 文件中的服务信息
+    /// 返回: Vec<(服务名, 二进制文件, 类型, 启动类型, 错误控制)>
+    fn parse_inf_service_info(inf_content: &str) -> Vec<(String, String, u32, u32, u32)> {
+        let mut services = Vec::new();
+        let mut current_section = String::new();
+        let mut service_install_sections: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        
+        // 第一遍：找到 AddService 指令，获取服务名和安装段名
+        for line in inf_content.lines() {
+            let line = line.trim();
+            
+            // 跳过注释和空行
+            if line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+            
+            // 检查段名
+            if line.starts_with('[') && line.ends_with(']') {
+                current_section = line[1..line.len()-1].to_lowercase();
+                continue;
+            }
+            
+            // 查找 AddService 指令
+            let lower_line = line.to_lowercase();
+            if lower_line.starts_with("addservice") {
+                // AddService = ServiceName, flags, InstallSection
+                let parts: Vec<&str> = line.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    let args: Vec<&str> = parts[1].split(',').map(|s| s.trim()).collect();
+                    if args.len() >= 3 {
+                        let service_name = args[0].trim().to_string();
+                        let install_section = args[2].trim().to_lowercase();
+                        if !service_name.is_empty() && !install_section.is_empty() {
+                            service_install_sections.insert(install_section, service_name);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 第二遍：解析服务安装段
+        current_section.clear();
+        let mut service_type: u32 = 1; // SERVICE_KERNEL_DRIVER
+        let mut start_type: u32 = 3;   // SERVICE_DEMAND_START
+        let mut error_control: u32 = 1; // SERVICE_ERROR_NORMAL
+        let mut service_binary = String::new();
+        
+        for line in inf_content.lines() {
+            let line = line.trim();
+            
+            if line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+            
+            if line.starts_with('[') && line.ends_with(']') {
+                // 保存之前段的服务信息
+                if let Some(service_name) = service_install_sections.get(&current_section) {
+                    if !service_binary.is_empty() {
+                        services.push((
+                            service_name.clone(),
+                            service_binary.clone(),
+                            service_type,
+                            start_type,
+                            error_control,
+                        ));
+                    }
+                }
+                
+                // 重置并切换到新段
+                current_section = line[1..line.len()-1].to_lowercase();
+                service_type = 1;
+                start_type = 3;
+                error_control = 1;
+                service_binary.clear();
+                continue;
+            }
+            
+            // 解析服务段中的属性
+            if service_install_sections.contains_key(&current_section) {
+                let parts: Vec<&str> = line.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim().to_lowercase();
+                    let value = parts[1].trim();
+                    
+                    match key.as_str() {
+                        "servicetype" => {
+                            service_type = Self::parse_inf_number(value);
+                        }
+                        "starttype" => {
+                            start_type = Self::parse_inf_number(value);
+                        }
+                        "errorcontrol" => {
+                            error_control = Self::parse_inf_number(value);
+                        }
+                        "servicebinary" => {
+                            // %12%\xxx.sys 或 %dirid%\xxx.sys
+                            service_binary = Self::resolve_inf_path(value);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        
+        // 保存最后一个段
+        if let Some(service_name) = service_install_sections.get(&current_section) {
+            if !service_binary.is_empty() {
+                services.push((
+                    service_name.clone(),
+                    service_binary,
+                    service_type,
+                    start_type,
+                    error_control,
+                ));
+            }
+        }
+        
+        services
+    }
+
+    /// 解析 INF 文件中的数值（支持十进制和十六进制）
+    fn parse_inf_number(value: &str) -> u32 {
+        let value = value.split(';').next().unwrap_or("").trim();
+        let value = value.split(',').next().unwrap_or("").trim();
+        
+        if value.to_lowercase().starts_with("0x") {
+            u32::from_str_radix(&value[2..], 16).unwrap_or(0)
+        } else {
+            value.parse().unwrap_or(0)
+        }
+    }
+
+    /// 解析 INF 路径，提取文件名
+    fn resolve_inf_path(value: &str) -> String {
+        // 移除注释
+        let value = value.split(';').next().unwrap_or("").trim();
+        
+        // 提取文件名（去掉 %xx% 路径部分）
+        // %12%\xxx.sys -> xxx.sys
+        // %dirid%\path\xxx.sys -> xxx.sys
+        let filename = value
+            .rsplit(|c| c == '\\' || c == '/')
+            .next()
+            .unwrap_or(value)
+            .trim();
+        
+        filename.to_string()
+    }
+
+    /// 从在线系统导出驱动（用于 PE 环境下导出目标系统的驱动）
     ///
-    /// 直接从目标系统的驱动存储目录复制第三方驱动
+    /// # 参数
+    /// - `system_root`: 系统根目录 (如 "C:\\")
+    /// - `destination`: 目标目录
+    ///
+    /// # 返回
+    /// - 成功导出的驱动数量
     pub fn export_drivers_from_system(
         &self,
         system_root: &Path,
@@ -859,17 +1303,17 @@ impl DriverManager {
                     match Self::copy_dir_recursive(&path, &dest_dir) {
                         Ok(_) => {
                             success_count += 1;
-                            log::info!("[DriverManager] 已导出: {}", dir_name);
+                            println!("[DriverManager] 已导出: {}", dir_name);
                         }
                         Err(e) => {
-                            log::warn!("[DriverManager] 导出失败: {} - {}", dir_name, e);
+                            println!("[DriverManager] 导出失败: {} - {}", dir_name, e);
                         }
                     }
                 }
             }
         }
 
-        log::info!("[DriverManager] 从系统导出 {} 个驱动", success_count);
+        println!("[DriverManager] 从系统导出 {} 个驱动", success_count);
         Ok(success_count)
     }
 
@@ -913,14 +1357,25 @@ impl DriverManager {
 // ============================================================================
 
 /// 导出系统驱动到指定目录
-#[allow(dead_code)]
+///
+/// # 参数
+/// - `destination`: 目标目录
+///
+/// # 返回
+/// - 成功导出的驱动数量
 pub fn export_drivers(destination: &str) -> Result<usize> {
     let manager = DriverManager::new()?;
     manager.export_drivers(Path::new(destination), true)
 }
 
 /// 从指定系统分区导出驱动（PE环境下使用）
-#[allow(dead_code)]
+///
+/// # 参数
+/// - `system_partition`: 系统分区根目录 (如 "C:\\")
+/// - `destination`: 目标目录
+///
+/// # 返回
+/// - 成功导出的驱动数量
 pub fn export_drivers_from_system(system_partition: &str, destination: &str) -> Result<usize> {
     let manager = DriverManager::new()?;
     manager.export_drivers_from_system(
@@ -930,13 +1385,26 @@ pub fn export_drivers_from_system(system_partition: &str, destination: &str) -> 
 }
 
 /// 导入驱动
-#[allow(dead_code)]
+///
+/// # 参数
+/// - `driver_path`: 驱动目录
+/// - `force`: 是否强制安装
+///
+/// # 返回
+/// - (成功数, 失败数, 是否需要重启)
 pub fn import_drivers(driver_path: &str, force: bool) -> Result<(usize, usize, bool)> {
     let manager = DriverManager::new()?;
     manager.import_drivers(Path::new(driver_path), force)
 }
 
 /// 导入驱动到离线系统（PE环境下使用）
+///
+/// # 参数
+/// - `offline_root`: 离线系统根目录 (如 "D:\\")
+/// - `driver_path`: 驱动目录
+///
+/// # 返回
+/// - (成功数, 失败数)
 pub fn import_drivers_offline(offline_root: &str, driver_path: &str) -> Result<(usize, usize)> {
     let manager = DriverManager::new()?;
     manager.import_drivers_offline(
@@ -946,15 +1414,26 @@ pub fn import_drivers_offline(offline_root: &str, driver_path: &str) -> Result<(
 }
 
 /// 枚举所有 OEM 驱动
-#[allow(dead_code)]
 pub fn list_oem_drivers() -> Result<Vec<DriverInfo>> {
     let manager = DriverManager::new()?;
     manager.enumerate_oem_drivers()
 }
 
 /// 枚举所有驱动
-#[allow(dead_code)]
 pub fn list_all_drivers() -> Result<Vec<DriverInfo>> {
     let manager = DriverManager::new()?;
     manager.enumerate_all_drivers()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_third_party_detection() {
+        assert!(DriverManager::is_third_party_driver("oem123.inf_amd64"));
+        assert!(DriverManager::is_third_party_driver("nvlddmkm.inf_amd64"));
+        assert!(!DriverManager::is_third_party_driver("usbport.inf_amd64"));
+        assert!(!DriverManager::is_third_party_driver("pci.inf_amd64"));
+    }
 }

@@ -216,7 +216,7 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
     };
     
     // 卷标处理
-    let vol_label = if label.is_empty() { "NewVolume" } else { label };
+    let vol_label = if label.is_empty() { "OS" } else { label };
 
     log::info!(
         "开始格式化分区: {} (文件系统: {}, 卷标: {})",
@@ -298,7 +298,7 @@ where
     } else {
         file_system
     };
-    let vol_label = if label.is_empty() { "NewVolume" } else { label };
+    let vol_label = if label.is_empty() { "OS" } else { label };
 
     log::info!(
         "开始格式化分区: {} (文件系统: {}, 卷标: {})",

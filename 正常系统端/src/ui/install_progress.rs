@@ -414,7 +414,20 @@ impl App {
                 
                 let boot_manager = crate::core::bcdedit::BootManager::new();
                 match boot_manager.repair_boot_advanced(&target_partition, use_uefi) {
-                    Ok(_) => println!("[INSTALL STEP 5] 引导修复成功"),
+                    Ok(_) => {
+                        println!("[INSTALL STEP 5] 引导修复成功");
+                        
+                        // 如果是 Win7 + UEFI 模式，且启用了 UefiSeven 补丁
+                        if use_uefi && advanced_options.win7_uefi_patch {
+                            println!("[INSTALL STEP 5] 检测到 Win7 UEFI 补丁选项，开始应用 UefiSeven");
+                            send_step(&progress_tx, 5, "应用Win7 UEFI补丁", 70);
+                            
+                            match advanced_options.apply_uefiseven_patch(&target_partition) {
+                                Ok(_) => println!("[INSTALL STEP 5] UefiSeven 补丁应用成功"),
+                                Err(e) => println!("[INSTALL STEP 5] UefiSeven 补丁应用失败: {} (继续安装)", e),
+                            }
+                        }
+                    }
                     Err(e) => println!("[INSTALL STEP 5] 引导修复失败: {}", e),
                 }
                 send_step(&progress_tx, 5, "修复引导", 100);
@@ -597,6 +610,44 @@ impl App {
             send_step(&progress_tx, 4, "复制镜像文件", 100);
             std::thread::sleep(std::time::Duration::from_millis(100));
 
+            // Step 4.5: 如果启用了 Win7 UEFI 补丁，复制 UefiSeven 文件到数据目录
+            if advanced_options.win7_uefi_patch {
+                println!("[INSTALL PE STEP 4.5] 复制 UefiSeven 文件到数据分区");
+                let uefiseven_dir = format!("{}\\uefiseven", data_dir);
+                let _ = std::fs::create_dir_all(&uefiseven_dir);
+                
+                // 从程序目录复制 UefiSeven 文件
+                if let Some(program_dir) = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                {
+                    let source_uefiseven_dir = program_dir.join("uefiseven");
+                    if source_uefiseven_dir.exists() {
+                        // 复制 bootx64.efi
+                        let src_efi = source_uefiseven_dir.join("bootx64.efi");
+                        let dst_efi = format!("{}\\bootx64.efi", uefiseven_dir);
+                        if src_efi.exists() {
+                            match std::fs::copy(&src_efi, &dst_efi) {
+                                Ok(_) => println!("[INSTALL PE STEP 4.5] 复制 UefiSeven bootx64.efi 成功"),
+                                Err(e) => println!("[INSTALL PE STEP 4.5] 复制 UefiSeven bootx64.efi 失败: {}", e),
+                            }
+                        }
+                        
+                        // 复制 UefiSeven.ini（如果存在）
+                        let src_ini = source_uefiseven_dir.join("UefiSeven.ini");
+                        let dst_ini = format!("{}\\UefiSeven.ini", uefiseven_dir);
+                        if src_ini.exists() {
+                            match std::fs::copy(&src_ini, &dst_ini) {
+                                Ok(_) => println!("[INSTALL PE STEP 4.5] 复制 UefiSeven.ini 成功"),
+                                Err(e) => println!("[INSTALL PE STEP 4.5] 复制 UefiSeven.ini 失败: {}", e),
+                            }
+                        }
+                    } else {
+                        println!("[INSTALL PE STEP 4.5] 警告: UefiSeven 源目录不存在: {}", source_uefiseven_dir.display());
+                    }
+                }
+            }
+
             // Step 5: 写入配置文件
             send_step(&progress_tx, 5, "写入配置文件", 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -636,6 +687,11 @@ impl App {
                 } else {
                     String::new()
                 },
+                win7_uefi_patch: advanced_options.win7_uefi_patch,
+                win7_inject_usb3_driver: advanced_options.win7_inject_usb3_driver,
+                win7_inject_nvme_driver: advanced_options.win7_inject_nvme_driver,
+                win7_fix_acpi_bsod: advanced_options.win7_fix_acpi_bsod,
+                win7_fix_storage_bsod: advanced_options.win7_fix_storage_bsod,
             };
             
             match ConfigFileManager::write_install_config(&target_partition, &data_partition, &install_config) {
@@ -792,12 +848,36 @@ fn copy_dir_recursive(src: &str, dst: &str) -> anyhow::Result<()> {
 
 /// 生成无人值守 XML 文件
 fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> anyhow::Result<()> {
+    use crate::core::system_utils::{get_file_version, get_system_architecture};
+    
     println!("[UNATTEND] 生成无人值守配置文件");
     
     let username = if options.custom_username && !options.username.is_empty() {
         options.username.clone()
     } else {
         "User".to_string()
+    };
+
+    // 检测目标系统架构
+    let arch = get_system_architecture(target_partition);
+    let arch_str = arch.as_unattend_str();
+    println!("[UNATTEND] 检测到目标系统架构: {}", arch_str);
+
+    // 通过 ntdll.dll 文件版本检测目标系统版本
+    // Windows 7: 6.1.x, Windows 8: 6.2.x, Windows 8.1: 6.3.x, Windows 10/11: 10.0.x
+    let ntdll_path = Path::new(target_partition).join("Windows").join("System32").join("ntdll.dll");
+    let (is_win7, is_win8) = match get_file_version(&ntdll_path) {
+        Some((major, minor, build, _)) => {
+            println!("[UNATTEND] 检测到目标系统版本 (ntdll.dll): {}.{}.{}", major, minor, build);
+            
+            let is_win7 = major == 6 && minor == 1;
+            let is_win8 = major == 6 && (minor == 2 || minor == 3);
+            (is_win7, is_win8)
+        }
+        None => {
+            println!("[UNATTEND] 无法读取 ntdll.dll 版本: {:?}, 默认使用 Win10/11 配置", ntdll_path);
+            (false, false)
+        }
     };
 
     // 构建 FirstLogonCommands
@@ -813,8 +893,8 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                 </SynchronousCommand>"#, order));
     order += 1;
 
-    // 如果需要删除UWP应用
-    if options.remove_uwp_apps {
+    // 如果需要删除UWP应用（仅Win10/11支持）
+    if options.remove_uwp_apps && !is_win7 && !is_win8 {
         first_logon_commands.push_str(&format!(r#"
                 <SynchronousCommand wcm:action="add">
                     <Order>{}</Order>
@@ -832,10 +912,40 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                     <Description>Cleanup scripts directory</Description>
                 </SynchronousCommand>"#, order));
     
+    // 根据系统版本生成不同的OOBE配置
+    // Win7: 移除HideOEMRegistrationScreen（家庭版不支持）
+    let oobe_section = if is_win7 {
+        // Windows 7: 不支持 HideOnlineAccountScreens, HideWirelessSetupInOOBE, SkipMachineOOBE, SkipUserOOBE, HideLocalAccountScreen, HideOEMRegistrationScreen(家庭版)
+        r#"<OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <ProtectYourPC>3</ProtectYourPC>
+                <NetworkLocation>Home</NetworkLocation>
+            </OOBE>"#.to_string()
+    } else if is_win8 {
+        // Windows 8/8.1: 支持 HideLocalAccountScreen，不支持其他新选项
+        r#"<OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <ProtectYourPC>3</ProtectYourPC>
+                <NetworkLocation>Home</NetworkLocation>
+            </OOBE>"#.to_string()
+    } else {
+        // Windows 10/11: 完整支持所有OOBE选项
+        r#"<OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                <ProtectYourPC>3</ProtectYourPC>
+                <SkipMachineOOBE>true</SkipMachineOOBE>
+                <SkipUserOOBE>true</SkipUserOOBE>
+            </OOBE>"#.to_string()
+    };
+    
     let xml_content = format!(r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
-        <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <UserData>
                 <ProductKey>
                     <WillShowUI>OnError</WillShowUI>
@@ -845,10 +955,10 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
         </component>
     </settings>
     <settings pass="specialize">
-        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <ComputerName>*</ComputerName>
         </component>
-        <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <RunSynchronous>
                 <RunSynchronousCommand wcm:action="add">
                     <Order>1</Order>
@@ -859,17 +969,8 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
         </component>
     </settings>
     <settings pass="oobeSystem">
-        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <OOBE>
-                <HideEULAPage>true</HideEULAPage>
-                <HideLocalAccountScreen>true</HideLocalAccountScreen>
-                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
-                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
-                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-                <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
-            </OOBE>
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            {oobe_section}
             <UserAccounts>
                 <LocalAccounts>
                     <LocalAccount wcm:action="add">
@@ -880,7 +981,7 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                         <Description>Local User</Description>
                         <DisplayName>{username}</DisplayName>
                         <Group>Administrators</Group>
-                        <Name>{username}</Name>
+                        <n>{username}</n>
                     </LocalAccount>
                 </LocalAccounts>
             </UserAccounts>
@@ -897,7 +998,7 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
             </FirstLogonCommands>
         </component>
     </settings>
-</unattend>"#, username = username, first_logon_commands = first_logon_commands);
+</unattend>"#, arch = arch_str, oobe_section = oobe_section, username = username, first_logon_commands = first_logon_commands);
 
     let panther_dir = format!("{}\\Windows\\Panther", target_partition);
     std::fs::create_dir_all(&panther_dir)?;
@@ -915,6 +1016,7 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
     
     Ok(())
 }
+
 
 /// 查找可用的数据分区（非系统分区）
 /// 返回 (分区盘符, 是否自动创建)

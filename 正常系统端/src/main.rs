@@ -19,10 +19,24 @@ pub struct PreloadedConfig {
 }
 
 fn main() -> eframe::Result<()> {
-    // 初始化日志
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp(Some(env_logger::TimestampPrecision::Millis))
-        .init();
+    // 加载应用配置（用于获取日志设置）
+    let app_config = core::app_config::AppConfig::load();
+    
+    // 初始化日志系统
+    if let Err(e) = utils::logger::LogManager::init(app_config.log_enabled) {
+        eprintln!("日志系统初始化失败: {}", e);
+        // 即使日志初始化失败，程序也应该继续运行
+    }
+    
+    // 清理旧日志文件
+    if app_config.log_enabled {
+        if let Err(e) = utils::logger::LogManager::cleanup_old_logs(app_config.log_retention_days) {
+            log::warn!("清理旧日志失败: {}", e);
+        }
+    }
+
+    // 初始化国际化系统
+    utils::i18n::init(&app_config.language);
 
     log::info!("LetRecovery 启动中...");
 
@@ -111,9 +125,11 @@ fn main() -> eframe::Result<()> {
     log::info!("预加载完成，初始化 GUI...");
 
     // 加载图标
+    log::info!("加载图标...");
     let icon = load_icon();
 
     // 设置窗口选项
+    log::info!("创建窗口选项...");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([950.0, 680.0])
@@ -123,36 +139,30 @@ fn main() -> eframe::Result<()> {
     };
 
     // 运行应用，传入预加载的配置
+    log::info!("启动 eframe 窗口...");
     let config_clone = preloaded_config.clone();
     eframe::run_native(
         "LetRecovery - Windows系统一键重装工具",
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new_with_preloaded(cc, &config_clone)))),
+        Box::new(move |cc| {
+            log::info!("eframe 回调开始创建 App...");
+            Ok(Box::new(app::App::new_with_preloaded(cc, &config_clone)))
+        }),
     )
 }
 
 /// 预加载所有配置和系统信息
 fn preload_all_config() -> PreloadedConfig {
-    // 并行加载各种信息以加快启动速度
+    use std::time::{Duration, Instant};
+    
+    // 只等待远程配置和分区信息（这两个比较快且重要）
+    // 系统信息和硬件信息改为异步加载，不阻塞窗口显示
+    
     let remote_config_handle = std::thread::spawn(|| {
         log::info!("开始加载远程配置...");
         let config = download::server_config::RemoteConfig::load_from_server();
         log::info!("远程配置加载完成: loaded={}", config.loaded);
         config
-    });
-
-    let system_info_handle = std::thread::spawn(|| {
-        log::info!("开始收集系统信息...");
-        let info = core::system_info::SystemInfo::collect().ok();
-        log::info!("系统信息收集完成");
-        info
-    });
-
-    let hardware_info_handle = std::thread::spawn(|| {
-        log::info!("开始收集硬件信息...");
-        let info = core::hardware_info::HardwareInfo::collect().ok();
-        log::info!("硬件信息收集完成");
-        info
     });
 
     let partitions_handle = std::thread::spawn(|| {
@@ -162,16 +172,33 @@ fn preload_all_config() -> PreloadedConfig {
         partitions
     });
 
-    // 等待所有线程完成
-    let remote_config = remote_config_handle.join().ok();
-    let system_info = system_info_handle.join().ok().flatten();
-    let hardware_info = hardware_info_handle.join().ok().flatten();
+    // 等待远程配置（带超时）
+    let start = Instant::now();
+    let timeout = Duration::from_secs(5);
+    
+    log::info!("等待远程配置...");
+    let remote_config = loop {
+        if remote_config_handle.is_finished() {
+            break remote_config_handle.join().ok();
+        }
+        if start.elapsed() > timeout {
+            log::warn!("远程配置加载超时，跳过");
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    
+    // 等待分区信息（这个通常很快）
+    log::info!("等待分区信息...");
     let partitions = partitions_handle.join().ok().unwrap_or_default();
 
+    log::info!("预加载完成，耗时: {:?}", start.elapsed());
+    
+    // 系统信息和硬件信息不在这里等待，改为在 App 中异步加载
     PreloadedConfig {
         remote_config,
-        system_info,
-        hardware_info,
+        system_info: None,      // 稍后异步加载
+        hardware_info: None,    // 稍后异步加载
         partitions,
     }
 }
@@ -566,12 +593,57 @@ fn detect_uefi_mode() -> bool {
 
 /// 生成无人值守XML (PE版本)
 fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::Result<()> {
+    use crate::core::system_utils::{get_file_version, get_system_architecture};
+    use std::path::Path;
+    
     let username = if username.is_empty() { "User" } else { username };
+    
+    // 检测目标系统架构
+    let arch = get_system_architecture(target_partition);
+    let arch_str = arch.as_unattend_str();
+    
+    // 通过 ntdll.dll 文件版本检测目标系统版本
+    let ntdll_path = Path::new(target_partition).join("Windows").join("System32").join("ntdll.dll");
+    let (is_win7, is_win8) = match get_file_version(&ntdll_path) {
+        Some((major, minor, _, _)) => {
+            let is_win7 = major == 6 && minor == 1;
+            let is_win8 = major == 6 && (minor == 2 || minor == 3);
+            (is_win7, is_win8)
+        }
+        None => (false, false)
+    };
+    
+    // 根据系统版本生成不同的OOBE配置
+    // Win7: 移除HideOEMRegistrationScreen（家庭版不支持）
+    let oobe_section = if is_win7 {
+        r#"<OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <ProtectYourPC>3</ProtectYourPC>
+                <NetworkLocation>Home</NetworkLocation>
+            </OOBE>"#
+    } else if is_win8 {
+        r#"<OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <ProtectYourPC>3</ProtectYourPC>
+                <NetworkLocation>Home</NetworkLocation>
+            </OOBE>"#
+    } else {
+        r#"<OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                <ProtectYourPC>3</ProtectYourPC>
+                <SkipMachineOOBE>true</SkipMachineOOBE>
+                <SkipUserOOBE>true</SkipUserOOBE>
+            </OOBE>"#
+    };
     
     let xml_content = format!(r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
-        <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+        <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
             <UserData>
                 <ProductKey>
                     <WillShowUI>OnError</WillShowUI>
@@ -581,17 +653,8 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
         </component>
     </settings>
     <settings pass="oobeSystem">
-        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <OOBE>
-                <HideEULAPage>true</HideEULAPage>
-                <HideLocalAccountScreen>true</HideLocalAccountScreen>
-                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
-                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
-                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-                <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
-            </OOBE>
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            {oobe}
             <UserAccounts>
                 <LocalAccounts>
                     <LocalAccount wcm:action="add">
@@ -600,9 +663,9 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
                             <PlainText>true</PlainText>
                         </Password>
                         <Description>Local User</Description>
-                        <DisplayName>{}</DisplayName>
+                        <DisplayName>{user}</DisplayName>
                         <Group>Administrators</Group>
-                        <Name>{}</Name>
+                        <n>{user}</n>
                     </LocalAccount>
                 </LocalAccounts>
             </UserAccounts>
@@ -612,11 +675,11 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
                     <PlainText>true</PlainText>
                 </Password>
                 <Enabled>true</Enabled>
-                <Username>{}</Username>
+                <Username>{user}</Username>
             </AutoLogon>
         </component>
     </settings>
-</unattend>"#, username, username, username);
+</unattend>"#, arch = arch_str, oobe = oobe_section, user = username);
 
     let panther_dir = format!("{}\\Windows\\Panther", target_partition);
     std::fs::create_dir_all(&panther_dir)?;
@@ -626,6 +689,7 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
     
     Ok(())
 }
+
 
 /// 显示错误消息框
 fn show_error_message(message: &str) {

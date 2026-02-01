@@ -56,6 +56,21 @@ pub fn launch_wandrv() -> Result<(), String> {
     }
 }
 
+/// 启动 SpaceSniffer 磁盘空间分析工具
+pub fn launch_space_sniffer() -> Result<(), String> {
+    let tools_dir = get_tools_dir();
+    let space_sniffer_path = tools_dir.join("SpaceSniffer.exe");
+
+    if space_sniffer_path.exists() {
+        match Command::new(&space_sniffer_path).spawn() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("启动失败: SpaceSniffer.exe - {}", e)),
+        }
+    } else {
+        Err(format!("工具不存在: {:?}", space_sniffer_path))
+    }
+}
+
 /// 修复引导
 pub fn repair_boot(target_partition: &str) -> Result<(), String> {
     let boot_manager = crate::core::bcdedit::BootManager::new();
