@@ -139,7 +139,6 @@ impl SystemInfo {
         };
         use windows::Win32::System::Wmi::{
             IWbemLocator, WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
-            WBEM_INFINITE,
         };
         
         const RPC_C_AUTHN_DEFAULT: u32 = 0xFFFFFFFF;

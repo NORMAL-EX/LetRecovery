@@ -552,7 +552,6 @@ impl Dism {
 
     /// 解析 WIM XML 元数据字符串
     fn parse_wim_xml(xml: &str) -> Result<Vec<ImageInfo>> {
-        use crate::core::wimgapi::WimImageType;
         
         let mut images = Vec::new();
 

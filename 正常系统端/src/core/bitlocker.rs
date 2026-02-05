@@ -12,6 +12,7 @@
 //! - 所有密码和恢复密钥仅在内存中短暂存在
 //! - 使用RAII模式确保句柄正确释放
 
+use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -21,7 +22,7 @@ use windows::Win32::Storage::FileSystem::{
 
 #[cfg(windows)]
 use super::fveapi::{
-    format_recovery_key, FveAccessMode, FveApi, FveError, FveLockStatus, FveProtectionStatus, FveVolumeInfo,
+    format_recovery_key, FveAccessMode, FveApi, FveError, FveLockStatus, FveProtectionStatus,
     FveVolumeStatus,
 };
 
@@ -229,7 +230,10 @@ impl BitLockerManager {
                 true
             }
             Err(e) => {
-                log::warn!("BitLocker管理器: fveapi.dll 不可用 ({}), 将回退到 manage-bde", e);
+                log::warn!(
+                    "BitLocker管理器: fveapi.dll 不可用 ({}), 将回退到 manage-bde",
+                    e
+                );
                 false
             }
         }
@@ -257,6 +261,7 @@ impl BitLockerManager {
     fn is_manage_bde_available() -> bool {
         std::process::Command::new("manage-bde")
             .arg("-?")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output()
             .is_ok()
     }
@@ -342,10 +347,7 @@ impl BitLockerManager {
             Err(FveError::NotEncrypted)
             | Err(FveError::NotBitLockerVolume)
             | Err(FveError::NotSupported) => {
-                log::debug!(
-                    "驱动器 {}: 未加密或不支持BitLocker (fveapi)",
-                    drive_letter
-                );
+                log::debug!("驱动器 {}: 未加密或不支持BitLocker (fveapi)", drive_letter);
                 VolumeStatus::NotEncrypted
             }
             Err(FveError::AccessDenied) => {
@@ -374,7 +376,11 @@ impl BitLockerManager {
         use std::process::Command;
 
         let drive = format!("{}:", drive_letter);
-        let output = match Command::new("manage-bde").args(["-status", &drive]).output() {
+        let output = match Command::new("manage-bde")
+            .args(["-status", &drive])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output()
+        {
             Ok(o) => o,
             Err(_) => return VolumeStatus::Unknown,
         };
@@ -406,12 +412,8 @@ impl BitLockerManager {
             }
             Err(FveError::NotEncrypted)
             | Err(FveError::NotBitLockerVolume)
-            | Err(FveError::NotSupported) => {
-                (VolumeStatus::NotEncrypted, 0.0)
-            }
-            Err(_) => {
-                self.get_status_with_percentage_manage_bde(drive_letter)
-            }
+            | Err(FveError::NotSupported) => (VolumeStatus::NotEncrypted, 0.0),
+            Err(_) => self.get_status_with_percentage_manage_bde(drive_letter),
         }
     }
 
@@ -421,7 +423,11 @@ impl BitLockerManager {
         use std::process::Command;
 
         let drive = format!("{}:", drive_letter);
-        let output = match Command::new("manage-bde").args(["-status", &drive]).output() {
+        let output = match Command::new("manage-bde")
+            .args(["-status", &drive])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output()
+        {
             Ok(o) => o,
             Err(_) => return (VolumeStatus::Unknown, 0.0),
         };
@@ -456,6 +462,7 @@ impl BitLockerManager {
         // manage-bde -protectors -get C: -Type RecoveryPassword
         let output = match Command::new("manage-bde")
             .args(["-protectors", "-get", drive, "-Type", "RecoveryPassword"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output()
         {
             Ok(o) => o,
@@ -463,11 +470,10 @@ impl BitLockerManager {
         };
 
         let stdout = decode_windows_output(&output.stdout);
-        
+
         // 解析输出寻找 48 位数字密码
         // 格式通常为：111111-222222-333333-444444-555555-666666-777777-888888
-        extract_recovery_key(&stdout)
-            .ok_or_else(|| "未找到恢复密钥".to_string())
+        extract_recovery_key(&stdout).ok_or_else(|| "未找到恢复密钥".to_string())
     }
 
     /// 检查指定驱动器是否需要解锁
@@ -558,6 +564,7 @@ impl BitLockerManager {
 
         let output = match Command::new("manage-bde")
             .args(["-unlock", &drive, "-password", password])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output()
         {
             Ok(o) => o,
@@ -590,8 +597,8 @@ impl BitLockerManager {
                 letter,
                 stdout
             );
-            let error_msg =
-                extract_error_message(&stdout).unwrap_or_else(|| "解锁失败，请检查密码是否正确".to_string());
+            let error_msg = extract_error_message(&stdout)
+                .unwrap_or_else(|| "解锁失败，请检查密码是否正确".to_string());
             UnlockResult::failure(&letter, &error_msg, None)
         }
     }
@@ -693,6 +700,7 @@ impl BitLockerManager {
 
         let output = match Command::new("manage-bde")
             .args(["-unlock", &drive, "-recoverypassword", recovery_key])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output()
         {
             Ok(o) => o,
@@ -753,11 +761,7 @@ impl BitLockerManager {
             // 检查是否超时
             if start_time.elapsed() > timeout {
                 log::error!("BitLocker 分区 {} 解锁超时（5分钟）", letter);
-                return UnlockResult::failure(
-                    letter,
-                    "解锁超时，分区可能仍在后台处理中",
-                    None
-                );
+                return UnlockResult::failure(letter, "解锁超时，分区可能仍在后台处理中", None);
             }
 
             // 检查分区状态
@@ -775,7 +779,10 @@ impl BitLockerManager {
                         );
                         return UnlockResult::success(letter, "解锁成功");
                     } else {
-                        log::debug!("BitLocker 分区 {} 状态为已解锁，但文件系统尚未就绪，继续等待...", letter);
+                        log::debug!(
+                            "BitLocker 分区 {} 状态为已解锁，但文件系统尚未就绪，继续等待...",
+                            letter
+                        );
                     }
                 }
                 VolumeStatus::NotEncrypted => {
@@ -786,14 +793,14 @@ impl BitLockerManager {
                 VolumeStatus::EncryptedLocked => {
                     // 仍然锁定，可能解锁失败
                     log::warn!("BitLocker 分区 {} 仍处于锁定状态", letter);
-                    return UnlockResult::failure(
-                        letter,
-                        "解锁失败，分区仍处于锁定状态",
-                        None
-                    );
+                    return UnlockResult::failure(letter, "解锁失败，分区仍处于锁定状态", None);
                 }
                 _ => {
-                    log::debug!("BitLocker 分区 {} 当前状态: {:?}，继续等待...", letter, status);
+                    log::debug!(
+                        "BitLocker 分区 {} 当前状态: {:?}，继续等待...",
+                        letter,
+                        status
+                    );
                 }
             }
 
@@ -895,7 +902,11 @@ impl BitLockerManager {
                 }
             },
             Err(e) => {
-                log::error!("BitLocker 分区 {} 打开失败（需要写权限）: {} (fveapi)", letter, e);
+                log::error!(
+                    "BitLocker 分区 {} 打开失败（需要写权限）: {} (fveapi)",
+                    letter,
+                    e
+                );
                 DecryptResult::failure(&letter, &e.to_string(), Some(e.code()))
             }
         }
@@ -909,7 +920,15 @@ impl BitLockerManager {
         let letter = format!("{}:", drive_letter);
         let drive = format!("{}:", drive_letter);
 
-        let output = match Command::new("manage-bde").args(["-off", &drive]).output() {
+        let output = match {
+            let mut cmd = Command::new("manage-bde");
+            cmd.args(["-off", &drive]);
+
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+            cmd.output()
+        } {
             Ok(o) => o,
             Err(e) => {
                 return DecryptResult::failure(&letter, &format!("执行命令失败: {}", e), None)
@@ -939,14 +958,18 @@ impl BitLockerManager {
                 letter,
                 stdout
             );
-            let error_msg = extract_error_message(&stdout).unwrap_or_else(|| "解密操作失败".to_string());
+            let error_msg =
+                extract_error_message(&stdout).unwrap_or_else(|| "解密操作失败".to_string());
             DecryptResult::failure(&letter, &error_msg, None)
         }
     }
 
     /// 检查指定驱动器是否可以进行彻底解密
     pub fn can_decrypt(&self, drive_letter: char) -> bool {
-        matches!(self.get_status(drive_letter), VolumeStatus::EncryptedUnlocked)
+        matches!(
+            self.get_status(drive_letter),
+            VolumeStatus::EncryptedUnlocked
+        )
     }
 
     /// 获取所有BitLocker加密的卷
@@ -992,7 +1015,10 @@ impl BitLockerManager {
         let drive_path = format!("{}\\", drive);
 
         // 检查驱动器类型
-        let wide_path: Vec<u16> = drive_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_path: Vec<u16> = drive_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let drive_type = unsafe { GetDriveTypeW(PCWSTR(wide_path.as_ptr())) };
 
         // 只检查固定磁盘
@@ -1091,7 +1117,15 @@ impl BitLockerManager {
         use std::process::Command;
 
         let drive = format!("{}:", drive_letter);
-        let output = match Command::new("manage-bde").args(["-status", &drive]).output() {
+        let output = match {
+            let mut cmd = Command::new("manage-bde");
+            cmd.args(["-status", &drive]);
+
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+            cmd.output()
+        } {
             Ok(o) => o,
             Err(_) => return ("密码/恢复密钥".to_string(), None),
         };
@@ -1166,7 +1200,8 @@ fn decode_windows_output(bytes: &[u8]) -> String {
 fn extract_encryption_percentage(output: &str) -> Option<f32> {
     for line in output.lines() {
         let line_lower = line.to_lowercase();
-        if line_lower.contains("已加密百分比") || line_lower.contains("percentage encrypted") {
+        if line_lower.contains("已加密百分比") || line_lower.contains("percentage encrypted")
+        {
             // 提取百分比数字
             if let Some(colon_pos) = line.find(':').or_else(|| line.find('：')) {
                 let value_part = &line[colon_pos + 1..];
@@ -1192,21 +1227,24 @@ fn determine_volume_status(output: &str) -> VolumeStatus {
     // 正在解密：转换状态: 解密进行中
     if output_lower.contains("解密进行中")
         || output_lower.contains("decryption in progress")
-        || output_lower.contains("解密正在进行") {
+        || output_lower.contains("解密正在进行")
+    {
         return VolumeStatus::Decrypting;
     }
 
     // 正在加密：转换状态: 加密进行中
     if output_lower.contains("加密进行中")
         || output_lower.contains("encryption in progress")
-        || output_lower.contains("加密正在进行") {
+        || output_lower.contains("加密正在进行")
+    {
         return VolumeStatus::Encrypting;
     }
 
     // 检查是否完全解密（转换状态: 完全解密 + 已加密百分比: 0.0%）
     if output_lower.contains("完全解密") || output_lower.contains("fully decrypted") {
         // 额外检查百分比，确保真的是0%
-        if output_lower.contains("已加密百分比") || output_lower.contains("percentage encrypted") {
+        if output_lower.contains("已加密百分比") || output_lower.contains("percentage encrypted")
+        {
             // 提取百分比
             if let Some(percentage) = extract_encryption_percentage(output) {
                 if percentage > 0.0 {
@@ -1353,15 +1391,15 @@ fn extract_recovery_key(output: &str) -> Option<String> {
         // 恢复密钥格式: 111111-222222-333333-444444-555555-666666-777777-888888
         // 长度 = 6*8 + 7个连字符 = 48 + 7 = 55
         if trimmed.len() == 55 {
-             let parts: Vec<&str> = trimmed.split('-').collect();
-             if parts.len() == 8 {
-                 let all_numeric = parts.iter().all(|part| {
-                     part.len() == 6 && part.chars().all(|c| c.is_ascii_digit())
-                 });
-                 if all_numeric {
-                     return Some(trimmed.to_string());
-                 }
-             }
+            let parts: Vec<&str> = trimmed.split('-').collect();
+            if parts.len() == 8 {
+                let all_numeric = parts
+                    .iter()
+                    .all(|part| part.len() == 6 && part.chars().all(|c| c.is_ascii_digit()));
+                if all_numeric {
+                    return Some(trimmed.to_string());
+                }
+            }
         }
     }
     None

@@ -17,7 +17,6 @@
 #![allow(non_camel_case_types)]
 
 use std::ffi::c_void;
-use std::path::Path;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;

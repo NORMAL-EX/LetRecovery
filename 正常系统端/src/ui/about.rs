@@ -1,7 +1,7 @@
 use egui;
 
 use crate::app::App;
-use crate::utils::i18n::{self, LanguageInfo};
+use crate::utils::i18n::{self};
 use crate::utils::logger::LogManager;
 use crate::tr;
 
@@ -20,7 +20,7 @@ impl App {
                 // 版本信息
                 ui.horizontal(|ui| {
                     ui.label(tr!("版本:"));
-                    ui.strong("v2026.2.1");
+                    ui.strong("v2026.2.6");
                 });
 
                 ui.add_space(15.0);
@@ -206,8 +206,7 @@ impl App {
                         ui.label(tr!("日志保留天数:"));
                         let mut days = self.app_config.log_retention_days;
                         let slider = egui::Slider::new(&mut days, 1..=30)
-                            .suffix(format!(" {}", tr!("天")))
-                            .clamp_to_range(true);
+                            .suffix(format!(" {}", tr!("天")));
                         if ui.add(slider).changed() {
                             self.app_config.set_log_retention_days(days);
                         }

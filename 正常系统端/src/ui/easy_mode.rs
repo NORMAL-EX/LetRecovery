@@ -176,13 +176,11 @@ impl App {
             egui::Frame::none()
                 .fill(ui.visuals().selection.bg_fill)
                 .stroke(egui::Stroke::new(2.0, ui.visuals().selection.stroke.color))
-                .rounding(6.0)
                 .inner_margin(12.0)
         } else {
             egui::Frame::none()
                 .fill(ui.visuals().widgets.noninteractive.bg_fill)
                 .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                .rounding(6.0)
                 .inner_margin(12.0)
         };
         

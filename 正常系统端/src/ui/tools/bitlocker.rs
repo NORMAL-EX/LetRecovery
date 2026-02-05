@@ -5,10 +5,8 @@
 
 // 重新导出核心模块的类型，保持API兼容
 pub use crate::core::bitlocker::{
-    VolumeStatus as BitLockerStatus,
     VolumeInfo as BitLockerPartition,
     UnlockResult,
-    DecryptResult,
 };
 
 // 重新导出便捷函数，保持API兼容

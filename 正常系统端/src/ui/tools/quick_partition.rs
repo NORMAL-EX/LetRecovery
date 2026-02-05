@@ -1238,7 +1238,6 @@ impl App {
                                 if ui.add(
                                     egui::Slider::new(&mut slider_value, min_gb..=max_gb)
                                         .suffix(" GB")
-                                        .clamp_to_range(true)
                                 ).changed() {
                                     self.quick_partition_state.editor.resize_size_text = format!("{:.1}", slider_value);
                                 }

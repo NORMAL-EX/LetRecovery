@@ -1949,7 +1949,6 @@ impl App {
 
     /// 跳过当前安装时BitLocker分区
     fn skip_current_install_bitlocker_partition(&mut self) {
-        use crate::core::bitlocker::VolumeStatus;
 
         if let Some(ref current) = self.install_bitlocker_current.clone() {
             // 从列表中移除当前分区

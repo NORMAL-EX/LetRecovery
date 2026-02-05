@@ -410,7 +410,6 @@ impl App {
         if source_partition.is_none() {
             return;
         }
-        let source_partition = source_partition.unwrap();
 
         // 检查BitLocker锁定的分区
         let locked_partitions = self.check_bitlocker_for_backup();

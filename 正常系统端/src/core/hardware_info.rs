@@ -36,7 +36,6 @@ use windows::Win32::System::Ioctl::{
 use windows::Win32::System::Wmi::{
     IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices,
     WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
-    WBEM_INFINITE,
 };
 use windows::Win32::System::Variant::{
     VT_NULL, VT_EMPTY, VT_BSTR, VT_I4, VT_UI4, VT_I2, VT_UI2, VT_UI1, VT_I8, VT_UI8, VT_ARRAY,

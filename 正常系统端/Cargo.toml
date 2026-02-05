@@ -1,6 +1,6 @@
 [package]
 name = "LetRecovery"
-version = "2026.2.1"
+version = "2026.2.6"
 edition = "2021"
 authors = ["NORMAL-EX"]
 description = "Windows系统一键重装工具"

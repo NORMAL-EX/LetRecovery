@@ -10,8 +10,5 @@ pub mod system_backup;
 pub mod system_install;
 pub mod tools;
 
-// 导出MD5校验状态
-pub use download_progress::Md5VerifyState;
-
 // 导出内嵌资源
 pub use embedded_assets::{EmbeddedAssets, EmbeddedLogoType};

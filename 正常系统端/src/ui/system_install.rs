@@ -1,7 +1,7 @@
 use egui;
 use std::sync::mpsc;
 
-use crate::app::{App, BootModeSelection, InstallMode, UnattendCheckResult};
+use crate::app::{App, BootModeSelection, UnattendCheckResult};
 use crate::core::disk::{Partition, PartitionStyle};
 use crate::core::dism::ImageInfo;
 
