@@ -195,6 +195,7 @@ impl App {
                         ui.label("可用空间");
                         ui.label("卷标");
                         ui.label("分区表");
+                        ui.label("BitLocker");
                         ui.label("状态");
                         ui.end_row();
 
@@ -227,6 +228,16 @@ impl App {
                             ui.label(&partition.label);
                             ui.label(format!("{}", partition.partition_style));
                             
+                            // 显示 BitLocker 状态
+                            let status_color = match partition.bitlocker_status {
+                                crate::core::bitlocker::VolumeStatus::EncryptedLocked => egui::Color32::RED,
+                                crate::core::bitlocker::VolumeStatus::EncryptedUnlocked => egui::Color32::GREEN,
+                                crate::core::bitlocker::VolumeStatus::Encrypting | 
+                                crate::core::bitlocker::VolumeStatus::Decrypting => egui::Color32::YELLOW,
+                                _ => ui.visuals().text_color(),
+                            };
+                            ui.colored_label(status_color, partition.bitlocker_status.as_str());
+
                             let status = if partition.has_windows {
                                 "已有系统"
                             } else {
@@ -839,6 +850,115 @@ impl App {
         }
     }
 
+    /// 检查安装相关分区的BitLocker状态
+    /// 返回需要解锁的分区列表
+    fn check_bitlocker_for_install(&self) -> Vec<crate::ui::tools::BitLockerPartition> {
+        use crate::core::bitlocker::BitLockerManager;
+        
+        let manager = BitLockerManager::new();
+        if !manager.is_available() {
+            return Vec::new();
+        }
+        
+        let mut locked_partitions = Vec::new();
+        
+        // 检查目标安装分区
+        if let Some(idx) = self.selected_partition {
+            if let Some(partition) = self.partitions.get(idx) {
+                let letter = partition.letter.chars().next().unwrap_or('C');
+                if manager.needs_unlock(letter) {
+                    let status = manager.get_status(letter);
+                    locked_partitions.push(crate::ui::tools::BitLockerPartition {
+                        letter: partition.letter.clone(),
+                        label: partition.label.clone(),
+                        total_size_mb: partition.total_size_mb,
+                        status,
+                        protection_method: "密码/恢复密钥".to_string(),
+                        encryption_percentage: None,
+                    });
+                }
+            }
+        }
+        
+        // 检查所有可能用于存储数据的分区（非系统分区、非PE分区）
+        for partition in &self.partitions {
+            // 跳过已经添加的分区
+            if locked_partitions.iter().any(|p| p.letter == partition.letter) {
+                continue;
+            }
+            
+            // 跳过X:盘（PE系统盘）
+            if partition.letter.to_uppercase().starts_with('X') {
+                continue;
+            }
+            
+            let letter = partition.letter.chars().next().unwrap_or('C');
+            if manager.needs_unlock(letter) {
+                let status = manager.get_status(letter);
+                locked_partitions.push(crate::ui::tools::BitLockerPartition {
+                    letter: partition.letter.clone(),
+                    label: partition.label.clone(),
+                    total_size_mb: partition.total_size_mb,
+                    status,
+                    protection_method: "密码/恢复密钥".to_string(),
+                    encryption_percentage: None,
+                });
+            }
+        }
+        
+        locked_partitions
+    }
+
+    /// 启动 BitLocker 解密流程
+    /// 在正常系统环境下，检测所有已解锁的加密分区，发送解密指令，并记录需要等待解密的分区
+    /// 注意：因为要进入PE环境安装系统，PE无法访问加密分区，所以必须等待完全解密完成
+    /// 返回是否启动了解密流程
+    fn initiate_bitlocker_decryption(&mut self) -> bool {
+        if self.is_pe_environment() {
+            return false;
+        }
+
+        println!("[BITLOCKER] 开始检测并强制解密分区...");
+        self.decrypting_partitions.clear();
+
+        // 创建临时的管理器以查询实时状态
+        let manager = crate::core::bitlocker::BitLockerManager::new();
+        let mut decryption_started = false;
+
+        for partition in &self.partitions {
+            let drive_letter = partition.letter.chars().next().unwrap_or('C');
+            let drive_str = format!("{}:", drive_letter);
+
+            // 获取实时状态
+            let current_status = manager.get_status(drive_letter);
+
+            // 情况1: 已加密且已解锁 -> 发送解密指令并等待
+            if current_status == crate::core::bitlocker::VolumeStatus::EncryptedUnlocked {
+                println!("[BITLOCKER] 检测到已解锁的加密分区 {}，正在尝试彻底解密...", drive_str);
+
+                let result = manager.decrypt(&drive_str);
+
+                if result.success {
+                    println!("[BITLOCKER] 分区 {} 解密指令已发送: {}", drive_str, result.message);
+                    self.decrypting_partitions.push(drive_str);
+                    decryption_started = true;
+                } else {
+                    println!("[BITLOCKER] 分区 {} 解密失败: {} (Code: {:?})",
+                        drive_str, result.message, result.error_code);
+                    // 即使失败，如果是因为已经在解密中，也应该等待
+                }
+            }
+            // 情况2: 正在解密中 -> 直接加入等待列表
+            else if current_status == crate::core::bitlocker::VolumeStatus::Decrypting {
+                println!("[BITLOCKER] 分区 {} 已经在解密过程中，加入等待列表", drive_str);
+                self.decrypting_partitions.push(drive_str);
+                decryption_started = true;
+            }
+        }
+
+        decryption_started
+    }
+
     pub fn start_installation(&mut self) {
         let partition = self
             .partitions
@@ -849,7 +969,42 @@ impl App {
         }
         let partition = partition.unwrap();
 
-        let image_path = self.local_image_path.clone();
+        // 1. 检查是否有需要解锁的 BitLocker 分区 (优先级最高)
+        let locked_partitions = self.check_bitlocker_for_install();
+        if !locked_partitions.is_empty() {
+            println!("[INSTALL] 检测到 {} 个BitLocker锁定的分区，需要先解锁", locked_partitions.len());
+            self.install_bitlocker_partitions = locked_partitions;
+            self.install_bitlocker_current = self.install_bitlocker_partitions.first().map(|p| p.letter.clone());
+            self.install_bitlocker_message.clear();
+            self.install_bitlocker_password.clear();
+            self.install_bitlocker_recovery_key.clear();
+            self.install_bitlocker_mode = crate::app::BitLockerUnlockMode::Password;
+            self.install_bitlocker_continue_after = true;
+            self.show_install_bitlocker_dialog = true;
+            return;
+        }
+
+        // 2. 尝试启动 BitLocker 解密
+        // 如果有分区正在解密或开始解密，进入解密等待流程
+        if self.initiate_bitlocker_decryption() {
+            println!("[INSTALL] 检测到 BitLocker 分区需要解密，进入解密等待流程");
+            
+            self.bitlocker_decryption_needed = true;
+            
+            // 初始化安装状态，但步骤设为 0 (解密阶段)
+            self.initialize_install_state(&partition, self.local_image_path.clone());
+            self.install_step = 0; // 0 表示预处理/解密阶段
+            
+            return;
+        }
+
+        // 3. 正常继续安装
+        self.bitlocker_decryption_needed = false;
+        self.continue_installation_after_bitlocker();
+    }
+    
+    /// 初始化安装状态变量
+    fn initialize_install_state(&mut self, partition: &crate::core::disk::Partition, image_path: String) {
         let volume_index = self
             .selected_volume
             .and_then(|i| self.image_volumes.get(i).map(|v| v.index))
@@ -858,44 +1013,16 @@ impl App {
         let is_system_partition = partition.is_system_partition;
         let is_pe = self.is_pe_environment();
 
-        // 确定安装模式
         self.install_mode = if is_pe || !is_system_partition {
-            InstallMode::Direct
+            crate::app::InstallMode::Direct
         } else {
-            InstallMode::ViaPE
+            crate::app::InstallMode::ViaPE
         };
-
-        // 如果需要通过PE安装，先检查PE是否存在
-        if self.install_mode == InstallMode::ViaPE {
-            let pe_info = self.selected_pe_for_install.and_then(|idx| {
-                self.config.as_ref().and_then(|c| c.pe_list.get(idx).cloned())
-            });
-            
-            if let Some(pe) = pe_info {
-                let (pe_exists, _) = crate::core::pe::PeManager::check_pe_exists(&pe.filename);
-                if !pe_exists {
-                    // PE不存在，先下载PE
-                    println!("[INSTALL] PE文件不存在，开始下载: {}", pe.filename);
-                    self.pending_download_url = Some(pe.download_url.clone());
-                    self.pending_download_filename = Some(pe.filename.clone());
-                    self.pending_pe_md5 = pe.md5.clone();  // 设置MD5校验值
-                    let pe_dir = crate::utils::path::get_exe_dir()
-                        .join("PE")
-                        .to_string_lossy()
-                        .to_string();
-                    self.download_save_path = pe_dir;
-                    self.pe_download_then_action = Some(crate::app::PeDownloadThenAction::Install);
-                    self.current_panel = crate::app::Panel::DownloadProgress;
-                    return;
-                }
-            }
-        }
 
         self.install_options = crate::app::InstallOptions {
             format_partition: self.format_partition,
             repair_boot: self.repair_boot,
             unattended_install: self.unattended_install,
-            // 根据driver_action设置export_drivers（仅SaveOnly和AutoImport需要导出）
             export_drivers: matches!(self.driver_action, crate::app::DriverAction::SaveOnly | crate::app::DriverAction::AutoImport),
             auto_reboot: self.auto_reboot,
             boot_mode: self.selected_boot_mode,
@@ -906,15 +1033,130 @@ impl App {
         self.is_installing = true;
         self.current_panel = crate::app::Panel::InstallProgress;
         self.install_progress = crate::app::InstallProgress::default();
-        
-        // 重置自动重启标志
         self.auto_reboot_triggered = false;
 
         self.install_target_partition = partition.letter.clone();
         self.install_image_path = image_path;
         self.install_volume_index = volume_index;
         self.install_is_system_partition = is_system_partition;
+        
+        // 创建进度通道
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.install_progress_rx = Some(rx);
+        
+        // 如果有正在解密的分区，启动监控线程
+        if !self.decrypting_partitions.is_empty() {
+            println!("[INSTALL] 启动 BitLocker 解密监控线程...");
+            let partitions = self.decrypting_partitions.clone();
+            
+            std::thread::spawn(move || {
+                let manager = crate::core::bitlocker::BitLockerManager::new();
+                
+                loop {
+                    let mut all_decrypted = true;
+                    let mut waiting_list = Vec::new();
+                    let mut max_percentage = 0.0f32;
 
+                    for part in &partitions {
+                        let letter = part.chars().next().unwrap_or('C');
+                        let (status, percentage) = manager.get_status_with_percentage(letter);
+
+                        // 因为要进入PE环境安装系统，PE无法访问加密分区
+                        // 所以必须等待完全解密完成（状态变为 NotEncrypted）
+                        if status != crate::core::bitlocker::VolumeStatus::NotEncrypted {
+                            all_decrypted = false;
+                            waiting_list.push(format!("{} ({:.1}%)", part, percentage));
+
+                            // 记录最大的加密百分比（用于显示进度）
+                            if percentage > max_percentage {
+                                max_percentage = percentage;
+                            }
+                        }
+                    }
+
+                    if all_decrypted {
+                        let _ = tx.send(crate::core::dism::DismProgress {
+                            percentage: 100,
+                            status: "DECRYPTION_COMPLETE".to_string(),
+                        });
+                        break;
+                    } else {
+                        // 将加密百分比转换为解密进度（100% - 加密百分比）
+                        let decryption_progress = (100.0 - max_percentage).max(0.0).min(100.0) as u8;
+
+                        let _ = tx.send(crate::core::dism::DismProgress {
+                            percentage: decryption_progress,
+                            status: format!("DECRYPTING:正在解密: {}", waiting_list.join(", ")),
+                        });
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            });
+        }
+    }
+
+    /// BitLocker解锁完成后继续安装
+    pub fn continue_installation_after_bitlocker(&mut self) {
+        let partition = self
+            .partitions
+            .get(self.selected_partition.unwrap())
+            .cloned();
+        if partition.is_none() {
+            return;
+        }
+        let partition = partition.unwrap();
+
+        // 解锁完成后，再次尝试启动解密流程
+        // 如果有分区需要解密，转入解密等待流程
+        if self.initiate_bitlocker_decryption() {
+            println!("[INSTALL] 解锁后检测到 BitLocker 分区需要解密，进入解密等待流程");
+            self.bitlocker_decryption_needed = true;
+            self.initialize_install_state(&partition, self.local_image_path.clone());
+            self.install_step = 0; // 解密阶段
+            return;
+        }
+
+        // 如果不需要通过PE安装，或者已经在PE环境，直接初始化并开始
+        self.bitlocker_decryption_needed = false;
+        self.initialize_install_state(&partition, self.local_image_path.clone());
+
+        // 如果需要通过PE安装，检查PE是否存在
+        if self.install_mode == crate::app::InstallMode::ViaPE {
+            let pe_info = self.selected_pe_for_install.and_then(|idx| {
+                self.config.as_ref().and_then(|c| c.pe_list.get(idx).cloned())
+            });
+            
+            if let Some(pe) = pe_info {
+                let (pe_exists, _) = crate::core::pe::PeManager::check_pe_exists(&pe.filename);
+                if !pe_exists {
+                    println!("[INSTALL] PE文件不存在，开始下载: {}", pe.filename);
+                    self.pending_download_url = Some(pe.download_url.clone());
+                    self.pending_download_filename = Some(pe.filename.clone());
+                    self.pending_pe_md5 = pe.md5.clone();
+                    let pe_dir = crate::utils::path::get_exe_dir()
+                        .join("PE")
+                        .to_string_lossy()
+                        .to_string();
+                    self.download_save_path = pe_dir;
+                    self.pe_download_then_action = Some(crate::app::PeDownloadThenAction::Install);
+                    self.current_panel = crate::app::Panel::DownloadProgress;
+                    
+                    // 因为转到了下载页面，需要重置 is_installing
+                    self.is_installing = false;
+                    return;
+                }
+            }
+        }
+
+        // 正常开始步骤 1 (或 0 如果是 ViaPE 的话，但这里我们统一用 0 作为特殊解密步骤)
+        // InstallProgress UI 里的 start_xxx_thread 会在 step == 0 时启动
+        // 但我们需要区分 "解密等待中(step=0)" 和 "刚初始化准备开始(step=0)"
+        // 为了区分，我们将 install_step 设为 1 表示准备好开始安装了 (对于 Direct 模式)
+        // 或者保持 0，但在 UI update 中判断 decrypting_partitions 是否为空
+        
+        // 这里的 install_step = 0 会触发 show_install_progress 里的启动线程逻辑
+        // 我们只需确保 decrypting_partitions 为空，这样 UI 就不会卡在解密界面
         self.install_step = 0;
     }
     

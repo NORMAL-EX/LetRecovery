@@ -39,6 +39,7 @@ impl App {
                         ui.label("总空间");
                         ui.label("已用空间");
                         ui.label("卷标");
+                        ui.label("BitLocker");
                         ui.label("状态");
                         ui.end_row();
 
@@ -72,6 +73,16 @@ impl App {
                             ui.label(Self::format_size(used_size));
                             ui.label(&partition.label);
                             
+                            // 显示 BitLocker 状态
+                            let status_color = match partition.bitlocker_status {
+                                crate::core::bitlocker::VolumeStatus::EncryptedLocked => egui::Color32::RED,
+                                crate::core::bitlocker::VolumeStatus::EncryptedUnlocked => egui::Color32::GREEN,
+                                crate::core::bitlocker::VolumeStatus::Encrypting | 
+                                crate::core::bitlocker::VolumeStatus::Decrypting => egui::Color32::YELLOW,
+                                _ => ui.visuals().text_color(),
+                            };
+                            ui.colored_label(status_color, partition.bitlocker_status.as_str());
+
                             let status = if partition.has_windows {
                                 "有系统"
                             } else {
@@ -357,8 +368,72 @@ impl App {
         
         false
     }
+    
+    /// 检查备份相关分区的BitLocker状态
+    /// 返回需要解锁的分区列表
+    fn check_bitlocker_for_backup(&self) -> Vec<crate::ui::tools::BitLockerPartition> {
+        use crate::core::bitlocker::BitLockerManager;
+        
+        let manager = BitLockerManager::new();
+        if !manager.is_available() {
+            return Vec::new();
+        }
+        
+        let mut locked_partitions = Vec::new();
+        
+        // 检查源备份分区
+        if let Some(idx) = self.backup_source_partition {
+            if let Some(partition) = self.partitions.get(idx) {
+                let letter = partition.letter.chars().next().unwrap_or('C');
+                if manager.needs_unlock(letter) {
+                    let status = manager.get_status(letter);
+                    locked_partitions.push(crate::ui::tools::BitLockerPartition {
+                        letter: partition.letter.clone(),
+                        label: partition.label.clone(),
+                        total_size_mb: partition.total_size_mb,
+                        status,
+                        protection_method: "密码/恢复密钥".to_string(),
+                        encryption_percentage: None,
+                    });
+                }
+            }
+        }
+        
+        locked_partitions
+    }
 
     fn start_backup(&mut self) {
+        let source_partition = self
+            .partitions
+            .get(self.backup_source_partition.unwrap())
+            .cloned();
+        if source_partition.is_none() {
+            return;
+        }
+        let source_partition = source_partition.unwrap();
+
+        // 检查BitLocker锁定的分区
+        let locked_partitions = self.check_bitlocker_for_backup();
+        if !locked_partitions.is_empty() {
+            // 有锁定的分区，显示解锁对话框
+            println!("[BACKUP] 检测到 {} 个BitLocker锁定的分区，需要先解锁", locked_partitions.len());
+            self.backup_bitlocker_partitions = locked_partitions;
+            self.backup_bitlocker_current = self.backup_bitlocker_partitions.first().map(|p| p.letter.clone());
+            self.backup_bitlocker_message.clear();
+            self.backup_bitlocker_password.clear();
+            self.backup_bitlocker_recovery_key.clear();
+            self.backup_bitlocker_mode = crate::app::BitLockerUnlockMode::Password;
+            self.backup_bitlocker_continue_after = true;
+            self.show_backup_bitlocker_dialog = true;
+            return;
+        }
+
+        // 没有锁定的分区，继续正常备份流程
+        self.continue_backup_after_bitlocker();
+    }
+    
+    /// BitLocker解锁完成后继续备份
+    pub fn continue_backup_after_bitlocker(&mut self) {
         let source_partition = self
             .partitions
             .get(self.backup_source_partition.unwrap())

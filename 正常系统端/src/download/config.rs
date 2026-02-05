@@ -160,12 +160,40 @@ pub struct SoftwareList {
     pub software: Vec<OnlineSoftware>,
 }
 
+/// 在线GPU驱动信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineGpuDriver {
+    /// 驱动名称
+    pub name: String,
+    /// 驱动描述
+    pub description: String,
+    /// 更新日期
+    pub update_date: String,
+    /// 文件大小
+    pub file_size: String,
+    /// 图标URL（可选）
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// 下载URL
+    pub download_url: String,
+    /// 文件名
+    pub filename: String,
+}
+
+/// GPU驱动列表JSON格式
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuDriverList {
+    pub software: Vec<OnlineGpuDriver>,
+}
+
 /// 配置管理器
 #[derive(Debug, Clone, Default)]
 pub struct ConfigManager {
     pub systems: Vec<OnlineSystem>,
     pub pe_list: Vec<OnlinePE>,
     pub software_list: Vec<OnlineSoftware>,
+    /// GPU驱动列表
+    pub gpu_driver_list: Vec<OnlineGpuDriver>,
     /// 小白模式配置
     pub easy_mode_config: Option<EasyModeConfig>,
 }
@@ -199,7 +227,7 @@ impl ConfigManager {
             Vec::new()
         };
 
-        Ok(Self { systems, pe_list, software_list: Vec::new(), easy_mode_config: None })
+        Ok(Self { systems, pe_list, software_list: Vec::new(), gpu_driver_list: Vec::new(), easy_mode_config: None })
     }
     
     /// 从远程配置内容加载
@@ -216,7 +244,7 @@ impl ConfigManager {
             .map(|c| Self::parse_pe_list(c))
             .unwrap_or_default();
         
-        Self { systems, pe_list, software_list: Vec::new(), easy_mode_config: None }
+        Self { systems, pe_list, software_list: Vec::new(), gpu_driver_list: Vec::new(), easy_mode_config: None }
     }
     
     /// 从远程配置内容加载（包含软件列表）
@@ -242,7 +270,7 @@ impl ConfigManager {
             .map(|c| Self::parse_software_list(c))
             .unwrap_or_default();
         
-        Self { systems, pe_list, software_list, easy_mode_config: None }
+        Self { systems, pe_list, software_list, gpu_driver_list: Vec::new(), easy_mode_config: None }
     }
     
     /// 从远程配置内容加载（完整版，包含所有配置）
@@ -273,7 +301,44 @@ impl ConfigManager {
         let easy_mode_config = easy_content
             .and_then(|c| EasyModeConfig::parse(c));
         
-        Self { systems, pe_list, software_list, easy_mode_config }
+        Self { systems, pe_list, software_list, gpu_driver_list: Vec::new(), easy_mode_config }
+    }
+    
+    /// 从远程配置内容加载（完整版+GPU驱动，包含所有配置）
+    /// 
+    /// # Arguments
+    /// * `dl_content` - 系统镜像列表内容
+    /// * `pe_content` - PE 列表内容
+    /// * `soft_content` - 软件列表内容（JSON格式）
+    /// * `easy_content` - 小白模式配置内容（JSON格式）
+    /// * `gpu_content` - GPU驱动列表内容（JSON格式）
+    pub fn load_from_content_full_with_gpu(
+        dl_content: Option<&str>, 
+        pe_content: Option<&str>,
+        soft_content: Option<&str>,
+        easy_content: Option<&str>,
+        gpu_content: Option<&str>,
+    ) -> Self {
+        let systems = dl_content
+            .map(|c| Self::parse_system_list(c))
+            .unwrap_or_default();
+        
+        let pe_list = pe_content
+            .map(|c| Self::parse_pe_list(c))
+            .unwrap_or_default();
+        
+        let software_list = soft_content
+            .map(|c| Self::parse_software_list(c))
+            .unwrap_or_default();
+        
+        let easy_mode_config = easy_content
+            .and_then(|c| EasyModeConfig::parse(c));
+        
+        let gpu_driver_list = gpu_content
+            .map(|c| Self::parse_gpu_driver_list(c))
+            .unwrap_or_default();
+        
+        Self { systems, pe_list, software_list, gpu_driver_list, easy_mode_config }
     }
 
     /// 解析系统列表
@@ -358,6 +423,17 @@ impl ConfigManager {
             }
         }
     }
+    
+    /// 解析GPU驱动列表（JSON格式）
+    pub fn parse_gpu_driver_list(content: &str) -> Vec<OnlineGpuDriver> {
+        match serde_json::from_str::<GpuDriverList>(content) {
+            Ok(list) => list.software,
+            Err(e) => {
+                log::warn!("解析GPU驱动列表失败: {}", e);
+                Vec::new()
+            }
+        }
+    }
 
     /// 检查配置是否为空
     pub fn is_empty(&self) -> bool {
@@ -367,6 +443,11 @@ impl ConfigManager {
     /// 检查软件列表是否为空
     pub fn has_software(&self) -> bool {
         !self.software_list.is_empty()
+    }
+    
+    /// 检查GPU驱动列表是否为空
+    pub fn has_gpu_drivers(&self) -> bool {
+        !self.gpu_driver_list.is_empty()
     }
 }
 

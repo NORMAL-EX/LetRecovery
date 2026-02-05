@@ -7,7 +7,7 @@ description = "Windows系统一键重装工具"
 
 [dependencies]
 # GUI
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
 egui = "0.31"
 egui_extras = { version = "0.31", features = ["image"] }
 
@@ -90,7 +90,10 @@ single-instance = "0.3"
 image = "0.25"
 
 # SVG渲染
-resvg = "0.44"
+resvg = { version = "0.44", default-features = false }
+
+# 显式添加 ttf-parser 以解决 rlib 格式问题
+ttf-parser = "0.25"
 
 [build-dependencies]
 winres = "0.1"

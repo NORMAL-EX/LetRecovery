@@ -265,6 +265,12 @@ pub struct App {
     // 工具箱
     pub tool_message: String,
     pub tool_target_partition: Option<String>,
+    
+    // 一键修复引导对话框
+    pub show_repair_boot_dialog: bool,
+    pub repair_boot_loading: bool,
+    pub repair_boot_message: String,
+    pub repair_boot_selected_partition: Option<String>,
 
     // tokio 运行时
     pub runtime: tokio::runtime::Runtime,
@@ -395,19 +401,6 @@ pub struct App {
     pub batch_format_rx: Option<Receiver<crate::ui::tools::batch_format::BatchFormatResult>>,
     pub batch_format_partitions_rx: Option<Receiver<Vec<crate::ui::tools::FormatablePartition>>>,
     
-    // BitLocker解锁对话框
-    pub show_bitlocker_dialog: bool,
-    pub bitlocker_loading: bool,
-    pub bitlocker_detecting: bool,
-    pub bitlocker_message: String,
-    pub bitlocker_partitions: Vec<crate::ui::tools::BitLockerPartition>,
-    pub bitlocker_selected: Option<String>,
-    pub bitlocker_password: String,
-    pub bitlocker_recovery_key: String,
-    pub bitlocker_unlock_mode: BitLockerUnlockMode,
-    pub bitlocker_rx: Option<Receiver<crate::ui::tools::bitlocker::UnlockResult>>,
-    pub bitlocker_partitions_rx: Option<Receiver<Vec<crate::ui::tools::BitLockerPartition>>>,
-    
     // GHO密码查看对话框
     pub show_gho_password_dialog: bool,
     pub gho_password_file_path: String,
@@ -447,6 +440,16 @@ pub struct App {
     pub quick_partition_result_rx: Option<Receiver<crate::core::quick_partition::QuickPartitionResult>>,
     pub resize_existing_result_rx: Option<Receiver<crate::core::quick_partition::ResizePartitionResult>>,
     
+    // 镜像校验对话框
+    pub show_image_verify_dialog: bool,
+    pub image_verify_file_path: String,
+    pub image_verify_loading: bool,
+    pub image_verify_result: Option<crate::ui::tools::ImageVerifyResult>,
+    pub image_verify_progress: Option<crate::core::image_verify::VerifyProgress>,
+    pub image_verify_progress_rx: Option<Receiver<crate::core::image_verify::VerifyProgress>>,
+    pub image_verify_result_rx: Option<Receiver<crate::ui::tools::ImageVerifyResult>>,
+    pub image_verify_cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    
     // 应用配置（小白模式等）
     pub app_config: crate::core::app_config::AppConfig,
     
@@ -481,6 +484,56 @@ pub struct App {
     pub last_unattend_check_partition: Option<String>,
     /// 是否显示无人值守冲突提示对话框
     pub show_unattend_conflict_modal: bool,
+    
+    // 安装时BitLocker解锁对话框
+    /// 是否显示安装前BitLocker解锁对话框
+    pub show_install_bitlocker_dialog: bool,
+    /// 安装前BitLocker解锁对话框加载状态
+    pub install_bitlocker_loading: bool,
+    /// 安装前BitLocker解锁对话框消息
+    pub install_bitlocker_message: String,
+    /// 需要解锁的BitLocker分区列表
+    pub install_bitlocker_partitions: Vec<crate::ui::tools::BitLockerPartition>,
+    /// 当前正在解锁的分区
+    pub install_bitlocker_current: Option<String>,
+    /// 密码输入
+    pub install_bitlocker_password: String,
+    /// 恢复密钥输入
+    pub install_bitlocker_recovery_key: String,
+    /// 解锁模式
+    pub install_bitlocker_mode: BitLockerUnlockMode,
+    /// 解锁结果接收器
+    pub install_bitlocker_rx: Option<Receiver<crate::ui::tools::bitlocker::UnlockResult>>,
+    /// 安装前BitLocker检查完成后是否继续安装
+    pub install_bitlocker_continue_after: bool,
+    
+    // 备份时BitLocker解锁对话框
+    /// 是否显示备份前BitLocker解锁对话框
+    pub show_backup_bitlocker_dialog: bool,
+    /// 备份前BitLocker解锁对话框加载状态
+    pub backup_bitlocker_loading: bool,
+    /// 备份前BitLocker解锁对话框消息
+    pub backup_bitlocker_message: String,
+    /// 需要解锁的BitLocker分区列表
+    pub backup_bitlocker_partitions: Vec<crate::ui::tools::BitLockerPartition>,
+    /// 当前正在解锁的分区
+    pub backup_bitlocker_current: Option<String>,
+    /// 密码输入
+    pub backup_bitlocker_password: String,
+    /// 恢复密钥输入
+    pub backup_bitlocker_recovery_key: String,
+    /// 解锁模式
+    pub backup_bitlocker_mode: BitLockerUnlockMode,
+    /// 解锁结果接收器
+    pub backup_bitlocker_rx: Option<Receiver<crate::ui::tools::bitlocker::UnlockResult>>,
+    /// 备份前BitLocker检查完成后是否继续备份
+    pub backup_bitlocker_continue_after: bool,
+    
+    // 安装时的 BitLocker 解密状态
+    /// 正在解密的 BitLocker 分区列表
+    pub decrypting_partitions: Vec<String>,
+    /// 是否需要 BitLocker 解密步骤（用于UI显示）
+    pub bitlocker_decryption_needed: bool,
 }
 
 /// 小白模式Logo状态
@@ -497,6 +550,7 @@ pub enum OnlineDownloadTab {
     #[default]
     SystemImage,
     Software,
+    GpuDriver,
 }
 
 /// 待下载的软件信息
@@ -600,6 +654,10 @@ impl Default for App {
             backup_swm_split_size: 4096,  // 默认4GB分卷
             tool_message: String::new(),
             tool_target_partition: None,
+            show_repair_boot_dialog: false,
+            repair_boot_loading: false,
+            repair_boot_message: String::new(),
+            repair_boot_selected_partition: None,
             runtime,
             download_manager: Arc::new(Mutex::new(None)),
             download_gid: None,
@@ -680,18 +738,6 @@ impl Default for App {
             batch_format_selected: HashSet::new(),
             batch_format_rx: None,
             batch_format_partitions_rx: None,
-            // BitLocker解锁对话框
-            show_bitlocker_dialog: false,
-            bitlocker_loading: false,
-            bitlocker_detecting: false,
-            bitlocker_message: String::new(),
-            bitlocker_partitions: Vec::new(),
-            bitlocker_selected: None,
-            bitlocker_password: String::new(),
-            bitlocker_recovery_key: String::new(),
-            bitlocker_unlock_mode: BitLockerUnlockMode::default(),
-            bitlocker_rx: None,
-            bitlocker_partitions_rx: None,
             // GHO密码查看对话框
             show_gho_password_dialog: false,
             gho_password_file_path: String::new(),
@@ -727,6 +773,15 @@ impl Default for App {
             quick_partition_disks_rx: None,
             quick_partition_result_rx: None,
             resize_existing_result_rx: None,
+            // 镜像校验对话框
+            show_image_verify_dialog: false,
+            image_verify_file_path: String::new(),
+            image_verify_loading: false,
+            image_verify_result: None,
+            image_verify_progress: None,
+            image_verify_progress_rx: None,
+            image_verify_result_rx: None,
+            image_verify_cancel_flag: None,
             // 应用配置（小白模式等）
             app_config: crate::core::app_config::AppConfig::load(),
             // PE下载待校验的MD5
@@ -749,6 +804,30 @@ impl Default for App {
             unattend_check_rx: None,
             last_unattend_check_partition: None,
             show_unattend_conflict_modal: false,
+            // 安装时BitLocker解锁对话框
+            show_install_bitlocker_dialog: false,
+            install_bitlocker_loading: false,
+            install_bitlocker_message: String::new(),
+            install_bitlocker_partitions: Vec::new(),
+            install_bitlocker_current: None,
+            install_bitlocker_password: String::new(),
+            install_bitlocker_recovery_key: String::new(),
+            install_bitlocker_mode: BitLockerUnlockMode::default(),
+            install_bitlocker_rx: None,
+            install_bitlocker_continue_after: false,
+            // 备份时BitLocker解锁对话框
+            show_backup_bitlocker_dialog: false,
+            backup_bitlocker_loading: false,
+            backup_bitlocker_message: String::new(),
+            backup_bitlocker_partitions: Vec::new(),
+            backup_bitlocker_current: None,
+            backup_bitlocker_password: String::new(),
+            backup_bitlocker_recovery_key: String::new(),
+            backup_bitlocker_mode: BitLockerUnlockMode::default(),
+            backup_bitlocker_rx: None,
+            backup_bitlocker_continue_after: false,
+            decrypting_partitions: Vec::new(),
+            bitlocker_decryption_needed: false,
         }
     }
 }
@@ -970,11 +1049,12 @@ impl App {
             self.remote_config_loading = false;
             
             if remote_config.loaded {
-                self.config = Some(ConfigManager::load_from_content_full(
+                self.config = Some(ConfigManager::load_from_content_full_with_gpu(
                     remote_config.dl_content.as_deref(),
                     remote_config.pe_content.as_deref(),
                     remote_config.soft_content.as_deref(),
                     remote_config.easy_content.as_deref(),
+                    remote_config.gpu_content.as_deref(),
                 ));
                 log::info!("使用预加载的远程配置");
                 
@@ -1125,11 +1205,12 @@ impl App {
                 self.remote_config_rx = None;
                 
                 if remote_config.loaded {
-                    self.config = Some(ConfigManager::load_from_content_full(
+                    self.config = Some(ConfigManager::load_from_content_full_with_gpu(
                         remote_config.dl_content.as_deref(),
                         remote_config.pe_content.as_deref(),
                         remote_config.soft_content.as_deref(),
                         remote_config.easy_content.as_deref(),
+                        remote_config.gpu_content.as_deref(),
                     ));
                     log::info!("远程配置加载成功");
                     
@@ -1297,6 +1378,19 @@ impl eframe::App for App {
                     ui.add_space(10.0);
                 });
         }
+
+        // 安装时BitLocker解锁对话框
+        // 使用一个临时UI来渲染对话框
+        egui::Area::new(egui::Id::new("install_bitlocker_dialog_area"))
+            .show(ctx, |ui| {
+                self.render_install_bitlocker_dialog(ui);
+            });
+        
+        // 备份时BitLocker解锁对话框
+        egui::Area::new(egui::Id::new("backup_bitlocker_dialog_area"))
+            .show(ctx, |ui| {
+                self.render_backup_bitlocker_dialog(ui);
+            });
 
         // 底部状态栏
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
@@ -1585,7 +1679,9 @@ impl eframe::App for App {
             || self.partition_copy_copying
             || self.quick_partition_state.loading
             || self.quick_partition_state.executing
-            || self.unattend_check_loading;
+            || self.unattend_check_loading
+            || self.install_bitlocker_loading
+            || self.backup_bitlocker_loading;
         
         if self.is_installing || self.is_backing_up || self.current_download.is_some() 
             || self.iso_mounting || self.pe_downloading || self.remote_config_loading 

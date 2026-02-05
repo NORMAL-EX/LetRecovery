@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::app::{App, OnlineDownloadTab, PendingSoftDownload, SoftIconState};
-use crate::download::config::{OnlineSystem, OnlineSoftware};
+use crate::download::config::{OnlineSystem, OnlineSoftware, OnlineGpuDriver};
 
 /// 图标加载结果
 struct IconLoadResult {
@@ -57,6 +57,15 @@ impl App {
             ).clicked() {
                 self.online_download_tab = OnlineDownloadTab::Software;
             }
+            
+            ui.add_space(10.0);
+            
+            if ui.selectable_label(
+                self.online_download_tab == OnlineDownloadTab::GpuDriver,
+                "🎮 显卡驱动"
+            ).clicked() {
+                self.online_download_tab = OnlineDownloadTab::GpuDriver;
+            }
         });
         
         ui.separator();
@@ -66,6 +75,7 @@ impl App {
         match self.online_download_tab {
             OnlineDownloadTab::SystemImage => self.show_system_image_tab(ui),
             OnlineDownloadTab::Software => self.show_software_download_tab(ui),
+            OnlineDownloadTab::GpuDriver => self.show_gpu_driver_tab(ui),
         }
         
         // 软件下载模态框
@@ -625,6 +635,208 @@ impl App {
                 
                 ui.add_space(10.0);
             });
+    }
+    
+    /// 显示GPU驱动下载选项卡
+    fn show_gpu_driver_tab(&mut self, ui: &mut egui::Ui) {
+        // 显示本机显卡信息
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("🖥️ 本机显卡信息");
+            });
+            ui.separator();
+            
+            if let Some(ref hw_info) = self.hardware_info {
+                if hw_info.gpus.is_empty() {
+                    ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "未检测到显卡");
+                } else {
+                    for (i, gpu) in hw_info.gpus.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("显卡 {}:", i + 1));
+                            ui.strong(crate::core::hardware_info::beautify_gpu_name(&gpu.name));
+                        });
+                        
+                        if !gpu.current_resolution.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(55.0);
+                                ui.label(format!("分辨率: {} @ {}Hz", gpu.current_resolution, gpu.refresh_rate));
+                            });
+                        }
+                        
+                        if !gpu.driver_version.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(55.0);
+                                ui.label(format!("驱动版本: {}", gpu.driver_version));
+                            });
+                        }
+                        
+                        if i < hw_info.gpus.len() - 1 {
+                            ui.add_space(5.0);
+                        }
+                    }
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("正在检测显卡信息...");
+                });
+            }
+        });
+        
+        ui.add_space(10.0);
+        
+        // 提示信息
+        ui.horizontal(|ui| {
+            ui.label("ℹ");
+            ui.label("请根据您的显卡型号选择合适的驱动程序下载。");
+        });
+        ui.add_space(5.0);
+        ui.separator();
+        ui.add_space(5.0);
+        
+        // 检查GPU驱动列表
+        let gpu_driver_list: Vec<OnlineGpuDriver> = self
+            .config
+            .as_ref()
+            .map(|c| c.gpu_driver_list.clone())
+            .unwrap_or_default();
+        
+        if gpu_driver_list.is_empty() {
+            if !self.remote_config_loading {
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "未找到在线显卡驱动资源");
+                ui.label("服务器可能暂未提供显卡驱动列表，请稍后重试");
+
+                if ui.button("刷新配置").clicked() {
+                    self.start_remote_config_loading();
+                }
+            }
+            return;
+        }
+        
+        // 收集需要加载的图标URL
+        let mut icons_to_load: Vec<String> = Vec::new();
+        for driver in &gpu_driver_list {
+            if let Some(ref icon_url) = driver.icon_url {
+                if !icon_url.is_empty() 
+                    && !self.soft_icon_cache.contains_key(icon_url)
+                    && !self.soft_icon_loading.contains(icon_url) 
+                {
+                    icons_to_load.push(icon_url.clone());
+                }
+            }
+        }
+        
+        // 启动图标加载任务
+        for url in icons_to_load {
+            self.start_icon_loading(url, ui.ctx());
+        }
+        
+        let mut driver_to_download: Option<usize> = None;
+        
+        // 驱动列表
+        egui::ScrollArea::vertical()
+            .max_height(340.0)
+            .id_salt("gpu_driver_list")
+            .show(ui, |ui| {
+                for (i, driver) in gpu_driver_list.iter().enumerate() {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            // 图标区域：58x58，内部居中显示图标
+                            ui.allocate_ui(egui::vec2(58.0, 58.0), |ui| {
+                                ui.centered_and_justified(|ui| {
+                                    self.show_gpu_driver_icon(ui, driver);
+                                });
+                            });
+                            
+                            ui.add_space(10.0);
+                            
+                            // 驱动信息
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.strong(&driver.name);
+                                    ui.label(format!("| {}", driver.file_size));
+                                });
+                                ui.label(&driver.description);
+                                ui.small(format!("更新日期: {}", driver.update_date));
+                            });
+                            
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("下载").clicked() {
+                                    driver_to_download = Some(i);
+                                }
+                            });
+                        });
+                    });
+                    ui.add_space(5.0);
+                }
+            });
+        
+        // 处理下载请求
+        if let Some(i) = driver_to_download {
+            if let Some(driver) = gpu_driver_list.get(i) {
+                // 设置待下载信息
+                self.pending_soft_download = Some(PendingSoftDownload {
+                    name: driver.name.clone(),
+                    download_url: driver.download_url.clone(),
+                    filename: driver.filename.clone(),
+                });
+                
+                // 初始化下载保存路径
+                if self.soft_download_save_path.is_empty() {
+                    self.soft_download_save_path = self.get_default_software_download_path();
+                }
+                
+                // 显示下载模态框
+                self.show_soft_download_modal = true;
+            }
+        }
+        
+        // 刷新按钮
+        ui.add_space(10.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!self.remote_config_loading, egui::Button::new("刷新在线资源")).clicked() {
+                self.start_remote_config_loading();
+            }
+            if self.remote_config_loading {
+                ui.spinner();
+            }
+        });
+    }
+    
+    /// 显示GPU驱动图标
+    fn show_gpu_driver_icon(&mut self, ui: &mut egui::Ui, driver: &OnlineGpuDriver) {
+        let icon_size = egui::vec2(48.0, 48.0);
+        
+        if let Some(ref icon_url) = driver.icon_url {
+            if !icon_url.is_empty() {
+                if let Some(state) = self.soft_icon_cache.get(icon_url) {
+                    match state {
+                        SoftIconState::Loaded(texture) => {
+                            ui.add_sized(icon_size, egui::Image::new(texture).fit_to_exact_size(icon_size));
+                            return;
+                        }
+                        SoftIconState::Loading => {
+                            // 显示加载中的占位符
+                            ui.add_sized(icon_size, egui::Spinner::new());
+                            return;
+                        }
+                        SoftIconState::Failed => {
+                            // 加载失败，显示默认图标
+                        }
+                    }
+                } else if self.soft_icon_loading.contains(icon_url) {
+                    // 正在加载中
+                    ui.add_sized(icon_size, egui::Spinner::new());
+                    return;
+                }
+            }
+        }
+        
+        // 默认图标 - 使用显卡图标
+        ui.add_sized(icon_size, egui::Label::new(
+            egui::RichText::new("🎮").size(32.0)
+        ));
     }
 
     pub fn load_online_config(&mut self) {

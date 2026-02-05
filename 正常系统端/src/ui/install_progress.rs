@@ -59,7 +59,7 @@ impl App {
         egui::ScrollArea::vertical()
             .max_height(200.0)
             .show(ui, |ui| {
-                let steps = match self.install_mode {
+                let mut steps = match self.install_mode {
                     InstallMode::Direct => vec![
                         "格式化分区",
                         "导出驱动",
@@ -79,10 +79,26 @@ impl App {
                     ],
                 };
 
+                // 如果需要 BitLocker 解密，插入解密步骤作为第一步
+                if self.bitlocker_decryption_needed {
+                    steps.insert(0, "解密 BitLocker 分区");
+                }
+
+                // 计算有效步骤索引（用于显示）
+                let effective_install_step = if self.bitlocker_decryption_needed {
+                    if self.install_step == 0 {
+                        1
+                    } else {
+                        self.install_step + 1
+                    }
+                } else {
+                    self.install_step
+                };
+
                 for (i, step) in steps.iter().enumerate() {
                     let step_num = i + 1;
-                    let is_current = self.install_step == step_num;
-                    let is_completed = self.install_step > step_num;
+                    let is_current = effective_install_step == step_num;
+                    let is_completed = effective_install_step > step_num;
 
                     let prefix = if is_completed {
                         "✓"
@@ -151,7 +167,7 @@ impl App {
         }
 
         // 启动安装线程
-        if self.install_step == 0 && self.is_installing {
+        if self.install_step == 0 && self.is_installing && self.decrypting_partitions.is_empty() {
             match self.install_mode {
                 InstallMode::Direct => self.start_direct_install_thread(),
                 InstallMode::ViaPE => self.start_pe_install_thread(),
@@ -162,6 +178,19 @@ impl App {
     fn update_install_progress(&mut self) {
         if let Some(ref rx) = self.install_progress_rx {
             while let Ok(progress) = rx.try_recv() {
+                // 处理 BitLocker 解密状态
+                if progress.status == "DECRYPTION_COMPLETE" {
+                    println!("[INSTALL UI] BitLocker 解密完成，准备开始安装");
+                    self.decrypting_partitions.clear();
+                    self.install_progress.current_step = "准备开始安装...".to_string();
+                    return;
+                } else if progress.status.starts_with("DECRYPTING:") {
+                    self.install_progress.current_step = progress.status.trim_start_matches("DECRYPTING:").to_string();
+                    // 使用实际的解密进度（从加密百分比计算得出）
+                    self.install_progress.step_progress = progress.percentage;
+                    return;
+                }
+
                 if let Some((step, name)) = parse_step_from_status(&progress.status) {
                     self.install_progress.step_progress = progress.percentage;
                     

@@ -63,3 +63,26 @@ pub struct NvidiaUninstallResult {
     /// 失败数量
     pub failed_count: usize,
 }
+
+/// 镜像校验结果（用于UI显示）
+#[derive(Debug, Clone, Default)]
+pub struct ImageVerifyResult {
+    /// 文件路径
+    pub file_path: String,
+    /// 镜像类型名称
+    pub image_type: String,
+    /// 是否通过校验
+    pub is_valid: bool,
+    /// 状态文本
+    pub status_text: String,
+    /// 文件大小（字节）
+    pub file_size: u64,
+    /// 镜像数量
+    pub image_count: u32,
+    /// 分卷数量
+    pub part_count: u16,
+    /// 详细消息
+    pub message: String,
+    /// 详细信息列表
+    pub details: Vec<String>,
+}

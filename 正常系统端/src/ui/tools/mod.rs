@@ -17,9 +17,10 @@ pub mod gho_password;
 pub mod nvidia_uninstall;
 pub mod partition_copy;
 pub mod quick_partition;
+pub mod image_verify;
 
 // 重新导出常用类型
-pub use types::{DriverBackupMode, AppxPackageInfo, InstalledSoftware, WindowsPartitionInfo};
+pub use types::{DriverBackupMode, AppxPackageInfo, InstalledSoftware, WindowsPartitionInfo, ImageVerifyResult};
 pub use batch_format::FormatablePartition;
 pub use bitlocker::BitLockerPartition;
 pub use partition_copy::{CopyablePartition, CopyProgress};
@@ -85,21 +86,6 @@ impl App {
                 }
 
                 if ui
-                    .add(egui::Button::new("Bitlocker解锁").min_size(button_size))
-                    .clicked()
-                {
-                    self.show_bitlocker_dialog = true;
-                    self.bitlocker_message.clear();
-                    self.bitlocker_partitions.clear();
-                    self.bitlocker_password.clear();
-                    self.bitlocker_recovery_key.clear();
-                    self.start_detect_bitlocker_partitions();
-                }
-
-                ui.end_row();
-
-                // ========== 第二行 ==========
-                if ui
                     .add(egui::Button::new("导入存储驱动").min_size(button_size))
                     .clicked()
                 {
@@ -107,6 +93,9 @@ impl App {
                     self.import_storage_driver_message.clear();
                 }
 
+                ui.end_row();
+
+                // ========== 第二行 ==========
                 if ui
                     .add(egui::Button::new("一键分区").min_size(button_size))
                     .clicked()
@@ -132,15 +121,19 @@ impl App {
                     self.driver_backup_message.clear();
                 }
 
-                ui.end_row();
-
-                // ========== 第三行 ==========
                 if is_pe {
                     if ui
                         .add(egui::Button::new("一键修复引导").min_size(button_size))
                         .clicked()
                     {
-                        self.repair_boot_action(is_pe);
+                        // 打开一键修复引导对话框，让用户选择分区
+                        self.show_repair_boot_dialog = true;
+                        self.repair_boot_message.clear();
+                        self.repair_boot_selected_partition = None;
+                        // 确保Windows分区信息已加载
+                        if self.windows_partitions_cache.is_none() && !self.windows_partitions_loading {
+                            self.start_load_windows_partitions();
+                        }
                     }
                 } else {
                     ui.add_enabled(
@@ -148,6 +141,10 @@ impl App {
                         egui::Button::new("一键修复引导").min_size(button_size),
                     );
                 }
+
+                ui.end_row();
+
+                // ========== 第三行 ==========
 
                 if ui
                     .add(egui::Button::new("本机网络信息").min_size(button_size))
@@ -178,15 +175,16 @@ impl App {
                     self.time_sync_message.clear();
                 }
 
-                ui.end_row();
-
-                // ========== 第四行 ==========
                 if ui
                     .add(egui::Button::new("手动运行Ghost").min_size(button_size))
                     .clicked()
                 {
                     self.launch_ghost_tool();
                 }
+
+                ui.end_row();
+
+                // ========== 第四行 ==========
 
                 if ui
                     .add(egui::Button::new("万能驱动").min_size(button_size))
@@ -218,14 +216,25 @@ impl App {
                     );
                 }
 
-                ui.end_row();
-
-                // ========== 第五行 ==========
                 if ui
                     .add(egui::Button::new("SpaceSniffer").min_size(button_size))
                     .clicked()
                 {
                     self.launch_space_sniffer_tool();
+                }
+
+                ui.end_row();
+
+                // ========== 第五行 ==========
+
+                if ui
+                    .add(egui::Button::new("镜像校验").min_size(button_size))
+                    .clicked()
+                {
+                    self.show_image_verify_dialog = true;
+                    self.image_verify_file_path.clear();
+                    self.image_verify_result = None;
+                    self.image_verify_progress = None;
                 }
 
                 ui.end_row();
@@ -240,11 +249,12 @@ impl App {
         self.render_reset_network_confirm_dialog(ui);
         self.render_time_sync_dialog(ui);
         self.render_batch_format_dialog(ui);
-        self.render_bitlocker_dialog(ui);
         self.render_gho_password_dialog(ui);
         self.render_nvidia_uninstall_dialog(ui);
         self.render_partition_copy_dialog(ui);
         self.render_quick_partition_dialog(ui);
+        self.render_image_verify_dialog(ui);
+        self.render_repair_boot_dialog(ui);
 
         // 显示工具状态
         if !self.tool_message.is_empty() {
@@ -290,26 +300,28 @@ impl App {
         }
     }
 
-    /// 修复引导操作
-    fn repair_boot_action(&mut self, is_pe: bool) {
-        let target_partition = if is_pe {
-            match &self.tool_target_partition {
-                Some(p) => p.clone(),
-                None => {
-                    self.tool_message = "请先选择目标系统分区".to_string();
-                    return;
-                }
+    /// 修复引导操作（从对话框调用）
+    pub fn repair_boot_action(&mut self) {
+        // 从对话框中选择的分区获取
+        let target_partition = match &self.repair_boot_selected_partition {
+            Some(p) => p.clone(),
+            None => {
+                self.repair_boot_message = "请先选择目标系统分区".to_string();
+                return;
             }
-        } else {
-            std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string())
         };
+
+        self.repair_boot_loading = true;
+        self.repair_boot_message = "正在修复引导...".to_string();
 
         match actions::repair_boot(&target_partition) {
             Ok(_) => {
-                self.tool_message = format!("引导修复成功: {}", target_partition);
+                self.repair_boot_message = format!("✓ 引导修复成功: {}", target_partition);
+                self.repair_boot_loading = false;
             }
             Err(e) => {
-                self.tool_message = format!("引导修复失败: {}", e);
+                self.repair_boot_message = format!("✗ 引导修复失败: {}", e);
+                self.repair_boot_loading = false;
             }
         }
     }

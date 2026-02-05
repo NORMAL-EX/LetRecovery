@@ -3,6 +3,7 @@ use std::path::Path;
 use crate::utils::cmd::create_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
+use crate::core::bitlocker::{BitLockerManager, VolumeStatus};
 
 #[cfg(windows)]
 use windows::{
@@ -75,6 +76,7 @@ pub struct Partition {
     pub partition_style: PartitionStyle,
     pub disk_number: Option<u32>,
     pub partition_number: Option<u32>,
+    pub bitlocker_status: VolumeStatus,
 }
 
 /// 分区详细信息
@@ -113,9 +115,12 @@ impl DiskManager {
         let mut partitions = Vec::new();
         let is_pe = Self::is_pe_environment();
 
+        // 预先创建 BitLockerManager 实例，避免重复创建
+        let bitlocker_manager = BitLockerManager::new();
+
         for letter in b'A'..=b'Z' {
             let drive = format!("{}:", letter as char);
-            if let Ok(info) = Self::get_partition_info(&drive, is_pe) {
+            if let Ok(info) = Self::get_partition_info(&drive, is_pe, &bitlocker_manager) {
                 partitions.push(info);
             }
         }
@@ -123,7 +128,7 @@ impl DiskManager {
         Ok(partitions)
     }
 
-    fn get_partition_info(drive: &str, is_pe: bool) -> Result<Partition> {
+    fn get_partition_info(drive: &str, is_pe: bool, bitlocker_manager: &BitLockerManager) -> Result<Partition> {
         let path = format!("{}\\", drive);
         let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -187,6 +192,10 @@ impl DiskManager {
         // 获取分区表类型、磁盘号和分区号
         let detail = Self::get_partition_style(drive);
 
+        // 获取 BitLocker 状态
+        let letter_char = drive.chars().next().unwrap_or('C');
+        let bitlocker_status = bitlocker_manager.get_status(letter_char);
+
         Ok(Partition {
             letter: drive.to_string(),
             total_size_mb: total_bytes / 1024 / 1024,
@@ -197,6 +206,7 @@ impl DiskManager {
             partition_style: detail.style,
             disk_number: detail.disk_number,
             partition_number: detail.partition_number,
+            bitlocker_status,
         })
     }
 

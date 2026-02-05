@@ -127,34 +127,6 @@ impl App {
             }
         }
         
-        // 检查BitLocker分区检测结果
-        if let Some(ref rx) = self.bitlocker_partitions_rx {
-            if let Ok(partitions) = rx.try_recv() {
-                self.bitlocker_partitions = partitions;
-                self.bitlocker_detecting = false;
-                self.bitlocker_partitions_rx = None;
-                
-                if self.bitlocker_partitions.is_empty() {
-                    self.bitlocker_message = "未检测到BitLocker加密的分区".to_string();
-                }
-            }
-        }
-        
-        // 检查BitLocker解锁结果
-        if let Some(ref rx) = self.bitlocker_rx {
-            if let Ok(result) = rx.try_recv() {
-                self.bitlocker_message = if result.success {
-                    format!("{} {}", result.letter, result.message)
-                } else {
-                    format!("{} 解锁失败: {}", result.letter, result.message)
-                };
-                self.bitlocker_loading = false;
-                self.bitlocker_rx = None;
-                // 刷新分区列表
-                self.start_detect_bitlocker_partitions();
-            }
-        }
-        
         // 检查GHO密码读取结果
         self.check_gho_password_result();
         
@@ -166,6 +138,9 @@ impl App {
         
         // 检查一键分区异步操作
         self.check_quick_partition_disk_load();
+        
+        // 检查镜像校验状态
+        self.check_image_verify_status();
     }
     
     /// 启动后台加载Windows分区信息
@@ -1271,263 +1246,6 @@ impl App {
         });
     }
 
-    // ==================== BitLocker解锁对话框 ====================
-
-    /// 渲染BitLocker解锁对话框
-    pub fn render_bitlocker_dialog(&mut self, ui: &mut egui::Ui) {
-        use crate::app::BitLockerUnlockMode;
-        
-        if !self.show_bitlocker_dialog {
-            return;
-        }
-
-        let mut should_close = false;
-        let mut do_unlock = false;
-
-        egui::Window::new("BitLocker解锁")
-            .resizable(true)
-            .default_width(500.0)
-            .default_height(400.0)
-            .show(ui.ctx(), |ui| {
-                ui.label("检测并解锁BitLocker加密的分区");
-                ui.add_space(10.0);
-
-                if self.bitlocker_detecting {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("正在检测BitLocker分区...");
-                    });
-                } else if self.bitlocker_partitions.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(0, 180, 0),
-                        "✓ 未检测到需要解锁的BitLocker分区",
-                    );
-                } else {
-                    // 显示BitLocker分区列表
-                    ui.label("检测到以下BitLocker分区：");
-                    ui.add_space(5.0);
-
-                    egui::ScrollArea::vertical()
-                        .max_height(150.0)
-                        .show(ui, |ui| {
-                            for partition in &self.bitlocker_partitions.clone() {
-                                let is_selected = self.bitlocker_selected.as_ref() == Some(&partition.letter);
-                                
-                                let status_color = match partition.status {
-                                    super::bitlocker::BitLockerStatus::EncryptedLocked => {
-                                        egui::Color32::from_rgb(255, 100, 100)
-                                    }
-                                    super::bitlocker::BitLockerStatus::EncryptedUnlocked => {
-                                        egui::Color32::from_rgb(100, 200, 100)
-                                    }
-                                    _ => egui::Color32::GRAY,
-                                };
-
-                                let display_text = format!(
-                                    "{} [{}] - {} ({:.1} GB) - 保护方式: {}",
-                                    partition.letter,
-                                    if partition.label.is_empty() { "无标签" } else { &partition.label },
-                                    partition.status.as_str(),
-                                    partition.total_size_mb as f64 / 1024.0,
-                                    partition.protection_method,
-                                );
-
-                                ui.horizontal(|ui| {
-                                    if ui.selectable_label(is_selected, "").clicked() {
-                                        self.bitlocker_selected = Some(partition.letter.clone());
-                                    }
-                                    ui.colored_label(status_color, &display_text);
-                                });
-                            }
-                        });
-
-                    // 只有在有已锁定的分区时才显示解锁选项
-                    let has_locked = self.bitlocker_partitions.iter()
-                        .any(|p| p.status == super::bitlocker::BitLockerStatus::EncryptedLocked);
-
-                    if has_locked {
-                        ui.add_space(15.0);
-                        ui.separator();
-                        ui.add_space(10.0);
-
-                        // 选择要解锁的分区
-                        ui.horizontal(|ui| {
-                            ui.label("选择要解锁的分区:");
-                            
-                            let current_text = self.bitlocker_selected
-                                .as_ref()
-                                .cloned()
-                                .unwrap_or_else(|| "请选择".to_string());
-
-                            egui::ComboBox::from_id_salt("bitlocker_partition_select")
-                                .selected_text(current_text)
-                                .show_ui(ui, |ui| {
-                                    for partition in &self.bitlocker_partitions {
-                                        if partition.status == super::bitlocker::BitLockerStatus::EncryptedLocked {
-                                            let display = format!(
-                                                "{} [{}]",
-                                                partition.letter,
-                                                partition.status.as_str()
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.bitlocker_selected,
-                                                Some(partition.letter.clone()),
-                                                display,
-                                            );
-                                        }
-                                    }
-                                });
-                        });
-
-                        ui.add_space(10.0);
-
-                        // 解锁方式选择
-                        ui.horizontal(|ui| {
-                            ui.label("解锁方式:");
-                            ui.radio_value(&mut self.bitlocker_unlock_mode, BitLockerUnlockMode::Password, "密码");
-                            ui.radio_value(&mut self.bitlocker_unlock_mode, BitLockerUnlockMode::RecoveryKey, "恢复密钥");
-                        });
-
-                        ui.add_space(10.0);
-
-                        // 输入密码或恢复密钥
-                        match self.bitlocker_unlock_mode {
-                            BitLockerUnlockMode::Password => {
-                                ui.horizontal(|ui| {
-                                    ui.label("密码:");
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.bitlocker_password)
-                                            .password(true)
-                                            .desired_width(300.0)
-                                    );
-                                });
-                            }
-                            BitLockerUnlockMode::RecoveryKey => {
-                                ui.horizontal(|ui| {
-                                    ui.label("恢复密钥:");
-                                });
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.bitlocker_recovery_key)
-                                        .hint_text("格式: XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX")
-                                        .desired_width(450.0)
-                                );
-                            }
-                        }
-                    }
-                }
-
-                ui.add_space(15.0);
-
-                // 显示状态消息
-                if !self.bitlocker_message.is_empty() {
-                    let color = get_message_color(&self.bitlocker_message);
-                    ui.colored_label(color, &self.bitlocker_message);
-                    ui.add_space(10.0);
-                }
-
-                ui.horizontal(|ui| {
-                    if self.bitlocker_loading {
-                        ui.spinner();
-                        ui.label("正在解锁...");
-                    } else {
-                        // 检查是否有已锁定的分区
-                        let has_locked = self.bitlocker_partitions.iter()
-                            .any(|p| p.status == super::bitlocker::BitLockerStatus::EncryptedLocked);
-
-                        if has_locked {
-                            let can_unlock = self.bitlocker_selected.is_some()
-                                && !self.bitlocker_detecting
-                                && (match self.bitlocker_unlock_mode {
-                                    BitLockerUnlockMode::Password => !self.bitlocker_password.is_empty(),
-                                    BitLockerUnlockMode::RecoveryKey => !self.bitlocker_recovery_key.is_empty(),
-                                });
-
-                            if ui
-                                .add_enabled(can_unlock, egui::Button::new("解锁"))
-                                .clicked()
-                            {
-                                do_unlock = true;
-                            }
-                        }
-
-                        if ui.button("刷新").clicked() {
-                            self.start_detect_bitlocker_partitions();
-                        }
-
-                        if ui.button("关闭").clicked() {
-                            should_close = true;
-                        }
-                    }
-                });
-            });
-
-        if do_unlock {
-            self.start_bitlocker_unlock();
-        }
-
-        if should_close {
-            self.show_bitlocker_dialog = false;
-        }
-    }
-
-    /// 启动后台检测BitLocker分区
-    pub fn start_detect_bitlocker_partitions(&mut self) {
-        if self.bitlocker_detecting {
-            return;
-        }
-
-        self.bitlocker_detecting = true;
-        self.bitlocker_partitions.clear();
-        self.bitlocker_message.clear();
-
-        let (tx, rx) = mpsc::channel();
-        self.bitlocker_partitions_rx = Some(rx);
-
-        std::thread::spawn(move || {
-            let partitions = super::bitlocker::get_bitlocker_partitions();
-            let _ = tx.send(partitions);
-        });
-    }
-
-    /// 启动后台BitLocker解锁
-    fn start_bitlocker_unlock(&mut self) {
-        use crate::app::BitLockerUnlockMode;
-        
-        if self.bitlocker_loading {
-            return;
-        }
-
-        let drive = match &self.bitlocker_selected {
-            Some(d) => d.clone(),
-            None => {
-                self.bitlocker_message = "请先选择要解锁的分区".to_string();
-                return;
-            }
-        };
-
-        self.bitlocker_loading = true;
-        self.bitlocker_message = "正在解锁...".to_string();
-
-        let mode = self.bitlocker_unlock_mode;
-        let password = self.bitlocker_password.clone();
-        let recovery_key = self.bitlocker_recovery_key.clone();
-
-        let (tx, rx) = mpsc::channel();
-        self.bitlocker_rx = Some(rx);
-
-        std::thread::spawn(move || {
-            let result = match mode {
-                BitLockerUnlockMode::Password => {
-                    super::bitlocker::unlock_with_password(&drive, &password)
-                }
-                BitLockerUnlockMode::RecoveryKey => {
-                    super::bitlocker::unlock_with_recovery_key(&drive, &recovery_key)
-                }
-            };
-            let _ = tx.send(result);
-        });
-    }
-
     // ==================== 分区对拷对话框 ====================
 
     /// 检查分区对拷异步操作结果
@@ -1951,6 +1669,747 @@ impl App {
         std::thread::spawn(move || {
             super::partition_copy::execute_partition_copy(&source, &target, tx, is_resume);
         });
+    }
+
+    // ==================== 安装时BitLocker解锁对话框 ====================
+
+    /// 渲染安装时BitLocker解锁对话框
+    pub fn render_install_bitlocker_dialog(&mut self, ui: &mut egui::Ui) {
+        use crate::app::BitLockerUnlockMode;
+        use crate::core::bitlocker::VolumeStatus;
+
+        if !self.show_install_bitlocker_dialog {
+            return;
+        }
+
+        // 检查解锁结果
+        self.check_install_bitlocker_unlock_result();
+
+        let mut should_close = false;
+        let mut do_unlock = false;
+        let mut do_skip = false;
+        let mut do_skip_all = false;
+
+        egui::Window::new("🔐 BitLocker解锁")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(500.0);
+                
+                ui.label("检测到以下分区被BitLocker加密锁定，需要解锁后才能继续安装：");
+                ui.add_space(10.0);
+
+                // 显示锁定分区列表
+                egui::ScrollArea::vertical()
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("install_bitlocker_partitions")
+                            .num_columns(4)
+                            .spacing([10.0, 4.0])
+                            .min_col_width(80.0)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("分区").strong());
+                                ui.label(egui::RichText::new("大小").strong());
+                                ui.label(egui::RichText::new("卷标").strong());
+                                ui.label(egui::RichText::new("状态").strong());
+                                ui.end_row();
+
+                                for partition in &self.install_bitlocker_partitions {
+                                    let is_current = self.install_bitlocker_current.as_ref() == Some(&partition.letter);
+                                    
+                                    let status_color = match partition.status {
+                                        VolumeStatus::EncryptedLocked => egui::Color32::from_rgb(255, 100, 100),
+                                        VolumeStatus::EncryptedUnlocked => egui::Color32::from_rgb(100, 200, 100),
+                                        _ => egui::Color32::GRAY,
+                                    };
+                                    
+                                    let label = if is_current {
+                                        egui::RichText::new(&partition.letter).strong().color(egui::Color32::from_rgb(100, 150, 255))
+                                    } else {
+                                        egui::RichText::new(&partition.letter)
+                                    };
+                                    
+                                    ui.label(label);
+                                    ui.label(format!("{:.1} GB", partition.total_size_mb as f64 / 1024.0));
+                                    ui.label(if partition.label.is_empty() { "-" } else { &partition.label });
+                                    ui.colored_label(status_color, partition.status.as_str());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                // 检查是否还有需要解锁的分区
+                let has_locked = self.install_bitlocker_partitions.iter()
+                    .any(|p| p.status == VolumeStatus::EncryptedLocked);
+
+                if has_locked {
+                    // 显示当前要解锁的分区
+                    if let Some(ref current) = self.install_bitlocker_current {
+                        ui.add_space(5.0);
+                        ui.horizontal(|ui| {
+                            ui.label("当前解锁:");
+                            ui.strong(current);
+                        });
+                    }
+
+                    ui.add_space(10.0);
+
+                    // 解锁模式选择
+                    ui.horizontal(|ui| {
+                        ui.label("解锁方式:");
+                        ui.radio_value(&mut self.install_bitlocker_mode, BitLockerUnlockMode::Password, "密码");
+                        ui.radio_value(&mut self.install_bitlocker_mode, BitLockerUnlockMode::RecoveryKey, "恢复密钥");
+                    });
+
+                    ui.add_space(5.0);
+
+                    // 输入框
+                    match self.install_bitlocker_mode {
+                        BitLockerUnlockMode::Password => {
+                            ui.horizontal(|ui| {
+                                ui.label("密码:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.install_bitlocker_password)
+                                        .password(true)
+                                        .desired_width(300.0),
+                                );
+                            });
+                        }
+                        BitLockerUnlockMode::RecoveryKey => {
+                            ui.horizontal(|ui| {
+                                ui.label("恢复密钥:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.install_bitlocker_recovery_key)
+                                        .desired_width(300.0)
+                                        .hint_text("000000-000000-000000-000000-000000-000000-000000-000000"),
+                                );
+                            });
+                        }
+                    }
+                } else {
+                    // 所有分区都已解锁
+                    ui.add_space(10.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 200, 100),
+                        "✓ 所有分区已解锁，可以继续安装",
+                    );
+                }
+
+                // 显示消息
+                if !self.install_bitlocker_message.is_empty() {
+                    ui.add_space(10.0);
+                    let color = get_message_color(&self.install_bitlocker_message);
+                    ui.colored_label(color, &self.install_bitlocker_message);
+                }
+
+                ui.add_space(15.0);
+                ui.separator();
+                ui.add_space(5.0);
+
+                // 按钮
+                ui.horizontal(|ui| {
+                    if self.install_bitlocker_loading {
+                        ui.spinner();
+                        ui.label("正在解锁...");
+                    } else if has_locked {
+                        let can_unlock = self.install_bitlocker_current.is_some()
+                            && match self.install_bitlocker_mode {
+                                BitLockerUnlockMode::Password => !self.install_bitlocker_password.is_empty(),
+                                BitLockerUnlockMode::RecoveryKey => !self.install_bitlocker_recovery_key.is_empty(),
+                            };
+
+                        if ui.add_enabled(can_unlock, egui::Button::new("解锁")).clicked() {
+                            do_unlock = true;
+                        }
+
+                        if ui.button("跳过此分区").clicked() {
+                            do_skip = true;
+                        }
+
+                        if ui.button("跳过所有").clicked() {
+                            do_skip_all = true;
+                        }
+
+                        if ui.button("取消安装").clicked() {
+                            should_close = true;
+                        }
+                    } else {
+                        // 所有分区都已解锁
+                        if ui.button("继续安装").clicked() {
+                            should_close = true;
+                            if self.install_bitlocker_continue_after {
+                                self.continue_installation_after_bitlocker();
+                            }
+                        }
+
+                        if ui.button("取消").clicked() {
+                            should_close = true;
+                        }
+                    }
+                });
+            });
+
+        // 处理操作
+        if do_unlock {
+            self.start_install_bitlocker_unlock();
+        }
+
+        if do_skip {
+            self.skip_current_install_bitlocker_partition();
+        }
+
+        if do_skip_all {
+            // 跳过所有锁定的分区
+            self.install_bitlocker_partitions.retain(|p| p.status != VolumeStatus::EncryptedLocked);
+            self.install_bitlocker_current = None;
+            self.install_bitlocker_message = "已跳过所有锁定的分区".to_string();
+        }
+
+        if should_close {
+            self.show_install_bitlocker_dialog = false;
+            self.install_bitlocker_continue_after = false;
+        }
+    }
+
+    /// 检查安装时BitLocker解锁结果
+    fn check_install_bitlocker_unlock_result(&mut self) {
+        use crate::core::bitlocker::VolumeStatus;
+
+        if let Some(ref rx) = self.install_bitlocker_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.install_bitlocker_loading = false;
+                self.install_bitlocker_rx = None;
+
+                if result.success {
+                    self.install_bitlocker_message = format!("{} 解锁成功", result.letter);
+                    
+                    // 更新分区状态
+                    if let Some(partition) = self.install_bitlocker_partitions.iter_mut()
+                        .find(|p| p.letter == result.letter)
+                    {
+                        partition.status = VolumeStatus::EncryptedUnlocked;
+                    }
+
+                    // 清空输入
+                    self.install_bitlocker_password.clear();
+                    self.install_bitlocker_recovery_key.clear();
+
+                    // 选择下一个需要解锁的分区
+                    self.select_next_install_bitlocker_partition();
+                } else {
+                    self.install_bitlocker_message = format!("{} 解锁失败: {}", result.letter, result.message);
+                }
+            }
+        }
+    }
+
+    /// 启动安装时BitLocker解锁
+    fn start_install_bitlocker_unlock(&mut self) {
+        use crate::app::BitLockerUnlockMode;
+
+        if self.install_bitlocker_loading {
+            return;
+        }
+
+        let drive = match &self.install_bitlocker_current {
+            Some(d) => d.clone(),
+            None => {
+                self.install_bitlocker_message = "请先选择要解锁的分区".to_string();
+                return;
+            }
+        };
+
+        self.install_bitlocker_loading = true;
+        self.install_bitlocker_message = "正在解锁...".to_string();
+
+        let mode = self.install_bitlocker_mode;
+        let password = self.install_bitlocker_password.clone();
+        let recovery_key = self.install_bitlocker_recovery_key.clone();
+
+        let (tx, rx) = mpsc::channel();
+        self.install_bitlocker_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = match mode {
+                BitLockerUnlockMode::Password => {
+                    super::bitlocker::unlock_with_password(&drive, &password)
+                }
+                BitLockerUnlockMode::RecoveryKey => {
+                    super::bitlocker::unlock_with_recovery_key(&drive, &recovery_key)
+                }
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// 跳过当前安装时BitLocker分区
+    fn skip_current_install_bitlocker_partition(&mut self) {
+        use crate::core::bitlocker::VolumeStatus;
+
+        if let Some(ref current) = self.install_bitlocker_current.clone() {
+            // 从列表中移除当前分区
+            self.install_bitlocker_partitions.retain(|p| p.letter != *current);
+            self.install_bitlocker_message = format!("已跳过分区 {}", current);
+            
+            // 选择下一个需要解锁的分区
+            self.select_next_install_bitlocker_partition();
+        }
+    }
+
+    /// 选择下一个需要解锁的安装时BitLocker分区
+    fn select_next_install_bitlocker_partition(&mut self) {
+        use crate::core::bitlocker::VolumeStatus;
+
+        self.install_bitlocker_current = self.install_bitlocker_partitions
+            .iter()
+            .find(|p| p.status == VolumeStatus::EncryptedLocked)
+            .map(|p| p.letter.clone());
+    }
+    
+    // ==================== 备份时BitLocker解锁对话框 ====================
+
+    /// 渲染备份时BitLocker解锁对话框
+    pub fn render_backup_bitlocker_dialog(&mut self, ui: &mut egui::Ui) {
+        use crate::app::BitLockerUnlockMode;
+        use crate::core::bitlocker::VolumeStatus;
+
+        if !self.show_backup_bitlocker_dialog {
+            return;
+        }
+
+        // 检查解锁结果
+        self.check_backup_bitlocker_unlock_result();
+
+        let mut should_close = false;
+        let mut do_unlock = false;
+        let mut do_skip = false;
+        let mut do_skip_all = false;
+
+        egui::Window::new("🔐 BitLocker解锁 - 备份")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(500.0);
+                
+                ui.label("检测到以下分区被BitLocker加密锁定，需要解锁后才能继续备份：");
+                ui.add_space(10.0);
+
+                // 显示锁定分区列表
+                egui::ScrollArea::vertical()
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("backup_bitlocker_partitions")
+                            .num_columns(4)
+                            .spacing([10.0, 4.0])
+                            .min_col_width(80.0)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("分区").strong());
+                                ui.label(egui::RichText::new("大小").strong());
+                                ui.label(egui::RichText::new("卷标").strong());
+                                ui.label(egui::RichText::new("状态").strong());
+                                ui.end_row();
+
+                                for partition in &self.backup_bitlocker_partitions {
+                                    let is_current = self.backup_bitlocker_current.as_ref() == Some(&partition.letter);
+                                    
+                                    let status_color = match partition.status {
+                                        VolumeStatus::EncryptedLocked => egui::Color32::from_rgb(255, 100, 100),
+                                        VolumeStatus::EncryptedUnlocked => egui::Color32::from_rgb(100, 200, 100),
+                                        _ => egui::Color32::GRAY,
+                                    };
+                                    
+                                    let label = if is_current {
+                                        egui::RichText::new(&partition.letter).strong().color(egui::Color32::from_rgb(100, 150, 255))
+                                    } else {
+                                        egui::RichText::new(&partition.letter)
+                                    };
+                                    
+                                    ui.label(label);
+                                    ui.label(format!("{:.1} GB", partition.total_size_mb as f64 / 1024.0));
+                                    ui.label(if partition.label.is_empty() { "-" } else { &partition.label });
+                                    ui.colored_label(status_color, partition.status.as_str());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                // 检查是否还有需要解锁的分区
+                let has_locked = self.backup_bitlocker_partitions.iter()
+                    .any(|p| p.status == VolumeStatus::EncryptedLocked);
+
+                if has_locked {
+                    // 显示当前要解锁的分区
+                    if let Some(ref current) = self.backup_bitlocker_current {
+                        ui.add_space(5.0);
+                        ui.horizontal(|ui| {
+                            ui.label("当前解锁:");
+                            ui.strong(current);
+                        });
+                    }
+
+                    ui.add_space(10.0);
+
+                    // 解锁模式选择
+                    ui.horizontal(|ui| {
+                        ui.label("解锁方式:");
+                        ui.radio_value(&mut self.backup_bitlocker_mode, BitLockerUnlockMode::Password, "密码");
+                        ui.radio_value(&mut self.backup_bitlocker_mode, BitLockerUnlockMode::RecoveryKey, "恢复密钥");
+                    });
+
+                    ui.add_space(5.0);
+
+                    // 输入框
+                    match self.backup_bitlocker_mode {
+                        BitLockerUnlockMode::Password => {
+                            ui.horizontal(|ui| {
+                                ui.label("密码:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.backup_bitlocker_password)
+                                        .password(true)
+                                        .desired_width(300.0),
+                                );
+                            });
+                        }
+                        BitLockerUnlockMode::RecoveryKey => {
+                            ui.horizontal(|ui| {
+                                ui.label("恢复密钥:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.backup_bitlocker_recovery_key)
+                                        .desired_width(300.0)
+                                        .hint_text("000000-000000-000000-000000-000000-000000-000000-000000"),
+                                );
+                            });
+                        }
+                    }
+                } else {
+                    // 所有分区都已解锁
+                    ui.add_space(10.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 200, 100),
+                        "✓ 所有分区已解锁，可以继续备份",
+                    );
+                }
+
+                // 显示消息
+                if !self.backup_bitlocker_message.is_empty() {
+                    ui.add_space(10.0);
+                    let color = get_message_color(&self.backup_bitlocker_message);
+                    ui.colored_label(color, &self.backup_bitlocker_message);
+                }
+
+                ui.add_space(15.0);
+                ui.separator();
+                ui.add_space(5.0);
+
+                // 按钮
+                ui.horizontal(|ui| {
+                    if self.backup_bitlocker_loading {
+                        ui.spinner();
+                        ui.label("正在解锁...");
+                    } else if has_locked {
+                        let can_unlock = self.backup_bitlocker_current.is_some()
+                            && match self.backup_bitlocker_mode {
+                                BitLockerUnlockMode::Password => !self.backup_bitlocker_password.is_empty(),
+                                BitLockerUnlockMode::RecoveryKey => !self.backup_bitlocker_recovery_key.is_empty(),
+                            };
+
+                        if ui.add_enabled(can_unlock, egui::Button::new("解锁")).clicked() {
+                            do_unlock = true;
+                        }
+
+                        if ui.button("跳过此分区").clicked() {
+                            do_skip = true;
+                        }
+
+                        if ui.button("跳过所有").clicked() {
+                            do_skip_all = true;
+                        }
+
+                        if ui.button("取消备份").clicked() {
+                            should_close = true;
+                        }
+                    } else {
+                        // 所有分区都已解锁
+                        if ui.button("继续备份").clicked() {
+                            should_close = true;
+                            if self.backup_bitlocker_continue_after {
+                                self.continue_backup_after_bitlocker();
+                            }
+                        }
+
+                        if ui.button("取消").clicked() {
+                            should_close = true;
+                        }
+                    }
+                });
+            });
+
+        // 处理操作
+        if do_unlock {
+            self.start_backup_bitlocker_unlock();
+        }
+
+        if do_skip {
+            self.skip_current_backup_bitlocker_partition();
+        }
+
+        if do_skip_all {
+            // 跳过所有锁定的分区
+            self.backup_bitlocker_partitions.retain(|p| p.status != VolumeStatus::EncryptedLocked);
+            self.backup_bitlocker_current = None;
+            self.backup_bitlocker_message = "已跳过所有锁定的分区".to_string();
+        }
+
+        if should_close {
+            self.show_backup_bitlocker_dialog = false;
+            self.backup_bitlocker_continue_after = false;
+        }
+    }
+
+    /// 检查备份时BitLocker解锁结果
+    fn check_backup_bitlocker_unlock_result(&mut self) {
+        use crate::core::bitlocker::VolumeStatus;
+
+        if let Some(ref rx) = self.backup_bitlocker_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.backup_bitlocker_loading = false;
+                self.backup_bitlocker_rx = None;
+
+                if result.success {
+                    self.backup_bitlocker_message = format!("{} 解锁成功", result.letter);
+                    
+                    // 更新分区状态
+                    if let Some(partition) = self.backup_bitlocker_partitions.iter_mut()
+                        .find(|p| p.letter == result.letter)
+                    {
+                        partition.status = VolumeStatus::EncryptedUnlocked;
+                    }
+
+                    // 清空输入
+                    self.backup_bitlocker_password.clear();
+                    self.backup_bitlocker_recovery_key.clear();
+
+                    // 选择下一个需要解锁的分区
+                    self.select_next_backup_bitlocker_partition();
+                } else {
+                    self.backup_bitlocker_message = format!("{} 解锁失败: {}", result.letter, result.message);
+                }
+            }
+        }
+    }
+
+    /// 启动备份时BitLocker解锁
+    fn start_backup_bitlocker_unlock(&mut self) {
+        use crate::app::BitLockerUnlockMode;
+
+        if self.backup_bitlocker_loading {
+            return;
+        }
+
+        let drive = match &self.backup_bitlocker_current {
+            Some(d) => d.clone(),
+            None => {
+                self.backup_bitlocker_message = "请先选择要解锁的分区".to_string();
+                return;
+            }
+        };
+
+        self.backup_bitlocker_loading = true;
+        self.backup_bitlocker_message = "正在解锁...".to_string();
+
+        let mode = self.backup_bitlocker_mode;
+        let password = self.backup_bitlocker_password.clone();
+        let recovery_key = self.backup_bitlocker_recovery_key.clone();
+
+        let (tx, rx) = mpsc::channel();
+        self.backup_bitlocker_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = match mode {
+                BitLockerUnlockMode::Password => {
+                    super::bitlocker::unlock_with_password(&drive, &password)
+                }
+                BitLockerUnlockMode::RecoveryKey => {
+                    super::bitlocker::unlock_with_recovery_key(&drive, &recovery_key)
+                }
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// 跳过当前备份时BitLocker分区
+    fn skip_current_backup_bitlocker_partition(&mut self) {
+        use crate::core::bitlocker::VolumeStatus;
+
+        if let Some(ref current) = self.backup_bitlocker_current.clone() {
+            // 从列表中移除当前分区
+            self.backup_bitlocker_partitions.retain(|p| p.letter != *current);
+            self.backup_bitlocker_message = format!("已跳过分区 {}", current);
+            
+            // 选择下一个需要解锁的分区
+            self.select_next_backup_bitlocker_partition();
+        }
+    }
+
+    /// 选择下一个需要解锁的备份时BitLocker分区
+    fn select_next_backup_bitlocker_partition(&mut self) {
+        use crate::core::bitlocker::VolumeStatus;
+
+        self.backup_bitlocker_current = self.backup_bitlocker_partitions
+            .iter()
+            .find(|p| p.status == VolumeStatus::EncryptedLocked)
+            .map(|p| p.letter.clone());
+    }
+
+    // ==================== 一键修复引导对话框 ====================
+
+    /// 渲染一键修复引导对话框
+    pub fn render_repair_boot_dialog(&mut self, ui: &mut egui::Ui) {
+        if !self.show_repair_boot_dialog {
+            return;
+        }
+
+        let mut should_close = false;
+        let mut do_repair = false;
+        let windows_partitions = self.get_cached_windows_partitions();
+        let is_loading_partitions = self.windows_partitions_loading;
+
+        egui::Window::new("一键修复引导")
+            .resizable(false)
+            .default_width(450.0)
+            .show(ui.ctx(), |ui| {
+                ui.label("修复Windows系统的启动引导");
+                ui.add_space(10.0);
+
+                // 分区选择
+                if is_loading_partitions {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("正在检测Windows分区...");
+                    });
+                } else if windows_partitions.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 100, 100),
+                        "未检测到包含Windows系统的分区",
+                    );
+                    ui.add_space(5.0);
+                    ui.label("请确保目标分区包含有效的Windows系统");
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("选择目标系统分区:");
+
+                        let current_text = self
+                            .repair_boot_selected_partition
+                            .as_ref()
+                            .map(|letter| format_partition_display(&windows_partitions, letter))
+                            .unwrap_or_else(|| "请选择".to_string());
+
+                        egui::ComboBox::from_id_salt("repair_boot_partition_select")
+                            .selected_text(current_text)
+                            .width(250.0)
+                            .show_ui(ui, |ui| {
+                                for partition in &windows_partitions {
+                                    let display = format!(
+                                        "{} [{}] [{}]",
+                                        partition.letter,
+                                        partition.windows_version,
+                                        partition.architecture
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.repair_boot_selected_partition,
+                                        Some(partition.letter.clone()),
+                                        display,
+                                    );
+                                }
+                            });
+                    });
+
+                    // 显示所选分区的详细信息
+                    if let Some(ref selected) = self.repair_boot_selected_partition {
+                        if let Some(partition) = windows_partitions.iter().find(|p| &p.letter == selected) {
+                            ui.add_space(10.0);
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Windows版本:");
+                                    ui.label(&partition.windows_version);
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("系统架构:");
+                                    ui.label(&partition.architecture);
+                                });
+                            });
+                        }
+                    }
+                }
+
+                ui.add_space(15.0);
+
+                // 消息显示
+                if !self.repair_boot_message.is_empty() {
+                    let color = get_message_color(&self.repair_boot_message);
+                    ui.colored_label(color, &self.repair_boot_message);
+                    ui.add_space(10.0);
+                }
+
+                // 进度指示
+                if self.repair_boot_loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("正在修复引导...");
+                    });
+                    ui.add_space(10.0);
+                }
+
+                ui.separator();
+                ui.add_space(5.0);
+
+                // 按钮
+                ui.horizontal(|ui| {
+                    let can_repair = !self.repair_boot_loading 
+                        && self.repair_boot_selected_partition.is_some()
+                        && !windows_partitions.is_empty();
+
+                    if ui
+                        .add_enabled(can_repair, egui::Button::new("开始修复"))
+                        .clicked()
+                    {
+                        do_repair = true;
+                    }
+
+                    if ui
+                        .add_enabled(!self.repair_boot_loading, egui::Button::new("刷新"))
+                        .clicked()
+                    {
+                        self.refresh_windows_partitions_cache();
+                    }
+
+                    if ui.button("关闭").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        // 执行修复
+        if do_repair {
+            self.repair_boot_action();
+        }
+
+        // 关闭对话框
+        if should_close {
+            self.show_repair_boot_dialog = false;
+            self.repair_boot_message.clear();
+            self.repair_boot_selected_partition = None;
+        }
     }
 }
 
