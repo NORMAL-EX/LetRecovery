@@ -1,1 +1,51 @@
-
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/letrecovery.png" />
+    <link rel="apple-touch-icon" href="/letrecovery.png" />
+    
+    <!-- Primary Meta Tags -->
+    <title>LetRecovery - 纯净无广告的系统重装工具</title>
+    <meta name="title" content="LetRecovery - 纯净无广告的系统重装工具" />
+    <meta name="description" content="LetRecovery 是一款基于 Rust + egui 开发的系统重装工具，完全纯净无广告无捆绑，高效便捷，小白也能轻松上手。" />
+    <meta name="keywords" content="LetRecovery,系统重装,重装系统,Windows重装,纯净系统,无广告,无捆绑,Rust,egui" />
+    <meta name="author" content="Cloud-PE Dev / LetRecovery Team" />
+    <meta name="robots" content="index, follow" />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://sysre.cn/" />
+    <meta property="og:title" content="LetRecovery - 纯净无广告的系统重装工具" />
+    <meta property="og:description" content="LetRecovery 是一款基于 Rust + egui 开发的系统重装工具，完全纯净无广告无捆绑，高效便捷，小白也能轻松上手。" />
+    <meta property="og:image" content="https://pic1.imgdb.cn/item/69613b1d14866864fecdc7dc.png" />
+    
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:url" content="https://sysre.cn/" />
+    <meta property="twitter:title" content="LetRecovery - 纯净无广告的系统重装工具" />
+    <meta property="twitter:description" content="LetRecovery 是一款基于 Rust + egui 开发的系统重装工具，完全纯净无广告无捆绑，高效便捷，小白也能轻松上手。" />
+    <meta property="twitter:image" content="https://pic1.imgdb.cn/item/69613b1d14866864fecdc7dc.png" />
+    
+    <!-- Theme Color -->
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
+    
+    <!-- Prevent FOUC (Flash of Unstyled Content) -->
+    <script>
+      (function() {
+        const theme = localStorage.getItem('letrecovery-theme');
+        if (theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches) || (!theme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
