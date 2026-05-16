@@ -18,7 +18,7 @@ const Header: React.FC = () => {
 
   const navItems = [
     { name: '主页', path: '/' },
-    { name: '许可证', path: '/license' },
+    { name: '关于', path: '/about' },
   ]
 
   const isActive = (path: string) => {
