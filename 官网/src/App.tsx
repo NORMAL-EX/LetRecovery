@@ -1,7 +1,7 @@
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import { ThemeProvider } from '@/hooks/useTheme'
 import { Header, Footer } from '@/components/layout'
-import { Home, QQGroup, License } from '@/pages'
+import { Home, QQGroup, About } from '@/pages'
 
 function App() {
   return (
@@ -13,7 +13,7 @@ function App() {
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/qqg" element={<QQGroup />} />
-              <Route path="/license" element={<License />} />
+              <Route path="/about" element={<About />} />
             </Routes>
           </main>
           <Footer />
