@@ -47,7 +47,7 @@ const About: React.FC = () => {
     <>
       <Banner title="关于" subtitle="了解 LetRecovery 的项目信息与贡献人员" />
 
-      <section className="py-16 md:py-20">
+      <section className="pb-16 md:pb-24">
         <div className="container mx-auto px-4 max-w-3xl space-y-6">
           {/* 关于卡片 */}
           <Card>
