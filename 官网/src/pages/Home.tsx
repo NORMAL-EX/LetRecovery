@@ -9,7 +9,6 @@ import {
   Rocket,
   Gauge,
   BadgeCheck,
-  AlertTriangle,
   Info,
   ExternalLink,
   Cloud,
