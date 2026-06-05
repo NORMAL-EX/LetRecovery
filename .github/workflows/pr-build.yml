@@ -42,10 +42,12 @@ jobs:
           set -o pipefail
           cargo build --locked --message-format=short 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
+          echo "cargo exit code: $rc"
           if [ "$rc" -ne 0 ]; then
-            grep -E "error(\[|:)" build.log | head -40 | while IFS= read -r l; do
-              echo "::error::$l"
-            done
+            echo "----- build.log tail -----"
+            tail -n 120 build.log
+            msg="$(tail -n 120 build.log | sed 's/%/%25/g; s/\r$//' | sed ':a;N;$!ba;s/\n/%0A/g')"
+            echo "::error title=${{ matrix.name }} build failed::${msg}"
           fi
           exit "$rc"
 
