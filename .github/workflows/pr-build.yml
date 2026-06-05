@@ -35,21 +35,17 @@ jobs:
         with:
           workspaces: ${{ matrix.dir }}
 
-      - name: Build
+      - name: Verify Cargo.lock is up to date
         working-directory: ${{ matrix.dir }}
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo build --locked --message-format=short 2>&1 | tee build.log
-          rc=${PIPESTATUS[0]}
-          echo "cargo exit code: $rc"
-          if [ "$rc" -ne 0 ]; then
-            echo "----- build.log tail -----"
-            tail -n 120 build.log
-            msg="$(tail -n 120 build.log | sed 's/%/%25/g; s/\r$//' | sed ':a;N;$!ba;s/\n/%0A/g')"
-            echo "::error title=${{ matrix.name }} build failed::${msg}"
-          fi
-          exit "$rc"
+        run: cargo metadata --locked --format-version 1 > metadata.json
+
+      - name: Cargo check
+        working-directory: ${{ matrix.dir }}
+        run: cargo check --locked
+
+      - name: Cargo build
+        working-directory: ${{ matrix.dir }}
+        run: cargo build --locked
 
   website:
     name: Build 官网
