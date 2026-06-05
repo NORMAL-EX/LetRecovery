@@ -37,7 +37,17 @@ jobs:
 
       - name: Build
         working-directory: ${{ matrix.dir }}
-        run: cargo build --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --locked --message-format=short 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            grep -E "error(\[|:)" build.log | head -40 | while IFS= read -r l; do
+              echo "::error::$l"
+            done
+          fi
+          exit "$rc"
 
   website:
     name: Build 官网
