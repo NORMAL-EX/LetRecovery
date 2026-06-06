@@ -41,7 +41,7 @@ fn ensure_global_init(init: FnGlobalInit) -> bool {
     WIMLIB_INIT_OK.load(Ordering::SeqCst)
 }
 
-use crate::core::wimgapi::{ImageInfo, WimProgress, Wimgapi};
+use crate::image_meta::{parse_image_info_from_xml, ImageInfo, WimProgress};
 
 // ============================================================================
 // 常量（严格对照 wimlib.h）
@@ -336,8 +336,8 @@ unsafe extern "C" fn verify_progress_callback(
 // ============================================================================
 
 fn find_and_load_dll() -> Result<Library, String> {
-    // 先确保 DLL 就位（PE 环境兜底，由共享库 lr-core 内置并释放），再尝试加载
-    lr_core::ensure_dll_available();
+    // 先确保 DLL 就位（PE 环境兜底，内置并释放），再尝试加载
+    crate::ensure_dll_available();
     let names = ["libwim-15.dll", "wimlib-15.dll", "libwim.dll", "wimlib.dll"];
     let mut last = String::new();
 
@@ -822,7 +822,7 @@ impl WimlibManager {
         };
         unsafe { (self.free_wim)(wim) };
 
-        let images = Wimgapi::parse_image_info_from_xml(&xml);
+        let images = parse_image_info_from_xml(&xml);
         if images.is_empty() {
             return Err("未解析到镜像信息".to_string());
         }

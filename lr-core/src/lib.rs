@@ -7,6 +7,8 @@
 //! 后续计划收纳：镜像元数据类型 + XML 解析、wimlib FFI 封装等
 //! （见仓库 TESTING.md）。
 
+pub mod image_meta;
+pub mod wimlib;
 pub mod wimlib_dll;
 
 pub use wimlib_dll::ensure_dll_available;

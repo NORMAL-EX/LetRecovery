@@ -750,7 +750,7 @@ impl App {
     /// 排除的类型：
     /// - WindowsPE: PE环境镜像
     fn is_installable_image(vol: &ImageInfo) -> bool {
-        use crate::core::wimgapi::WimImageType;
+        use lr_core::image_meta::WimImageType;
         
         // 1. 优先使用 image_type 字段判断
         match vol.image_type {

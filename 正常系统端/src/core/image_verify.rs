@@ -21,7 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::core::iso::IsoMounter;
-use crate::core::wimlib::Wimlib;
+use lr_core::wimlib::Wimlib;
 
 // ============================================================================
 // 类型定义

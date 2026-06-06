@@ -15,8 +15,8 @@ use std::sync::mpsc::Sender;
 use crate::core::dism_cmd::DismCmd;
 use crate::core::driver::DriverManager;
 use crate::core::system_utils;
-use crate::core::wimgapi::{WimProgress, WIM_COMPRESS_LZX};
-use crate::core::wimlib::WimlibManager;
+use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZX};
+use lr_core::wimlib::WimlibManager;
 
 /// 操作进度
 #[derive(Debug, Clone)]
@@ -39,7 +39,7 @@ pub struct ImageInfo {
     /// Windows 次版本号 (如 Win7 为 1，对应版本 6.1)
     pub minor_version: Option<u16>,
     /// 镜像类型 (标准安装/整盘备份/PE等)
-    pub image_type: crate::core::wimgapi::WimImageType,
+    pub image_type: lr_core::image_meta::WimImageType,
     /// 是否已验证可安装
     pub verified_installable: bool,
 }
@@ -621,8 +621,8 @@ impl Dism {
         installation_type: &str,
         major_version: Option<u16>,
         size_bytes: u64
-    ) -> crate::core::wimgapi::WimImageType {
-        use crate::core::wimgapi::WimImageType;
+    ) -> lr_core::image_meta::WimImageType {
+        use lr_core::image_meta::WimImageType;
         
         let name_lower = name.to_lowercase();
         let install_type_lower = installation_type.to_lowercase();

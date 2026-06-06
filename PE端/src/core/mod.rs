@@ -10,5 +10,3 @@ pub mod driver;
 pub mod ghost;
 pub mod registry;
 pub mod system_utils;
-pub mod wimgapi;
-pub mod wimlib;

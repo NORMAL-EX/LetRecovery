@@ -266,9 +266,9 @@ fn check_system_components() -> Result<(), Vec<String>> {
     let system32_path = std::path::Path::new(&system_root).join("System32");
     
     // 必需的系统组件列表
+    // 注：WIM 处理已改用内置的 libwim-15.dll，不再依赖系统 wimgapi.dll
     let required_components = [
         ("diskpart.exe", "磁盘分区工具"),
-        ("wimgapi.dll", "WIM 镜像处理库"),
         ("advapi32.dll", "高级 Windows API 库"),
     ];
     

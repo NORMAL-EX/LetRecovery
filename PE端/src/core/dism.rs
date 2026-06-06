@@ -11,8 +11,8 @@ use std::path::Path;
 use std::sync::mpsc::Sender;
 
 use crate::core::dism_exe::{DismExe, DismExeProgress};
-use crate::core::wimgapi::{WimProgress, WIM_COMPRESS_LZX, WIM_COMPRESS_LZMS};
-use crate::core::wimlib::WimlibManager;
+use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZX, WIM_COMPRESS_LZMS};
+use lr_core::wimlib::WimlibManager;
 
 /// 操作进度
 #[derive(Debug, Clone)]
