@@ -5,11 +5,11 @@
 //!
 //! # 结构体说明（通过逆向工程确认）
 //!
-//! ## FVE_STATUS_INFO / FVE_GET_STATUS_OUTPUT 结构体（版本2，0x80字节）
+//! ## FVE_STATUS_INFO / FVE_GET_STATUS_OUTPUT 结构体（version 8，0x78=120字节）
 //!
 //! 关键字段偏移（已通过反汇编验证）：
-//! - +0x00 dwSize: 结构体大小 (0x80 = 128)
-//! - +0x04 dwVersion: 版本号 (2)
+//! - +0x00 dwSize: 结构体大小 (0x78 = 120) —— version 8 必须为 0x78
+//! - +0x04 dwVersion: 版本号 (8) —— FveGetStatus 内部 `cmp eax,8` 选择 0x78 结构
 //! - +0x0C dwConversionStatus: 转换状态 (0-5)
 //! - +0x10 dblPercentComplete: 加密百分比 (0.0-100.0)
 //! - +0x38 dwProtectionStatus: 保护状态 (0=off/已解锁, 1=on/已锁定)
@@ -229,14 +229,14 @@ impl From<u32> for FveLockStatus {
     }
 }
 
-/// FVE_GET_STATUS_OUTPUT 结构体（版本2，0x80字节）
+/// FVE_GET_STATUS_OUTPUT 结构体（version 8，0x78=120字节）
 ///
 /// 根据fveapi.dll逆向工程分析确认的结构体布局。
 /// 这是 FveGetStatusW 和 FveGetStatus 函数使用的输出结构。
 ///
 /// 关键字段偏移（已验证）：
-/// - +0x00 dwSize: 结构体大小，必须设置为 0x80 (128)
-/// - +0x04 dwVersion: 版本号，必须设置为 2
+/// - +0x00 dwSize: 结构体大小，必须设置为 0x78 (120)
+/// - +0x04 dwVersion: 版本号，必须设置为 8
 /// - +0x0C dwConversionStatus: 转换状态 (0=解密, 1=加密, 2-5=转换中)
 /// - +0x10 dblPercentComplete: 加密百分比 (0.0-100.0)
 /// - +0x38 dwProtectionStatus: 保护状态 (0=关闭/已解锁, 1=开启/已锁定)
@@ -246,9 +246,9 @@ impl From<u32> for FveLockStatus {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FveGetStatusOutput {
-    /// +0x00: 结构体大小（必须为 0x80 = 128）
+    /// +0x00: 结构体大小（version 8 必须为 0x78 = 120；逆向: cmp dword [rbx],0x78 @0x1800240bd）
     pub size: u32,
-    /// +0x04: 版本号（必须为 2）
+    /// +0x04: 版本号（必须为 8；逆向: mov eax,[rbx+4]; cmp eax,8 @0x1800240af）
     pub version: u32,
     /// +0x08: 保留字段
     reserved1: u32,
@@ -258,30 +258,35 @@ pub struct FveGetStatusOutput {
     pub percent_complete: f64,
     /// +0x18: 保留字段数组 (0x20字节, 到0x37)
     reserved2: [u8; 0x20],
-    /// +0x38: 保护状态 (0=关闭/已解锁, 1=开启/已锁定)
+    /// +0x38: BitLocker 保护开关 ProtectionStatus (0=关, 1=开)。
+    /// 逆向重要提示: 这是“保护是否启用”，**不等于卷是否被锁定**。
+    /// 一个正常运行、已解锁的加密卷该值同样是 1(开)。v8 填充路径
+    /// (fveapi 0x180024070) 中**没有**独立的锁定状态字段——锁定(密钥
+    /// 可用性)由 API 行为通过错误码体现，见 `is_locked` / `get_lock_status` 文档。
     pub protection_status: u32,
     /// +0x3C: 保留字段数组 (0x14字节, 到0x4F)
     reserved3: [u8; 0x14],
     /// +0x50: 卷大小（字节）
     pub volume_size: u64,
-    /// +0x58: 已加密大小（字节）
+    /// +0x58: 已加密大小（字节）。逆向注意: v8 填充路径**未写入** +0x58,
+    /// 实测读到初始化的 0，不可依赖。可靠的容量字段是 volume_size(+0x50)。
     pub encrypted_size: u64,
     /// +0x60: 保留字段数组 (0x10字节, 到0x6F)
     reserved4: [u8; 0x10],
     /// +0x70: 加密标志
     pub encryption_flags: u32,
-    /// +0x74: 保留字段数组 (0x0C字节, 到0x7F)
-    reserved5: [u8; 0x0C],
+    /// +0x74: 保留字段数组 (0x04字节, 到0x77)
+    reserved5: [u8; 0x04],
 }
 
 // 确保结构体大小正确
-const _: () = assert!(std::mem::size_of::<FveGetStatusOutput>() == 0x80);
+const _: () = assert!(std::mem::size_of::<FveGetStatusOutput>() == 0x78);
 
 impl Default for FveGetStatusOutput {
     fn default() -> Self {
         Self {
-            size: 0x80,
-            version: 2,
+            size: 0x78,
+            version: 8,
             reserved1: 0,
             conversion_status: 0,
             percent_complete: 0.0,
@@ -292,7 +297,7 @@ impl Default for FveGetStatusOutput {
             encrypted_size: 0,
             reserved4: [0; 0x10],
             encryption_flags: 0,
-            reserved5: [0; 0x0C],
+            reserved5: [0; 0x04],
         }
     }
 }
@@ -314,8 +319,17 @@ impl FveGetStatusOutput {
             || self.conversion_status == FveVolumeStatus::DecryptionPaused as u32
     }
 
-    /// 检查卷是否已锁定
-    pub fn is_locked(&self) -> bool {
+    /// 检查 BitLocker 保护是否开启。
+    ///
+    /// # ⚠ 这不是锁定状态
+    /// 逆向确认 FVE_GET_STATUS_OUTPUT(v8) 没有独立锁定字段，本方法返回的是
+    /// ProtectionStatus(+0x38)，仅表示“保护开关是否开启”。已解锁的加密卷
+    /// 同样返回 true。要判断**卷是否被锁定**，请用以下权威途径之一：
+    /// - 调用解锁后看错误码：`FVE_E_LOCKED_VOLUME(0x80310000)` / `KeyRequired` ⇒ 锁定；
+    ///   `VolumeUnlocked(0x80310023)` ⇒ 本来就没锁；`Success` ⇒ 已解锁。
+    /// - 使用 `FveError::indicates_locked()`。
+    #[deprecated(note = "ProtectionStatus != 锁定状态；锁定请用解锁返回的错误码判定")]
+    pub fn is_protection_on(&self) -> bool {
         self.protection_status == FveProtectionStatus::On as u32
     }
 
@@ -329,7 +343,13 @@ impl FveGetStatusOutput {
         FveProtectionStatus::from(self.protection_status)
     }
 
-    /// 获取锁定状态枚举
+    /// 获取锁定状态枚举。
+    ///
+    /// # ⚠ 不可靠
+    /// 逆向确认本结构体不含锁定字段。此处沿用旧实现(由 ProtectionStatus 推断)，
+    /// 仅作兼容；正常运行的已解锁加密卷会被误判为 Locked。真实锁定状态请通过
+    /// 解锁返回的错误码判定(见 `FveError::indicates_locked`)。
+    #[deprecated(note = "不可靠；锁定请用解锁返回的错误码判定")]
     pub fn get_lock_status(&self) -> FveLockStatus {
         FveLockStatus::from(self.protection_status)
     }
@@ -355,6 +375,7 @@ pub struct FveVolumeInfo {
 }
 
 impl From<&FveGetStatusOutput> for FveVolumeInfo {
+    #[allow(deprecated)] // lock_status 沿用旧映射仅作兼容(见 get_lock_status 文档)
     fn from(output: &FveGetStatusOutput) -> Self {
         Self {
             volume_status: output.get_volume_status(),
@@ -721,8 +742,9 @@ impl<'a> FveVolumeHandle<'a> {
         let auth_element = self.api.create_passphrase_auth(password)?;
         let hr = unsafe { (self.api.fn_unlock_volume)(self.handle, auth_element) };
 
-        if hr == 0 {
-            log::info!("卷使用密码解锁成功");
+        // 0x80310023 = FVE_E_VOLUME_NOT_LOCKED: 卷本来就没锁，视为成功
+        if hr == 0 || hr == FveError::VolumeUnlocked as u32 {
+            log::info!("卷使用密码解锁成功(或本就未锁定)");
             Ok(())
         } else {
             let error = FveError::from_hresult(hr);
@@ -736,8 +758,9 @@ impl<'a> FveVolumeHandle<'a> {
         let auth_element = self.api.create_recovery_auth(recovery_key)?;
         let hr = unsafe { (self.api.fn_unlock_volume)(self.handle, auth_element) };
 
-        if hr == 0 {
-            log::info!("卷使用恢复密钥解锁成功");
+        // 0x80310023 = FVE_E_VOLUME_NOT_LOCKED: 卷本来就没锁，视为成功
+        if hr == 0 || hr == FveError::VolumeUnlocked as u32 {
+            log::info!("卷使用恢复密钥解锁成功(或本就未锁定)");
             Ok(())
         } else {
             let error = FveError::from_hresult(hr);
@@ -969,18 +992,20 @@ mod tests {
 
     #[test]
     fn test_fve_get_status_output_size() {
-        assert_eq!(std::mem::size_of::<FveGetStatusOutput>(), 0x80);
+        assert_eq!(std::mem::size_of::<FveGetStatusOutput>(), 0x78);
     }
 
     #[test]
     fn test_fve_get_status_output_default() {
         let output = FveGetStatusOutput::default();
-        assert_eq!(output.size, 0x80);
-        assert_eq!(output.version, 2);
+        assert_eq!(output.size, 0x78);
+        assert_eq!(output.version, 8);
         assert_eq!(output.conversion_status, 0);
         assert_eq!(output.protection_status, 0);
         assert!(!output.is_encrypted());
-        assert!(!output.is_locked());
+        #[allow(deprecated)]
+        let _prot = output.is_protection_on();
+        assert!(!_prot);
     }
 
     #[test]
