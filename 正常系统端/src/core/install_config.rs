@@ -48,6 +48,9 @@ pub struct InstallConfig {
     pub custom_username: String,
     /// 自定义系统盘卷标
     pub volume_label: String,
+    /// 自定义无人值守文件：UI 选择时为源文件绝对路径；
+    /// 经 write_install_config 复制到数据目录后，写入 INI 的是相对文件名。
+    pub custom_unattend_path: String,
     
     // Win7 专用选项
     /// Win7 UEFI 补丁（使用 UefiSeven）
@@ -188,9 +191,20 @@ impl ConfigFileManager {
         std::fs::write(&marker_path, "LetRecovery Install Marker")
             .context("写入安装标记文件失败")?;
 
+        // 处理自定义无人值守文件：把用户选择的 XML 复制到数据目录，INI 里只存相对文件名
+        let mut config = config.clone();
+        if !config.custom_unattend_path.is_empty() {
+            const CUSTOM_UNATTEND_NAME: &str = "custom_unattend.xml";
+            let dst = format!("{}\\{}", data_dir, CUSTOM_UNATTEND_NAME);
+            std::fs::copy(&config.custom_unattend_path, &dst)
+                .with_context(|| format!("复制自定义无人值守文件失败: {}", config.custom_unattend_path))?;
+            config.custom_unattend_path = CUSTOM_UNATTEND_NAME.to_string();
+            println!("[CONFIG] 已复制自定义无人值守文件 -> {}", dst);
+        }
+
         // 写入配置文件
         let config_path = format!("{}\\{}", data_dir, Self::INSTALL_CONFIG);
-        let content = Self::serialize_install_config(config);
+        let content = Self::serialize_install_config(&config);
         std::fs::write(&config_path, &content)
             .context("写入安装配置文件失败")?;
 
@@ -329,6 +343,7 @@ RemoveUWPApps={}
 ImportStorageControllerDrivers={}
 CustomUsername={}
 VolumeLabel={}
+CustomUnattendFile={}
 
 [Win7]
 Win7UefiPatch={}
@@ -358,6 +373,7 @@ Win7FixStorageBsod={}
             config.import_storage_controller_drivers,
             config.custom_username,
             config.volume_label,
+            config.custom_unattend_path,
             config.win7_uefi_patch,
             config.win7_inject_usb3_driver,
             config.win7_inject_nvme_driver,
@@ -424,6 +440,7 @@ SwmSplitSize={}
                     "ImportStorageControllerDrivers" => config.import_storage_controller_drivers = value.parse().unwrap_or(false),
                     "CustomUsername" => config.custom_username = value.to_string(),
                     "VolumeLabel" => config.volume_label = value.to_string(),
+                    "CustomUnattendFile" => config.custom_unattend_path = value.to_string(),
                     "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
                     "Win7InjectUsb3Driver" => config.win7_inject_usb3_driver = value.parse().unwrap_or(false),
                     "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
@@ -466,4 +483,125 @@ SwmSplitSize={}
         
         Ok(config)
     }
+}
+
+/// 轻量级 unattend.xml 语法校验（无第三方依赖）。
+///
+/// 检查：非空、含 `<unattend` 根元素、标签/注释/声明闭合且配对、引号内的 `>` 不误判。
+/// 返回 Ok(()) 表示语法基本合法；Err(msg) 给出可展示给用户的错误原因。
+pub fn validate_unattend_xml(xml: &str) -> Result<(), String> {
+    let s = xml.trim_start_matches('\u{feff}');
+    if s.trim().is_empty() {
+        return Err("文件内容为空".to_string());
+    }
+    if !s.contains("<unattend") {
+        return Err("不是有效的无人值守文件（缺少 <unattend> 根元素）".to_string());
+    }
+
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    let mut stack: Vec<String> = Vec::new();
+    let mut i = 0usize;
+
+    while i < n {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        // 注释 <!-- -->
+        if s[i..].starts_with("<!--") {
+            match s[i + 4..].find("-->") {
+                Some(off) => {
+                    i = i + 4 + off + 3;
+                    continue;
+                }
+                None => return Err("注释未闭合（缺少 -->）".to_string()),
+            }
+        }
+        // 处理指令/声明 <? ?>
+        if s[i..].starts_with("<?") {
+            match s[i + 2..].find("?>") {
+                Some(off) => {
+                    i = i + 2 + off + 2;
+                    continue;
+                }
+                None => return Err("XML 声明未闭合（缺少 ?>）".to_string()),
+            }
+        }
+        // <!DOCTYPE ...> 等
+        if bytes.get(i + 1) == Some(&b'!') {
+            match s[i..].find('>') {
+                Some(off) => {
+                    i += off + 1;
+                    continue;
+                }
+                None => return Err("<! ...> 未闭合".to_string()),
+            }
+        }
+
+        // 普通标签：从 i+1 起扫描到 '>'（跳过引号内的 '>'）
+        let mut j = i + 1;
+        let mut quote: Option<u8> = None;
+        let mut close = None;
+        while j < n {
+            let c = bytes[j];
+            match quote {
+                Some(q) => {
+                    if c == q {
+                        quote = None;
+                    }
+                }
+                None => {
+                    if c == b'"' || c == b'\'' {
+                        quote = Some(c);
+                    } else if c == b'>' {
+                        close = Some(j);
+                        break;
+                    }
+                }
+            }
+            j += 1;
+        }
+        let close = match close {
+            Some(c) => c,
+            None => return Err("存在未闭合的标签（缺少 '>'）".to_string()),
+        };
+        if quote.is_some() {
+            return Err("标签属性中的引号未闭合".to_string());
+        }
+
+        let inner = s[i + 1..close].trim();
+        if inner.starts_with('/') {
+            // 结束标签
+            let name = inner[1..].trim();
+            if name.is_empty() {
+                return Err("空的结束标签 </>".to_string());
+            }
+            match stack.pop() {
+                Some(top) if top == name => {}
+                Some(top) => {
+                    return Err(format!("标签未正确配对：遇到 </{}>，但应先闭合 <{}>", name, top))
+                }
+                None => return Err(format!("多余的结束标签 </{}>", name)),
+            }
+        } else if inner.ends_with('/') {
+            // 自闭合标签，忽略
+        } else {
+            let name = inner
+                .split(|c: char| c.is_whitespace())
+                .next()
+                .unwrap_or("");
+            if name.is_empty() {
+                return Err("存在空标签名".to_string());
+            }
+            stack.push(name.to_string());
+        }
+
+        i = close + 1;
+    }
+
+    if let Some(top) = stack.last() {
+        return Err(format!("有未闭合的标签：<{}>", top));
+    }
+    Ok(())
 }

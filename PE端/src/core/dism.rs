@@ -11,7 +11,8 @@ use std::path::Path;
 use std::sync::mpsc::Sender;
 
 use crate::core::dism_exe::{DismExe, DismExeProgress};
-use crate::core::wimgapi::{WimManager, WimProgress, WIM_COMPRESS_LZX, WIM_COMPRESS_LZMS};
+use crate::core::wimgapi::{WimProgress, WIM_COMPRESS_LZX, WIM_COMPRESS_LZMS};
+use crate::core::wimlib::WimlibManager;
 
 /// 操作进度
 #[derive(Debug, Clone)]
@@ -53,8 +54,8 @@ impl Dism {
     ) -> Result<()> {
         log::info!("[Dism] 使用 wimgapi 应用镜像: {} -> {}", image_file, apply_dir);
 
-        let wim_manager = WimManager::new()
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
+        let wim_manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
 
         // 创建进度转换通道
         let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
@@ -101,8 +102,8 @@ impl Dism {
     ) -> Result<()> {
         log::info!("[Dism] 使用 wimgapi 捕获镜像: {} -> {}", capture_dir, image_file);
 
-        let wim_manager = WimManager::new()
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
+        let wim_manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
 
         let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
 
@@ -168,8 +169,8 @@ impl Dism {
     ) -> Result<()> {
         log::info!("[Dism] 使用 wimgapi 捕获ESD镜像: {} -> {}", capture_dir, image_file);
 
-        let wim_manager = WimManager::new()
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
+        let wim_manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
 
         let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
 
@@ -244,8 +245,8 @@ impl Dism {
             });
         }
 
-        let wim_manager = WimManager::new()
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
+        let wim_manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
 
         let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
 
@@ -461,10 +462,10 @@ impl Dism {
     /// 使用 wimgapi.dll 或直接解析 WIM XML 元数据
     #[allow(dead_code)]
     pub fn get_image_info(&self, image_file: &str) -> Result<Vec<ImageInfo>> {
-        // 首先尝试使用 wimgapi
-        if let Ok(wim_manager) = WimManager::new() {
+        // 首先尝试使用 wimlib
+        if let Ok(wim_manager) = WimlibManager::new() {
             if let Ok(images) = wim_manager.get_image_info(image_file) {
-                log::info!("[Dism] 从 wimgapi 成功获取 {} 个镜像信息", images.len());
+                log::info!("[Dism] 从 wimlib 成功获取 {} 个镜像信息", images.len());
                 return Ok(images.into_iter().map(|img| ImageInfo {
                     index: img.index,
                     name: img.name,

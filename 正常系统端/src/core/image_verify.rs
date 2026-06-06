@@ -21,7 +21,6 @@ use std::thread;
 use std::time::Duration;
 
 use crate::core::iso::IsoMounter;
-use crate::core::wimgapi::{Wimgapi, WIM_COMPRESS_NONE, WIM_GENERIC_READ, WIM_OPEN_EXISTING, WIM_REFERENCE_APPEND};
 use crate::core::wimlib::Wimlib;
 
 // ============================================================================
@@ -466,97 +465,116 @@ impl ImageVerifier {
         let mut result = VerifyResult::default();
         result.part_count = swm_files.len() as u16;
         result.details.push(format!("找到 {} 个分卷文件", swm_files.len()));
+        let total_parts = swm_files.len();
 
         reporter.report(10, format!("找到 {} 个分卷，正在加载...", swm_files.len()), file_path);
 
-        // 加载 wimgapi
-        let wimgapi = match Wimgapi::new(None) {
+        // 加载 wimlib
+        let wimlib = match Wimlib::new() {
             Ok(w) => w,
-            Err(e) => return VerifyResult::error(file_path, ImageType::Swm, format!("无法加载 wimgapi.dll: {}", e)),
+            Err(e) => return VerifyResult::error(file_path, ImageType::Swm, format!("无法加载 wimlib: {}", e)),
         };
 
         reporter.report(20, "正在打开主分卷...", file_path);
 
         // 打开主 SWM 文件
-        let main_path = Path::new(&swm_files[0]);
-        let wim_handle = match wimgapi.open(main_path, WIM_GENERIC_READ, WIM_OPEN_EXISTING, WIM_COMPRESS_NONE) {
+        let wim_handle = match wimlib.open_wim(&swm_files[0]) {
             Ok(h) => h,
             Err(e) => return VerifyResult::corrupted(file_path, ImageType::Swm, format!("无法打开主分卷: {}", e)),
         };
 
-        // 设置临时路径
-        let temp_dir = std::env::temp_dir();
-        let _ = wimgapi.set_temp_path(wim_handle, &temp_dir);
+        reporter.report(40, "正在引入其余分卷...", file_path);
 
-        // 加载其他分卷
-        let total_parts = swm_files.len();
-        for (i, swm_path) in swm_files.iter().enumerate().skip(1) {
-            if self.is_cancelled() {
-                let _ = wimgapi.close(wim_handle);
-                result.status = VerifyStatus::Cancelled;
-                result.message = "校验已取消".to_string();
-                return result;
-            }
-
-            let progress = Self::calculate_progress(20, (i + 1) as u32, total_parts as u32, 30);
-            reporter.report(progress, format!("正在加载分卷 {}/{}...", i + 1, total_parts), swm_path);
-
-            let ref_path = Path::new(swm_path);
-            if let Err(e) = wimgapi.set_reference_file(wim_handle, ref_path, WIM_REFERENCE_APPEND) {
-                let _ = wimgapi.close(wim_handle);
-                return VerifyResult::corrupted(file_path, ImageType::Swm, format!("无法加载分卷 {}: {}", swm_path, e));
-            }
+        // 用 glob 引入同目录其余分卷（如 dir/install*.swm）
+        let glob = Self::build_swm_glob(&swm_files[0]);
+        if let Err(e) = wim_handle.reference_resource_globs(&[&glob]) {
+            return VerifyResult::corrupted(
+                file_path,
+                ImageType::Swm,
+                format!("无法引入分卷（{}）: {}", glob, e),
+            );
         }
 
         reporter.report(55, "正在读取镜像信息...", file_path);
 
         // 获取镜像数量
-        let image_count = wimgapi.get_image_count(wim_handle);
-        result.image_count = image_count;
-
-        if image_count == 0 {
-            let _ = wimgapi.close(wim_handle);
+        let image_count = wim_handle.get_image_count();
+        if image_count <= 0 {
             return VerifyResult::corrupted(file_path, ImageType::Swm, "分卷镜像中没有有效的系统镜像");
         }
+        result.image_count = image_count as u32;
 
-        // 获取镜像信息
-        if let Ok(xml) = wimgapi.get_image_information(wim_handle) {
-            let images = Wimgapi::parse_image_info_from_xml(&xml);
-            for img in &images {
-                result.details.push(format!("镜像 {}: {}", img.index, img.name));
+        for i in 1..=image_count {
+            let (name, _desc) = wim_handle.get_image_info(i);
+            if !name.is_empty() {
+                result.details.push(format!("镜像 {}: {}", i, name));
             }
         }
 
-        reporter.report(70, "正在验证镜像结构...", file_path);
+        reporter.report(60, "正在校验完整性...", file_path);
 
-        // 验证每个镜像
-        for index in 1..=image_count {
-            if self.is_cancelled() {
-                let _ = wimgapi.close(wim_handle);
-                result.status = VerifyStatus::Cancelled;
-                result.message = "校验已取消".to_string();
-                return result;
-            }
-
-            let progress = Self::calculate_progress(70, index, image_count, 25);
-            reporter.report(progress, format!("正在验证镜像 {}/{}...", index, image_count), file_path);
-
-            match wimgapi.load_image(wim_handle, index) {
-                Ok(image_handle) => {
-                    let _ = wimgapi.close(image_handle);
+        // 进度监控线程（复用全局进度，与 WIM/ESD 校验一致）
+        let cancel_flag = Arc::clone(&self.cancel_flag);
+        let reporter_tx = reporter.tx.clone();
+        let monitor = thread::spawn(move || {
+            let mut last_progress = 0u8;
+            loop {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    break;
                 }
-                Err(e) => {
-                    let _ = wimgapi.close(wim_handle);
-                    return VerifyResult::corrupted(file_path, ImageType::Swm, format!("镜像 {} 损坏: {}", index, e));
+                let current = Wimlib::get_global_progress();
+                if current > last_progress {
+                    last_progress = current;
+                    if let Some(ref tx) = reporter_tx {
+                        let _ = tx.send(VerifyProgress::new(
+                            60 + (current as u32 * 35 / 100) as u8,
+                            format!("正在校验完整性 ({}%)...", current),
+                            "",
+                        ));
+                    }
                 }
+                if current >= 100 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
             }
+        });
+
+        let verify_result = wim_handle.verify();
+        let _ = monitor.join();
+
+        if self.is_cancelled() {
+            result.status = VerifyStatus::Cancelled;
+            result.message = "校验已取消".to_string();
+            return result;
         }
 
-        let _ = wimgapi.close(wim_handle);
-
-        result.status = VerifyStatus::Valid;
-        result.message = format!("校验通过，{} 个分卷，{} 个镜像全部有效", total_parts, image_count);
+        match verify_result {
+            Ok(_) => {
+                result.status = VerifyStatus::Valid;
+                result.message =
+                    format!("校验通过，{} 个分卷，{} 个镜像全部有效", total_parts, image_count);
+            }
+            Err(e) => {
+                result.status = VerifyStatus::Corrupted;
+                result.message = format!("校验失败: {}", e);
+            }
+        }
         result
+    }
+
+    /// 由 SWM 主分卷路径构造引入其余分卷的 glob（dir/install.swm -> dir/install*.swm）
+    fn build_swm_glob(main_swm: &str) -> String {
+        let path = Path::new(main_swm);
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let base = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+        let base = if base.is_empty() { stem } else { base };
+        let pattern = format!("{}*.swm", base);
+        match dir {
+            Some(d) => d.join(pattern).to_string_lossy().into_owned(),
+            None => pattern,
+        }
     }
 
     /// 查找 SWM 分卷文件

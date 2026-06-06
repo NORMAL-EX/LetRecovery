@@ -15,7 +15,8 @@ use std::sync::mpsc::Sender;
 use crate::core::dism_cmd::DismCmd;
 use crate::core::driver::DriverManager;
 use crate::core::system_utils;
-use crate::core::wimgapi::{WimManager, WimProgress, WIM_COMPRESS_LZX, Wimgapi};
+use crate::core::wimgapi::{WimProgress, WIM_COMPRESS_LZX};
+use crate::core::wimlib::WimlibManager;
 
 /// 操作进度
 #[derive(Debug, Clone)]
@@ -72,10 +73,10 @@ impl Dism {
         index: u32,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        println!("[Dism] 使用 wimgapi 应用镜像: {} -> {}", image_file, apply_dir);
+        println!("[Dism] 使用 wimlib 应用镜像: {} -> {}", image_file, apply_dir);
 
-        let wim_manager = WimManager::new()
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
+        let wim_manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
 
         // 创建进度转换通道
         let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
@@ -120,10 +121,10 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        println!("[Dism] 使用 wimgapi 捕获镜像: {} -> {}", capture_dir, image_file);
+        println!("[Dism] 使用 wimlib 捕获镜像: {} -> {}", capture_dir, image_file);
 
-        let wim_manager = WimManager::new()
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
+        let wim_manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
 
         let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
 
@@ -318,13 +319,13 @@ impl Dism {
     pub fn get_image_info(&self, image_file: &str) -> Result<Vec<ImageInfo>> {
         println!("[Dism] 开始获取镜像信息: {}", image_file);
         
-        // 首先尝试使用 wimgapi
-        match WimManager::new() {
+        // 首先尝试使用 wimlib
+        match WimlibManager::new() {
             Ok(wim_manager) => {
-                println!("[Dism] wimgapi.dll 加载成功");
+                println!("[Dism] wimlib 加载成功");
                 match wim_manager.get_image_info(image_file) {
                     Ok(images) => {
-                        println!("[Dism] 从 wimgapi 成功获取 {} 个镜像信息", images.len());
+                        println!("[Dism] 从 wimlib 成功获取 {} 个镜像信息", images.len());
                         return Ok(images.into_iter().map(|img| ImageInfo {
                             index: img.index,
                             name: img.name,
@@ -393,51 +394,40 @@ impl Dism {
     }
 
     fn get_ntdll_major_version(image_file: &str, index: u32) -> Result<u16> {
-        let wimgapi = Wimgapi::new(None)
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
-        let wim_path = Path::new(image_file);
-        let mount_dir = std::env::temp_dir().join(format!(
-            "LetRecovery_WimMount_{}_{}",
+        // 用 wimlib 仅提取 \Windows\System32\ntdll.dll 到临时目录，再读其文件版本
+        // （替代原先的 wimgapi 挂载方案——wimlib 在 Windows 上不支持挂载）
+        let manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
+
+        let extract_dir = std::env::temp_dir().join(format!(
+            "LetRecovery_WimExtract_{}_{}",
             std::process::id(),
             index
         ));
-
-        if mount_dir.exists() {
-            let _ = std::fs::remove_dir_all(&mount_dir);
+        if extract_dir.exists() {
+            let _ = std::fs::remove_dir_all(&extract_dir);
         }
-        std::fs::create_dir_all(&mount_dir).context("创建临时挂载目录失败")?;
+        std::fs::create_dir_all(&extract_dir).context("创建临时提取目录失败")?;
 
-        let temp_dir = mount_dir.join("temp");
-        let _ = std::fs::create_dir_all(&temp_dir);
-
-        wimgapi
-            .mount_image(&mount_dir, wim_path, index, Some(&temp_dir))
-            .map_err(|e| anyhow::anyhow!("挂载镜像失败: {}", e))?;
-
-        struct MountGuard<'a> {
-            wimgapi: &'a Wimgapi,
-            mount_dir: PathBuf,
-            wim_path: PathBuf,
-            index: u32,
-        }
-
-        impl<'a> Drop for MountGuard<'a> {
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
             fn drop(&mut self) {
-                let _ = self
-                    .wimgapi
-                    .unmount_image(&self.mount_dir, &self.wim_path, self.index, false);
-                let _ = std::fs::remove_dir_all(&self.mount_dir);
+                let _ = std::fs::remove_dir_all(&self.0);
             }
         }
+        let _guard = DirGuard(extract_dir.clone());
 
-        let _guard = MountGuard {
-            wimgapi: &wimgapi,
-            mount_dir: mount_dir.clone(),
-            wim_path: wim_path.to_path_buf(),
-            index,
-        };
+        let extract_dir_str = extract_dir.to_string_lossy().to_string();
+        manager
+            .extract_paths(
+                image_file,
+                index,
+                &extract_dir_str,
+                &["\\Windows\\System32\\ntdll.dll"],
+            )
+            .map_err(|e| anyhow::anyhow!("提取 ntdll.dll 失败: {}", e))?;
 
-        let ntdll_path = mount_dir
+        let ntdll_path = extract_dir
             .join("Windows")
             .join("System32")
             .join("ntdll.dll");

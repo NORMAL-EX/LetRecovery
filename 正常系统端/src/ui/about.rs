@@ -247,45 +247,6 @@ impl App {
                 ui.add_space(20.0);
                 ui.separator();
 
-                // 免费声明
-                ui.heading(tr!("免费声明"));
-                ui.add_space(10.0);
-
-                ui.colored_label(
-                    egui::Color32::from_rgb(0, 200, 83),
-                    format!("✓ {}", tr!("本软件完全免费，禁止任何形式的倒卖行为！")),
-                );
-
-                ui.add_space(8.0);
-
-                ui.label(tr!("如果您是通过付费渠道获取本软件，您已被骗，请立即举报并申请退款。"));
-
-                ui.add_space(15.0);
-
-                // 使用条款
-                ui.heading(tr!("使用条款"));
-                ui.add_space(10.0);
-
-                ui.colored_label(egui::Color32::from_rgb(100, 181, 246), format!("{}：", tr!("允许")));
-                ui.indent("allowed", |ui| {
-                    ui.label(format!("• {}", tr!("个人学习、研究和非盈利使用")));
-                    ui.label(format!("• {}", tr!("修改源代码并用于非盈利用途")));
-                    ui.label(format!("• {}", tr!("在注明出处的前提下进行非商业性质的分发")));
-                });
-
-                ui.add_space(10.0);
-
-                ui.colored_label(egui::Color32::from_rgb(239, 83, 80), format!("{}：", tr!("禁止")));
-                ui.indent("forbidden", |ui| {
-                    ui.label(format!("• {}", tr!("将本软件或其源代码用于任何商业/盈利用途")));
-                    ui.label(format!("• {}", tr!("销售、倒卖本软件或其衍生作品")));
-                    ui.label(format!("• {}", tr!("将本软件整合到商业产品或服务中")));
-                    ui.label(format!("• {}", tr!("个人利用本软件或其代码进行盈利活动")));
-                });
-
-                ui.add_space(20.0);
-                ui.separator();
-
                 // 致谢
                 ui.heading(tr!("致谢"));
 

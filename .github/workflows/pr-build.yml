@@ -47,6 +47,17 @@ jobs:
         working-directory: ${{ matrix.dir }}
         run: cargo build --locked
 
+      # 以下为代码质量检查，非阻塞（不影响构建结论），仅供参考
+      - name: Cargo fmt check
+        working-directory: ${{ matrix.dir }}
+        run: cargo fmt --check
+        continue-on-error: true
+
+      - name: Cargo clippy
+        working-directory: ${{ matrix.dir }}
+        run: cargo clippy --locked --all-targets
+        continue-on-error: true
+
   website:
     name: Build 官网
     runs-on: ubuntu-latest

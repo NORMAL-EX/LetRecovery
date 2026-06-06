@@ -175,6 +175,8 @@ pub struct InstallOptions {
     pub boot_mode: BootModeSelection,
     pub advanced_options: AdvancedOptions,
     pub driver_action: DriverAction,
+    /// 自定义无人值守文件绝对路径（空=使用内置生成）
+    pub custom_unattend_path: String,
 }
 
 /// 主应用结构
@@ -484,6 +486,10 @@ pub struct App {
     pub last_unattend_check_partition: Option<String>,
     /// 是否显示无人值守冲突提示对话框
     pub show_unattend_conflict_modal: bool,
+    /// 用户选择的自定义无人值守文件路径（空=使用内置生成的）
+    pub custom_unattend_path: String,
+    /// 自定义无人值守文件语法校验错误（Some=有错，禁用安装按钮并提示）
+    pub custom_unattend_error: Option<String>,
     
     // 安装时BitLocker解锁对话框
     /// 是否显示安装前BitLocker解锁对话框
@@ -800,6 +806,8 @@ impl Default for App {
             embedded_assets: crate::ui::EmbeddedAssets::new(),
             // 无人值守检测相关
             partition_has_unattend: false,
+            custom_unattend_path: String::new(),
+            custom_unattend_error: None,
             unattend_check_loading: false,
             unattend_check_rx: None,
             last_unattend_check_partition: None,

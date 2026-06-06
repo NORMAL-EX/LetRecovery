@@ -421,12 +421,75 @@ impl App {
 
         ui.add_space(20.0);
 
+        // 自定义无人值守文件（仅在启用无人值守时显示）
+        if self.unattended_install {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("自定义无人值守:");
+                if ui.button("选择文件…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("无人值守文件", &["xml"])
+                        .pick_file()
+                    {
+                        let p = path.to_string_lossy().to_string();
+                        match std::fs::read_to_string(&path) {
+                            Ok(content) => {
+                                self.custom_unattend_path = p;
+                                self.custom_unattend_error =
+                                    crate::core::install_config::validate_unattend_xml(&content)
+                                        .err();
+                            }
+                            Err(e) => {
+                                self.custom_unattend_path = p;
+                                self.custom_unattend_error = Some(format!("无法读取文件: {}", e));
+                            }
+                        }
+                    }
+                }
+                if !self.custom_unattend_path.is_empty()
+                    && ui.button("清除").clicked()
+                {
+                    self.custom_unattend_path.clear();
+                    self.custom_unattend_error = None;
+                }
+            });
+
+            if self.custom_unattend_path.is_empty() {
+                ui.label(
+                    egui::RichText::new("未选择则使用内置生成的无人值守配置").weak(),
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("已选:");
+                    ui.monospace(self.custom_unattend_path.clone());
+                });
+                match &self.custom_unattend_error {
+                    Some(err) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 50, 47),
+                            format!("⚠ 无人值守文件语法错误：{}（已禁用安装）", err),
+                        );
+                    }
+                    None => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0, 160, 0),
+                            "✓ 无人值守文件语法校验通过",
+                        );
+                    }
+                }
+            }
+        }
+
+        ui.add_space(10.0);
+
         // 开始安装按钮
         let can_install = self.selected_partition.is_some()
             && !self.local_image_path.is_empty()
             && (self.local_image_path.ends_with(".gho") || self.selected_volume.is_some())
             && !install_blocked
-            && (!show_pe_selector || self.selected_pe_for_install.is_some());
+            && (!show_pe_selector || self.selected_pe_for_install.is_some())
+            // 选择了自定义无人值守但语法有误 -> 禁用安装
+            && self.custom_unattend_error.is_none();
 
         ui.horizontal(|ui| {
             if ui
@@ -1028,6 +1091,11 @@ impl App {
             boot_mode: self.selected_boot_mode,
             advanced_options: self.advanced_options.clone(),
             driver_action: self.driver_action,
+            custom_unattend_path: if self.unattended_install {
+                self.custom_unattend_path.clone()
+            } else {
+                String::new()
+            },
         };
 
         self.is_installing = true;

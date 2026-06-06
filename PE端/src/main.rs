@@ -292,7 +292,36 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         // Step 7: 生成无人值守配置
         if config.unattended {
             println!("[PE INSTALL] Step 7: 生成无人值守配置");
-            let _ = generate_unattend_xml(&target_partition, &config.custom_username);
+            if !config.custom_unattend_file.is_empty() {
+                // 用户自定义无人值守文件：直接复制到目标系统
+                let data_dir = ConfigFileManager::get_data_dir(&data_partition);
+                let src = format!("{}\\{}", data_dir, config.custom_unattend_file);
+                match std::fs::read(&src) {
+                    Ok(content) => {
+                        let panther_dir = format!("{}\\Windows\\Panther", target_partition);
+                        let _ = std::fs::create_dir_all(&panther_dir);
+                        let _ = std::fs::write(format!("{}\\unattend.xml", panther_dir), &content);
+                        let sysprep_dir =
+                            format!("{}\\Windows\\System32\\Sysprep", target_partition);
+                        if std::path::Path::new(&sysprep_dir).exists() {
+                            let _ = std::fs::write(format!("{}\\unattend.xml", sysprep_dir), &content);
+                        }
+                        println!("[PE INSTALL] 已应用自定义无人值守文件: {}", src);
+                    }
+                    Err(e) => eprintln!("[PE INSTALL] 读取自定义无人值守文件失败: {}", e),
+                }
+            } else {
+                let _ = generate_unattend_xml(&target_partition, &config.custom_username);
+            }
+        }
+
+        // Step 7.5: 离线登录兜底（放开空密码策略 + 已知用户名时配置自动登录）
+        if let Err(e) =
+            core::account_fix::ensure_offline_login(&target_partition, &config.custom_username)
+        {
+            eprintln!("[PE INSTALL] 离线登录兜底设置失败（不影响安装）: {}", e);
+        } else {
+            println!("[PE INSTALL] 已应用离线登录兜底设置");
         }
 
         // Step 8: 清理

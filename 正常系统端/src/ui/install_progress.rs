@@ -716,6 +716,7 @@ impl App {
                 } else {
                     String::new()
                 },
+                custom_unattend_path: options.custom_unattend_path.clone(),
                 win7_uefi_patch: advanced_options.win7_uefi_patch,
                 win7_inject_usb3_driver: advanced_options.win7_inject_usb3_driver,
                 win7_inject_nvme_driver: advanced_options.win7_inject_nvme_driver,

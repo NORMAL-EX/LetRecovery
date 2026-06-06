@@ -1,4 +1,8 @@
 fn main() {
+    // 把 vendor/libwim-15.dll 复制到最终可执行文件目录（target/<profile>/），
+    // 使 wimlib 在运行时能在 exe 同目录找到它。
+    copy_wimlib_dll();
+
     // 仅在 Windows 上设置资源
     #[cfg(windows)]
     {
@@ -54,5 +58,40 @@ fn main() {
         if let Err(e) = res.compile() {
             eprintln!("Warning: Failed to compile Windows resources: {}", e);
         }
+    }
+}
+
+/// 将 vendor/libwim-15.dll 复制到 target/<profile>/ 及 deps/，供运行时加载。
+fn copy_wimlib_dll() {
+    use std::path::Path;
+
+    let dll_name = "libwim-15.dll";
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let src = Path::new(&manifest_dir).join("vendor").join(dll_name);
+
+    println!("cargo:rerun-if-changed=vendor/{}", dll_name);
+
+    if !src.exists() {
+        println!("cargo:warning=未找到 {}，跳过 DLL 复制", src.display());
+        return;
+    }
+
+    let out_dir = match std::env::var("OUT_DIR") {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let target_dir = match Path::new(&out_dir).ancestors().nth(3) {
+        Some(d) => d.to_path_buf(),
+        None => return,
+    };
+
+    let dst = target_dir.join(dll_name);
+    if let Err(e) = std::fs::copy(&src, &dst) {
+        println!("cargo:warning=复制 DLL 失败 {} -> {}: {}", src.display(), dst.display(), e);
+    }
+
+    let deps_dir = target_dir.join("deps");
+    if deps_dir.exists() {
+        let _ = std::fs::copy(&src, deps_dir.join(dll_name));
     }
 }

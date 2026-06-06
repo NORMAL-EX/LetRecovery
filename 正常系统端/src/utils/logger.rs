@@ -55,7 +55,14 @@ impl LogManager {
 
         if enabled {
             // 创建文件日志写入器（按日期滚动）
-            let file_appender = tracing_appender::rolling::daily(&log_dir, "LetRecovery.log");
+            // 用 Builder 设置 .log 后缀，文件名形如 LetRecovery.2026-06-06.log
+            // （直接用 rolling::daily 会得到 LetRecovery.log.2026-06-06，后缀是日期而非 .log）
+            let file_appender = tracing_appender::rolling::Builder::new()
+                .filename_prefix("LetRecovery")
+                .filename_suffix("log")
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .build(&log_dir)
+                .map_err(|e| anyhow::anyhow!("创建日志文件写入器失败: {}", e))?;
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
             // 文件日志格式层
@@ -139,7 +146,7 @@ impl LogManager {
     pub fn get_current_log_file() -> PathBuf {
         let log_dir = Self::get_log_dir();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        log_dir.join(format!("LetRecovery.log.{}", today))
+        log_dir.join(format!("LetRecovery.{}.log", today))
     }
 
     /// 清理旧日志文件

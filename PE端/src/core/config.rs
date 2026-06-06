@@ -83,6 +83,8 @@ pub struct InstallConfig {
     pub custom_username: String,
     /// 自定义系统盘卷标
     pub volume_label: String,
+    /// 自定义无人值守文件（数据目录下的相对文件名，空=使用内置生成）
+    pub custom_unattend_file: String,
     
     // Win7 专用选项
     /// Win7 UEFI 补丁（使用 UefiSeven）
@@ -387,6 +389,7 @@ impl ConfigFileManager {
                     }
                     "CustomUsername" => config.custom_username = value.to_string(),
                     "VolumeLabel" => config.volume_label = value.to_string(),
+                    "CustomUnattendFile" => config.custom_unattend_file = value.to_string(),
                     "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
                     "Win7InjectUsb3Driver" => config.win7_inject_usb3_driver = value.parse().unwrap_or(false),
                     "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
