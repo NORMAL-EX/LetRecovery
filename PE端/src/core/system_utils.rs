@@ -692,34 +692,28 @@ pub fn get_pe_system_drive() -> Option<String> {
 // 临时目录管理
 // =============================================================================
 
-/// 获取适合的临时目录
+/// 获取适合的临时目录。
 ///
-/// 在 PE 环境中优先使用 X:\Windows\TEMP，
-/// 否则使用系统默认临时目录。
+/// 不写死盘符：优先用当前运行系统的 `%SystemRoot%\TEMP`（PE 盘符不一定是 X:），
+/// 再用探测到的 PE 系统盘，最后回退到系统默认临时目录。
 pub fn get_temp_directory() -> PathBuf {
-    // PE 环境优先
-    let pe_temps = [
-        "X:\\Windows\\TEMP",
-        "X:\\TEMP",
-        "Y:\\TEMP",
-    ];
-
-    for temp in &pe_temps {
-        let path = Path::new(temp);
-        if path.exists() {
-            return path.to_path_buf();
+    // 1) 当前系统的 Windows\TEMP（由 SystemRoot 推导，盘符无关）
+    if let Ok(system_root) = std::env::var("SystemRoot") {
+        let p = Path::new(&system_root).join("TEMP");
+        if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+            return p;
         }
     }
 
-    // 尝试创建 PE 临时目录
-    if is_pe_environment() {
-        let pe_temp = Path::new("X:\\Windows\\TEMP");
-        if std::fs::create_dir_all(pe_temp).is_ok() {
-            return pe_temp.to_path_buf();
+    // 2) 探测到的 PE 系统盘
+    if let Some(drive) = get_pe_system_drive() {
+        let p = PathBuf::from(format!("{}\\Windows\\TEMP", drive));
+        if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+            return p;
         }
     }
 
-    // 使用系统默认临时目录
+    // 3) 系统默认临时目录（读取 TEMP/TMP 环境变量）
     std::env::temp_dir()
 }
 

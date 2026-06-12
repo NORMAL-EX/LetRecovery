@@ -23,8 +23,9 @@ impl PeManager {
     /// 检查PE文件是否存在
     /// 返回 (存在, 完整路径)
     pub fn check_pe_exists(filename: &str) -> (bool, String) {
-        // 检查多个可能的位置
+        // 检查多个可能的位置（新布局优先：bin\pe）
         let locations = [
+            get_bin_dir().join("pe").join(filename),
             get_exe_dir().join(filename),
             get_exe_dir().join("PE").join(filename),
             get_exe_dir().join("pe").join(filename),

@@ -187,13 +187,6 @@ impl App {
                 // ========== 第四行 ==========
 
                 if ui
-                    .add(egui::Button::new("万能驱动").min_size(button_size))
-                    .clicked()
-                {
-                    self.launch_wandrv_tool();
-                }
-
-                if ui
                     .add(egui::Button::new("查看GHO密码").min_size(button_size))
                     .clicked()
                 {
@@ -223,10 +216,7 @@ impl App {
                     self.launch_space_sniffer_tool();
                 }
 
-                ui.end_row();
-
-                // ========== 第五行 ==========
-
+                // 镜像校验补到本行第 4 格（删除“万能驱动”后填平空缺）
                 if ui
                     .add(egui::Button::new("镜像校验").min_size(button_size))
                     .clicked()
@@ -235,6 +225,22 @@ impl App {
                     self.image_verify_file_path.clear();
                     self.image_verify_result = None;
                     self.image_verify_progress = None;
+                }
+
+                ui.end_row();
+
+                // ========== 第五行 ==========
+
+                if ui
+                    .add(egui::Button::new("BitLocker管理").min_size(button_size))
+                    .clicked()
+                {
+                    self.show_bitlocker_manage_dialog = true;
+                    self.bitlocker_manage_message.clear();
+                    self.bitlocker_manage_password.clear();
+                    self.bitlocker_manage_recovery_key.clear();
+                    self.bitlocker_manage_selected = None;
+                    self.start_load_bitlocker_manage_partitions();
                 }
 
                 ui.end_row();
@@ -255,6 +261,7 @@ impl App {
         self.render_quick_partition_dialog(ui);
         self.render_image_verify_dialog(ui);
         self.render_repair_boot_dialog(ui);
+        self.render_bitlocker_manage_dialog(ui);
 
         // 显示工具状态
         if !self.tool_message.is_empty() {
@@ -269,18 +276,6 @@ impl App {
         match actions::launch_ghost() {
             Ok(_) => {
                 self.tool_message = "已启动: Ghost64.exe".to_string();
-            }
-            Err(e) => {
-                self.tool_message = e;
-            }
-        }
-    }
-
-    /// 启动万能驱动工具
-    fn launch_wandrv_tool(&mut self) {
-        match actions::launch_wandrv() {
-            Ok(_) => {
-                self.tool_message = "已启动: QDZC.exe".to_string();
             }
             Err(e) => {
                 self.tool_message = e;

@@ -41,7 +41,7 @@ fn ensure_global_init(init: FnGlobalInit) -> bool {
     WIMLIB_INIT_OK.load(Ordering::SeqCst)
 }
 
-use crate::core::wimgapi::{ImageInfo, WimProgress, Wimgapi};
+use crate::image_meta::{parse_image_info_from_xml, ImageInfo, WimProgress};
 
 // ============================================================================
 // 常量（严格对照 wimlib.h）
@@ -52,6 +52,8 @@ mod progress_msg {
     pub const EXTRACT_STREAMS: i32 = 4;
     pub const WRITE_STREAMS: i32 = 12;
     pub const VERIFY_INTEGRITY: i32 = 16;
+    /// wimlib_verify_wim() 校验文件数据时发送此消息（info 指向 verify_streams）
+    pub const VERIFY_STREAMS: i32 = 29;
 }
 
 /// 进度回调返回值
@@ -312,11 +314,20 @@ unsafe extern "C" fn verify_progress_callback(
     _ctx: *mut c_void,
 ) -> c_int {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        if info.is_null() || msg != progress_msg::VERIFY_INTEGRITY {
+        if info.is_null() {
             return;
         }
-        let total = read_u64(info, 8);
-        let completed = read_u64(info, 0);
+        // 不同消息的 info 结构体布局不同：
+        // - VERIFY_INTEGRITY (整完整性表)：integrity { total_bytes@0, completed_bytes@8 }
+        //   仅在用 CHECK_INTEGRITY 打开时才会收到。
+        // - VERIFY_STREAMS  (校验文件数据)：verify_streams {
+        //     wimfile@0, total_streams@8, total_bytes@16, completed_streams@24, completed_bytes@32 }
+        //   wimlib_verify_wim() 实际发送的是这个消息。
+        let (total, completed) = match msg {
+            progress_msg::VERIFY_INTEGRITY => (read_u64(info, 0), read_u64(info, 8)),
+            progress_msg::VERIFY_STREAMS => (read_u64(info, 16), read_u64(info, 32)),
+            _ => return,
+        };
         if total > 0 {
             let percent = ((completed as f64 / total as f64) * 100.0).min(100.0) as u8;
             let cur = VERIFY_GLOBAL_PROGRESS.load(Ordering::SeqCst);
@@ -335,29 +346,9 @@ unsafe extern "C" fn verify_progress_callback(
 // DLL 加载（共享给 Wimlib 与 WimlibManager）
 // ============================================================================
 
-/// 编译期嵌入的 libwim-15.dll。用于在 PE 等默认不含该 DLL 的环境下兜底释放，
-/// 确保 wimlib 一定能被加载（旧版用的 wimgapi.dll 是 PE 自带的，迁移到 wimlib 后
-/// 若 PE 打包未带上 libwim-15.dll 会导致所有镜像操作失败）。
-static EMBEDDED_WIMLIB_DLL: &[u8] = include_bytes!("../../vendor/libwim-15.dll");
-
-/// 确保 libwim-15.dll 在可执行文件同目录存在；不存在则从嵌入数据释放。幂等。
-pub fn ensure_dll_available() {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let dst = dir.join("libwim-15.dll");
-            if !dst.exists() {
-                match std::fs::write(&dst, EMBEDDED_WIMLIB_DLL) {
-                    Ok(_) => log::info!("已释放内置 libwim-15.dll 到 {}", dst.display()),
-                    Err(e) => log::warn!("释放内置 libwim-15.dll 失败 {}: {}", dst.display(), e),
-                }
-            }
-        }
-    }
-}
-
 fn find_and_load_dll() -> Result<Library, String> {
-    // 先确保 DLL 就位（PE 环境兜底），再尝试加载
-    ensure_dll_available();
+    // 先确保 DLL 就位（PE 环境兜底，内置并释放），再尝试加载
+    crate::ensure_dll_available();
     let names = ["libwim-15.dll", "wimlib-15.dll", "libwim.dll", "wimlib.dll"];
     let mut last = String::new();
 
@@ -842,7 +833,7 @@ impl WimlibManager {
         };
         unsafe { (self.free_wim)(wim) };
 
-        let images = Wimgapi::parse_image_info_from_xml(&xml);
+        let images = parse_image_info_from_xml(&xml);
         if images.is_empty() {
             return Err("未解析到镜像信息".to_string());
         }

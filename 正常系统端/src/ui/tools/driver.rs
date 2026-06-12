@@ -32,8 +32,7 @@ pub fn import_drivers_offline(target_partition: &str, driver_dir: &str) -> Resul
 
 /// 获取存储控制器驱动目录
 pub fn get_storage_driver_dir() -> Option<std::path::PathBuf> {
-    let driver_dir = crate::utils::path::get_exe_dir()
-        .join("drivers")
+    let driver_dir = crate::utils::path::get_drivers_dir()
         .join("storage_controller");
     
     if driver_dir.exists() {

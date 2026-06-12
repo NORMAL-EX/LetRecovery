@@ -534,7 +534,33 @@ pub struct App {
     pub backup_bitlocker_rx: Option<Receiver<crate::ui::tools::bitlocker::UnlockResult>>,
     /// 备份前BitLocker检查完成后是否继续备份
     pub backup_bitlocker_continue_after: bool,
-    
+
+    // BitLocker 管理工具对话框
+    /// 是否显示 BitLocker 管理对话框
+    pub show_bitlocker_manage_dialog: bool,
+    /// 是否正在执行解锁/解密操作
+    pub bitlocker_manage_loading: bool,
+    /// 是否正在加载分区列表
+    pub bitlocker_manage_partitions_loading: bool,
+    /// 状态消息
+    pub bitlocker_manage_message: String,
+    /// 检测到的 BitLocker 加密分区列表
+    pub bitlocker_manage_partitions: Vec<crate::ui::tools::BitLockerPartition>,
+    /// 当前选中的分区盘符
+    pub bitlocker_manage_selected: Option<String>,
+    /// 解锁密码输入
+    pub bitlocker_manage_password: String,
+    /// 解锁恢复密钥输入
+    pub bitlocker_manage_recovery_key: String,
+    /// 解锁方式
+    pub bitlocker_manage_mode: BitLockerUnlockMode,
+    /// 分区列表加载结果接收器
+    pub bitlocker_manage_partitions_rx: Option<Receiver<Vec<crate::ui::tools::BitLockerPartition>>>,
+    /// 解锁结果接收器
+    pub bitlocker_manage_unlock_rx: Option<Receiver<crate::ui::tools::bitlocker::UnlockResult>>,
+    /// 解密结果接收器
+    pub bitlocker_manage_decrypt_rx: Option<Receiver<crate::core::bitlocker::DecryptResult>>,
+
     // 安装时的 BitLocker 解密状态
     /// 正在解密的 BitLocker 分区列表
     pub decrypting_partitions: Vec<String>,
@@ -627,7 +653,7 @@ impl Default for App {
             repair_boot: true,
             unattended_install: true,
             export_drivers: true,
-            auto_reboot: false,
+            auto_reboot: true,
             selected_boot_mode: BootModeSelection::Auto,
             driver_action: DriverAction::AutoImport,
             advanced_options: AdvancedOptions::default(),
@@ -834,6 +860,19 @@ impl Default for App {
             backup_bitlocker_mode: BitLockerUnlockMode::default(),
             backup_bitlocker_rx: None,
             backup_bitlocker_continue_after: false,
+            // BitLocker 管理工具对话框
+            show_bitlocker_manage_dialog: false,
+            bitlocker_manage_loading: false,
+            bitlocker_manage_partitions_loading: false,
+            bitlocker_manage_message: String::new(),
+            bitlocker_manage_partitions: Vec::new(),
+            bitlocker_manage_selected: None,
+            bitlocker_manage_password: String::new(),
+            bitlocker_manage_recovery_key: String::new(),
+            bitlocker_manage_mode: BitLockerUnlockMode::default(),
+            bitlocker_manage_partitions_rx: None,
+            bitlocker_manage_unlock_rx: None,
+            bitlocker_manage_decrypt_rx: None,
             decrypting_partitions: Vec::new(),
             bitlocker_decryption_needed: false,
         }

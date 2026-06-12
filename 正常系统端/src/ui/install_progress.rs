@@ -645,12 +645,9 @@ impl App {
                 let uefiseven_dir = format!("{}\\uefiseven", data_dir);
                 let _ = std::fs::create_dir_all(&uefiseven_dir);
                 
-                // 从程序目录复制 UefiSeven 文件
-                if let Some(program_dir) = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                // 从程序目录复制 UefiSeven 文件（bin\uefiseven）
                 {
-                    let source_uefiseven_dir = program_dir.join("uefiseven");
+                    let source_uefiseven_dir = crate::utils::path::get_uefiseven_dir();
                     if source_uefiseven_dir.exists() {
                         // 复制 bootx64.efi
                         let src_efi = source_uefiseven_dir.join("bootx64.efi");
@@ -967,8 +964,6 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>"#.to_string()
     };
     
@@ -1011,7 +1006,7 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                         <Description>Local User</Description>
                         <DisplayName>{username}</DisplayName>
                         <Group>Administrators</Group>
-                        <n>{username}</n>
+                        <Name>{username}</Name>
                     </LocalAccount>
                 </LocalAccounts>
             </UserAccounts>
@@ -1040,8 +1035,10 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
     let sysprep_dir = format!("{}\\Windows\\System32\\Sysprep", target_partition);
     if Path::new(&sysprep_dir).exists() {
         let sysprep_unattend = format!("{}\\unattend.xml", sysprep_dir);
-        let _ = std::fs::write(&sysprep_unattend, &xml_content);
-        println!("[UNATTEND] 已写入: {}", sysprep_unattend);
+        match std::fs::write(&sysprep_unattend, &xml_content) {
+            Ok(_) => println!("[UNATTEND] 已写入: {}", sysprep_unattend),
+            Err(e) => println!("[UNATTEND] 警告：写入 Sysprep unattend 失败: {} ({})", sysprep_unattend, e),
+        }
     }
     
     Ok(())

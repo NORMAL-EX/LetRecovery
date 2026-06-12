@@ -1,0 +1,40 @@
+name: Build 正常系统端 EXE
+
+on:
+  push:
+    branches: [workspace-refactor]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-normal-exe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build LetRecovery (release)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
+      - name: Build release (正常系统端)
+        run: cargo build -p LetRecovery --release
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LetRecovery-normal-exe
+          path: target/release/LetRecovery.exe
+          if-no-files-found: error

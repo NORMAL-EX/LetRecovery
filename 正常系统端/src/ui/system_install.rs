@@ -320,6 +320,66 @@ impl App {
             ui.checkbox(&mut self.auto_reboot, "立即重启");
         });
 
+        // 自定义无人值守文件（仅在启用无人值守时显示，放在引导模式选择上方）
+        if self.unattended_install {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("自定义无人值守:");
+                if ui.button("选择文件…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("无人值守文件", &["xml"])
+                        .pick_file()
+                    {
+                        let p = path.to_string_lossy().to_string();
+                        match std::fs::read_to_string(&path) {
+                            Ok(content) => {
+                                self.custom_unattend_path = p;
+                                self.custom_unattend_error =
+                                    crate::core::install_config::validate_unattend_xml(&content)
+                                        .err();
+                            }
+                            Err(e) => {
+                                self.custom_unattend_path = p;
+                                self.custom_unattend_error = Some(format!("无法读取文件: {}", e));
+                            }
+                        }
+                    }
+                }
+                if !self.custom_unattend_path.is_empty()
+                    && ui.button("清除").clicked()
+                {
+                    self.custom_unattend_path.clear();
+                    self.custom_unattend_error = None;
+                }
+            });
+
+            if self.custom_unattend_path.is_empty() {
+                ui.label(
+                    egui::RichText::new("未选择则使用内置生成的无人值守配置").weak(),
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("已选:");
+                    ui.monospace(self.custom_unattend_path.clone());
+                });
+                match &self.custom_unattend_error {
+                    Some(err) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 50, 47),
+                            format!("⚠ 无人值守文件语法错误：{}（已禁用安装）", err),
+                        );
+                    }
+                    None => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0, 160, 0),
+                            "✓ 无人值守文件语法校验通过",
+                        );
+                    }
+                }
+            }
+            ui.add_space(6.0);
+        }
+
         // 引导模式选择
         ui.horizontal(|ui| {
             ui.label("引导模式:");
@@ -420,65 +480,6 @@ impl App {
         });
 
         ui.add_space(20.0);
-
-        // 自定义无人值守文件（仅在启用无人值守时显示）
-        if self.unattended_install {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("自定义无人值守:");
-                if ui.button("选择文件…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("无人值守文件", &["xml"])
-                        .pick_file()
-                    {
-                        let p = path.to_string_lossy().to_string();
-                        match std::fs::read_to_string(&path) {
-                            Ok(content) => {
-                                self.custom_unattend_path = p;
-                                self.custom_unattend_error =
-                                    crate::core::install_config::validate_unattend_xml(&content)
-                                        .err();
-                            }
-                            Err(e) => {
-                                self.custom_unattend_path = p;
-                                self.custom_unattend_error = Some(format!("无法读取文件: {}", e));
-                            }
-                        }
-                    }
-                }
-                if !self.custom_unattend_path.is_empty()
-                    && ui.button("清除").clicked()
-                {
-                    self.custom_unattend_path.clear();
-                    self.custom_unattend_error = None;
-                }
-            });
-
-            if self.custom_unattend_path.is_empty() {
-                ui.label(
-                    egui::RichText::new("未选择则使用内置生成的无人值守配置").weak(),
-                );
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label("已选:");
-                    ui.monospace(self.custom_unattend_path.clone());
-                });
-                match &self.custom_unattend_error {
-                    Some(err) => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(220, 50, 47),
-                            format!("⚠ 无人值守文件语法错误：{}（已禁用安装）", err),
-                        );
-                    }
-                    None => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(0, 160, 0),
-                            "✓ 无人值守文件语法校验通过",
-                        );
-                    }
-                }
-            }
-        }
 
         ui.add_space(10.0);
 
@@ -750,7 +751,7 @@ impl App {
     /// 排除的类型：
     /// - WindowsPE: PE环境镜像
     fn is_installable_image(vol: &ImageInfo) -> bool {
-        use crate::core::wimgapi::WimImageType;
+        use lr_core::image_meta::WimImageType;
         
         // 1. 优先使用 image_type 字段判断
         match vol.image_type {
@@ -1202,8 +1203,7 @@ impl App {
                     self.pending_download_url = Some(pe.download_url.clone());
                     self.pending_download_filename = Some(pe.filename.clone());
                     self.pending_pe_md5 = pe.md5.clone();
-                    let pe_dir = crate::utils::path::get_exe_dir()
-                        .join("PE")
+                    let pe_dir = crate::utils::path::get_pe_dir()
                         .to_string_lossy()
                         .to_string();
                     self.download_save_path = pe_dir;

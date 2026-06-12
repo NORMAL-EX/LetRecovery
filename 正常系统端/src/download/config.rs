@@ -61,64 +61,36 @@ pub struct PeCache {
 
 impl PeCache {
     const CACHE_VERSION: u32 = 1;
-    
-    /// 获取缓存文件路径
-    fn get_cache_path() -> std::path::PathBuf {
-        crate::utils::path::get_exe_dir().join("pe_cache.json")
-    }
-    
-    /// 保存PE配置到本地缓存（不包含下载链接）
+
+    /// 保存PE配置（不含下载链接），写入 config.json 的 pe_cache 字段
     pub fn save(pe_list: &[OnlinePE]) -> Result<()> {
-        let cache = PeCache {
+        let mut app_config = crate::core::app_config::AppConfig::load();
+        app_config.pe_cache = PeCache {
             pe_list: pe_list.iter().map(CachedPE::from).collect(),
             version: Self::CACHE_VERSION,
         };
-        
-        let cache_path = Self::get_cache_path();
-        let json_content = serde_json::to_string_pretty(&cache)?;
-        std::fs::write(&cache_path, json_content)?;
-        
-        log::info!("PE配置已缓存到: {:?}, 共 {} 项", cache_path, pe_list.len());
+        app_config.save()?;
+
+        log::info!("PE配置已缓存到 config.json, 共 {} 项", pe_list.len());
         Ok(())
     }
-    
-    /// 从本地缓存加载PE配置
+
+    /// 从 config.json 的 pe_cache 字段加载PE配置
     pub fn load() -> Option<Vec<OnlinePE>> {
-        let cache_path = Self::get_cache_path();
-        
-        if !cache_path.exists() {
-            log::info!("PE缓存文件不存在: {:?}", cache_path);
+        let cache = crate::core::app_config::AppConfig::load().pe_cache;
+
+        if cache.version != Self::CACHE_VERSION || cache.pe_list.is_empty() {
+            log::info!("config.json 中无有效 PE 缓存");
             return None;
         }
-        
-        match std::fs::read_to_string(&cache_path) {
-            Ok(content) => {
-                match serde_json::from_str::<PeCache>(&content) {
-                    Ok(cache) => {
-                        if cache.version != Self::CACHE_VERSION {
-                            log::warn!("PE缓存版本不匹配，忽略缓存");
-                            return None;
-                        }
-                        
-                        let pe_list: Vec<OnlinePE> = cache.pe_list
-                            .iter()
-                            .map(|c| c.to_online_pe())
-                            .collect();
-                        
-                        log::info!("从缓存加载PE配置，共 {} 项", pe_list.len());
-                        Some(pe_list)
-                    }
-                    Err(e) => {
-                        log::warn!("解析PE缓存失败: {}", e);
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("读取PE缓存文件失败: {}", e);
-                None
-            }
-        }
+
+        let pe_list: Vec<OnlinePE> = cache.pe_list
+            .iter()
+            .map(|c| c.to_online_pe())
+            .collect();
+
+        log::info!("从 config.json 加载PE配置，共 {} 项", pe_list.len());
+        Some(pe_list)
     }
     
     /// 检查是否有本地PE可用（已下载过）

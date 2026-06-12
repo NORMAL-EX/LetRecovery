@@ -485,123 +485,29 @@ SwmSplitSize={}
     }
 }
 
-/// 轻量级 unattend.xml 语法校验（无第三方依赖）。
+/// unattend.xml 语法校验，基于 roxmltree 做完整 XML 解析。
 ///
-/// 检查：非空、含 `<unattend` 根元素、标签/注释/声明闭合且配对、引号内的 `>` 不误判。
-/// 返回 Ok(()) 表示语法基本合法；Err(msg) 给出可展示给用户的错误原因。
+/// 相比手写扫描器，roxmltree 能完整检查标签配对、嵌套、属性引号、实体、
+/// 命名空间等，并在出错时给出行列号，便于用户定位。
+/// 返回 Ok(()) 表示语法合法；Err(msg) 给出可展示给用户的错误原因。
 pub fn validate_unattend_xml(xml: &str) -> Result<(), String> {
     let s = xml.trim_start_matches('\u{feff}');
     if s.trim().is_empty() {
         return Err("文件内容为空".to_string());
     }
-    if !s.contains("<unattend") {
-        return Err("不是有效的无人值守文件（缺少 <unattend> 根元素）".to_string());
+
+    // 完整 XML 解析：标签未闭合/未配对、引号未闭合、非法嵌套等都会在此报错。
+    let doc = roxmltree::Document::parse(s).map_err(|e| format!("XML 语法错误：{}", e))?;
+
+    // 根元素必须是 <unattend>
+    let root = doc.root_element();
+    let root_name = root.tag_name().name();
+    if root_name != "unattend" {
+        return Err(format!(
+            "不是有效的无人值守文件（根元素应为 <unattend>，实际为 <{}>）",
+            if root_name.is_empty() { "?" } else { root_name }
+        ));
     }
 
-    let bytes = s.as_bytes();
-    let n = bytes.len();
-    let mut stack: Vec<String> = Vec::new();
-    let mut i = 0usize;
-
-    while i < n {
-        if bytes[i] != b'<' {
-            i += 1;
-            continue;
-        }
-        // 注释 <!-- -->
-        if s[i..].starts_with("<!--") {
-            match s[i + 4..].find("-->") {
-                Some(off) => {
-                    i = i + 4 + off + 3;
-                    continue;
-                }
-                None => return Err("注释未闭合（缺少 -->）".to_string()),
-            }
-        }
-        // 处理指令/声明 <? ?>
-        if s[i..].starts_with("<?") {
-            match s[i + 2..].find("?>") {
-                Some(off) => {
-                    i = i + 2 + off + 2;
-                    continue;
-                }
-                None => return Err("XML 声明未闭合（缺少 ?>）".to_string()),
-            }
-        }
-        // <!DOCTYPE ...> 等
-        if bytes.get(i + 1) == Some(&b'!') {
-            match s[i..].find('>') {
-                Some(off) => {
-                    i += off + 1;
-                    continue;
-                }
-                None => return Err("<! ...> 未闭合".to_string()),
-            }
-        }
-
-        // 普通标签：从 i+1 起扫描到 '>'（跳过引号内的 '>'）
-        let mut j = i + 1;
-        let mut quote: Option<u8> = None;
-        let mut close = None;
-        while j < n {
-            let c = bytes[j];
-            match quote {
-                Some(q) => {
-                    if c == q {
-                        quote = None;
-                    }
-                }
-                None => {
-                    if c == b'"' || c == b'\'' {
-                        quote = Some(c);
-                    } else if c == b'>' {
-                        close = Some(j);
-                        break;
-                    }
-                }
-            }
-            j += 1;
-        }
-        let close = match close {
-            Some(c) => c,
-            None => return Err("存在未闭合的标签（缺少 '>'）".to_string()),
-        };
-        if quote.is_some() {
-            return Err("标签属性中的引号未闭合".to_string());
-        }
-
-        let inner = s[i + 1..close].trim();
-        if inner.starts_with('/') {
-            // 结束标签
-            let name = inner[1..].trim();
-            if name.is_empty() {
-                return Err("空的结束标签 </>".to_string());
-            }
-            match stack.pop() {
-                Some(top) if top == name => {}
-                Some(top) => {
-                    return Err(format!("标签未正确配对：遇到 </{}>，但应先闭合 <{}>", name, top))
-                }
-                None => return Err(format!("多余的结束标签 </{}>", name)),
-            }
-        } else if inner.ends_with('/') {
-            // 自闭合标签，忽略
-        } else {
-            let name = inner
-                .split(|c: char| c.is_whitespace())
-                .next()
-                .unwrap_or("");
-            if name.is_empty() {
-                return Err("存在空标签名".to_string());
-            }
-            stack.push(name.to_string());
-        }
-
-        i = close + 1;
-    }
-
-    if let Some(top) = stack.last() {
-        return Err(format!("有未闭合的标签：<{}>", top));
-    }
     Ok(())
 }

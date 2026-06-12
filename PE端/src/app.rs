@@ -1011,12 +1011,12 @@ fn generate_win8_unattend_xml(username: &str, scripts_dir: &str, first_logon_com
 
 /// 生成 Windows 10/11 无人值守配置
 /// 
-/// 完整支持所有 OOBE 跳过选项：
+/// 通过预置 LocalAccount + 以下 OOBE 选项跳过账户/隐私等屏幕：
 /// - HideLocalAccountScreen
 /// - HideOnlineAccountScreens
 /// - HideWirelessSetupInOOBE
-/// - SkipMachineOOBE
-/// - SkipUserOOBE
+///
+/// 注：SkipMachineOOBE / SkipUserOOBE 已被微软弃用且在 Win11 上不可靠，故不再使用。
 fn generate_win10_unattend_xml(username: &str, scripts_dir: &str, first_logon_commands: &str, arch: &str) -> String {
     format!(r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -1052,8 +1052,6 @@ fn generate_win10_unattend_xml(username: &str, scripts_dir: &str, first_logon_co
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>
             <UserAccounts>
                 <LocalAccounts>

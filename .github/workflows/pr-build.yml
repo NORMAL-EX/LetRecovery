@@ -13,16 +13,8 @@ concurrency:
 
 jobs:
   rust:
-    name: Build Rust · ${{ matrix.name }}
+    name: Build Rust workspace
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: PE端
-            dir: PE端
-          - name: 正常系统端
-            dir: 正常系统端
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,30 +24,24 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ matrix.dir }}
 
-      - name: Verify Cargo.lock is up to date
-        working-directory: ${{ matrix.dir }}
-        run: cargo metadata --locked --format-version 1 > metadata.json
+      # 工作区改造后依赖图变化：重新生成 Cargo.lock（不使用 --locked）
+      - name: Generate lockfile
+        run: cargo generate-lockfile
 
-      - name: Cargo check
-        working-directory: ${{ matrix.dir }}
-        run: cargo check --locked
+      - name: Cargo check (workspace)
+        run: cargo check --workspace
 
-      - name: Cargo build
-        working-directory: ${{ matrix.dir }}
-        run: cargo build --locked
+      - name: Cargo build (workspace)
+        run: cargo build --workspace
 
       # 以下为代码质量检查，非阻塞（不影响构建结论），仅供参考
       - name: Cargo fmt check
-        working-directory: ${{ matrix.dir }}
-        run: cargo fmt --check
+        run: cargo fmt --all --check
         continue-on-error: true
 
       - name: Cargo clippy
-        working-directory: ${{ matrix.dir }}
-        run: cargo clippy --locked --all-targets
+        run: cargo clippy --workspace --all-targets
         continue-on-error: true
 
   website:

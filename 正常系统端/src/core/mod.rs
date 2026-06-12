@@ -19,5 +19,3 @@ pub mod quick_partition;
 pub mod registry;
 pub mod system_info;
 pub mod system_utils;
-pub mod wimgapi;
-pub mod wimlib;

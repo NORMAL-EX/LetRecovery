@@ -27,6 +27,9 @@ windows = { version = "0.58", features = [
     "Win32_System_Registry",
 ] }
 
+# 两端共享核心库
+lr-core = { path = "../lr-core" }
+
 # wimgapi.dll / setupapi.dll 动态加载
 libloading = "0.8"
 
@@ -51,9 +54,3 @@ winres = "0.1"
 [[bin]]
 name = "LetRecoveryPE"
 path = "src/main.rs"
-
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = true

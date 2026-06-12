@@ -66,17 +66,21 @@ impl AdvancedOptions {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     }
 
-    /// 获取 Win7 驱动目录（程序运行目录下的 drivers\{usb3|nvme}）
+    /// 获取 Win7 驱动目录（bin\drivers\{usb3|nvme}）
     fn get_win7_driver_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
         let base = Self::get_program_dir();
-        let usb3 = base.as_ref().map(|b| b.join("drivers").join("usb3"));
-        let nvme = base.as_ref().map(|b| b.join("drivers").join("nvme"));
+        let usb3 = base
+            .as_ref()
+            .map(|b| b.join("bin").join("drivers").join("usb3"));
+        let nvme = base
+            .as_ref()
+            .map(|b| b.join("bin").join("drivers").join("nvme"));
         (usb3, nvme)
     }
     
-    /// 获取 UefiSeven 目录（程序运行目录下的 uefiseven）
+    /// 获取 UefiSeven 目录（bin\uefiseven）
     fn get_uefiseven_dir() -> Option<PathBuf> {
-        Self::get_program_dir().map(|b| b.join("uefiseven"))
+        Self::get_program_dir().map(|b| b.join("bin").join("uefiseven"))
     }
     
     /// 显示依赖无人值守的复选框
@@ -548,8 +552,7 @@ log=0
 
         // 13. 导入磁盘控制器驱动（Win10/Win11 x64）
         if self.import_storage_controller_drivers {
-            let storage_drivers_dir = crate::utils::path::get_exe_dir()
-                .join("drivers")
+            let storage_drivers_dir = crate::utils::path::get_drivers_dir()
                 .join("storage_controller");
             if storage_drivers_dir.is_dir() {
                 println!(

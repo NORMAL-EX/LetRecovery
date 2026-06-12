@@ -22,7 +22,7 @@ use windows::Win32::Storage::FileSystem::{
 
 #[cfg(windows)]
 use super::fveapi::{
-    format_recovery_key, FveAccessMode, FveApi, FveError, FveLockStatus, FveProtectionStatus,
+    format_recovery_key, FveApi, FveError, FveLockStatus, FveProtectionStatus,
     FveVolumeStatus,
 };
 
@@ -107,6 +107,8 @@ impl From<&super::fveapi::FveVolumeInfo> for VolumeStatus {
             FveVolumeStatus::DecryptionInProgress | FveVolumeStatus::DecryptionPaused => {
                 VolumeStatus::Decrypting
             }
+            // 读取到非法/未知 conversion_status：不臆断为已解密，按未知处理
+            FveVolumeStatus::Unknown => VolumeStatus::Unknown,
         }
     }
 }
@@ -874,7 +876,14 @@ impl BitLockerManager {
         DecryptResult::failure(drive, "仅支持Windows系统", None)
     }
 
-    /// 使用fveapi解密
+    /// 使用fveapi解密（对齐 a1ive/fvetool 的可靠实现）
+    ///
+    /// 关键修正：过去用裸盘符 `"X:"` 读写开卷会被 fveapi 当成根目录、用
+    /// FILE_NON_DIRECTORY_FILE 打开 → STATUS_FILE_IS_A_DIRECTORY → 映射成假的
+    /// ERROR_ACCESS_DENIED(0x80070005)，导致 fveapi 解密恒失败、只能回退 manage-bde。
+    /// 现改为调用 `decrypt_unlocked_volume_blocking`：开卷路径优先
+    /// `\\?\Volume{GUID}\` → `\\.\X:` → `X:`，解密首选 `FveConversionDecrypt`，
+    /// 纯普通管理员、无需 SYSTEM 冒充。解密一旦发起即视为成功（后台继续）。
     #[cfg(windows)]
     fn decrypt_fveapi(&self, drive_letter: char) -> DecryptResult {
         let letter = format!("{}:", drive_letter);
@@ -885,28 +894,17 @@ impl BitLockerManager {
             Err(e) => return DecryptResult::failure(&letter, &e, None),
         };
 
-        // 重要：解密操作需要写权限，必须使用 FveAccessMode::ReadWrite
-        // 根据逆向分析，FveConversionDecryptEx 内部会验证句柄的访问模式 (mode=1)
-        match api.open_volume_ex(&volume_path, FveAccessMode::ReadWrite) {
-            Ok(handle) => match handle.start_decryption() {
-                Ok(()) => {
-                    log::info!("BitLocker 分区 {} 开始解密 (fveapi)", letter);
-                    DecryptResult::success(&letter, "已开始解密，此过程可能需要较长时间，请勿中断")
-                }
-                Err(FveError::NotEncrypted) => {
-                    DecryptResult::success(&letter, "分区已经是未加密状态")
-                }
-                Err(e) => {
-                    log::error!("BitLocker 分区 {} 解密失败: {} (fveapi)", letter, e);
-                    DecryptResult::failure(&letter, &e.to_string(), Some(e.code()))
-                }
-            },
+        // poll/timeout 参数仅为兼容签名保留：解密发起后立即返回，真实进度由调用方/manage-bde 复核
+        match api.decrypt_unlocked_volume_blocking(&volume_path, 1000, 0) {
+            Ok(_) => {
+                log::info!("BitLocker 分区 {} 开始解密 (fveapi)", letter);
+                DecryptResult::success(&letter, "已开始解密，此过程可能需要较长时间，请勿中断")
+            }
+            Err(FveError::NotEncrypted) => {
+                DecryptResult::success(&letter, "分区已经是未加密状态")
+            }
             Err(e) => {
-                log::error!(
-                    "BitLocker 分区 {} 打开失败（需要写权限）: {} (fveapi)",
-                    letter,
-                    e
-                );
+                log::error!("BitLocker 分区 {} 解密失败: {} (fveapi)", letter, e);
                 DecryptResult::failure(&letter, &e.to_string(), Some(e.code()))
             }
         }
