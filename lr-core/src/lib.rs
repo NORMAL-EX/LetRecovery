@@ -9,6 +9,7 @@
 
 pub mod command;
 pub mod encoding;
+pub mod hash;
 pub mod image_meta;
 pub mod reboot;
 pub mod registry;
