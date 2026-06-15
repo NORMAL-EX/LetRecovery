@@ -56,10 +56,10 @@
 **3d. ⚠️ 非空密码离线清除（account_fix::clear_account_password）**
 代码：`PE端/core/account_fix.rs`，已接入 `ensure_offline_login`（仅在**指定了用户名**时触发）。
 思路（chntpw）：离线把 SAM 中目标账户 V 结构的 NT/LM hash **长度字段清零** = 空密码；并清除 F 结构 `ACB_DISABLED` 位启用账户。
-安全：**操作前强制把 SAM 复制为 `SAM.lrbak`**；只覆盖 4 字节长度字段，不改 hive 结构 / 不挪数据；V 解析失败或越界即跳过，绝不写回可疑数据；sysprep 镜像里目标账户不存在 → 无匹配 → 安全空操作。
+安全：**操作前强制把 SAM 复制为 `SAM.lrbak`（成功收尾后删除，仅出错时保留）**；只覆盖 4 字节长度字段，不改 hive 结构 / 不挪数据；V 解析失败或越界即跳过，绝不写回可疑数据；sysprep 镜像里目标账户不存在 → 无匹配 → 安全空操作。
 
 - [ ] 虚拟机还原"账户带**非空密码**"的备份，且装机时填了该用户名 → 该账户可**空密码登录**且系统正常。
-- [ ] 目标盘存在 `SAM.lrbak` 备份；查 `log` 有 `[SAM] 已备份` / `已清除账户` 记录。
+- [ ] 查 `log` 有 `[SAM] 已备份` / `已清除账户` / `已删除临时备份` 记录；**成功后目标盘不应残留 `SAM.lrbak`**（仅出错时保留以便恢复）。
 - [ ] sysprep 安装镜像 → 日志显示"未找到匹配账户，SAM 未改动"，OOBE 正常建号。
 - [ ] 不指定用户名 → 不动 SAM（仅空密码策略 + 跳过自动登录）。
 
@@ -97,12 +97,21 @@
 - [ ] PE 里（PE 默认不带 libwim）跑备份/安装 → 不报"找不到 wimlib"。
 - [ ] 连续多次「校验→释放→备份」不崩溃（验证移除 Drop cleanup 后多实例安全）。
 
-### 8. fveapi.rs（BitLocker）结构修正
-代码：`正常系统端/core/fveapi.rs`，对齐 `normal-ex/fve` 参考实现：`FVE_GET_STATUS_OUTPUT` 的 `dwVersion` 2→8、`dwSize` 0x80→0x78，并修正锁定状态判断与 `unlock` 行为。
+### 8. fveapi.rs（BitLocker）重写，对齐 a1ive/fvetool ⚠️
+代码：`正常系统端/core/fveapi.rs`（重写为 a1ive/fvetool `fvelib.c` 的忠实移植）、`正常系统端/core/bitlocker.rs`。
+关键修正（此前解锁路径从未真正工作）：
+- 认证元素 32 字节 → 正确的 **584 字节**结构（口令 Magic=578 / 恢复=32，MustBeOne=1）；
+- `FVE_UNLOCK_SETTINGS`(x64=0x38) 补上缺失的 `SecretType`（口令 0x00800000 / 恢复 0x00080000）；
+- 统一用 `FveOpenVolumeW(\\?\Volume{GUID}\)` 开卷（锁定卷返回 0x80310000 但仍取得可用句柄），
+  删除 CreateFileW/FveOpenVolumeByHandle/卷枚举/SYSTEM 令牌冒充等无效死代码；
+- 状态结构改回 `dwSize=0x80 / dwVersion=2`（对 E_INVALIDARG 回退 v1），三级状态查询；
+- bitlocker.rs 解锁失败回退 manage-bde（与状态查询/解密一致）。
 
-测试方法：
-- [ ] 对一个 BitLocker **已加密/已锁定**的分区读取状态 → 正确识别"已锁定"。
-- [ ] 提供正确恢复密钥/密码解锁 → 解锁成功且能读写。
+测试方法（fveapi.dll 为未公开 API，**务必**真机/虚拟机回归）：
+- [ ] 对 BitLocker **已加密/已锁定**分区读取状态 → 正确识别“已锁定”。
+- [ ] 已锁定分区用**正确密码**解锁 → 成功且能读写；错误密码 → 提示“密码错误”。
+- [ ] 已锁定分区用**正确恢复密钥**(48 位数字)解锁 → 成功；错误 → 提示“恢复密钥错误”。
+- [ ] 对已解锁的加密分区**彻底解密**（关闭 BitLocker）→ 开始解密并最终完全解密。
 - [ ] 未加密分区 → 状态正常显示，不误报。
 
 ### 9. UI 调整
@@ -164,7 +173,8 @@
 
 ### B. 镜像信息 XML 解析换 roxmltree ✅ 已完成
 - `lr-core/image_meta.rs::parse_image_info_from_xml` 已改为 **roxmltree 优先**解析 WIM 的 `<WIM>/<IMAGE>` 块；旧的手写 `.find` 仅作**兜底**（roxmltree 解析失败 / 未解析出镜像时回退），对截断或非常规 XML 仍尽力提取。
-- [ ] 回归：单卷/多卷/带 DISPLAYNAME/WINDOWS 块/Win7 老格式 WIM、ESD，确认卷名/版本/类型解析与之前一致。
+- ✅ 已补**单元测试** `lr-core/src/image_meta.rs`（12 例，覆盖 单卷 / 多卷 / DISPLAYNAME / PRODUCTNAME+EDITIONID / Win7 老格式 / 整盘备份 / PE / 非法 XML 兜底 / 索引非 1 起 / 占位名）。在装有 Rust 的 Windows 上 `cargo test -p lr-core` 可跑（lr-core 依赖 windows-only 的 wimlib，故仅 Windows 可编译测试）。
+- [ ] 真机回归：用真实 install.wim / .esd / 一组 .swm 对照 `dism /Get-WimInfo` 复核卷名/版本/类型。
 
 ### C. ⚠️ 统一 PE 两套安装流程（CLI `run_cli_mode` ↔ GUI `execute_install_workflow`）
 两套几乎重复、易分叉。完整去重未做。改安装主流程，需真机测两种启动：

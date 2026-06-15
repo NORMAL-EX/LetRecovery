@@ -270,7 +270,11 @@ fn parse_image_info_fallback(xml: &str) -> Vec<ImageInfo> {
                 xml[abs_img_start + 7..]
                     .find("<IMAGE ")
                     .map(|e| abs_img_start + 7 + e)
-                    .or_else(|| xml[abs_img_start..].find("</WIM>").map(|e| abs_img_start + e))
+                    .or_else(|| {
+                        xml[abs_img_start..]
+                            .find("</WIM>")
+                            .map(|e| abs_img_start + e)
+                    })
             })
             .unwrap_or(xml.len());
 
@@ -387,4 +391,178 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 标准安装镜像（单卷，NAME 优先）
+    #[test]
+    fn single_standard_install_uses_name() {
+        let xml = r#"<WIM><TOTALBYTES>9000000000</TOTALBYTES>
+<IMAGE INDEX="1"><TOTALBYTES>4000000000</TOTALBYTES>
+<WINDOWS><ARCH>9</ARCH><PRODUCTNAME>Microsoft Windows</PRODUCTNAME>
+<EDITIONID>Professional</EDITIONID><INSTALLATIONTYPE>Client</INSTALLATIONTYPE>
+<VERSION><MAJOR>10</MAJOR><MINOR>0</MINOR><BUILD>19045</BUILD></VERSION></WINDOWS>
+<NAME>Windows 10 Pro</NAME><DESCRIPTION>Windows 10 Pro</DESCRIPTION></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].index, 1);
+        assert_eq!(v[0].name, "Windows 10 Pro");
+        assert_eq!(v[0].installation_type, "Client");
+        assert_eq!(v[0].major_version, Some(10));
+        assert_eq!(v[0].size_bytes, 4_000_000_000);
+        assert_eq!(v[0].image_type, WimImageType::StandardInstall);
+    }
+
+    // 多卷，DISPLAYNAME 优先于 NAME
+    #[test]
+    fn multi_image_displayname() {
+        let xml = r#"<WIM>
+<IMAGE INDEX="1"><DISPLAYNAME>Windows 11 Home</DISPLAYNAME>
+<WINDOWS><INSTALLATIONTYPE>Client</INSTALLATIONTYPE><VERSION><MAJOR>10</MAJOR></VERSION></WINDOWS>
+<NAME>HOME</NAME></IMAGE>
+<IMAGE INDEX="2"><DISPLAYNAME>Windows 11 Pro</DISPLAYNAME>
+<WINDOWS><INSTALLATIONTYPE>Client</INSTALLATIONTYPE><VERSION><MAJOR>10</MAJOR></VERSION></WINDOWS>
+<NAME>PRO</NAME></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].index, 1);
+        assert_eq!(v[0].name, "Windows 11 Home");
+        assert_eq!(v[1].index, 2);
+        assert_eq!(v[1].name, "Windows 11 Pro");
+        assert!(v
+            .iter()
+            .all(|i| i.image_type == WimImageType::StandardInstall));
+    }
+
+    // 无 NAME/DISPLAYNAME，用 WINDOWS 的 PRODUCTNAME + EDITIONID 拼名
+    #[test]
+    fn name_from_productname_editionid() {
+        let xml = r#"<WIM><IMAGE INDEX="1"><WINDOWS>
+<PRODUCTNAME>Windows 10</PRODUCTNAME><EDITIONID>Enterprise</EDITIONID>
+<INSTALLATIONTYPE>Client</INSTALLATIONTYPE><VERSION><MAJOR>10</MAJOR></VERSION></WINDOWS></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "Windows 10 Enterprise");
+    }
+
+    // PRODUCTNAME 已含 EDITIONID 时不重复拼接（Win7 老格式，major=6）
+    #[test]
+    fn name_no_duplicate_edition_win7() {
+        let xml = r#"<WIM><IMAGE INDEX="1"><WINDOWS>
+<PRODUCTNAME>Windows 7 Ultimate</PRODUCTNAME><EDITIONID>Ultimate</EDITIONID>
+<INSTALLATIONTYPE>Client</INSTALLATIONTYPE><VERSION><MAJOR>6</MAJOR><MINOR>1</MINOR></VERSION></WINDOWS></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v[0].name, "Windows 7 Ultimate");
+        assert_eq!(v[0].major_version, Some(6));
+        assert_eq!(v[0].image_type, WimImageType::StandardInstall);
+    }
+
+    // 整盘备份：无 INSTALLATIONTYPE 且体积大
+    #[test]
+    fn full_backup_by_size() {
+        let xml = r#"<WIM><IMAGE INDEX="1"><NAME>MyBackup</NAME>
+<TOTALBYTES>2000000000</TOTALBYTES></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v[0].name, "MyBackup");
+        assert_eq!(v[0].image_type, WimImageType::FullBackup);
+    }
+
+    // 整盘备份：靠名称关键字（中文“备份”）
+    #[test]
+    fn full_backup_by_keyword() {
+        let xml = r#"<WIM><IMAGE INDEX="1"><NAME>系统备份</NAME>
+<TOTALBYTES>100</TOTALBYTES></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v[0].image_type, WimImageType::FullBackup);
+    }
+
+    // PE 镜像
+    #[test]
+    fn windows_pe() {
+        let xml = r#"<WIM><IMAGE INDEX="1"><NAME>WinPE</NAME>
+<WINDOWS><INSTALLATIONTYPE>WindowsPE</INSTALLATIONTYPE><VERSION><MAJOR>10</MAJOR></VERSION></WINDOWS></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v[0].image_type, WimImageType::WindowsPE);
+    }
+
+    // 非法 XML（未转义 &）→ roxmltree 失败 → 字符串扫描兜底仍能提取
+    #[test]
+    fn fallback_on_invalid_xml() {
+        let xml = r#"<WIM><IMAGE INDEX="1"><NAME>A & B</NAME>
+<INSTALLATIONTYPE>Client</INSTALLATIONTYPE></IMAGE></WIM>"#;
+        // 先确认 roxmltree 确实无法解析（验证我们真的走了兜底路径）
+        assert!(roxmltree::Document::parse(xml).is_err());
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].index, 1);
+        assert_eq!(v[0].name, "A & B");
+    }
+
+    // 空 WIM → 无镜像
+    #[test]
+    fn empty_wim() {
+        assert!(parse_image_info_from_xml("<WIM></WIM>").is_empty());
+    }
+
+    // 索引非从 1 开始
+    #[test]
+    fn index_not_starting_at_one() {
+        let xml = r#"<WIM><IMAGE INDEX="3"><NAME>X</NAME>
+<WINDOWS><INSTALLATIONTYPE>Client</INSTALLATIONTYPE><VERSION><MAJOR>10</MAJOR></VERSION></WINDOWS></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].index, 3);
+    }
+
+    // 完全没有名称信息 → 回退到“镜像 N”
+    #[test]
+    fn fallback_name_placeholder() {
+        let xml = r#"<WIM><IMAGE INDEX="1"><TOTALBYTES>100</TOTALBYTES></IMAGE></WIM>"#;
+        let v = parse_image_info_from_xml(xml);
+        assert_eq!(v[0].name, "镜像 1");
+        assert_eq!(v[0].image_type, WimImageType::Unknown);
+    }
+
+    // determine_image_type 直接单测
+    #[test]
+    fn determine_type_direct() {
+        let mk = |it: &str, major: Option<u16>, size: u64, name: &str| ImageInfo {
+            index: 1,
+            name: name.into(),
+            size_bytes: size,
+            installation_type: it.into(),
+            description: String::new(),
+            major_version: major,
+            minor_version: None,
+            image_type: WimImageType::Unknown,
+            verified_installable: false,
+        };
+        assert_eq!(
+            determine_image_type(&mk("Client", Some(10), 0, "x")),
+            WimImageType::StandardInstall
+        );
+        assert_eq!(
+            determine_image_type(&mk("Server", Some(10), 0, "x")),
+            WimImageType::StandardInstall
+        );
+        assert_eq!(
+            determine_image_type(&mk("WindowsPE", Some(10), 0, "x")),
+            WimImageType::WindowsPE
+        );
+        assert_eq!(
+            determine_image_type(&mk("", None, 5_000_000_000, "x")),
+            WimImageType::FullBackup
+        );
+        assert_eq!(
+            determine_image_type(&mk("", None, 10, "ghost clone")),
+            WimImageType::FullBackup
+        );
+        assert_eq!(
+            determine_image_type(&mk("", None, 10, "随便")),
+            WimImageType::Unknown
+        );
+    }
 }

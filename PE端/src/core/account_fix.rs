@@ -14,8 +14,8 @@
 //!    - SOFTWARE：在已知目标用户名时配置 Winlogon 自动登录（空密码）。
 //! 2) 非空密码清除层（仅在已知用户名时触发，见 `clear_account_password`）：
 //!    离线把目标账户在 SAM 中的 NT/LM hash「长度」清零（chntpw 思路），等效于
-//!    把密码改为空。为降低风险：**操作前强制备份 SAM**、严格校验 V 结构、
-//!    只覆盖 4 字节长度字段（不改 hive 结构 / 不挪动数据）；任何异常即跳过。
+//!    把密码改为空。为降低风险：**操作前强制备份 SAM（成功收尾后删除，仅出错时保留）**、
+//!    严格校验 V 结构、只覆盖 4 字节长度字段（不改 hive 结构 / 不挪动数据）；任何异常即跳过。
 //!    sysprep 镜像里目标账户尚未创建 → 无匹配 → 自动空操作，故对装机无副作用。
 
 use anyhow::Result;
@@ -79,7 +79,10 @@ pub fn ensure_offline_login(target_partition: &str, username: &str) -> Result<()
             let _ = OfflineRegistry::set_dword(winlogon, "AutoLogonCount", 1);
             let _ = OfflineRegistry::unload_hive("LR_SOFT");
         } else {
-            log::warn!("目标 SOFTWARE 配置单元不存在，跳过自动登录配置: {}", software_hive);
+            log::warn!(
+                "目标 SOFTWARE 配置单元不存在，跳过自动登录配置: {}",
+                software_hive
+            );
         }
 
         // 3) 离线清除该账户的非空密码（备份镜像里账户带密码时，让用户能空密码登录）。
@@ -101,6 +104,7 @@ pub fn ensure_offline_login(target_partition: &str, username: &str) -> Result<()
 ///
 /// 安全措施：先把 SAM 复制为 `SAM.lrbak` 备份；只覆盖 V 结构里的 4 字节长度字段，
 /// 不改动 hive 结构、不挪动数据；解析失败/越界一律跳过，绝不写回可疑数据。
+/// **成功收尾后会删除该备份**（避免在目标系统留下含账户哈希的 SAM 副本）；仅在出错时保留备份以便恢复。
 pub fn clear_account_password(target_partition: &str, username: &str) -> Result<bool> {
     let username = username.trim();
     if username.is_empty() {
@@ -168,6 +172,17 @@ pub fn clear_account_password(target_partition: &str, username: &str) -> Result<
     if let Ok(false) = &result {
         log::info!("[SAM] 未找到匹配账户 [{}]，SAM 未改动", username);
     }
+
+    // 收尾：成功（无论是否改动）即删除 SAM 备份，避免在目标系统永久留下含账户哈希的
+    // SAM 副本（安全隐患）；仅在出错时保留备份，便于必要时手动恢复。
+    match &result {
+        Ok(_) => match std::fs::remove_file(&backup) {
+            Ok(_) => log::info!("[SAM] 已删除临时备份 {}", backup),
+            Err(e) => log::warn!("[SAM] 删除临时备份失败（可手动删除 {}）: {}", backup, e),
+        },
+        Err(_) => log::warn!("[SAM] 操作出错，保留 SAM 备份以便恢复: {}", backup),
+    }
+
     result
 }
 
@@ -211,7 +226,17 @@ fn reg_read_binary(key: &str, value: &str) -> Result<Vec<u8>> {
 fn reg_write_binary(key: &str, value: &str, data: &[u8]) -> Result<()> {
     let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
     let out = new_command("reg.exe")
-        .args(["add", key, "/v", value, "/t", "REG_BINARY", "/d", &hex, "/f"])
+        .args([
+            "add",
+            key,
+            "/v",
+            value,
+            "/t",
+            "REG_BINARY",
+            "/d",
+            &hex,
+            "/f",
+        ])
         .output()?;
     if !out.status.success() {
         anyhow::bail!("reg add 失败: {}", gbk_to_utf8(&out.stderr));
@@ -225,7 +250,10 @@ fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
         anyhow::bail!("十六进制长度异常");
     }
     let val = |c: u8| (c as char).to_digit(16).unwrap() as u8;
-    Ok(hex.chunks_exact(2).map(|c| (val(c[0]) << 4) | val(c[1])).collect())
+    Ok(hex
+        .chunks_exact(2)
+        .map(|c| (val(c[0]) << 4) | val(c[1]))
+        .collect())
 }
 
 fn read_u32_le(b: &[u8], off: usize) -> Option<u32> {
