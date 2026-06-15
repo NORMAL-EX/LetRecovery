@@ -250,6 +250,68 @@ unsafe fn read_u64(base: *const c_void, off: usize) -> u64 {
     ((base as *const u8).add(off) as *const u64).read_unaligned()
 }
 
+/// wimlib 压缩用的最优线程数 = 逻辑 CPU 数；探测失败回退 0（由 wimlib 自动按在线处理器数选择）。
+/// 显式传入核数以确保压缩阶段吃满全部核心。
+fn optimal_threads() -> c_uint {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as c_uint)
+        .unwrap_or(0)
+}
+
+/// 在 wimlib 重负载操作（apply/capture/split/verify）期间，临时把**进程**优先级提升到
+/// HIGH，结束后恢复原值。让 wimlib 内部的压缩/解压工作线程获得更激进的 CPU 调度，
+/// 在与其它进程争用时也能顶到更高占用，提升吞吐。RAII：drop 时自动恢复。
+#[cfg(windows)]
+struct HighPriorityGuard {
+    previous: u32,
+    raised: bool,
+}
+
+#[cfg(windows)]
+impl HighPriorityGuard {
+    fn new() -> Self {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetPriorityClass, SetPriorityClass, HIGH_PRIORITY_CLASS,
+        };
+        unsafe {
+            let h = GetCurrentProcess();
+            let previous = GetPriorityClass(h);
+            let raised = SetPriorityClass(h, HIGH_PRIORITY_CLASS).is_ok();
+            if raised {
+                log::info!("wimlib 操作：已临时提升进程优先级为 HIGH（结束后恢复）");
+            }
+            HighPriorityGuard {
+                previous,
+                raised: raised && previous != 0,
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HighPriorityGuard {
+    fn drop(&mut self) {
+        if self.raised {
+            use windows::Win32::System::Threading::{
+                GetCurrentProcess, SetPriorityClass, PROCESS_CREATION_FLAGS,
+            };
+            unsafe {
+                let _ =
+                    SetPriorityClass(GetCurrentProcess(), PROCESS_CREATION_FLAGS(self.previous));
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct HighPriorityGuard;
+#[cfg(not(windows))]
+impl HighPriorityGuard {
+    fn new() -> Self {
+        HighPriorityGuard
+    }
+}
+
 // ============================================================================
 // 进度回调
 // ============================================================================
@@ -487,6 +549,7 @@ pub struct WimHandle<'a> {
 impl<'a> WimHandle<'a> {
     /// 校验完整性（无完整性表时 wimlib 直接返回成功）
     pub fn verify(&self) -> Result<(), String> {
+        let _prio = HighPriorityGuard::new();
         let rc = unsafe { (self.lib.verify_wim)(self.wim, 0) };
         if rc != WIMLIB_ERR_SUCCESS {
             return Err(self.lib.error_message(rc));
@@ -655,6 +718,7 @@ impl WimlibManager {
         progress_tx: Option<Sender<WimProgress>>,
     ) -> Result<(), String> {
         let wim = self.open(image_file)?;
+        let _prio = HighPriorityGuard::new();
 
         // 安装进度回调
         let mut ctx = Box::new(ProgressCtx {
@@ -724,6 +788,7 @@ impl WimlibManager {
         progress_tx: Option<Sender<WimProgress>>,
     ) -> Result<(), String> {
         let append = Path::new(image_file).exists();
+        let _prio = HighPriorityGuard::new();
 
         let wim = if append {
             self.open(image_file)?
@@ -777,7 +842,7 @@ impl WimlibManager {
             let solid = compression == 3;
             if append {
                 let flags = if solid { WIMLIB_WRITE_FLAG_SOLID } else { 0 };
-                let rc = unsafe { (self.overwrite)(wim, flags, 0) };
+                let rc = unsafe { (self.overwrite)(wim, flags, optimal_threads()) };
                 if rc != WIMLIB_ERR_SUCCESS {
                     return Err(self.error_message(rc));
                 }
@@ -789,7 +854,7 @@ impl WimlibManager {
                     0
                 };
                 let rc = unsafe {
-                    (self.write)(wim, wpath.as_ptr(), WIMLIB_ALL_IMAGES, flags, 0)
+                    (self.write)(wim, wpath.as_ptr(), WIMLIB_ALL_IMAGES, flags, optimal_threads())
                 };
                 if rc != WIMLIB_ERR_SUCCESS {
                     return Err(self.error_message(rc));
@@ -806,6 +871,7 @@ impl WimlibManager {
     /// 把已有 WIM 分割为 SWM 分卷
     pub fn split_wim(&self, wim_path: &str, swm_path: &str, part_size_mb: u64) -> Result<(), String> {
         let wim = self.open(wim_path)?;
+        let _prio = HighPriorityGuard::new();
         let wswm = to_wide(swm_path);
         let part_size = part_size_mb.saturating_mul(1024 * 1024);
         let rc = unsafe { (self.split)(wim, wswm.as_ptr(), part_size, 0) };
