@@ -22,8 +22,7 @@ use windows::Win32::Storage::FileSystem::{
 
 #[cfg(windows)]
 use super::fveapi::{
-    format_recovery_key, FveApi, FveError, FveLockStatus, FveProtectionStatus,
-    FveVolumeStatus,
+    format_recovery_key, FveApi, FveError, FveLockStatus, FveProtectionStatus, FveVolumeStatus,
 };
 
 /// 驱动器类型常量
@@ -501,11 +500,20 @@ impl BitLockerManager {
             return UnlockResult::success(&letter, "驱动器已经是解锁状态");
         }
 
-        let result = if self.use_fveapi {
+        let mut result = if self.use_fveapi {
             self.unlock_with_password_fveapi(drive_letter, password)
         } else {
             self.unlock_with_password_manage_bde(drive_letter, password)
         };
+
+        // fveapi 解锁失败时回退 manage-bde（与状态查询/解密一致）；密码明确错误(0x80310027)不回退
+        if !result.success && self.use_fveapi && result.error_code != Some(0x80310027) {
+            log::warn!("fveapi 解锁失败({})，回退 manage-bde", result.message);
+            let fb = self.unlock_with_password_manage_bde(drive_letter, password);
+            if fb.success {
+                result = fb;
+            }
+        }
 
         // 如果解锁成功，等待分区完全可访问
         if result.success {
@@ -629,11 +637,23 @@ impl BitLockerManager {
             return UnlockResult::success(&letter, "驱动器已经是解锁状态");
         }
 
-        let result = if self.use_fveapi {
+        let mut result = if self.use_fveapi {
             self.unlock_with_recovery_key_fveapi(drive_letter, &formatted_key)
         } else {
             self.unlock_with_recovery_key_manage_bde(drive_letter, &formatted_key)
         };
+
+        // fveapi 解锁失败时回退 manage-bde；恢复密钥明确错误(0x80310028)不回退
+        if !result.success && self.use_fveapi && result.error_code != Some(0x80310028) {
+            log::warn!(
+                "fveapi 恢复密钥解锁失败({})，回退 manage-bde",
+                result.message
+            );
+            let fb = self.unlock_with_recovery_key_manage_bde(drive_letter, &formatted_key);
+            if fb.success {
+                result = fb;
+            }
+        }
 
         // 如果解锁成功，等待分区完全可访问
         if result.success {
@@ -900,9 +920,7 @@ impl BitLockerManager {
                 log::info!("BitLocker 分区 {} 开始解密 (fveapi)", letter);
                 DecryptResult::success(&letter, "已开始解密，此过程可能需要较长时间，请勿中断")
             }
-            Err(FveError::NotEncrypted) => {
-                DecryptResult::success(&letter, "分区已经是未加密状态")
-            }
+            Err(FveError::NotEncrypted) => DecryptResult::success(&letter, "分区已经是未加密状态"),
             Err(e) => {
                 log::error!("BitLocker 分区 {} 解密失败: {} (fveapi)", letter, e);
                 DecryptResult::failure(&letter, &e.to_string(), Some(e.code()))
