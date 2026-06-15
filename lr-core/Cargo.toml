@@ -11,6 +11,7 @@ libloading = "0.8"
 anyhow = "1"
 encoding_rs = "0.8"
 roxmltree = "0.20"
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
