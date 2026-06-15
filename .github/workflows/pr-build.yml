@@ -35,6 +35,19 @@ jobs:
       - name: Cargo build (workspace)
         run: cargo build --workspace
 
+      # 编译所有测试目标（含 #[cfg(test)]），把“测试代码编不过”也变成阻塞失败。
+      # cargo check/build 不编译测试，此前测试目标的编译错误只会在非阻塞 clippy 里暴露。
+      - name: Compile all test targets
+        run: cargo test --workspace --no-run
+
+      # 运行确定性的纯逻辑单元测试（不触碰真实磁盘 / BitLocker / PE 环境）：
+      #   lr-core 全部（镜像 XML 解析）、PE端 account_fix（离线 SAM 改密）、正常端 fveapi（恢复密钥/错误码）
+      - name: Run pure-logic unit tests
+        run: |
+          cargo test -p lr-core
+          cargo test -p letrecovery-pe account_fix
+          cargo test -p LetRecovery fveapi
+
       # 以下为代码质量检查，非阻塞（不影响构建结论），仅供参考
       - name: Cargo fmt check
         run: cargo fmt --all --check

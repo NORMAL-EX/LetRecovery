@@ -316,3 +316,91 @@ fn enable_account_f(f: &[u8]) -> Option<Vec<u8>> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 合成一个最小可解析的 SAM "V" 结构：
+    /// header 偏移 0x0c=用户名相对偏移、0x10=用户名字节长度、0xa0=LM长度、0xac=NT长度，
+    /// 用户名数据从 0xcc+uoff 起，UTF-16LE。
+    fn build_v(username: &str, uoff: u32, lm_len: u32, nt_len: u32) -> Vec<u8> {
+        let uname: Vec<u8> = username.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let data_start = 0xcc + uoff as usize;
+        let mut v = vec![0u8; data_start + uname.len()];
+        v[0x0c..0x10].copy_from_slice(&uoff.to_le_bytes());
+        v[0x10..0x14].copy_from_slice(&(uname.len() as u32).to_le_bytes());
+        v[0xa0..0xa4].copy_from_slice(&lm_len.to_le_bytes());
+        v[0xac..0xb0].copy_from_slice(&nt_len.to_le_bytes());
+        v[data_start..data_start + uname.len()].copy_from_slice(&uname);
+        v
+    }
+
+    /// 合成一个最小 SAM "F" 结构：偏移 0x38 处的 USHORT 为账户控制标志位。
+    fn build_f(flags: u16) -> Vec<u8> {
+        let mut f = vec![0u8; 0x40];
+        f[0x38..0x3a].copy_from_slice(&flags.to_le_bytes());
+        f
+    }
+
+    #[test]
+    fn hex_to_bytes_works() {
+        assert_eq!(hex_to_bytes("dEadBeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        // 过滤空白等非十六进制字符
+        assert_eq!(hex_to_bytes("de ad\tbe ef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert!(hex_to_bytes("abc").is_err()); // 奇数长度
+        assert_eq!(hex_to_bytes("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn read_u32_le_bounds() {
+        assert_eq!(read_u32_le(&[1, 0, 0, 0], 0), Some(1));
+        assert_eq!(read_u32_le(&[0xff, 0xff, 0xff, 0xff], 0), Some(0xffff_ffff));
+        assert_eq!(read_u32_le(&[1, 2, 3], 0), None); // 越界返回 None
+    }
+
+    #[test]
+    fn parse_v_username_basic_and_offset() {
+        assert_eq!(
+            parse_v_username(&build_v("Administrator", 0, 16, 16)).as_deref(),
+            Some("Administrator")
+        );
+        // 用户名数据带相对偏移、且含非 ASCII
+        assert_eq!(parse_v_username(&build_v("用户A", 8, 16, 16)).as_deref(), Some("用户A"));
+    }
+
+    #[test]
+    fn parse_v_username_edge_cases() {
+        assert_eq!(parse_v_username(&[0u8; 0x80]), None); // 结构过短
+        assert_eq!(parse_v_username(&build_v("", 0, 0, 0)), None); // 用户名长度 0
+        // 用户名长度字段越界 → 安全返回 None（不 panic）
+        let mut v = build_v("X", 0, 0, 0);
+        v[0x10..0x14].copy_from_slice(&9999u32.to_le_bytes());
+        assert_eq!(parse_v_username(&v), None);
+    }
+
+    #[test]
+    fn blank_v_password_zeroes_hash_lengths() {
+        let mut v = build_v("u", 0, 16, 16);
+        assert!(blank_v_password(&mut v)); // 有非零长度 → 清零并返回 true
+        assert_eq!(read_u32_le(&v, 0xa0), Some(0)); // LM 长度被清零
+        assert_eq!(read_u32_le(&v, 0xac), Some(0)); // NT 长度被清零
+        assert!(!blank_v_password(&mut v)); // 已是空密码 → 无改动
+    }
+
+    #[test]
+    fn blank_v_password_noop_cases() {
+        let mut v = build_v("u", 0, 0, 0);
+        assert!(!blank_v_password(&mut v)); // 本就为 0
+        assert!(!blank_v_password(&mut vec![0u8; 0x80])); // 结构过短
+    }
+
+    #[test]
+    fn enable_account_f_clears_disabled_bit() {
+        // 含 ACB_DISABLED(0x0001) + 其它位(0x0210) → 仅清掉 0x0001、保留其它
+        let nf = enable_account_f(&build_f(0x0211)).expect("禁用账户应被改动");
+        assert_eq!(u16::from_le_bytes([nf[0x38], nf[0x39]]), 0x0210);
+        assert!(enable_account_f(&build_f(0x0210)).is_none()); // 本就启用 → None
+        assert!(enable_account_f(&[0u8; 0x10]).is_none()); // 结构过短 → None
+    }
+}
