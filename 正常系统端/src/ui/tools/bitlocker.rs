@@ -22,6 +22,12 @@ pub type BitLockerPartitionInfo = BitLockerPartition;
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 这几个兼容别名只有本测试用到，放在测试内导入，避免 bin 构建里产生 unused 告警
+    use crate::core::bitlocker::{
+        get_locked_partitions as get_locked_bitlocker_partitions,
+        has_locked_partitions as has_bitlocker_partitions,
+        has_locked_partitions as has_locked_bitlocker_partitions,
+    };
 
     #[test]
     fn test_api_compatibility() {
