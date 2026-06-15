@@ -18,8 +18,6 @@
 //!
 //! 仅以普通管理员身份运行即可（程序清单已请求 requireAdministrator）。
 
-#![allow(dead_code)]
-
 // =====================================================================================
 // 平台无关：枚举与公共类型（两端/调用方共用）
 // =====================================================================================
@@ -80,28 +78,6 @@ impl FveError {
 
     pub fn code(&self) -> u32 {
         *self as u32
-    }
-
-    /// 是否表示“卷未加密”一类（非 BitLocker / 未激活）
-    pub fn indicates_not_encrypted(&self) -> bool {
-        matches!(
-            self,
-            FveError::NotEncrypted | FveError::NotBitLockerVolume | FveError::NotSupported
-        )
-    }
-
-    /// 是否表示“卷需要解锁”
-    pub fn indicates_locked(&self) -> bool {
-        matches!(
-            self,
-            FveError::VolumeLocked | FveError::KeyRequired | FveError::AuthenticationFailed
-        )
-    }
-}
-
-impl From<u32> for FveError {
-    fn from(code: u32) -> Self {
-        Self::from_hresult(code)
     }
 }
 
@@ -207,10 +183,8 @@ pub struct FveVolumeInfo {
     pub lock_status: FveLockStatus,
     /// 加密百分比（0/100/或转换中的近似值；精确进度由 manage-bde 复核）
     pub encryption_percentage: u8,
-    /// 兼容字段（参考实现不提供，恒为 0）
+    /// 加密标志（保留，参考实现不提供，恒为 0）
     pub encryption_flags: u32,
-    pub volume_size: u64,
-    pub encrypted_size: u64,
 }
 
 /// 把 48 位恢复密钥格式化为 `XXXXXX-XXXXXX-...-XXXXXX`（8 组 6 位）。
@@ -338,9 +312,7 @@ mod imp {
     type FnUnlockVolume = unsafe extern "system" fn(*mut c_void, *mut c_void) -> u32;
     type FnUnlockVolumeWithAccessMode =
         unsafe extern "system" fn(*mut c_void, *mut FveUnlockSettings, u32) -> u32;
-    type FnLockVolume = unsafe extern "system" fn(*mut c_void, u32) -> u32;
     type FnConversionDecrypt = unsafe extern "system" fn(*mut c_void) -> u32;
-    type FnConversionDecryptEx = unsafe extern "system" fn(*mut c_void, u32) -> u32;
     type FnAuthFromPassphrase = unsafe extern "system" fn(*const u16, *mut FveAuthElement) -> u32;
     type FnAuthFromRecovery = unsafe extern "system" fn(*const u16, *mut FveAuthElement) -> u32;
     type FnIsVolumeEncrypted = unsafe extern "system" fn(*mut c_void) -> u32;
@@ -365,9 +337,7 @@ mod imp {
         get_status: FnGetStatus,
         unlock_volume: FnUnlockVolume,
         unlock_volume_access: Option<FnUnlockVolumeWithAccessMode>,
-        lock_volume: FnLockVolume,
         conversion_decrypt: FnConversionDecrypt,
-        conversion_decrypt_ex: FnConversionDecryptEx,
         auth_from_passphrase: FnAuthFromPassphrase,
         auth_from_recovery: FnAuthFromRecovery,
         is_volume_encrypted: Option<FnIsVolumeEncrypted>,
@@ -410,10 +380,7 @@ mod imp {
             let get_status_w = req!(library, b"FveGetStatusW", FnGetStatusW);
             let get_status = req!(library, b"FveGetStatus", FnGetStatus);
             let unlock_volume = req!(library, b"FveUnlockVolume", FnUnlockVolume);
-            let lock_volume = req!(library, b"FveLockVolume", FnLockVolume);
             let conversion_decrypt = req!(library, b"FveConversionDecrypt", FnConversionDecrypt);
-            let conversion_decrypt_ex =
-                req!(library, b"FveConversionDecryptEx", FnConversionDecryptEx);
             let auth_from_passphrase = req!(
                 library,
                 b"FveAuthElementFromPassPhraseW",
@@ -445,9 +412,7 @@ mod imp {
                 get_status,
                 unlock_volume,
                 unlock_volume_access,
-                lock_volume,
                 conversion_decrypt,
-                conversion_decrypt_ex,
                 auth_from_passphrase,
                 auth_from_recovery,
                 is_volume_encrypted,
@@ -609,8 +574,6 @@ mod imp {
                 lock_status: FveLockStatus::Unlocked,
                 encryption_percentage: 0,
                 encryption_flags: 0,
-                volume_size: 0,
-                encrypted_size: 0,
             })
         }
     }
@@ -623,10 +586,6 @@ mod imp {
     }
 
     impl<'a> FveVolumeHandle<'a> {
-        pub fn get_status(&self) -> Result<FveVolumeInfo, FveError> {
-            self.api.query_status_by_handle(self.handle)
-        }
-
         pub fn unlock_with_password(&self, password: &str) -> Result<(), FveError> {
             self.unlock_with_secret(password, SECRET_TYPE_PASSPHRASE)
         }
@@ -700,16 +659,6 @@ mod imp {
             }
         }
 
-        pub fn lock(&self, dismount_first: bool) -> Result<(), FveError> {
-            let hr =
-                unsafe { (self.api.lock_volume)(self.handle, if dismount_first { 1 } else { 0 }) };
-            if hr == HR_OK {
-                Ok(())
-            } else {
-                Err(FveError::from_hresult(hr))
-            }
-        }
-
         /// 开始解密（关闭 BitLocker）。立即返回，解密在后台进行。
         pub fn start_decryption(&self) -> Result<(), FveError> {
             let hr = unsafe { (self.api.conversion_decrypt)(self.handle) };
@@ -718,19 +667,6 @@ mod imp {
             } else {
                 Err(FveError::from_hresult(hr))
             }
-        }
-
-        pub fn start_decryption_ex(&self, flags: u32) -> Result<(), FveError> {
-            let hr = unsafe { (self.api.conversion_decrypt_ex)(self.handle, flags) };
-            if hr == HR_OK {
-                Ok(())
-            } else {
-                Err(FveError::from_hresult(hr))
-            }
-        }
-
-        pub fn as_raw(&self) -> *mut c_void {
-            self.handle
         }
     }
 
@@ -763,8 +699,6 @@ mod imp {
             lock_status: FveLockStatus::from(out.protection_status),
             encryption_percentage: percent_from_status(vs),
             encryption_flags: 0,
-            volume_size: 0,
-            encrypted_size: 0,
         }
     }
 
@@ -775,8 +709,6 @@ mod imp {
             lock_status: FveLockStatus::Locked,
             encryption_percentage: 100,
             encryption_flags: 0,
-            volume_size: 0,
-            encrypted_size: 0,
         }
     }
 
@@ -787,8 +719,6 @@ mod imp {
             lock_status: FveLockStatus::Unlocked,
             encryption_percentage: 0,
             encryption_flags: 0,
-            volume_size: 0,
-            encrypted_size: 0,
         }
     }
 
@@ -799,8 +729,6 @@ mod imp {
             lock_status: FveLockStatus::Unlocked,
             encryption_percentage: 100,
             encryption_flags: 0,
-            volume_size: 0,
-            encrypted_size: 0,
         }
     }
 
@@ -1029,22 +957,13 @@ pub struct FveVolumeHandle<'a> {
 
 #[cfg(not(windows))]
 impl<'a> FveVolumeHandle<'a> {
-    pub fn get_status(&self) -> Result<FveVolumeInfo, FveError> {
-        Err(FveError::NotSupported)
-    }
     pub fn unlock_with_password(&self, _password: &str) -> Result<(), FveError> {
         Err(FveError::NotSupported)
     }
     pub fn unlock_with_recovery_key(&self, _recovery_key: &str) -> Result<(), FveError> {
         Err(FveError::NotSupported)
     }
-    pub fn lock(&self, _dismount_first: bool) -> Result<(), FveError> {
-        Err(FveError::NotSupported)
-    }
     pub fn start_decryption(&self) -> Result<(), FveError> {
-        Err(FveError::NotSupported)
-    }
-    pub fn start_decryption_ex(&self, _flags: u32) -> Result<(), FveError> {
         Err(FveError::NotSupported)
     }
 }
