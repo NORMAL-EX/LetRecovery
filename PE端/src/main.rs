@@ -100,8 +100,11 @@ fn load_icon() -> egui::IconData {
 /// 【实验性】BitLocker 密钥透传解锁。
 ///
 /// 若正常系统端在注入引导时把恢复密钥文件打包进了 boot.wim，则 PE 启动后该文件位于
-/// `X:\LR_BitLockerKeys.txt`。读取其中的恢复密钥，对 A–Z 各盘逐一尝试
-/// `manage-bde -unlock <盘>: -RecoveryPassword <密钥>`（用退出码判定成功，免去本地化解析）。
+/// `X:\LR_BitLockerKeys.txt`。读取其中的恢复密钥，对 A–Z 各盘逐一尝试解锁。
+///
+/// 解锁优先用 **fveapi**（lr-core 共享、已在真机 CI 验证），fveapi.dll 不可用或本次失败
+/// 时再回退 `manage-bde -unlock`——因为精简 WinPE 可能并不带 manage-bde.exe（属可选组件），
+/// 也可能缺 fveapi.dll，两条路互为兜底最稳。
 ///
 /// best-effort：没有该文件（即未启用透传）、没有锁定卷、或解锁失败都不致命，仅记录日志。
 /// 恢复密钥由卷自校验，错误的密钥解锁会失败，因此对每个盘把所有密钥都试一遍即可。
@@ -115,9 +118,11 @@ fn unlock_bitlocker_passthrough() {
     if keys.is_empty() {
         return;
     }
+    let fveapi_ok = lr_core::fveapi::FveApi::instance().is_ok();
     println!(
-        "[PE INSTALL][实验] 检测到 BitLocker 密钥透传文件（{} 个恢复密钥），尝试解锁锁定卷…",
-        keys.len()
+        "[PE INSTALL][实验] 检测到 BitLocker 密钥透传文件（{} 个恢复密钥），fveapi.dll={}，尝试解锁锁定卷…",
+        keys.len(),
+        if fveapi_ok { "可用（优先）" } else { "不可用，将用 manage-bde" }
     );
 
     for byte in b'A'..=b'Z' {
@@ -127,17 +132,40 @@ fn unlock_bitlocker_passthrough() {
         }
         let drive = format!("{}:", letter);
         for key in &keys {
-            let unlocked = std::process::Command::new("manage-bde")
-                .args(["-unlock", &drive, "-RecoveryPassword", key])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if unlocked {
+            // 优先 fveapi（已真机验证），失败再回退 manage-bde；两者任一缺失都能兜底
+            if try_unlock_fveapi(letter, key) || try_unlock_manage_bde(&drive, key) {
                 println!("[PE INSTALL][实验] {} 已用恢复密钥解锁", drive);
                 break; // 该盘已解锁，换下一个盘
             }
         }
     }
+}
+
+/// 用 fveapi（lr-core 共享）对单个卷尝试恢复密钥解锁。
+/// fveapi.dll 不可用、密钥格式化失败、打开卷失败或密钥不匹配都返回 false。
+fn try_unlock_fveapi(drive_letter: char, recovery_key: &str) -> bool {
+    let api = match lr_core::fveapi::FveApi::instance() {
+        Ok(a) => a,
+        Err(_) => return false, // fveapi.dll 不可用
+    };
+    let formatted = match lr_core::fveapi::format_recovery_key(recovery_key) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let path = format!("{}:", drive_letter);
+    match api.open_volume(&path) {
+        Ok(handle) => handle.unlock_with_recovery_key(&formatted).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// 回退：用 manage-bde 对单个卷尝试恢复密钥解锁（退出码判成功；WinPE 可能未含该工具）。
+fn try_unlock_manage_bde(drive: &str, recovery_key: &str) -> bool {
+    std::process::Command::new("manage-bde")
+        .args(["-unlock", drive, "-RecoveryPassword", recovery_key])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// 命令行模式执行

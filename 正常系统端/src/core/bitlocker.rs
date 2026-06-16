@@ -21,7 +21,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 
 #[cfg(windows)]
-use super::fveapi::{
+use lr_core::fveapi::{
     format_recovery_key, FveApi, FveError, FveLockStatus, FveProtectionStatus, FveVolumeStatus,
 };
 
@@ -76,8 +76,8 @@ impl VolumeStatus {
 }
 
 #[cfg(windows)]
-impl From<&super::fveapi::FveVolumeInfo> for VolumeStatus {
-    fn from(info: &super::fveapi::FveVolumeInfo) -> Self {
+impl From<&lr_core::fveapi::FveVolumeInfo> for VolumeStatus {
+    fn from(info: &lr_core::fveapi::FveVolumeInfo) -> Self {
         // 关键：检查解密百分比！
         // 当 manage-bde -off 开始解密后，状态可能显示为 FullyDecrypted，
         // 但 encryption_percentage 仍然 > 0，表示还在解密过程中

@@ -10,6 +10,7 @@
 pub mod bl_passthrough;
 pub mod command;
 pub mod encoding;
+pub mod fveapi;
 pub mod hash;
 pub mod image_meta;
 pub mod reboot;
