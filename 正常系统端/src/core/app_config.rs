@@ -36,6 +36,14 @@ pub struct AppConfig {
     /// PE 配置缓存（原 pe_cache.json，已并入 config.json）
     #[serde(default)]
     pub pe_cache: crate::download::config::PeCache,
+
+    /// 【实验性】BitLocker 密钥透传重装。
+    ///
+    /// 重装带 BitLocker 的系统盘时，不预先关闭/解密 BitLocker，而是在"写 PE 引导"阶段
+    /// 抓取各加密卷的恢复密钥、打包进 PE 的 boot.wim；PE 启动后自动用这些密钥解锁再部署。
+    /// 仅可手动编辑 config.json 开启（默认关闭，无 UI 入口）。
+    #[serde(default)]
+    pub experimental_bitlocker_passthrough: bool,
 }
 
 /// 日志默认启用
@@ -63,6 +71,7 @@ impl Default for AppConfig {
             log_retention_days: 7,  // 默认保留7天
             language: String::from("zh-CN"),  // 默认简体中文
             pe_cache: crate::download::config::PeCache::default(),
+            experimental_bitlocker_passthrough: false,
         }
     }
 }

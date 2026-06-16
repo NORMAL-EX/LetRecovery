@@ -168,6 +168,9 @@ impl PeManager {
         println!("[PE] 复制 WIM 到 {}", target_wim);
         std::fs::copy(wim_path, &target_wim)?;
 
+        // 1.5 【实验性】BitLocker 密钥透传：把各加密卷的恢复密钥打包进刚拷好的 boot.wim
+        Self::maybe_inject_bitlocker_keys(&target_wim);
+
         // 2. 创建或使用boot.sdi
         let target_sdi = self.create_default_sdi(target_dir)?;
 
@@ -179,6 +182,65 @@ impl PeManager {
 
         println!("[PE] ========== PE启动准备完成 ==========");
         Ok(())
+    }
+
+    /// 【实验性】若配置开启 BitLocker 密钥透传，则抓取各 BitLocker 加密卷的恢复密钥，
+    /// 打包进刚拷好的 PE boot.wim（镜像 1，路径见 `lr_core::bl_passthrough::KEYS_WIM_PATH`）。
+    ///
+    /// 全程 best-effort：开关关闭、无加密卷、取不到恢复密钥、或注入失败都只记录日志，
+    /// 绝不影响 PE 启动流程本身。临时密钥文件用后即删（密钥仅随 boot.wim 进入 PE 的内存盘）。
+    fn maybe_inject_bitlocker_keys(target_wim: &str) {
+        let cfg = crate::core::app_config::AppConfig::load();
+        if !cfg.experimental_bitlocker_passthrough {
+            return;
+        }
+        println!("[PE][实验] BitLocker 密钥透传已开启，抓取各加密卷恢复密钥…");
+
+        let manager = crate::core::bitlocker::BitLockerManager::new();
+        let volumes = manager.get_encrypted_volumes(); // 仅返回已加密卷
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for v in &volumes {
+            match manager.get_recovery_key(&v.letter) {
+                Ok(key) => {
+                    println!("[PE][实验] 已取恢复密钥: {} {}", v.letter, v.label);
+                    entries.push((format!("{} {}", v.letter, v.label), key));
+                }
+                Err(e) => {
+                    println!("[PE][实验] 取恢复密钥失败 {}: {}（跳过该卷）", v.letter, e);
+                }
+            }
+        }
+        if entries.is_empty() {
+            println!("[PE][实验] 未取得任何 BitLocker 恢复密钥，跳过注入");
+            return;
+        }
+
+        let text = lr_core::bl_passthrough::serialize_keys(&entries);
+        let tmp = std::env::temp_dir().join(lr_core::bl_passthrough::KEYS_FILE_NAME);
+        if let Err(e) = std::fs::write(&tmp, text) {
+            println!("[PE][实验] 写临时密钥文件失败: {}（跳过注入）", e);
+            return;
+        }
+
+        let inject = (|| -> Result<()> {
+            let mgr = lr_core::wimlib::WimlibManager::new().map_err(|e| anyhow::anyhow!(e))?;
+            mgr.add_file_to_image(
+                target_wim,
+                1,
+                &tmp.to_string_lossy(),
+                lr_core::bl_passthrough::KEYS_WIM_PATH,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&tmp); // 密钥不留盘
+        match inject {
+            Ok(()) => println!(
+                "[PE][实验] 已把 {} 个卷的恢复密钥注入 boot.wim",
+                entries.len()
+            ),
+            Err(e) => println!("[PE][实验] 注入 boot.wim 失败: {}（PE 端将无法自动解锁）", e),
+        }
     }
 
     /// 创建默认的boot.sdi文件
