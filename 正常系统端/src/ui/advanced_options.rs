@@ -18,6 +18,14 @@ pub struct AdvancedOptions {
     pub disable_uac: bool,
     pub disable_device_encryption: bool,
     pub remove_uwp_apps: bool,
+    /// 迁移当前 WiFi（重装后自动连接）：勾选时即抓取当前连接的 WiFi 配置
+    pub migrate_wifi: bool,
+    /// 抓取到的 WiFi 配置 XML（含明文密钥，故不持久化到 config.json）
+    #[serde(skip)]
+    pub wifi_profile_xml: String,
+    /// 抓取到的 WiFi 名称（不持久化）
+    #[serde(skip)]
+    pub wifi_ssid: String,
 
     // 自定义脚本
     pub run_script_during_deploy: bool,
@@ -319,6 +327,87 @@ log=0
     }
 
     /// 应用选项到目标系统
+    /// 抓取当前连接的 WiFi（SSID + 含明文密钥的 profile XML），存入瞬态字段。
+    /// 在勾选「迁移 WiFi」时调用（须在有 WiFi 连接的正常系统中）。
+    pub fn capture_current_wifi(&mut self) {
+        match Self::read_current_wifi() {
+            Some((ssid, xml)) => {
+                self.wifi_ssid = ssid;
+                self.wifi_profile_xml = xml;
+            }
+            None => {
+                self.wifi_ssid.clear();
+                self.wifi_profile_xml.clear();
+            }
+        }
+    }
+
+    fn read_current_wifi() -> Option<(String, String)> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        let decode = |b: &[u8]| -> String {
+            match String::from_utf8(b.to_vec()) {
+                Ok(s) if s.chars().filter(|&c| c == '\u{FFFD}').count() < 3 => s,
+                _ => {
+                    let (c, _, _) = encoding_rs::GBK.decode(b);
+                    c.into_owned()
+                }
+            }
+        };
+
+        // 1) 当前连接的 SSID（排除 BSSID 行）
+        let out = Command::new("netsh")
+            .args(["wlan", "show", "interfaces"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+        let text = decode(&out.stdout);
+        let mut ssid = String::new();
+        for line in text.lines() {
+            let t = line.trim();
+            if t.starts_with("BSSID") {
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("SSID") {
+                if let Some(idx) = rest.find(':') {
+                    let v = rest[idx + 1..].trim();
+                    if !v.is_empty() {
+                        ssid = v.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+        if ssid.is_empty() {
+            return None;
+        }
+
+        // 2) 导出该 profile（key=clear 含明文密钥）到临时目录，读出唯一 xml
+        let tmp = std::env::temp_dir().join(format!("lr_wifi_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = Command::new("netsh")
+            .args(["wlan", "export", "profile"])
+            .arg(format!("name={}", ssid))
+            .arg("key=clear")
+            .arg(format!("folder={}", tmp.display()))
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        let xml = std::fs::read_dir(&tmp)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.path()
+                    .extension()
+                    .map(|x| x.eq_ignore_ascii_case("xml"))
+                    .unwrap_or(false)
+            })
+            .and_then(|e| std::fs::read_to_string(e.path()).ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+        xml.map(|x| (ssid, x))
+    }
+
     pub fn apply_to_system(&self, target_partition: &str) -> anyhow::Result<()> {
         println!("[ADVANCED] 开始应用高级选项到: {}", target_partition);
         
@@ -504,6 +593,39 @@ log=0
             let uwp_script_path = format!("{}\\remove_uwp.ps1", scripts_dir);
             std::fs::write(&uwp_script_path, &remove_uwp_script)?;
             println!("[ADVANCED] UWP删除脚本已写入: {}", uwp_script_path);
+        }
+
+        // WiFi 迁移：把抓到的 profile XML + SetupComplete.cmd 写到目标系统。
+        // Windows 安装末尾会自动运行 %WINDIR%\Setup\Scripts\SetupComplete.cmd（SYSTEM 身份），
+        // 用 netsh 添加 WiFi 配置后系统即可自动连接（profile 默认 autoconnect）。
+        if self.migrate_wifi && !self.wifi_profile_xml.is_empty() {
+            let setup_scripts = format!("{}\\Windows\\Setup\\Scripts", target_partition);
+            match std::fs::create_dir_all(&setup_scripts) {
+                Ok(_) => {
+                    let xml_path = format!("{}\\LR_WiFi.xml", setup_scripts);
+                    let cmd_path = format!("{}\\SetupComplete.cmd", setup_scripts);
+                    if let Err(e) = std::fs::write(&xml_path, self.wifi_profile_xml.as_bytes()) {
+                        println!("[ADVANCED] 写入 WiFi 配置失败: {}", e);
+                    } else {
+                        use std::io::Write;
+                        // 追加，避免覆盖可能已存在的 SetupComplete.cmd
+                        let line =
+                            "netsh wlan add profile filename=\"%~dp0LR_WiFi.xml\" user=all\r\n";
+                        let res = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&cmd_path)
+                            .and_then(|mut f| f.write_all(line.as_bytes()));
+                        match res {
+                            Ok(_) => {
+                                println!("[ADVANCED] 已配置 WiFi 自动迁移: {}", self.wifi_ssid)
+                            }
+                            Err(e) => println!("[ADVANCED] 写入 SetupComplete.cmd 失败: {}", e),
+                        }
+                    }
+                }
+                Err(e) => println!("[ADVANCED] 创建 Setup\\Scripts 目录失败: {}", e),
+            }
         }
 
         // ============ 自定义脚本 ============
@@ -1426,12 +1548,31 @@ Write-Host "UWP应用清理完成"
             
             // 删除预装UWP应用 - 依赖无人值守
             Self::show_unattend_dependent_checkbox(
-                ui, 
-                &mut self.remove_uwp_apps, 
+                ui,
+                &mut self.remove_uwp_apps,
                 "删除预装UWP应用",
                 unattend_disabled,
                 "此选项依赖无人值守配置，由于目标分区已存在配置文件而被禁用"
             );
+
+            // 迁移当前 WiFi（重装后自动连接）：勾选时立即抓取当前 WiFi 配置
+            let wifi_resp = ui.checkbox(&mut self.migrate_wifi, "迁移当前 WiFi（重装后自动连接）");
+            if wifi_resp.changed() && self.migrate_wifi {
+                self.capture_current_wifi();
+            }
+            if self.migrate_wifi {
+                if self.wifi_ssid.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 165, 0),
+                        "  ⚠ 未检测到当前 WiFi（请确认已连 WiFi 且以管理员运行）",
+                    );
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 200, 100),
+                        format!("  ✓ 将迁移：{}", self.wifi_ssid),
+                    );
+                }
+            }
 
             ui.add_space(15.0);
             ui.heading("自定义脚本");
