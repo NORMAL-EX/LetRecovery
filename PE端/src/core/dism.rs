@@ -43,6 +43,65 @@ impl Dism {
     // 镜像操作 - 使用 wimgapi.dll
     // ========================================================================
 
+    /// 校验镜像完整性（WIM/ESD）。会逐流解压并核对 SHA-1，能发现“解压到一半损坏”
+    /// 这类块级损坏（即使 ESD 没有完整性表）。校验失败即说明镜像已损坏/不完整。
+    pub fn verify_image(
+        &self,
+        image_file: &str,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<()> {
+        use lr_core::wimlib::Wimlib;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        log::info!("[Dism] 校验镜像完整性: {}", image_file);
+
+        let lib = Wimlib::new().map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
+        let handle = lib
+            .open_wim(image_file)
+            .map_err(|e| anyhow::anyhow!("打开镜像失败: {}", e))?;
+
+        // 进度监控线程：读取 wimlib 全局校验进度并上报
+        let done = Arc::new(AtomicBool::new(false));
+        let done_mon = Arc::clone(&done);
+        let tx = progress_tx.clone();
+        let monitor = std::thread::spawn(move || {
+            let mut last = 0u8;
+            loop {
+                if done_mon.load(Ordering::SeqCst) {
+                    break;
+                }
+                let p = Wimlib::get_global_progress();
+                if p > last {
+                    last = p;
+                    if let Some(ref t) = tx {
+                        let _ = t.send(DismProgress {
+                            percentage: p,
+                            status: format!("正在校验镜像 ({}%)...", p),
+                        });
+                    }
+                }
+                if p >= 100 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let result = handle.verify();
+        done.store(true, Ordering::SeqCst);
+        let _ = monitor.join();
+
+        match result {
+            Ok(_) => {
+                log::info!("[Dism] 镜像校验通过");
+                Ok(())
+            }
+            Err(e) => anyhow::bail!("{}", e),
+        }
+    }
+
     /// 应用系统镜像 (WIM/ESD)
     /// 使用 wimgapi.dll 实现
     pub fn apply_image(

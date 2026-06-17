@@ -268,6 +268,42 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     log::info!("完整镜像路径: {}", image_path);
 
+    // Step 0: 校验镜像完整性（WIM/ESD）。放在格式化之前——镜像损坏就提前失败，
+    // 不会白白格式化目标盘，也能给出明确“镜像损坏”而不是释放到一半才崩。
+    // GHO 不是 WIM，跳过 wimlib 校验。
+    if !config.is_gho {
+        let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::VerifyImage));
+        let _ = tx.send(WorkerMessage::SetStatus(
+            "正在校验系统镜像完整性（可能需要几分钟）...".to_string(),
+        ));
+        log::info!("[PE安装] 开始校验镜像: {}", image_path);
+
+        let (verify_tx, verify_rx) = channel::<DismProgress>();
+        let tx_v = tx.clone();
+        let verify_handle = thread::spawn(move || {
+            while let Ok(progress) = verify_rx.recv() {
+                let _ = tx_v.send(WorkerMessage::SetProgress(progress.percentage));
+                let _ = tx_v.send(WorkerMessage::SetStatus(progress.status));
+            }
+        });
+
+        let verify_result = Dism::new().verify_image(&image_path, Some(verify_tx));
+        let _ = verify_handle.join();
+
+        if let Err(e) = verify_result {
+            log::error!("[PE安装] 镜像校验失败: {}", e);
+            let _ = tx.send(WorkerMessage::Failed(format!(
+                "镜像校验失败：镜像可能已损坏或不完整（{}）。请重新获取镜像后重试。",
+                e
+            )));
+            return;
+        }
+        log::info!("[PE安装] 镜像校验通过");
+        let _ = tx.send(WorkerMessage::SetProgress(100));
+    } else {
+        log::info!("[PE安装] GHO 镜像，跳过 wimlib 校验");
+    }
+
     // Step 1: 格式化分区
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::FormatPartition));
     let _ = tx.send(WorkerMessage::SetStatus("正在格式化目标分区...".to_string()));
