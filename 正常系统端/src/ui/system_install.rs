@@ -519,6 +519,8 @@ impl App {
         ui.horizontal(|ui| {
             if ui.button("高级选项...").clicked() {
                 self.show_advanced_options = true;
+                // 每次打开重新检测 WiFi，决定是否显示“迁移当前 WiFi”选项
+                self.advanced_options.wifi_detected = None;
             }
             if ui.button("刷新分区").clicked() {
                 self.refresh_partitions();

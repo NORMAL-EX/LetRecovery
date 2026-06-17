@@ -29,6 +29,10 @@ pub struct AdvancedOptions {
     /// 抓取到的 WiFi 名称（不持久化）
     #[serde(skip)]
     pub wifi_ssid: String,
+    /// 当前系统是否检测到 WiFi（已连接无线网络）。None=尚未检测。
+    /// 用于决定是否显示“迁移当前 WiFi”选项；无 WiFi（虚拟机/无无线网卡/未连接）时隐藏。
+    #[serde(skip)]
+    pub wifi_detected: Option<bool>,
 
     // 自定义脚本
     pub run_script_during_deploy: bool,
@@ -343,6 +347,47 @@ log=0
                 self.wifi_profile_xml.clear();
             }
         }
+    }
+
+    /// 当前系统是否检测到 WiFi（已连接到某个无线网络）。
+    /// 虚拟机/无无线网卡/未连接 WiFi 时返回 false（用于隐藏“迁移 WiFi”选项）。
+    #[cfg(windows)]
+    fn system_has_wifi() -> bool {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        let out = match Command::new("netsh")
+            .args(["wlan", "show", "interfaces"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        let text = match String::from_utf8(out.stdout.clone()) {
+            Ok(s) if s.chars().filter(|&c| c == '\u{FFFD}').count() < 3 => s,
+            _ => encoding_rs::GBK.decode(&out.stdout).0.into_owned(),
+        };
+        for line in text.lines() {
+            let t = line.trim();
+            if t.starts_with("BSSID") {
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("SSID") {
+                if let Some(idx) = rest.find(':') {
+                    if !rest[idx + 1..].trim().is_empty() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(not(windows))]
+    fn system_has_wifi() -> bool {
+        false
     }
 
     fn read_current_wifi() -> Option<(String, String)> {
@@ -1558,23 +1603,30 @@ Write-Host "UWP应用清理完成"
                 "此选项依赖无人值守配置，由于目标分区已存在配置文件而被禁用"
             );
 
-            // 迁移当前 WiFi（重装后自动连接）：勾选时立即抓取当前 WiFi 配置
-            let wifi_resp = ui.checkbox(&mut self.migrate_wifi, "迁移当前 WiFi（重装后自动连接）");
-            if wifi_resp.changed() && self.migrate_wifi {
-                self.capture_current_wifi();
-            }
-            if self.migrate_wifi {
-                if self.wifi_ssid.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(255, 165, 0),
-                        "  ⚠ 未检测到当前 WiFi（请确认已连 WiFi 且以管理员运行）",
-                    );
-                } else {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(100, 200, 100),
-                        format!("  ✓ 将迁移：{}", self.wifi_ssid),
-                    );
+            // 迁移当前 WiFi（重装后自动连接）：仅当当前系统检测到 WiFi（已连接）时才显示。
+            // 虚拟机/无无线网卡/未连接 WiFi 时直接隐藏该选项。
+            let has_wifi = *self.wifi_detected.get_or_insert_with(Self::system_has_wifi);
+            if has_wifi {
+                let wifi_resp = ui.checkbox(&mut self.migrate_wifi, "迁移当前 WiFi（重装后自动连接）");
+                if wifi_resp.changed() && self.migrate_wifi {
+                    self.capture_current_wifi();
                 }
+                if self.migrate_wifi {
+                    if self.wifi_ssid.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 165, 0),
+                            "  ⚠ 未检测到当前 WiFi（请确认已连 WiFi 且以管理员运行）",
+                        );
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(100, 200, 100),
+                            format!("  ✓ 将迁移：{}", self.wifi_ssid),
+                        );
+                    }
+                }
+            } else if self.migrate_wifi {
+                // 之前在有 WiFi 的环境勾选过、现在无 WiFi：自动取消，避免误带配置
+                self.migrate_wifi = false;
             }
 
             ui.add_space(15.0);
