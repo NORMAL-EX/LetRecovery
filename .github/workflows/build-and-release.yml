@@ -41,12 +41,23 @@ jobs:
       - name: Build system-side exe (LetRecovery.exe)
         shell: bash
         working-directory: 正常系统端
-        run: cargo build --release --locked
+        run: |
+          set -euo pipefail
+          # 有 Cargo.lock 才用 --locked（main 各 crate 自带锁；workspace 分支可能无锁需现生成）
+          LOCKED=""
+          if [ -f Cargo.lock ] || [ -f ../Cargo.lock ]; then LOCKED="--locked"; fi
+          echo "cargo build --release ${LOCKED:-(no --locked)}"
+          cargo build --release $LOCKED
 
       - name: Build PE-side exe (LetRecoveryPE.exe)
         shell: bash
         working-directory: PE端
-        run: cargo build --release --locked
+        run: |
+          set -euo pipefail
+          LOCKED=""
+          if [ -f Cargo.lock ] || [ -f ../Cargo.lock ]; then LOCKED="--locked"; fi
+          echo "cargo build --release ${LOCKED:-(no --locked)}"
+          cargo build --release $LOCKED
 
       - name: Download base package (template)
         shell: bash
@@ -72,7 +83,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp -f "正常系统端/target/release/LetRecovery.exe" "pkg/LetRecovery.exe"
+          # 产物可能在各 crate 的 target/（独立 crate）或工作区根 target/（workspace）
+          src=""
+          for p in "正常系统端/target/release/LetRecovery.exe" "target/release/LetRecovery.exe"; do
+            if [ -f "$p" ]; then src="$p"; break; fi
+          done
+          test -n "$src" || { echo "找不到编译产物 LetRecovery.exe"; exit 1; }
+          echo "Using system-side exe: $src"
+          cp -f "$src" "pkg/LetRecovery.exe"
 
       - name: Inject PE-side exe into WIM
         shell: pwsh
@@ -85,7 +103,11 @@ jobs:
           dism /Mount-Image /ImageFile:"$wim" /Index:1 /MountDir:"$mount"
           if ($LASTEXITCODE -ne 0) { throw "DISM mount failed" }
           $dst = Join-Path $mount "Program Files\LetRecoveryPE\LetRecoveryPE.exe"
-          Copy-Item -Force "PE端\target\release\LetRecoveryPE.exe" $dst
+          # 产物可能在 crate 的 target\ 或工作区根 target\
+          $peExe = @("PE端\target\release\LetRecoveryPE.exe", "target\release\LetRecoveryPE.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $peExe) { throw "找不到编译产物 LetRecoveryPE.exe" }
+          Write-Host "Using PE-side exe: $peExe"
+          Copy-Item -Force $peExe $dst
           Write-Host "Replaced: $dst"
           dism /Unmount-Image /MountDir:"$mount" /Commit
           if ($LASTEXITCODE -ne 0) { throw "DISM unmount/commit failed" }
