@@ -1,0 +1,127 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "要构建并发布的分支(留空=用上面 Run workflow 选的分支)"
+        required: false
+        default: ""
+      tag:
+        description: "Release 标签(留空=用当天日期,如 2026.6.17)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-and-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            正常系统端
+            PE端
+
+      - name: Build system-side exe (LetRecovery.exe)
+        shell: bash
+        working-directory: 正常系统端
+        run: cargo build --release --locked
+
+      - name: Build PE-side exe (LetRecoveryPE.exe)
+        shell: bash
+        working-directory: PE端
+        run: cargo build --release --locked
+
+      - name: Download base package (template)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          gh release download release \
+            --repo NORMAL-EX/letrecovery-package \
+            --pattern package.7z --dir .
+          ls -la package.7z
+
+      - name: Extract base package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p pkg
+          7z x package.7z -opkg -y >/dev/null
+          test -f "pkg/LetRecovery.exe"            || { echo "底包缺少 LetRecovery.exe"; exit 1; }
+          test -f "pkg/bin/pe/LetRecovery_PE.wim"  || { echo "底包缺少 bin/pe/LetRecovery_PE.wim"; exit 1; }
+
+      - name: Replace system-side exe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -f "正常系统端/target/release/LetRecovery.exe" "pkg/LetRecovery.exe"
+
+      - name: Inject PE-side exe into WIM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $wim   = "pkg\bin\pe\LetRecovery_PE.wim"
+          $mount = Join-Path $env:RUNNER_TEMP "wimmount"
+          New-Item -ItemType Directory -Force -Path $mount | Out-Null
+          Write-Host "Mounting $wim ..."
+          dism /Mount-Image /ImageFile:"$wim" /Index:1 /MountDir:"$mount"
+          if ($LASTEXITCODE -ne 0) { throw "DISM mount failed" }
+          $dst = Join-Path $mount "Program Files\LetRecoveryPE\LetRecoveryPE.exe"
+          Copy-Item -Force "PE端\target\release\LetRecoveryPE.exe" $dst
+          Write-Host "Replaced: $dst"
+          dism /Unmount-Image /MountDir:"$mount" /Commit
+          if ($LASTEXITCODE -ne 0) { throw "DISM unmount/commit failed" }
+
+      - name: Repackage package.7z
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f package.7z
+          ( cd pkg && 7z a -t7z -mx=9 -m0=lzma2 -ms=on ../package.7z ./* >/dev/null )
+          ls -la package.7z
+
+      - name: Determine tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = "${{ inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = (Get-Date).ToUniversalTime().ToString('yyyy.M.d')
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Tag: $tag"
+
+      - name: Create Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          SHA="$(git rev-parse HEAD)"
+          BR="${{ inputs.branch || github.ref_name }}"
+          gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create "$TAG" package.7z \
+            --repo "${{ github.repository }}" \
+            --target "$SHA" \
+            --title "$TAG" \
+            --notes "Automated build from branch ${BR} (commit ${SHA})."
+          echo "Released $TAG"
