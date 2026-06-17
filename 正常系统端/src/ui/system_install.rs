@@ -1031,6 +1031,14 @@ impl App {
         println!("[BITLOCKER] 开始检测并强制解密分区...");
         self.decrypting_partitions.clear();
 
+        // 目标安装分区将被格式化，进入 PE 后可直接擦除重建，无需（也不应）先做漫长的
+        // 全盘解密——否则会卡在目标盘的解密等待上。这里仅对“非目标”的已解锁加密分区
+        // 做解密等待。
+        let target_letter = self
+            .selected_partition
+            .and_then(|i| self.partitions.get(i))
+            .and_then(|p| p.letter.chars().next());
+
         // 创建临时的管理器以查询实时状态
         let manager = crate::core::bitlocker::BitLockerManager::new();
         let mut decryption_started = false;
@@ -1038,6 +1046,12 @@ impl App {
         for partition in &self.partitions {
             let drive_letter = partition.letter.chars().next().unwrap_or('C');
             let drive_str = format!("{}:", drive_letter);
+
+            // 跳过目标安装分区（将被格式化擦除，无需解密）
+            if Some(drive_letter) == target_letter {
+                println!("[BITLOCKER] 跳过目标安装分区 {} 的强制解密（将被格式化擦除）", drive_str);
+                continue;
+            }
 
             // 获取实时状态
             let current_status = manager.get_status(drive_letter);
