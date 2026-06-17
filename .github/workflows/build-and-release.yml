@@ -177,6 +177,19 @@ jobs:
           ( cd pkg && 7z a -t7z -mx=9 -m0=lzma2 -ms=on ../LetRecovery.7z ./* >/dev/null )
           ls -la LetRecovery.7z
 
+      - name: Collect standalone exes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 单独提供两个 exe，便于在 PE/系统里直接替换测试，无需重打整包重装
+          for p in "正常系统端/target/release/LetRecovery.exe" "target/release/LetRecovery.exe"; do
+            if [ -f "$p" ]; then cp -f "$p" ./LetRecovery.exe; break; fi
+          done
+          for p in "PE端/target/release/LetRecoveryPE.exe" "target/release/LetRecoveryPE.exe"; do
+            if [ -f "$p" ]; then cp -f "$p" ./LetRecoveryPE.exe; break; fi
+          done
+          ls -la LetRecovery.exe LetRecoveryPE.exe
+
       - name: Determine tag
         id: tag
         shell: pwsh
@@ -208,7 +221,7 @@ jobs:
             printf '%s\n' "Automated build from branch ${BR} (commit ${SHA})."
           } > release_notes.md
           gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag || true
-          gh release create "$TAG" LetRecovery.7z \
+          gh release create "$TAG" LetRecovery.7z LetRecovery.exe LetRecoveryPE.exe \
             --repo "${{ github.repository }}" \
             --target "$SHA" \
             --title "$TAG" \
