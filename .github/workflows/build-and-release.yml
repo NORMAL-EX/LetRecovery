@@ -157,21 +157,21 @@ jobs:
           TAG="${{ steps.tag.outputs.tag }}"
           SHA="$(git rev-parse HEAD)"
           BR="${{ inputs.branch || github.ref_name }}"
-          NOTES="Automated build from branch ${BR} (commit ${SHA})."
           PRE=""
           # 非 main 分支视为测试构建：标记为 prerelease 并注明请勿使用
-          if [ "$BR" != "main" ]; then
-            PRE="--prerelease"
-            NOTES="⚠️ 测试构建，请勿使用 / TEST BUILD — DO NOT USE.
-此 release 由非 main 分支（${BR}）构建，仅供测试，可能不稳定。
-
-${NOTES}"
-          fi
+          {
+            if [ "$BR" != "main" ]; then
+              PRE="--prerelease"
+              printf '%s\n\n' "⚠️ 测试构建，请勿使用 / TEST BUILD — DO NOT USE."
+              printf '%s\n\n' "此 release 由非 main 分支（${BR}）构建，仅供测试，可能不稳定。"
+            fi
+            printf '%s\n' "Automated build from branch ${BR} (commit ${SHA})."
+          } > release_notes.md
           gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag || true
           gh release create "$TAG" LetRecovery.7z \
             --repo "${{ github.repository }}" \
             --target "$SHA" \
             --title "$TAG" \
-            --notes "$NOTES" \
+            --notes-file release_notes.md \
             $PRE
           echo "Released $TAG (prerelease: ${PRE:-no})"
