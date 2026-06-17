@@ -219,6 +219,23 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
         println!("[PE INSTALL] 完整镜像路径: {}", image_path);
 
+        // Step 0: 校验镜像完整性（WIM/ESD；GHO 跳过）——放在格式化之前，坏镜像不糟蹋目标盘
+        if !config.is_gho {
+            println!("[PE INSTALL] Step 0: 校验镜像完整性");
+            log::info!("[PE安装/CLI] 开始校验镜像: {}", image_path);
+            let dism = Dism::new();
+            if let Err(e) = dism.verify_image(&image_path, None) {
+                eprintln!("[PE INSTALL] 镜像校验失败: {}", e);
+                log::error!("[PE安装/CLI] 镜像校验失败: {}", e);
+                show_error_message(&format!(
+                    "镜像校验失败：镜像可能已损坏或不完整（{}）。请重新获取镜像后重试。",
+                    e
+                ));
+                return Ok(());
+            }
+            log::info!("[PE安装/CLI] 镜像校验通过");
+        }
+
         // Step 1: 格式化分区
         println!("[PE INSTALL] Step 1: 格式化分区");
         if let Err(e) = DiskManager::format_partition(&target_partition) {
