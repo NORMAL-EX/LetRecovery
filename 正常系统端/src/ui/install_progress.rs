@@ -609,10 +609,39 @@ impl App {
             send_step(&progress_tx, 3, "导出驱动", 100);
             std::thread::sleep(std::time::Duration::from_millis(100));
 
+            // Step 4 前置：校验源镜像完整性
+            // 坏镜像在“复制几个 GB + 重启进 PE”之前就终止，省去白等；不动磁盘。
+            {
+                use crate::core::image_verify::{ImageVerifier, VerifyStatus};
+                send_step(&progress_tx, 4, "校验镜像", 0);
+                println!("[INSTALL PE] 校验源镜像完整性: {}", image_path);
+                let (vtx, vrx) = mpsc::channel::<crate::core::image_verify::VerifyProgress>();
+                let ptx = progress_tx.clone();
+                let vh = std::thread::spawn(move || {
+                    while let Ok(p) = vrx.recv() {
+                        send_step(&ptx, 4, "校验镜像", p.percentage);
+                    }
+                });
+                let vres = ImageVerifier::new().verify(&image_path, Some(vtx));
+                let _ = vh.join();
+                if vres.status != VerifyStatus::Valid {
+                    println!("[INSTALL PE] 镜像校验失败: {} - {}", vres.status, vres.message);
+                    let _ = progress_tx.send(DismProgress {
+                        percentage: 0,
+                        status: format!(
+                            "ERROR:镜像校验失败：镜像可能已损坏或不完整（{}）。请重新获取镜像后重试。",
+                            vres.message
+                        ),
+                    });
+                    return;
+                }
+                println!("[INSTALL PE] 源镜像校验通过");
+            }
+
             // Step 4: 复制镜像文件
             send_step(&progress_tx, 4, "复制镜像文件", 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            
+
             println!("[INSTALL PE STEP 4] 复制镜像文件到数据分区");
             let image_filename = Path::new(&image_path)
                 .file_name()
