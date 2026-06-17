@@ -1030,30 +1030,26 @@ impl App {
             return false;
         }
 
+        // 实验性 BitLocker 密钥透传开启时：正常端【不预解密任何盘】，改为把恢复密钥
+        // 注入 PE、由 PE 启动后用恢复密钥解锁锁定卷（见 PeManager::maybe_inject_bitlocker_keys
+        // 与 PE 端 unlock_bitlocker_passthrough）。这样带 BitLocker 的系统盘重装无需漫长预解密。
+        if crate::core::app_config::AppConfig::load().experimental_bitlocker_passthrough {
+            println!("[BITLOCKER] 已开启密钥透传，跳过正常端预解密（改由 PE 用恢复密钥解锁）");
+            self.decrypting_partitions.clear();
+            return false;
+        }
+
         println!("[BITLOCKER] 开始检测并强制解密分区...");
         self.decrypting_partitions.clear();
 
-        // 目标安装分区将被格式化，进入 PE 后可直接擦除重建，无需（也不应）先做漫长的
-        // 全盘解密——否则会卡在目标盘的解密等待上。这里仅对“非目标”的已解锁加密分区
-        // 做解密等待。
-        let target_letter = self
-            .selected_partition
-            .and_then(|i| self.partitions.get(i))
-            .and_then(|p| p.letter.chars().next());
-
-        // 创建临时的管理器以查询实时状态
+        // 透传关闭（默认）：PE 无解锁能力，必须在正常端预解密所有【已解锁】的加密分区
+        // （含目标盘），否则进 PE 后这些卷处于锁定状态、无法访问/格式化。
         let manager = crate::core::bitlocker::BitLockerManager::new();
         let mut decryption_started = false;
 
         for partition in &self.partitions {
             let drive_letter = partition.letter.chars().next().unwrap_or('C');
             let drive_str = format!("{}:", drive_letter);
-
-            // 跳过目标安装分区（将被格式化擦除，无需解密）
-            if Some(drive_letter) == target_letter {
-                println!("[BITLOCKER] 跳过目标安装分区 {} 的强制解密（将被格式化擦除）", drive_str);
-                continue;
-            }
 
             // 获取实时状态
             let current_status = manager.get_status(drive_letter);
