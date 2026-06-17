@@ -259,7 +259,7 @@ impl App {
                 }
 
                 if ui
-                    .add(egui::Button::new("离线密码重置").min_size(button_size))
+                    .add(egui::Button::new("密码重置").min_size(button_size))
                     .clicked()
                 {
                     self.show_password_reset_dialog = true;

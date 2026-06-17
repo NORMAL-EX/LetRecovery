@@ -320,7 +320,7 @@ impl App {
             ui.checkbox(&mut self.auto_reboot, "立即重启");
         });
 
-        // 自定义无人值守文件（仅在启用无人值守时显示，放在引导模式选择上方）
+        // 自定义无人值守文件 + 引导模式（启用无人值守时两者并列；否则引导模式单独一行）
         if self.unattended_install {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -351,6 +351,38 @@ impl App {
                     self.custom_unattend_path.clear();
                     self.custom_unattend_error = None;
                 }
+
+                // 引导模式与“自定义无人值守”并列在同一行
+                ui.separator();
+                ui.label("引导模式:");
+                egui::ComboBox::from_id_salt("boot_mode_select")
+                    .selected_text(format!("{}", self.selected_boot_mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::Auto,
+                            "自动 (根据分区表)",
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::UEFI,
+                            "UEFI",
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::Legacy,
+                            "Legacy (BIOS)",
+                        );
+                    });
+                if let Some(idx) = self.selected_partition {
+                    if let Some(partition) = self.partitions.get(idx) {
+                        let actual_mode = Self::get_actual_boot_mode(
+                            self.selected_boot_mode,
+                            partition.partition_style,
+                        );
+                        ui.label(format!("( 将使用: {} )", actual_mode));
+                    }
+                }
             });
 
             if self.custom_unattend_path.is_empty() {
@@ -378,38 +410,40 @@ impl App {
                 }
             }
             ui.add_space(6.0);
-        }
-
-        // 引导模式选择
-        ui.horizontal(|ui| {
-            ui.label("引导模式:");
-            egui::ComboBox::from_id_salt("boot_mode_select")
-                .selected_text(format!("{}", self.selected_boot_mode))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.selected_boot_mode,
-                        BootModeSelection::Auto,
-                        "自动 (根据分区表)",
-                    );
-                    ui.selectable_value(
-                        &mut self.selected_boot_mode,
-                        BootModeSelection::UEFI,
-                        "UEFI",
-                    );
-                    ui.selectable_value(
-                        &mut self.selected_boot_mode,
-                        BootModeSelection::Legacy,
-                        "Legacy (BIOS)",
-                    );
-                });
-
-            if let Some(idx) = self.selected_partition {
-                if let Some(partition) = self.partitions.get(idx) {
-                    let actual_mode = Self::get_actual_boot_mode(self.selected_boot_mode, partition.partition_style);
-                    ui.label(format!("( 将使用: {} )", actual_mode));
+        } else {
+            // 未启用无人值守：引导模式单独一行
+            ui.horizontal(|ui| {
+                ui.label("引导模式:");
+                egui::ComboBox::from_id_salt("boot_mode_select")
+                    .selected_text(format!("{}", self.selected_boot_mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::Auto,
+                            "自动 (根据分区表)",
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::UEFI,
+                            "UEFI",
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::Legacy,
+                            "Legacy (BIOS)",
+                        );
+                    });
+                if let Some(idx) = self.selected_partition {
+                    if let Some(partition) = self.partitions.get(idx) {
+                        let actual_mode = Self::get_actual_boot_mode(
+                            self.selected_boot_mode,
+                            partition.partition_style,
+                        );
+                        ui.label(format!("( 将使用: {} )", actual_mode));
+                    }
                 }
-            }
-        });
+            });
+        }
 
         // PE选择（仅在需要通过PE安装时显示）
         if show_pe_selector {
