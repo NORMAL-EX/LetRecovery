@@ -112,6 +112,24 @@ jobs:
           dism /Unmount-Image /MountDir:"$mount" /Commit
           if ($LASTEXITCODE -ne 0) { throw "DISM unmount/commit failed" }
 
+      - name: Clean WIM (drop orphaned streams shown as [DELETED])
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $wim = "pkg\bin\pe\LetRecovery_PE.wim"
+          Write-Host "=== WIM info BEFORE clean ==="
+          dism /Get-WimInfo /WimFile:"$wim" /Index:1
+          # 挂载提交会在 WIM 内留下被替换文件的旧数据流（7z/Bandizip 显示为 [DELETED]）。
+          # /Export-Image 仅复制被引用的数据流到新 WIM，去掉孤立流；并保留映像名称与可启动标记。
+          $tmp = "pkg\bin\pe\_LetRecovery_PE.clean.wim"
+          if (Test-Path $tmp) { Remove-Item -Force $tmp }
+          dism /Export-Image /SourceImageFile:"$wim" /SourceIndex:1 /DestinationImageFile:"$tmp" /Compress:max
+          if ($LASTEXITCODE -ne 0) { throw "DISM export failed" }
+          Remove-Item -Force $wim
+          Move-Item -Force $tmp $wim
+          Write-Host "=== WIM info AFTER clean ==="
+          dism /Get-WimInfo /WimFile:"$wim" /Index:1
+
       - name: Update WIM MD5 in config.json
         shell: bash
         run: |
