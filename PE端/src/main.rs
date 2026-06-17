@@ -7,16 +7,62 @@ mod utils;
 
 use eframe::egui;
 
-fn main() -> eframe::Result<()> {
-    // 初始化日志
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp(Some(env_logger::TimestampPrecision::Millis))
-        .init();
+/// 日志文件路径：优先 exe 同目录；取不到则退回当前目录。
+fn log_file_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("LetRecoveryPE.log")))
+        .unwrap_or_else(|| std::path::PathBuf::from("LetRecoveryPE.log"))
+}
 
-    log::info!("LetRecovery PE 启动中...");
+/// 初始化日志：输出到文件（append）。文件打不开时退回默认 stderr，至少不影响启动。
+fn init_file_logger() {
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    builder.format_timestamp(Some(env_logger::TimestampPrecision::Millis));
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file_path())
+    {
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    let _ = builder.try_init();
+}
+
+/// 安装 panic 钩子，把线程 panic 的位置与信息写入日志（再调用默认钩子）。
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "未知位置".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<非字符串 panic>".to_string());
+        log::error!("[PANIC] 线程崩溃 @ {} : {}", location, msg);
+        default_hook(info);
+    }));
+}
+
+fn main() -> eframe::Result<()> {
+    // 初始化日志：写入到 exe 同目录的 LetRecoveryPE.log。
+    // PE 下 GUI 程序没有控制台，stderr 会被直接丢弃，必须落盘才能事后排查“怎么死的”。
+    init_file_logger();
+    // 安装 panic 钩子：安装流程跑在工作线程里，线程 panic 会“静默死亡”导致界面卡住，
+    // 必须把 panic 记到日志。
+    install_panic_hook();
+
+    log::info!("==================== LetRecovery PE 启动 ====================");
+    log::info!("版本: {} | 日志文件: {}", env!("CARGO_PKG_VERSION"), log_file_path().display());
 
     // 检查命令行参数
     let args: Vec<String> = std::env::args().collect();
+    log::info!("命令行参数: {:?}", args);
 
     // 命令行模式（无GUI）
     if args.contains(&"/PEINSTALL".to_string()) || args.contains(&"--pe-install".to_string()) {

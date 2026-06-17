@@ -285,6 +285,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             let _ = tx.send(WorkerMessage::SetProgress(100));
         }
         Err(e) => {
+            log::error!("[PE安装] 格式化分区失败: {}", e);
             let _ = tx.send(WorkerMessage::Failed(format!("格式化分区失败: {}", e)));
             return;
         }
@@ -295,6 +296,10 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetStatus("正在释放系统镜像...".to_string()));
 
     let apply_dir = format!("{}\\", target_partition);
+    log::info!(
+        "[PE安装] 开始释放镜像: 文件={} 卷索引={} is_gho={} -> 目标={}",
+        image_path, config.volume_index, config.is_gho, apply_dir
+    );
 
     // 创建进度通道
     let (progress_tx, progress_rx) = channel::<DismProgress>();
@@ -327,9 +332,11 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = progress_handle.join();
 
     if let Err(e) = apply_result {
+        log::error!("[PE安装] 释放镜像失败: {}", e);
         let _ = tx.send(WorkerMessage::Failed(format!("释放镜像失败: {}", e)));
         return;
     }
+    log::info!("[PE安装] 释放镜像完成");
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     // Step 3: 导入驱动
