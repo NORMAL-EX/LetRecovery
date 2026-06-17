@@ -150,6 +150,7 @@ impl App {
 
         // 检查离线密码重置状态
         self.check_password_reset_status();
+        self.check_password_reset_users_status();
     }
     
     /// 启动后台加载Windows分区信息

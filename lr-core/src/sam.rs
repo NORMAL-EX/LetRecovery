@@ -102,6 +102,60 @@ pub fn clear_account_password(target_partition: &str, username: &str) -> Result<
     result
 }
 
+/// 离线系统 SAM 中的一个本地账户（只读枚举用）。
+#[derive(Debug, Clone)]
+pub struct SamAccount {
+    /// 账户名（如 Administrator）。
+    pub username: String,
+    /// 账户 RID（8 位十六进制，如 000001F4）。
+    pub rid: String,
+    /// 是否被禁用（F 结构的 ACB_DISABLED 位）。
+    pub disabled: bool,
+}
+
+/// 只读列出目标系统 SAM 中的本地账户（**不修改** SAM，不做备份）。
+///
+/// - `target_partition`：目标系统盘，形如 `"C:"`。
+/// - 返回该系统下可解析出用户名的本地账户列表。
+pub fn list_accounts(target_partition: &str) -> Result<Vec<SamAccount>> {
+    let sam_hive = format!("{}\\Windows\\System32\\config\\SAM", target_partition);
+    if !Path::new(&sam_hive).exists() {
+        anyhow::bail!("目标 SAM 配置单元不存在: {}", sam_hive);
+    }
+
+    // 只读枚举使用独立的挂载名，避免与清除流程（LR_SAM）冲突。
+    OfflineRegistry::load_hive("LR_SAM_RO", &sam_hive)
+        .map_err(|e| anyhow::anyhow!("加载 SAM 配置单元失败: {}", e))?;
+
+    let result = (|| -> Result<Vec<SamAccount>> {
+        let users_key = "HKLM\\LR_SAM_RO\\SAM\\Domains\\Account\\Users";
+        let rids = list_user_rids(users_key)?;
+        let mut accounts = Vec::new();
+        for rid in rids {
+            let user_key = format!("{}\\{}", users_key, rid);
+            let v = match reg_read_binary(&user_key, "V") {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let name = match parse_v_username(&v) {
+                Some(n) if !n.is_empty() => n,
+                _ => continue,
+            };
+            // 读取 F 结构判断账户是否被禁用（偏移 0x38 处 USHORT 标志位）。
+            let disabled = reg_read_binary(&user_key, "F")
+                .ok()
+                .and_then(|f| f.get(0x38..0x3a).map(|s| u16::from_le_bytes([s[0], s[1]])))
+                .map(|flags| flags & 0x0001 != 0)
+                .unwrap_or(false);
+            accounts.push(SamAccount { username: name, rid, disabled });
+        }
+        Ok(accounts)
+    })();
+
+    let _ = OfflineRegistry::unload_hive("LR_SAM_RO");
+    result
+}
+
 /// 枚举 `Users` 键下的用户 RID 子键（8 位十六进制，如 000001F4）。
 fn list_user_rids(users_key: &str) -> Result<Vec<String>> {
     let out = new_command("reg.exe").args(["query", users_key]).output()?;

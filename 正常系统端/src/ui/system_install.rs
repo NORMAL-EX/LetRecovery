@@ -420,24 +420,36 @@ impl App {
                 ui.label("🔧 PE环境:");
                 
                 if pe_available {
+                    // 只有一个 PE 时自动选中（后面会隐藏下拉框）
+                    let pe_count = self.config.as_ref().map(|c| c.pe_list.len()).unwrap_or(0);
+                    if pe_count == 1 && self.selected_pe_for_install.is_none() {
+                        self.selected_pe_for_install = Some(0);
+                    }
                     if let Some(ref config) = self.config {
-                        egui::ComboBox::from_id_salt("pe_select_install")
-                            .selected_text(
-                                self.selected_pe_for_install
-                                    .and_then(|i| config.pe_list.get(i))
-                                    .map(|p| p.display_name.as_str())
-                                    .unwrap_or("请选择PE"),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (i, pe) in config.pe_list.iter().enumerate() {
-                                    ui.selectable_value(
-                                        &mut self.selected_pe_for_install,
-                                        Some(i),
-                                        &pe.display_name,
-                                    );
-                                }
-                            });
-                        
+                        if pe_count == 1 {
+                            // 仅一个 PE 环境：无需下拉框，直接显示其名称
+                            if let Some(pe) = config.pe_list.first() {
+                                ui.label(&pe.display_name);
+                            }
+                        } else {
+                            egui::ComboBox::from_id_salt("pe_select_install")
+                                .selected_text(
+                                    self.selected_pe_for_install
+                                        .and_then(|i| config.pe_list.get(i))
+                                        .map(|p| p.display_name.as_str())
+                                        .unwrap_or("请选择PE"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (i, pe) in config.pe_list.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut self.selected_pe_for_install,
+                                            Some(i),
+                                            &pe.display_name,
+                                        );
+                                    }
+                                });
+                        }
+
                         // 显示PE就绪状态
                         if let Some(idx) = self.selected_pe_for_install {
                             if let Some(pe) = config.pe_list.get(idx) {
