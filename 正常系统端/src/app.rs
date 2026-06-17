@@ -469,6 +469,16 @@ pub struct App {
     pub password_reset_loading: bool,
     pub password_reset_message: String,
     pub password_reset_rx: Option<Receiver<Result<bool, String>>>,
+    /// 选中的目标系统盘符（离线 Windows 所在分区），如 "D:"。
+    pub password_reset_target: Option<String>,
+    /// 目标系统的本地账户列表。
+    pub password_reset_users: Vec<lr_core::sam::SamAccount>,
+    /// 是否正在加载账户列表。
+    pub password_reset_users_loading: bool,
+    /// 账户列表加载结果通道。
+    pub password_reset_users_rx: Option<Receiver<Result<Vec<lr_core::sam::SamAccount>, String>>>,
+    /// 在列表中选中的账户名。
+    pub password_reset_selected_user: Option<String>,
 
     // 应用配置（小白模式等）
     pub app_config: crate::core::app_config::AppConfig,
@@ -854,6 +864,11 @@ impl Default for App {
             password_reset_loading: false,
             password_reset_message: String::new(),
             password_reset_rx: None,
+            password_reset_target: None,
+            password_reset_users: Vec::new(),
+            password_reset_users_loading: false,
+            password_reset_users_rx: None,
+            password_reset_selected_user: None,
             // 应用配置（小白模式等）
             app_config: crate::core::app_config::AppConfig::load(),
             // PE下载待校验的MD5

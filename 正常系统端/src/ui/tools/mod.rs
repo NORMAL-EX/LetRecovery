@@ -267,6 +267,10 @@ impl App {
                     self.password_reset_username.clear();
                     self.password_reset_message.clear();
                     self.password_reset_loading = false;
+                    self.password_reset_target = None;
+                    self.password_reset_users.clear();
+                    self.password_reset_selected_user = None;
+                    self.password_reset_users_loading = false;
                 }
 
                 ui.end_row();
