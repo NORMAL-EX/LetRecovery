@@ -169,6 +169,25 @@ jobs:
           echo "--- updated config.json ---"
           cat pkg/config.json
 
+      - name: Add README and CSDN evidence into package
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 随包放入说明文件（介绍 LetRecovery + 陈述 CSDN 盗卖事实）与证据截图
+          if [ -f assets/release/README.txt ]; then
+            cp -f assets/release/README.txt pkg/README.txt
+          else
+            echo "warning: assets/release/README.txt 不存在（该分支可能未包含），跳过"
+          fi
+          if ls assets/csdn-evidence/*.png >/dev/null 2>&1; then
+            mkdir -p pkg/images
+            cp -f assets/csdn-evidence/*.png pkg/images/
+          else
+            echo "warning: assets/csdn-evidence/*.png 不存在，跳过 images/"
+          fi
+          echo "--- package README + images ---"
+          ls -la pkg/README.txt pkg/images/ 2>/dev/null || true
+
       - name: Repackage into LetRecovery.7z
         shell: bash
         run: |
