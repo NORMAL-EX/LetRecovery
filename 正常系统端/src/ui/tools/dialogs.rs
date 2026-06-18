@@ -942,12 +942,7 @@ impl App {
             .default_width(400.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ui.ctx(), |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new("").size(32.0).color(egui::Color32::from_rgb(255, 180, 0)));
-                    ui.add_space(10.0);
-                });
-
+                ui.add_space(6.0);
                 ui.label("此操作将执行以下命令重置网络设置：");
                 ui.add_space(5.0);
 
@@ -1030,12 +1025,7 @@ impl App {
             .default_width(400.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ui.ctx(), |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new("").size(32.0));
-                    ui.add_space(10.0);
-                });
-
+                ui.add_space(6.0);
                 ui.label("是否立即网络同步本机的时间到北京时间？");
                 ui.add_space(10.0);
 
