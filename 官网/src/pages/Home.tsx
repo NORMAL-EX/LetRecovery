@@ -41,7 +41,7 @@ const Home: React.FC = () => {
       playerRef.current = new Artplayer({
         container: artRef.current,
         url: 'https://p1.cloud-pe.cn/LetRecovery.mp4',
-        poster: 'https://pic1.imgdb.cn/item/6975ba3d6deeadc41a3395a4.jpg',
+        poster: 'https://pic1.imgdb.cn/item/6a33aa9a91b65c4475abaa73.jpg',
         volume: 0.5,
         isLive: false,
         muted: false,
