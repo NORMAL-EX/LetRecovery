@@ -171,6 +171,11 @@ impl PeManager {
         // 1.5 【实验性】BitLocker 密钥透传：把各加密卷的恢复密钥打包进刚拷好的 boot.wim
         Self::maybe_inject_bitlocker_keys(&target_wim);
 
+        // 1.6 Secure Boot：PE 自带的 winload.efi 仅 2011 链签名，在已吊销 2011(CVE-2023-24932 DBX)
+        //     或仅信任 2023 证书的机器上会被 Secure Boot 拦下。若当前系统的 winload 是双签名(2011+2023)
+        //     且与 PE 同内核家族，则用它覆盖 PE 内的 winload，使 PE 在新老/已吊销机器上都能过 Secure Boot。
+        Self::maybe_upgrade_pe_bootloader(&target_wim);
+
         // 2. 创建或使用boot.sdi
         let target_sdi = self.create_default_sdi(target_dir)?;
 
@@ -244,6 +249,110 @@ impl PeManager {
                 entries.len()
             ),
             Err(e) => println!("[PE][实验] 注入 boot.wim 失败: {}（PE 端将无法自动解锁）", e),
+        }
+    }
+
+    /// 当前打包 PE 的内核家族（winload 版本前缀）。换 PE 基线时同步更新此常量。
+    /// 仅当“当前系统”的 winload 属于同一家族时才允许用它覆盖 PE 的 winload，避免 winload/内核版本不兼容。
+    const PE_WINLOAD_FAMILY: &'static str = "10.0.19041.";
+
+    /// 若满足条件，用【当前系统】的 winload.efi 覆盖 PE boot.wim 内的 winload.efi，
+    /// 让 PE 在“仅信任 2023 / 已吊销 2011(CVE-2023-24932 DBX)”的 Secure Boot 机器上也能启动。
+    ///
+    /// 条件（任一不满足即原样保留 PE 自带的 winload，绝不降级、不冒险）：
+    /// 1. 当前已开启 Secure Boot（否则用不着，避免无谓改动启动链）；
+    /// 2. 当前系统 winload.efi 含 2023 证书（双签名 2011+2023，新老机器都能过）；
+    /// 3. 当前系统 winload.efi 与 PE 同属 `PE_WINLOAD_FAMILY` 内核家族（版本兼容）。
+    ///
+    /// best-effort：失败只记日志，不影响 PE 启动准备。PE 经目标机自带 bootmgfw 引导，
+    /// 它唯一受 Secure Boot 校验的组件就是 boot.wim 内的 winload.efi，故只需替换它。
+    fn maybe_upgrade_pe_bootloader(target_wim: &str) {
+        // 1. 仅在 Secure Boot 开启时处理
+        if !Self::is_secure_boot_enabled() {
+            println!("[PE][SB] 未开启 Secure Boot，无需升级 PE winload");
+            return;
+        }
+
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let host_winload = format!("{}\\System32\\winload.efi", sysroot);
+        let bytes = match std::fs::read(&host_winload) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("[PE][SB] 读取当前系统 winload.efi 失败: {}，保留 PE 原 winload", e);
+                return;
+            }
+        };
+
+        // 2. 当前系统 winload 是否含 2023 证书（双签名 / 2023 签名）
+        let has_2023 = Self::bytes_contains(&bytes, b"Windows UEFI CA 2023")
+            || Self::bytes_contains(&bytes, b"Microsoft Windows Production PCA 2023");
+        if !has_2023 {
+            println!("[PE][SB] 当前系统 winload 未含 2023 证书（非双签名），保留 PE 原 winload");
+            return;
+        }
+
+        // 3. 内核家族匹配（winload 版本资源为 UTF-16LE，需以 UTF-16 形式匹配 "10.0.19041."）
+        let fam_u16: Vec<u8> = Self::PE_WINLOAD_FAMILY
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        if !Self::bytes_contains(&bytes, &fam_u16) {
+            println!(
+                "[PE][SB] 当前系统 winload 与 PE 内核家族({})不匹配，避免版本不兼容，保留 PE 原 winload",
+                Self::PE_WINLOAD_FAMILY
+            );
+            return;
+        }
+
+        // 4. 覆盖 PE boot.wim 内的 winload（ramdisk 引导用 \Windows\System32\Boot\winload.efi；
+        //    一并覆盖 \Windows\System32\winload.efi 以防万一）。wimlib ADD 对已存在路径即为替换。
+        let mgr = match lr_core::wimlib::WimlibManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                println!("[PE][SB] wimlib 初始化失败: {}，保留 PE 原 winload", e);
+                return;
+            }
+        };
+        let mut ok = 0;
+        for dest in [
+            "\\Windows\\System32\\Boot\\winload.efi",
+            "\\Windows\\System32\\winload.efi",
+        ] {
+            match mgr.add_file_to_image(target_wim, 1, &host_winload, dest) {
+                Ok(()) => {
+                    ok += 1;
+                    println!("[PE][SB] 已用当前系统双签名 winload 覆盖 PE: {}", dest);
+                }
+                Err(e) => println!("[PE][SB] 覆盖 {} 失败: {}", dest, e),
+            }
+        }
+        if ok > 0 {
+            println!("[PE][SB] PE winload 已升级为双签名(2011+2023)，可在已吊销2011/仅2023机器上过 Secure Boot");
+        }
+    }
+
+    /// 内存子串查找（用于在 PE 二进制里探测证书 CN / 版本字符串）。
+    fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return false;
+        }
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// 当前系统是否已开启 UEFI Secure Boot（读注册表 State\UEFISecureBootEnabled）。
+    fn is_secure_boot_enabled() -> bool {
+        let out = crate::utils::cmd::run_command_string(
+            "reg",
+            &[
+                "query",
+                r"HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\State",
+                "/v",
+                "UEFISecureBootEnabled",
+            ],
+        );
+        match out {
+            Ok(s) => s.to_lowercase().contains("0x1"),
+            Err(_) => false,
         }
     }
 
