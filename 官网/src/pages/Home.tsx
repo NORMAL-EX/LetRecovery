@@ -40,7 +40,7 @@ const Home: React.FC = () => {
       playerRef.current = new Artplayer({
         container: artRef.current,
         url: 'https://p1.cloud-pe.cn/LetRecovery.mp4',
-        poster: 'https://pic1.imgdb.cn/item/6975ba3d6deeadc41a3395a4.jpg',
+        poster: 'https://pic1.imgdb.cn/item/6a339a3591b65c4475ab67b2.png',
         volume: 0.5,
         isLive: false,
         muted: false,
