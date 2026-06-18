@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
 
-<img width="1429" height="1067" alt="image" src="https://github.com/user-attachments/assets/687be36e-4cfd-4cc1-8e49-5a8bf7309463" />
+<img width="803" height="600" alt="image" src="https://github.com/user-attachments/assets/8760ea53-785c-48ba-a6ce-dc3e154d3926" />
 
 </div>
 
