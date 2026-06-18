@@ -228,11 +228,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     use crate::ui::advanced_options::apply_advanced_options;
 
     log::info!("========== 开始PE安装流程 ==========");
-
-    // Step 0：【实验性】BitLocker 密钥透传——若正常端在引导阶段把恢复密钥打包进了
-    // boot.wim，则 PE 启动后用这些密钥解锁所有锁定卷；否则查找数据分区/格式化目标盘
-    // 都可能因卷锁定而失败。与 CLI 路径(run_cli_mode)保持一致。无密钥文件=未启用=安全空操作。
-    crate::unlock_bitlocker_passthrough();
+    // 注：BitLocker 透传解锁已在 main() 最前面统一执行（早于操作类型检测），这里不再重复。
 
     // 查找配置文件所在分区
     let data_partition = match ConfigFileManager::find_data_partition() {

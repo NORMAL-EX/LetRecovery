@@ -108,6 +108,15 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     log::info!("命令行参数: {:?}", args);
 
+    // 【关键】BitLocker 密钥透传解锁必须在**任何**操作类型检测之前执行。
+    // 安装标记文件(LetRecovery_Install.marker)位于目标系统卷上，若该卷被 BitLocker 加密，
+    // 则 PE 启动后它处于锁定状态，detect_operation_type()/find_install_marker_partition()
+    // 会读不到标记 → 返回 None → GUI 安装流程(execute_install_workflow)根本不会启动，
+    // 而解锁逻辑原先恰好埋在 execute_install_workflow 里，形成“要解锁才能检测、要检测才会解锁”
+    // 的死锁。这里提前到 main 最前面统一解锁，GUI/自动/命令行所有模式都覆盖，
+    // 且无论是否加密都会在日志里留下解锁尝试记录。无密钥文件=未启用=安全空操作。
+    unlock_bitlocker_passthrough();
+
     // 命令行模式（无GUI）
     if args.contains(&"/PEINSTALL".to_string()) || args.contains(&"--pe-install".to_string()) {
         log::info!("检测到PE安装模式（命令行），执行自动安装...");
@@ -335,10 +344,7 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
     if is_install {
         println!("[PE INSTALL] ========== PE自动安装模式 ==========");
-
-        // Step 0: 【实验性】BitLocker 密钥透传——若 boot.wim 里带了恢复密钥文件，
-        // 先解锁所有锁定的 BitLocker 卷，否则后续查找数据分区/格式化目标盘都可能因卷锁定而失败。
-        unlock_bitlocker_passthrough();
+        // 注：BitLocker 透传解锁已在 main() 最前面统一执行，这里不再重复。
 
         // 查找配置文件所在分区
         let data_partition = match ConfigFileManager::find_data_partition() {
