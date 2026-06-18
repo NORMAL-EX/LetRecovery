@@ -182,8 +182,8 @@ impl Dism {
     // 驱动操作 - 使用 setupapi.dll/newdev.dll
     // ========================================================================
 
-    /// 导出驱动 - 使用 Windows API
-    /// 在正常环境下导出当前系统的第三方驱动
+    /// 导出驱动 - 优先 DISM API(DismExportDriver)，失败回退手工导出
+    /// 在正常环境下导出当前系统的第三方驱动（在线映像）
     pub fn export_drivers(&self, destination: &str) -> Result<()> {
         std::fs::create_dir_all(destination)?;
 
@@ -191,26 +191,81 @@ impl Dism {
             anyhow::bail!("PE环境下无法导出当前系统驱动，请使用 export_drivers_from_system 并指定目标系统分区");
         }
 
-        println!("[Dism] 使用 Windows API 导出驱动到: {}", destination);
+        // 优先：DISM API 在线导出（等价 dism /online /export-driver）
+        match crate::core::dismapi::DismApi::load() {
+            Ok(api) => match api.export_drivers_online(Path::new(destination), None) {
+                Ok(count) => {
+                    println!("[Dism] DismExportDriver(在线) 成功导出 {} 个驱动 -> {}", count, destination);
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("[Dism] DismExportDriver(在线) 失败: {}，回退手工导出", e);
+                }
+            },
+            Err(e) => {
+                println!("[Dism] 加载 dismapi.dll 失败: {}，回退手工导出", e);
+            }
+        }
 
+        // 回退：SetupAPI 枚举 + 手工复制 DriverStore
+        println!("[Dism] 使用 Windows API(SetupAPI) 导出驱动到: {}", destination);
         let manager = DriverManager::new()
             .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
-
         let count = manager.export_drivers(Path::new(destination), true)?;
         println!("[Dism] 成功导出 {} 个驱动", count);
         Ok(())
     }
 
-    /// 从指定系统分区导出驱动 (PE环境下使用)
-    /// 使用 Windows API 直接读取驱动存储
+    /// 从指定系统分区导出驱动 (PE/正常环境均可)
+    /// 优先 DISM API(DismExportDriver)，失败回退手工遍历 DriverStore
     pub fn export_drivers_from_system(&self, system_partition: &str, destination: &str) -> Result<()> {
         std::fs::create_dir_all(destination)?;
 
-        println!("[Dism] 使用 Windows API 从 {} 导出驱动到: {}", system_partition, destination);
+        // 判断目标是否就是“当前运行系统”：非 PE 且盘符等于 %SystemDrive% → 用在线映像，
+        // 否则按离线映像（PE 下对已部署系统，或对另一块系统盘）导出。
+        let target_drive = system_partition
+            .trim()
+            .chars()
+            .next()
+            .map(|c| c.to_ascii_uppercase());
+        let system_drive = std::env::var("SystemDrive")
+            .ok()
+            .and_then(|s| s.trim().chars().next())
+            .map(|c| c.to_ascii_uppercase());
+        let is_online_target = !self.is_pe && target_drive.is_some() && target_drive == system_drive;
 
+        match crate::core::dismapi::DismApi::load() {
+            Ok(api) => {
+                let result = if is_online_target {
+                    println!("[Dism] DismExportDriver: 目标为当前运行系统，使用在线映像导出 -> {}", destination);
+                    api.export_drivers_online(Path::new(destination), None)
+                } else {
+                    println!("[Dism] DismExportDriver: 离线映像 {} -> {}", system_partition, destination);
+                    api.export_drivers_offline(
+                        Path::new(system_partition),
+                        Path::new(destination),
+                        None,
+                    )
+                };
+                match result {
+                    Ok(count) => {
+                        println!("[Dism] DismExportDriver 成功导出 {} 个驱动", count);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        println!("[Dism] DismExportDriver 失败: {}，回退手工导出", e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[Dism] 加载 dismapi.dll 失败: {}，回退手工导出", e);
+            }
+        }
+
+        // 回退：手工遍历 FileRepository
+        println!("[Dism] 使用 Windows API 从 {} 导出驱动到: {}", system_partition, destination);
         let manager = DriverManager::new()
             .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
-
         let count = manager.export_drivers_from_system(
             Path::new(system_partition),
             Path::new(destination),

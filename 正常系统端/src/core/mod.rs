@@ -6,6 +6,7 @@ pub mod cli_install;
 pub mod disk;
 pub mod dism;
 pub mod dism_cmd;
+pub mod dismapi;
 pub mod driver;
 pub mod ghost;
 pub mod gho_password;
