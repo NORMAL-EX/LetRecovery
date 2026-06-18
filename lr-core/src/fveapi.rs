@@ -409,6 +409,18 @@ mod imp {
             );
 
             log::info!("fveapi.dll 加载成功");
+            log::info!(
+                "fveapi: 可选导出 GetStatusW={} GetStatus={} ConversionDecrypt={} AuthPassphrase={} UnlockWithAccessMode={} IsVolumeEncrypted={}",
+                get_status_w.is_some(),
+                get_status.is_some(),
+                conversion_decrypt.is_some(),
+                auth_from_passphrase.is_some(),
+                unlock_volume_access.is_some(),
+                is_volume_encrypted.is_some()
+            );
+            if unlock_volume_access.is_none() {
+                log::warn!("fveapi: 缺 FveUnlockVolumeWithAccessMode 导出，将回退 FveUnlockVolume");
+            }
             Ok(FveApi {
                 _library: library,
                 open_volume,
@@ -546,7 +558,9 @@ mod imp {
                 return Err(FveError::Unknown);
             }
             if hr == HR_VOLUME_LOCKED {
-                log::debug!("开卷 {}：卷已锁定(0x80310000)，已取得句柄用于解锁", drive);
+                log::info!("fveapi: 开卷 {} 卷已锁定(0x80310000)，已取得句柄用于解锁", drive);
+            } else {
+                log::info!("fveapi: 开卷 {} 成功 hr=0x{:08X}", drive, hr);
             }
             Ok(FveVolumeHandle { handle, api: self })
         }
@@ -633,13 +647,31 @@ mod imp {
                 } else {
                     match self.api.auth_from_passphrase {
                         Some(f) => f(secret_w.as_ptr(), &mut *auth),
-                        None => return Err(FveError::NotSupported),
+                        None => {
+                            log::warn!("fveapi: 缺 FveAuthElementFromPassPhraseW 导出，无法用口令解锁");
+                            return Err(FveError::NotSupported);
+                        }
                     }
                 }
             };
             if hr_failed(hr) {
+                log::warn!(
+                    "fveapi: 生成认证元素失败(is_recovery={}) hr=0x{:08X} ({})",
+                    is_recovery,
+                    hr,
+                    FveError::from_hresult(hr)
+                );
                 return Err(FveError::from_hresult(hr));
             }
+            log::info!(
+                "fveapi: 认证元素已生成(is_recovery={})，解锁入口={}",
+                is_recovery,
+                if self.api.unlock_volume_access.is_some() {
+                    "FveUnlockVolumeWithAccessMode"
+                } else {
+                    "FveUnlockVolume"
+                }
+            );
 
             // 2) 优先用带 AccessMode 的解锁入口（需要 0x38 字节 settings + SecretType）
             let hr = if let Some(unlock_am) = self.api.unlock_volume_access {
@@ -663,8 +695,14 @@ mod imp {
             };
 
             if hr == HR_OK || hr == HR_VOLUME_UNLOCKED {
+                log::info!("fveapi: 解锁成功 hr=0x{:08X}", hr);
                 Ok(())
             } else {
+                log::warn!(
+                    "fveapi: 解锁失败 hr=0x{:08X} ({})",
+                    hr,
+                    FveError::from_hresult(hr)
+                );
                 Err(FveError::from_hresult(hr))
             }
         }
