@@ -1424,7 +1424,7 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(10.0);
-                        ui.colored_label(egui::Color32::RED, "❌");
+                        ui.colored_label(egui::Color32::RED, "");
                         ui.add_space(10.0);
                         ui.label(&self.error_dialog_message);
                         ui.add_space(20.0);
@@ -1447,7 +1447,7 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(10.0);
-                        ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "⚠");
+                        ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "");
                         ui.add_space(10.0);
                     });
                     
@@ -1551,7 +1551,7 @@ impl eframe::App for App {
                 if is_busy {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        format!("⚠ {}", tr!("操作进行中...")),
+                        format!("{}", tr!("操作进行中...")),
                     );
                     ui.add_space(5.0);
                 }

@@ -1444,7 +1444,7 @@ Write-Host "UWP应用清理完成"
                 
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 165, 0),
-                    "⚠ 以下选项仅适用于 Windows 7 x64 安装",
+                    "以下选项仅适用于 Windows 7 x64 安装",
                 );
                 ui.add_space(5.0);
                 
@@ -1539,7 +1539,7 @@ Write-Host "UWP应用清理完成"
                     
                     ui.colored_label(
                         egui::Color32::from_rgb(100, 181, 246),
-                        "🔧 UEFI 启动修补 (UefiSeven)",
+                        "UEFI 启动修补 (UefiSeven)",
                     );
                     ui.add_space(5.0);
                     
@@ -1564,7 +1564,7 @@ Write-Host "UWP应用清理完成"
                             ui.add_space(3.0);
                             ui.colored_label(
                                 egui::Color32::from_rgb(255, 165, 0),
-                                "⚠ 未找到 UefiSeven 文件，请将 UefiSeven 文件放置在程序目录的 uefiseven 文件夹中",
+                                "未找到 UefiSeven 文件，请将 UefiSeven 文件放置在程序目录的 uefiseven 文件夹中",
                             );
                         }
                     }
@@ -1615,7 +1615,7 @@ Write-Host "UWP应用清理完成"
                     if self.wifi_ssid.is_empty() {
                         ui.colored_label(
                             egui::Color32::from_rgb(255, 165, 0),
-                            "  ⚠ 未检测到当前 WiFi（请确认已连 WiFi 且以管理员运行）",
+                            "  未检测到当前 WiFi（请确认已连 WiFi 且以管理员运行）",
                         );
                     } else {
                         ui.colored_label(

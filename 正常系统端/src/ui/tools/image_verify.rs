@@ -68,7 +68,7 @@ impl App {
 
                     if self.image_verify_loading {
                         // 显示取消按钮
-                        if ui.button("❌ 取消").clicked() {
+                        if ui.button("取消").clicked() {
                             self.cancel_image_verify();
                         }
                         
@@ -152,14 +152,14 @@ impl App {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     egui::Color32::from_rgb(0, 200, 0),
-                    "✅ 校验通过",
+                    "校验通过",
                 );
             });
         } else {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 80, 80),
-                    format!("❌ {}", result.status_text),
+                    format!("{}", result.status_text),
                 );
             });
         }

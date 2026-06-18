@@ -213,7 +213,7 @@ impl App {
             ui.separator();
             
             ui.horizontal(|ui| {
-                ui.label("🔧 PE环境:");
+                ui.label("PE环境:");
                 
                 if pe_available {
                     if let Some(ref config) = self.config {
@@ -253,7 +253,7 @@ impl App {
             
             ui.colored_label(
                 egui::Color32::from_rgb(255, 165, 0),
-                "⚠ 备份当前系统分区需要先重启到PE环境",
+                "备份当前系统分区需要先重启到PE环境",
             );
         }
 
@@ -262,7 +262,7 @@ impl App {
             ui.add_space(5.0);
             ui.colored_label(
                 egui::Color32::RED,
-                "❌ 无法获取PE配置，无法备份当前系统分区。请检查网络连接后重试。",
+                "无法获取PE配置，无法备份当前系统分区。请检查网络连接后重试。",
             );
         }
 
@@ -350,7 +350,7 @@ impl App {
                     ui.add_space(5.0);
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 所选分区似乎没有 Windows 系统",
+                        "所选分区似乎没有 Windows 系统",
                     );
                 }
             }

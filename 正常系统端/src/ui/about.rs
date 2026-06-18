@@ -60,7 +60,7 @@ impl App {
                         });
                     
                     // 刷新语言列表按钮
-                    if ui.button("🔄").on_hover_text(tr!("刷新语言列表")).clicked() {
+                    if ui.button("").on_hover_text(tr!("刷新语言列表")).clicked() {
                         i18n::refresh_available_languages();
                     }
                 });
@@ -151,7 +151,7 @@ impl App {
                 if self.app_config.log_enabled {
                     ui.add_space(8.0);
                     let log_dir = LogManager::get_log_dir();
-                    if ui.button(format!("📂 {}", tr!("打开日志目录"))).clicked() {
+                    if ui.button(format!("{}", tr!("打开日志目录"))).clicked() {
                         if log_dir.exists() {
                             #[cfg(windows)]
                             {

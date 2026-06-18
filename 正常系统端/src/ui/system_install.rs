@@ -34,7 +34,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 181, 246),
-                    "💡 新手用户？可以在\"关于\"页面中开启小白模式，获得更简单的操作体验",
+                    "新手用户？可以在\"关于\"页面中开启小白模式，获得更简单的操作体验",
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").clicked() {
@@ -125,7 +125,7 @@ impl App {
             if volumes_to_show.is_empty() {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 165, 0),
-                    "⚠ 该镜像中没有可用的系统版本",
+                    "该镜像中没有可用的系统版本",
                 );
             } else {
                 // 获取要选择的默认索引
@@ -141,7 +141,7 @@ impl App {
                 if use_original {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 未检测到标准系统镜像，显示所有分卷",
+                        "未检测到标准系统镜像，显示所有分卷",
                     );
                 }
                 
@@ -403,7 +403,7 @@ impl App {
                     Some(err) => {
                         ui.colored_label(
                             egui::Color32::from_rgb(220, 50, 47),
-                            format!("⚠ 无人值守文件语法错误：{}（已禁用安装）", err),
+                            format!("无人值守文件语法错误：{}（已禁用安装）", err),
                         );
                     }
                     None => {
@@ -456,7 +456,7 @@ impl App {
             ui.separator();
             
             ui.horizontal(|ui| {
-                ui.label("🔧 PE环境:");
+                ui.label("PE环境:");
                 
                 if pe_available {
                     // 只有一个 PE 时自动选中（后面会隐藏下拉框）
@@ -508,7 +508,7 @@ impl App {
             
             ui.colored_label(
                 egui::Color32::from_rgb(255, 165, 0),
-                "⚠ 安装到当前系统分区需要先重启到PE环境",
+                "安装到当前系统分区需要先重启到PE环境",
             );
         }
 
@@ -517,7 +517,7 @@ impl App {
             ui.add_space(5.0);
             ui.colored_label(
                 egui::Color32::RED,
-                "❌ 无法获取PE配置，无法安装到当前系统分区。请检查网络连接后重试。",
+                "无法获取PE配置，无法安装到当前系统分区。请检查网络连接后重试。",
             );
         }
 
@@ -573,7 +573,7 @@ impl App {
                     ui.add_space(5.0);
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 目标分区已有系统，建议勾选\"格式化分区\"",
+                        "目标分区已有系统，建议勾选\"格式化分区\"",
                     );
                 }
             }

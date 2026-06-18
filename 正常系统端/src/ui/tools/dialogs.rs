@@ -293,7 +293,7 @@ impl App {
                 } else if windows_partitions.is_empty() {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 未找到包含 Windows 系统的分区",
+                        "未找到包含 Windows 系统的分区",
                     );
                 } else {
                     ui.horizontal(|ui| {
@@ -944,7 +944,7 @@ impl App {
             .show(ui.ctx(), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(10.0);
-                    ui.label(egui::RichText::new("⚠").size(32.0).color(egui::Color32::from_rgb(255, 180, 0)));
+                    ui.label(egui::RichText::new("").size(32.0).color(egui::Color32::from_rgb(255, 180, 0)));
                     ui.add_space(10.0);
                 });
 
@@ -1032,7 +1032,7 @@ impl App {
             .show(ui.ctx(), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(10.0);
-                    ui.label(egui::RichText::new("🕐").size(32.0));
+                    ui.label(egui::RichText::new("").size(32.0));
                     ui.add_space(10.0);
                 });
 
@@ -1120,7 +1120,7 @@ impl App {
                 } else if self.batch_format_partitions.is_empty() {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 未找到可格式化的分区",
+                        "未找到可格式化的分区",
                     );
                 } else {
                     // 全选/反选按钮
@@ -1279,7 +1279,7 @@ impl App {
         let mut do_resume = false;
         let mut do_export_recovery = false;
 
-        egui::Window::new("🔐 BitLocker管理")
+        egui::Window::new("BitLocker管理")
             .resizable(true)
             .default_width(560.0)
             .default_height(420.0)
@@ -1295,7 +1295,7 @@ impl App {
                 } else if self.bitlocker_manage_partitions.is_empty() {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 未检测到 BitLocker 加密分区",
+                        "未检测到 BitLocker 加密分区",
                     );
                 } else {
                     // 分区列表（单选）
@@ -1406,7 +1406,7 @@ impl App {
                             );
                             ui.colored_label(
                                 egui::Color32::from_rgb(255, 165, 0),
-                                "⚠ 解密在后台进行，可能耗时较长，期间请勿断电或重启。",
+                                "解密在后台进行，可能耗时较长，期间请勿断电或重启。",
                             );
                         }
                         Some(VolumeStatus::Decrypting) => {
@@ -1443,7 +1443,7 @@ impl App {
                     ui.separator();
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 恢复密钥（48 位数字），请妥善保管、勿泄露：",
+                        "恢复密钥（48 位数字），请妥善保管、勿泄露：",
                     );
                     ui.monospace(key.as_str());
                     ui.horizontal(|ui| {
@@ -1901,7 +1901,7 @@ impl App {
                 } else if self.partition_copy_partitions.is_empty() {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 未找到可用的分区",
+                        "未找到可用的分区",
                     );
                 } else {
                     // 克隆分区列表避免借用冲突
@@ -2223,7 +2223,7 @@ impl App {
         let mut do_skip = false;
         let mut do_skip_all = false;
 
-        egui::Window::new("🔐 BitLocker解锁")
+        egui::Window::new("BitLocker解锁")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2522,7 +2522,7 @@ impl App {
         let mut do_skip = false;
         let mut do_skip_all = false;
 
-        egui::Window::new("🔐 BitLocker解锁 - 备份")
+        egui::Window::new("BitLocker解锁 - 备份")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))

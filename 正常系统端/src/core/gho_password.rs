@@ -425,27 +425,27 @@ pub fn format_gho_password_info(info: &GhoPasswordInfo) -> String {
     
     if !info.is_valid_gho {
         if let Some(ref err) = info.error {
-            result.push_str(&format!("❌ 无效的GHO文件: {}\n", err));
+            result.push_str(&format!("无效的GHO文件: {}\n", err));
         } else {
-            result.push_str("❌ 无效的GHO文件\n");
+            result.push_str("无效的GHO文件\n");
         }
         return result;
     }
     
-    result.push_str("✅ 有效的GHO文件\n");
+    result.push_str("有效的GHO文件\n");
     
     if !info.has_password {
-        result.push_str("🔓 未设置密码保护\n");
+        result.push_str("未设置密码保护\n");
     } else {
-        result.push_str("🔒 已设置密码保护\n");
-        result.push_str(&format!("📏 密码长度: {} 字符\n", info.password_length));
+        result.push_str("已设置密码保护\n");
+        result.push_str(&format!("密码长度: {} 字符\n", info.password_length));
         
         if let Some(ref pwd) = info.password {
-            result.push_str(&format!("🔑 密码: {}\n", pwd));
+            result.push_str(&format!("密码: {}\n", pwd));
         } else if let Some(ref err) = info.error {
-            result.push_str(&format!("⚠️ {}\n", err));
+            result.push_str(&format!("{}\n", err));
         } else {
-            result.push_str("⚠️ 无法解密密码\n");
+            result.push_str("无法解密密码\n");
         }
     }
     

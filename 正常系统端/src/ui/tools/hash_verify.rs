@@ -132,7 +132,7 @@ impl App {
 
         if let Some(ref err) = result.error {
             ui.add_space(8.0);
-            ui.colored_label(egui::Color32::from_rgb(255, 80, 80), format!("❌ {}", err));
+            ui.colored_label(egui::Color32::from_rgb(255, 80, 80), format!("{}", err));
             return;
         }
 
@@ -145,13 +145,13 @@ impl App {
         match result.matched {
             Some(true) => {
                 ui.add_space(6.0);
-                ui.colored_label(egui::Color32::from_rgb(0, 200, 0), "✅ 与期望哈希一致");
+                ui.colored_label(egui::Color32::from_rgb(0, 200, 0), "与期望哈希一致");
             }
             Some(false) => {
                 ui.add_space(6.0);
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 80, 80),
-                    "❌ 与期望哈希不一致（文件可能损坏或被篡改）",
+                    "与期望哈希不一致（文件可能损坏或被篡改）",
                 );
             }
             None => {

@@ -191,7 +191,7 @@ impl App {
                     .show(ui, |ui| {
                         ui.colored_label(
                             egui::Color32::from_rgb(255, 200, 100),
-                            "⚠️ 注意事项:",
+                            "注意事项:",
                         );
                         ui.label("1. 卸载驱动后可能需要重启系统");
                         ui.label("2. 卸载后显示可能切换到基本显示适配器");
@@ -224,13 +224,13 @@ impl App {
                         if !has_nvidia && !is_pe {
                             ui.colored_label(
                                 egui::Color32::YELLOW,
-                                "⚠️ 当前系统未检测到英伟达显卡",
+                                "当前系统未检测到英伟达显卡",
                             );
                             ui.add_space(10.0);
                         }
 
                         if ui
-                            .add_enabled(can_uninstall, egui::Button::new("🗑 开始卸载"))
+                            .add_enabled(can_uninstall, egui::Button::new("开始卸载"))
                             .clicked()
                         {
                             do_uninstall = true;

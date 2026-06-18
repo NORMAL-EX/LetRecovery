@@ -33,7 +33,7 @@ impl App {
         // 非 PE 环境才提供“当前系统（在线）”；PE 下没有正在运行的目标系统。
         let show_selector = !is_pe || !windows_partitions.is_empty();
 
-        egui::Window::new("🔑 密码重置")
+        egui::Window::new("密码重置")
             .resizable(true)
             .default_width(560.0)
             .default_height(380.0)
@@ -41,7 +41,7 @@ impl App {
                 ui.label("清除 Windows 本地账户的密码（等效空密码），并启用被禁用的账户。");
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 165, 0),
-                    "⚠ 仅用于自己的系统/已授权场景。离线系统会修改其 SAM（操作前自动备份）；当前系统走 net 命令。",
+                    "仅用于自己的系统/已授权场景。离线系统会修改其 SAM（操作前自动备份）；当前系统走 net 命令。",
                 );
                 ui.add_space(10.0);
 
@@ -100,7 +100,7 @@ impl App {
                                 }
                             });
 
-                        if ui.button("🔄 刷新").clicked() {
+                        if ui.button("刷新").clicked() {
                             self.refresh_windows_partitions_cache();
                         }
                     });
@@ -167,10 +167,12 @@ impl App {
                 if !self.password_reset_message.is_empty() {
                     ui.add_space(10.0);
                     ui.separator();
-                    let color = if self.password_reset_message.starts_with('✅') {
-                        egui::Color32::from_rgb(0, 200, 0)
-                    } else if self.password_reset_message.starts_with('❌') {
+                    let m = &self.password_reset_message;
+                    let color = if m.contains("失败") || m.contains("错误") || m.contains("无法")
+                        || m.contains("未找到") || m.contains("请先") || m.contains("未在") {
                         egui::Color32::from_rgb(255, 80, 80)
+                    } else if m.contains("已重置") || m.contains("成功") {
+                        egui::Color32::from_rgb(102, 187, 106)
                     } else {
                         egui::Color32::GRAY
                     };
@@ -242,7 +244,7 @@ impl App {
                     }
                     Err(e) => {
                         self.password_reset_users.clear();
-                        self.password_reset_message = format!("❌ 读取账户列表失败：{}", e);
+                        self.password_reset_message = format!("读取账户列表失败：{}", e);
                     }
                 }
             }
@@ -268,7 +270,7 @@ impl App {
         let username = match self.password_reset_selected_user.clone() {
             Some(u) if !u.trim().is_empty() => u.trim().to_string(),
             _ => {
-                self.password_reset_message = "❌ 请先在列表中选择一个账户".to_string();
+                self.password_reset_message = "请先在列表中选择一个账户".to_string();
                 return;
             }
         };
@@ -282,13 +284,13 @@ impl App {
                     let sam = format!("{}\\Windows\\System32\\config\\SAM", p);
                     if !std::path::Path::new(&sam).exists() {
                         self.password_reset_message =
-                            format!("❌ 未在 {} 找到 Windows（缺少 {}）", p, sam);
+                            format!("未在 {} 找到 Windows（缺少 {}）", p, sam);
                         return;
                     }
                     Some(p)
                 }
                 None => {
-                    self.password_reset_message = "❌ 请先选择目标系统".to_string();
+                    self.password_reset_message = "请先选择目标系统".to_string();
                     return;
                 }
             }
@@ -321,12 +323,12 @@ impl App {
                 let reload = matches!(result, Ok(true));
                 self.password_reset_message = match result {
                     Ok(true) => {
-                        "✅ 已重置该账户密码（可空密码登录），并已启用账户".to_string()
+                        "已重置该账户密码（可空密码登录），并已启用账户".to_string()
                     }
                     Ok(false) => {
-                        "❌ 未找到匹配的账户（请核对用户名），SAM 未改动".to_string()
+                        "未找到匹配的账户（请核对用户名），SAM 未改动".to_string()
                     }
-                    Err(e) => format!("❌ 失败：{}", e),
+                    Err(e) => format!("失败：{}", e),
                 };
                 // 成功后刷新账户列表（更新“已禁用”标记），但保留成功提示
                 if reload {

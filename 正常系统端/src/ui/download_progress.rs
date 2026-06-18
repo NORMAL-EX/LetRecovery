@@ -337,7 +337,7 @@ impl App {
                             Md5VerifyState::Error(err) => {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(255, 165, 0),
-                                    format!("⚠ 校验出错: {}", err)
+                                    format!("校验出错: {}", err)
                                 );
                                 ui.add_space(5.0);
                                 ui.label("文件可能正常，但无法验证完整性。");

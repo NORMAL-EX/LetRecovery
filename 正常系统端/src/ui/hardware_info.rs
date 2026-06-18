@@ -13,7 +13,7 @@ impl App {
             if info.is_pe_environment {
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 200, 255),
-                    "🖥 当前运行在 PE 环境中",
+                    "当前运行在 PE 环境中",
                 );
                 ui.add_space(5.0);
             }
@@ -22,7 +22,7 @@ impl App {
         // 操作按钮区域
         ui.horizontal(|ui| {
             // 复制按钮
-            if ui.button("📋 复制全部信息").clicked() {
+            if ui.button("复制全部信息").clicked() {
                 if let Some(hw_info) = &self.hardware_info {
                     let formatted_text = hw_info.to_formatted_text(self.system_info.as_ref());
                     ui.ctx().copy_text(formatted_text);
@@ -30,7 +30,7 @@ impl App {
             }
             
             // 导出按钮
-            if ui.button("💾 导出为TXT").clicked() {
+            if ui.button("导出为TXT").clicked() {
                 self.export_hardware_info_to_txt();
             }
         });
@@ -46,7 +46,7 @@ impl App {
                     let sys_info = self.system_info.as_ref();
                     
                     // 系统信息
-                    egui::CollapsingHeader::new("💻 系统信息")
+                    egui::CollapsingHeader::new("系统信息")
                         .default_open(true)
                         .show(ui, |ui| {
                             egui::Grid::new("system_grid")
@@ -107,7 +107,7 @@ impl App {
                     ui.add_space(5.0);
                     
                     // 电脑信息
-                    egui::CollapsingHeader::new("🖥 电脑信息")
+                    egui::CollapsingHeader::new("电脑信息")
                         .default_open(true)
                         .show(ui, |ui| {
                             egui::Grid::new("computer_grid")
@@ -136,7 +136,7 @@ impl App {
                     ui.add_space(5.0);
                     
                     // 主板信息
-                    egui::CollapsingHeader::new("📟 主板信息")
+                    egui::CollapsingHeader::new("主板信息")
                         .default_open(true)
                         .show(ui, |ui| {
                             egui::Grid::new("motherboard_grid")
@@ -169,7 +169,7 @@ impl App {
                     ui.add_space(5.0);
                     
                     // CPU信息
-                    egui::CollapsingHeader::new("⚡ CPU信息")
+                    egui::CollapsingHeader::new("CPU信息")
                         .default_open(true)
                         .show(ui, |ui| {
                             egui::Grid::new("cpu_grid")
@@ -197,7 +197,7 @@ impl App {
                     ui.add_space(5.0);
                     
                     // 内存信息
-                    egui::CollapsingHeader::new("🧠 内存信息")
+                    egui::CollapsingHeader::new("内存信息")
                         .default_open(true)
                         .show(ui, |ui| {
                             let total_gb = hw_info.memory.total_physical as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -231,7 +231,7 @@ impl App {
                     
                     // 显卡信息
                     if !hw_info.gpus.is_empty() {
-                        egui::CollapsingHeader::new("🎮 显卡信息")
+                        egui::CollapsingHeader::new("显卡信息")
                             .default_open(true)
                             .show(ui, |ui| {
                                 egui::Grid::new("gpu_grid")
@@ -252,7 +252,7 @@ impl App {
                     
                     // 网卡信息
                     if !hw_info.network_adapters.is_empty() {
-                        egui::CollapsingHeader::new("🌐 网卡信息")
+                        egui::CollapsingHeader::new("网卡信息")
                             .default_open(true)
                             .show(ui, |ui| {
                                 egui::Grid::new("network_grid")
@@ -273,7 +273,7 @@ impl App {
                     
                     // 电池信息
                     if let Some(battery) = &hw_info.battery {
-                        egui::CollapsingHeader::new("🔋 电池信息")
+                        egui::CollapsingHeader::new("电池信息")
                             .default_open(true)
                             .show(ui, |ui| {
                                 egui::Grid::new("battery_grid")
@@ -326,7 +326,7 @@ impl App {
                     
                     // 硬盘信息
                     if !hw_info.disks.is_empty() {
-                        egui::CollapsingHeader::new("💾 硬盘信息")
+                        egui::CollapsingHeader::new("硬盘信息")
                             .default_open(true)
                             .show(ui, |ui| {
                                 egui::Grid::new("disk_grid")
@@ -351,7 +351,7 @@ impl App {
                     }
                     
                     // 磁盘分区信息
-                    egui::CollapsingHeader::new("📁 磁盘分区详情")
+                    egui::CollapsingHeader::new("磁盘分区详情")
                         .default_open(true)
                         .show(ui, |ui| {
                             let is_pe = self.system_info.as_ref().map(|s| s.is_pe_environment).unwrap_or(false);
