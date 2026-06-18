@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::Path;
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use crate::utils::command::new_command;
 use crate::utils::encoding::gbk_to_utf8;
@@ -14,21 +14,8 @@ pub struct BootManager {
 impl BootManager {
     /// 选择一个可靠的临时目录并确保它存在（避免 WinPE 下 os error 3）。
     fn reliable_temp_dir() -> PathBuf {
-        let candidates = [
-            PathBuf::from(r"X:\Windows\Temp"),
-            PathBuf::from(r"X:\Temp"),
-            std::env::temp_dir(),
-            PathBuf::from("X:\\"),
-        ];
-
-        for dir in candidates {
-            let _ = fs::create_dir_all(&dir);
-            if dir.exists() {
-                return dir;
-            }
-        }
-
-        std::env::temp_dir()
+        // 统一走 system_utils::get_temp_directory（按 SystemRoot/PE系统盘动态解析，不写死 X:）
+        crate::core::system_utils::get_temp_directory()
     }
     pub fn new() -> Self {
         let bin_dir = get_bin_dir();

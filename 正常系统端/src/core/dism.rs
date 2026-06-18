@@ -1,11 +1,11 @@
 //! 镜像操作模块
 //!
 //! 该模块封装了 Windows 系统镜像操作功能：
-//! - 镜像释放/应用：使用 wimgapi.dll
-//! - 镜像备份/捕获：使用 wimgapi.dll
+//! - 镜像释放/应用：使用 wimlib (libwim-15.dll)
+//! - 镜像备份/捕获：使用 wimlib (libwim-15.dll)
 //! - 离线驱动导入：使用 dism.exe 命令行（优先使用 {程序目录}\bin\Dism\dism.exe）
 //! - 离线 CAB 包导入：使用 dism.exe 命令行
-//! - 镜像信息获取：使用 wimgapi.dll + WIM XML 解析
+//! - 镜像信息获取：使用 wimlib (libwim-15.dll) + WIM XML 解析
 //! - 系统信息获取：使用 advapi32.dll (离线注册表)
 
 use anyhow::{Context, Result};
@@ -15,7 +15,8 @@ use std::sync::mpsc::Sender;
 use crate::core::dism_cmd::DismCmd;
 use crate::core::driver::DriverManager;
 use crate::core::system_utils;
-use crate::core::wimgapi::{WimManager, WimProgress, WIM_COMPRESS_LZX, Wimgapi};
+use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZX};
+use lr_core::wimlib::WimlibManager;
 
 /// 操作进度
 #[derive(Debug, Clone)]
@@ -38,7 +39,7 @@ pub struct ImageInfo {
     /// Windows 次版本号 (如 Win7 为 1，对应版本 6.1)
     pub minor_version: Option<u16>,
     /// 镜像类型 (标准安装/整盘备份/PE等)
-    pub image_type: crate::core::wimgapi::WimImageType,
+    pub image_type: lr_core::image_meta::WimImageType,
     /// 是否已验证可安装
     pub verified_installable: bool,
 }
@@ -60,11 +61,11 @@ impl Dism {
     }
 
     // ========================================================================
-    // 镜像操作 - 使用 wimgapi.dll
+    // 镜像操作 - 使用 wimlib (libwim-15.dll)
     // ========================================================================
 
     /// 应用系统镜像 (WIM/ESD)
-    /// 使用 wimgapi.dll 实现
+    /// 使用 wimlib 实现
     pub fn apply_image(
         &self,
         image_file: &str,
@@ -72,10 +73,10 @@ impl Dism {
         index: u32,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        println!("[Dism] 使用 wimgapi 应用镜像: {} -> {}", image_file, apply_dir);
+        println!("[Dism] 使用 wimlib 应用镜像: {} -> {}", image_file, apply_dir);
 
-        let wim_manager = WimManager::new()
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
+        let wim_manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
 
         // 创建进度转换通道
         let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
@@ -111,7 +112,7 @@ impl Dism {
     }
 
     /// 捕获系统镜像 (备份)
-    /// 使用 wimgapi.dll 实现
+    /// 使用 wimlib 实现
     pub fn capture_image(
         &self,
         image_file: &str,
@@ -120,10 +121,10 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        println!("[Dism] 使用 wimgapi 捕获镜像: {} -> {}", capture_dir, image_file);
+        println!("[Dism] 使用 wimlib 捕获镜像: {} -> {}", capture_dir, image_file);
 
-        let wim_manager = WimManager::new()
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
+        let wim_manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
 
         let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
 
@@ -162,7 +163,7 @@ impl Dism {
     }
 
     /// 增量备份镜像
-    /// 使用 wimgapi.dll 实现
+    /// 使用 wimlib 实现
     pub fn append_image(
         &self,
         image_file: &str,
@@ -171,7 +172,7 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        println!("[Dism] 使用 wimgapi 追加镜像: {} -> {}", capture_dir, image_file);
+        println!("[Dism] 使用 wimlib 追加镜像: {} -> {}", capture_dir, image_file);
 
         // 对于追加操作，WimManager 的 capture_image 在文件存在时会自动追加
         self.capture_image(image_file, capture_dir, name, description, progress_tx)
@@ -181,8 +182,8 @@ impl Dism {
     // 驱动操作 - 使用 setupapi.dll/newdev.dll
     // ========================================================================
 
-    /// 导出驱动 - 使用 Windows API
-    /// 在正常环境下导出当前系统的第三方驱动
+    /// 导出驱动 - 优先 DISM API(DismExportDriver)，失败回退手工导出
+    /// 在正常环境下导出当前系统的第三方驱动（在线映像）
     pub fn export_drivers(&self, destination: &str) -> Result<()> {
         std::fs::create_dir_all(destination)?;
 
@@ -190,26 +191,81 @@ impl Dism {
             anyhow::bail!("PE环境下无法导出当前系统驱动，请使用 export_drivers_from_system 并指定目标系统分区");
         }
 
-        println!("[Dism] 使用 Windows API 导出驱动到: {}", destination);
+        // 优先：DISM API 在线导出（等价 dism /online /export-driver）
+        match crate::core::dismapi::DismApi::load() {
+            Ok(api) => match api.export_drivers_online(Path::new(destination), None) {
+                Ok(count) => {
+                    println!("[Dism] DismExportDriver(在线) 成功导出 {} 个驱动 -> {}", count, destination);
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("[Dism] DismExportDriver(在线) 失败: {}，回退手工导出", e);
+                }
+            },
+            Err(e) => {
+                println!("[Dism] 加载 dismapi.dll 失败: {}，回退手工导出", e);
+            }
+        }
 
+        // 回退：SetupAPI 枚举 + 手工复制 DriverStore
+        println!("[Dism] 使用 Windows API(SetupAPI) 导出驱动到: {}", destination);
         let manager = DriverManager::new()
             .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
-
         let count = manager.export_drivers(Path::new(destination), true)?;
         println!("[Dism] 成功导出 {} 个驱动", count);
         Ok(())
     }
 
-    /// 从指定系统分区导出驱动 (PE环境下使用)
-    /// 使用 Windows API 直接读取驱动存储
+    /// 从指定系统分区导出驱动 (PE/正常环境均可)
+    /// 优先 DISM API(DismExportDriver)，失败回退手工遍历 DriverStore
     pub fn export_drivers_from_system(&self, system_partition: &str, destination: &str) -> Result<()> {
         std::fs::create_dir_all(destination)?;
 
-        println!("[Dism] 使用 Windows API 从 {} 导出驱动到: {}", system_partition, destination);
+        // 判断目标是否就是“当前运行系统”：非 PE 且盘符等于 %SystemDrive% → 用在线映像，
+        // 否则按离线映像（PE 下对已部署系统，或对另一块系统盘）导出。
+        let target_drive = system_partition
+            .trim()
+            .chars()
+            .next()
+            .map(|c| c.to_ascii_uppercase());
+        let system_drive = std::env::var("SystemDrive")
+            .ok()
+            .and_then(|s| s.trim().chars().next())
+            .map(|c| c.to_ascii_uppercase());
+        let is_online_target = !self.is_pe && target_drive.is_some() && target_drive == system_drive;
 
+        match crate::core::dismapi::DismApi::load() {
+            Ok(api) => {
+                let result = if is_online_target {
+                    println!("[Dism] DismExportDriver: 目标为当前运行系统，使用在线映像导出 -> {}", destination);
+                    api.export_drivers_online(Path::new(destination), None)
+                } else {
+                    println!("[Dism] DismExportDriver: 离线映像 {} -> {}", system_partition, destination);
+                    api.export_drivers_offline(
+                        Path::new(system_partition),
+                        Path::new(destination),
+                        None,
+                    )
+                };
+                match result {
+                    Ok(count) => {
+                        println!("[Dism] DismExportDriver 成功导出 {} 个驱动", count);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        println!("[Dism] DismExportDriver 失败: {}，回退手工导出", e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[Dism] 加载 dismapi.dll 失败: {}，回退手工导出", e);
+            }
+        }
+
+        // 回退：手工遍历 FileRepository
+        println!("[Dism] 使用 Windows API 从 {} 导出驱动到: {}", system_partition, destination);
         let manager = DriverManager::new()
             .map_err(|e| anyhow::anyhow!("驱动管理器初始化失败: {}", e))?;
-
         let count = manager.export_drivers_from_system(
             Path::new(system_partition),
             Path::new(destination),
@@ -310,21 +366,21 @@ impl Dism {
     }
 
     // ========================================================================
-    // 镜像信息 - 使用 wimgapi.dll + WIM XML 解析
+    // 镜像信息 - 使用 wimlib (libwim-15.dll) + WIM XML 解析
     // ========================================================================
 
     /// 获取 WIM/ESD 镜像信息（所有分卷）
-    /// 使用 wimgapi.dll 或直接解析 WIM XML 元数据
+    /// 使用 wimlib 或直接解析 WIM XML 元数据
     pub fn get_image_info(&self, image_file: &str) -> Result<Vec<ImageInfo>> {
         println!("[Dism] 开始获取镜像信息: {}", image_file);
         
-        // 首先尝试使用 wimgapi
-        match WimManager::new() {
+        // 首先尝试使用 wimlib
+        match WimlibManager::new() {
             Ok(wim_manager) => {
-                println!("[Dism] wimgapi.dll 加载成功");
+                println!("[Dism] wimlib 加载成功");
                 match wim_manager.get_image_info(image_file) {
                     Ok(images) => {
-                        println!("[Dism] 从 wimgapi 成功获取 {} 个镜像信息", images.len());
+                        println!("[Dism] 从 wimlib 成功获取 {} 个镜像信息", images.len());
                         return Ok(images.into_iter().map(|img| ImageInfo {
                             index: img.index,
                             name: img.name,
@@ -337,12 +393,12 @@ impl Dism {
                         }).collect());
                     }
                     Err(e) => {
-                        println!("[Dism] wimgapi 获取镜像信息失败: {}", e);
+                        println!("[Dism] wimlib 获取镜像信息失败: {}", e);
                     }
                 }
             }
             Err(e) => {
-                println!("[Dism] wimgapi.dll 加载失败: {} (这可能是PE环境缺少该DLL)", e);
+                println!("[Dism] wimlib (libwim-15.dll) 加载失败: {} (PE 环境会自动释放内置 DLL)", e);
             }
         }
 
@@ -358,11 +414,11 @@ impl Dism {
                 }
             }
             Err(e) => {
-                println!("[Dism] WIM XML 直接解析失败: {} (ESD文件的元数据是压缩的，需要wimgapi)", e);
+                println!("[Dism] WIM XML 直接解析失败: {} (ESD 文件的元数据是压缩的，需要 wimlib)", e);
             }
         }
 
-        anyhow::bail!("无法获取镜像信息：wimgapi 打开文件失败。可能原因：1.镜像文件损坏 2.系统 wimgapi.dll 版本过旧不支持此ESD格式，请将新版 wimgapi.dll 放到程序目录")
+        anyhow::bail!("无法获取镜像信息：wimlib 打开文件失败。可能原因：1.镜像文件损坏 2.libwim-15.dll 缺失或版本过旧不支持此格式（程序会自动释放内置的 libwim-15.dll 到程序目录，请确认其存在）")
     }
 
     /// 通过读取 ntdll.dll 文件版本判断是否为 Win10/11 镜像
@@ -393,51 +449,40 @@ impl Dism {
     }
 
     fn get_ntdll_major_version(image_file: &str, index: u32) -> Result<u16> {
-        let wimgapi = Wimgapi::new(None)
-            .map_err(|e| anyhow::anyhow!("wimgapi 初始化失败: {}", e))?;
-        let wim_path = Path::new(image_file);
-        let mount_dir = std::env::temp_dir().join(format!(
-            "LetRecovery_WimMount_{}_{}",
+        // 用 wimlib 仅提取 \Windows\System32\ntdll.dll 到临时目录，再读其文件版本
+        // （替代原先的 wimgapi 挂载方案——wimlib 在 Windows 上不支持挂载）
+        let manager = WimlibManager::new()
+            .map_err(|e| anyhow::anyhow!("wimlib 初始化失败: {}", e))?;
+
+        let extract_dir = std::env::temp_dir().join(format!(
+            "LetRecovery_WimExtract_{}_{}",
             std::process::id(),
             index
         ));
-
-        if mount_dir.exists() {
-            let _ = std::fs::remove_dir_all(&mount_dir);
+        if extract_dir.exists() {
+            let _ = std::fs::remove_dir_all(&extract_dir);
         }
-        std::fs::create_dir_all(&mount_dir).context("创建临时挂载目录失败")?;
+        std::fs::create_dir_all(&extract_dir).context("创建临时提取目录失败")?;
 
-        let temp_dir = mount_dir.join("temp");
-        let _ = std::fs::create_dir_all(&temp_dir);
-
-        wimgapi
-            .mount_image(&mount_dir, wim_path, index, Some(&temp_dir))
-            .map_err(|e| anyhow::anyhow!("挂载镜像失败: {}", e))?;
-
-        struct MountGuard<'a> {
-            wimgapi: &'a Wimgapi,
-            mount_dir: PathBuf,
-            wim_path: PathBuf,
-            index: u32,
-        }
-
-        impl<'a> Drop for MountGuard<'a> {
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
             fn drop(&mut self) {
-                let _ = self
-                    .wimgapi
-                    .unmount_image(&self.mount_dir, &self.wim_path, self.index, false);
-                let _ = std::fs::remove_dir_all(&self.mount_dir);
+                let _ = std::fs::remove_dir_all(&self.0);
             }
         }
+        let _guard = DirGuard(extract_dir.clone());
 
-        let _guard = MountGuard {
-            wimgapi: &wimgapi,
-            mount_dir: mount_dir.clone(),
-            wim_path: wim_path.to_path_buf(),
-            index,
-        };
+        let extract_dir_str = extract_dir.to_string_lossy().to_string();
+        manager
+            .extract_paths(
+                image_file,
+                index,
+                &extract_dir_str,
+                &["\\Windows\\System32\\ntdll.dll"],
+            )
+            .map_err(|e| anyhow::anyhow!("提取 ntdll.dll 失败: {}", e))?;
 
-        let ntdll_path = mount_dir
+        let ntdll_path = extract_dir
             .join("Windows")
             .join("System32")
             .join("ntdll.dll");
@@ -631,8 +676,8 @@ impl Dism {
         installation_type: &str,
         major_version: Option<u16>,
         size_bytes: u64
-    ) -> crate::core::wimgapi::WimImageType {
-        use crate::core::wimgapi::WimImageType;
+    ) -> lr_core::image_meta::WimImageType {
+        use lr_core::image_meta::WimImageType;
         
         let name_lower = name.to_lowercase();
         let install_type_lower = installation_type.to_lowercase();

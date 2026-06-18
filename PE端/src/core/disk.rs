@@ -1,8 +1,5 @@
 use anyhow::Result;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW};
 
@@ -76,24 +73,8 @@ impl DiskManager {
     /// WinPE 下 std::env::temp_dir() 可能指向不存在的路径，
     /// 直接写 diskpart 脚本会触发 "系统找不到指定的路径 (os error 3)"。
     fn reliable_temp_dir() -> PathBuf {
-        // WinPE 下最稳的两个临时目录：X:\Windows\Temp / X:\Temp
-        // 注意：WinPE 里 std::env::temp_dir() 可能指向不存在的路径，所以这里要“尽力创建”。
-        let candidates = [
-            PathBuf::from(r"X:\Windows\Temp"),
-            PathBuf::from(r"X:\Temp"),
-            std::env::temp_dir(),
-            PathBuf::from("X:\\"),
-        ];
-
-        for dir in candidates {
-            let _ = fs::create_dir_all(&dir);
-            if dir.exists() {
-                return dir;
-            }
-        }
-
-        // 兜底：即便不存在也返回一个值，避免上层因为 ? 直接编译不过/崩溃。
-        std::env::temp_dir()
+        // 统一走 system_utils::get_temp_directory（按 SystemRoot/PE系统盘动态解析，不写死 X:）
+        crate::core::system_utils::get_temp_directory()
     }
     /// 获取所有固定磁盘分区列表
     pub fn get_partitions() -> Result<Vec<Partition>> {

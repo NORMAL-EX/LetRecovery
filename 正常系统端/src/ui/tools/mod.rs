@@ -18,6 +18,8 @@ pub mod nvidia_uninstall;
 pub mod partition_copy;
 pub mod quick_partition;
 pub mod image_verify;
+pub mod hash_verify;
+pub mod password_reset;
 
 // 重新导出常用类型
 pub use types::{DriverBackupMode, AppxPackageInfo, InstalledSoftware, WindowsPartitionInfo, ImageVerifyResult};
@@ -187,13 +189,6 @@ impl App {
                 // ========== 第四行 ==========
 
                 if ui
-                    .add(egui::Button::new("万能驱动").min_size(button_size))
-                    .clicked()
-                {
-                    self.launch_wandrv_tool();
-                }
-
-                if ui
                     .add(egui::Button::new("查看GHO密码").min_size(button_size))
                     .clicked()
                 {
@@ -223,10 +218,7 @@ impl App {
                     self.launch_space_sniffer_tool();
                 }
 
-                ui.end_row();
-
-                // ========== 第五行 ==========
-
+                // 镜像校验补到本行第 4 格（删除“万能驱动”后填平空缺）
                 if ui
                     .add(egui::Button::new("镜像校验").min_size(button_size))
                     .clicked()
@@ -235,6 +227,50 @@ impl App {
                     self.image_verify_file_path.clear();
                     self.image_verify_result = None;
                     self.image_verify_progress = None;
+                }
+
+                ui.end_row();
+
+                // ========== 第五行 ==========
+
+                if ui
+                    .add(egui::Button::new("BitLocker管理").min_size(button_size))
+                    .clicked()
+                {
+                    self.show_bitlocker_manage_dialog = true;
+                    self.bitlocker_manage_message.clear();
+                    self.bitlocker_manage_password.clear();
+                    self.bitlocker_manage_recovery_key.clear();
+                    self.bitlocker_manage_recovery_display = None;
+                    self.bitlocker_manage_selected = None;
+                    self.start_load_bitlocker_manage_partitions();
+                }
+
+                if ui
+                    .add(egui::Button::new("文件哈希校验").min_size(button_size))
+                    .clicked()
+                {
+                    self.show_hash_verify_dialog = true;
+                    self.hash_verify_file_path.clear();
+                    self.hash_verify_expected.clear();
+                    self.hash_verify_result = None;
+                    self.hash_verify_progress = None;
+                    self.hash_verify_loading = false;
+                }
+
+                if ui
+                    .add(egui::Button::new("密码重置").min_size(button_size))
+                    .clicked()
+                {
+                    self.show_password_reset_dialog = true;
+                    self.password_reset_partition.clear();
+                    self.password_reset_username.clear();
+                    self.password_reset_message.clear();
+                    self.password_reset_loading = false;
+                    self.password_reset_target = None;
+                    self.password_reset_users.clear();
+                    self.password_reset_selected_user = None;
+                    self.password_reset_users_loading = false;
                 }
 
                 ui.end_row();
@@ -255,6 +291,9 @@ impl App {
         self.render_quick_partition_dialog(ui);
         self.render_image_verify_dialog(ui);
         self.render_repair_boot_dialog(ui);
+        self.render_bitlocker_manage_dialog(ui);
+        self.render_hash_verify_dialog(ui);
+        self.render_password_reset_dialog(ui);
 
         // 显示工具状态
         if !self.tool_message.is_empty() {
@@ -269,18 +308,6 @@ impl App {
         match actions::launch_ghost() {
             Ok(_) => {
                 self.tool_message = "已启动: Ghost64.exe".to_string();
-            }
-            Err(e) => {
-                self.tool_message = e;
-            }
-        }
-    }
-
-    /// 启动万能驱动工具
-    fn launch_wandrv_tool(&mut self) {
-        match actions::launch_wandrv() {
-            Ok(_) => {
-                self.tool_message = "已启动: QDZC.exe".to_string();
             }
             Err(e) => {
                 self.tool_message = e;
@@ -316,11 +343,11 @@ impl App {
 
         match actions::repair_boot(&target_partition) {
             Ok(_) => {
-                self.repair_boot_message = format!("✓ 引导修复成功: {}", target_partition);
+                self.repair_boot_message = format!("引导修复成功: {}", target_partition);
                 self.repair_boot_loading = false;
             }
             Err(e) => {
-                self.repair_boot_message = format!("✗ 引导修复失败: {}", e);
+                self.repair_boot_message = format!("引导修复失败: {}", e);
                 self.repair_boot_loading = false;
             }
         }

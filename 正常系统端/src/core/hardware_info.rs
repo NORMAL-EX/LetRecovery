@@ -806,7 +806,7 @@ fn get_battery_wmi_info() -> (Option<u32>, Option<u32>, Option<String>) {
         return (None, None, None);
     };
 
-    for obj in result {
+    if let Some(obj) = result.into_iter().next() {
         let design_capacity = obj.get_u32("DesignCapacity");
         let full_charge_capacity = obj.get_u32("FullChargeCapacity");
         let name = obj.get_string("Name");
@@ -885,7 +885,7 @@ fn get_bitlocker_status_wmi(drive_letter: &str) -> BitLockerStatus {
         return get_bitlocker_status_registry(drive_letter);
     };
 
-    for obj in result {
+    if let Some(obj) = result.into_iter().next() {
         // ProtectionStatus:
         // 0 = 保护关闭
         // 1 = 保护开启
@@ -1992,6 +1992,8 @@ fn get_physical_core_count() -> Option<u32> {
         if length == 0 { return None; }
         let count = length as usize / size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
         let mut buffer: Vec<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> = Vec::with_capacity(count);
+        // 先零初始化再 set_len，避免读取未初始化内存（clippy::uninit_vec）
+        std::ptr::write_bytes(buffer.as_mut_ptr(), 0, count);
         buffer.set_len(count);
         if GetLogicalProcessorInformation(buffer.as_mut_ptr(), &mut length) == 0 { return None; }
         let actual_count = length as usize / size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();

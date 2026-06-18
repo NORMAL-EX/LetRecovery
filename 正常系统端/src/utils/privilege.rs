@@ -45,12 +45,21 @@ pub fn restart_as_admin() -> Result<()> {
 
     let operation: Vec<u16> = "runas\0".encode_utf16().collect();
 
+    // 转发原始命令行参数（含空格的参数加引号），使 --install 等在 UAC 提权后仍能继续；
+    // 无参数时为空字符串，行为与传 null 一致。
+    let params: String = std::env::args()
+        .skip(1)
+        .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let params_wide: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
+
     unsafe {
         ShellExecuteW(
             None,
             PCWSTR(operation.as_ptr()),
             PCWSTR(exe_path_wide.as_ptr()),
-            PCWSTR::null(),
+            PCWSTR(params_wide.as_ptr()),
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );

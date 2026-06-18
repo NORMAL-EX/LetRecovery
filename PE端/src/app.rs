@@ -85,34 +85,55 @@ impl App {
         }
     }
 
-    /// 设置中文字体（从PE的X盘加载微软雅黑）
+    /// 设置中文字体（从当前运行系统的 Fonts 目录加载微软雅黑）
+    ///
+    /// 不写死盘符：PE 的系统盘不一定是 X:，应根据正在运行系统的 Windows 目录
+    /// 动态解析字体路径。
     fn setup_fonts(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
 
-        // PE环境下字体路径固定为 X:\Windows\Fonts\msyh.ttc
-        let font_path = std::path::Path::new("X:\\Windows\\Fonts\\msyh.ttc");
+        // 候选字体路径：优先用 %SystemRoot%（指向当前运行系统的 Windows 目录），
+        // 再用 PE 系统盘探测结果，最后回退到常见盘符。
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
 
-        if let Ok(font_data) = std::fs::read(font_path) {
-            fonts.font_data.insert(
-                "msyh".to_owned(),
-                std::sync::Arc::new(egui::FontData::from_owned(font_data)),
-            );
+        if let Ok(system_root) = std::env::var("SystemRoot") {
+            candidates.push(std::path::Path::new(&system_root).join("Fonts").join("msyh.ttc"));
+            candidates.push(std::path::Path::new(&system_root).join("Fonts").join("msyh.ttf"));
+        }
+        if let Some(drive) = crate::core::system_utils::get_pe_system_drive() {
+            candidates.push(std::path::PathBuf::from(format!("{}\\Windows\\Fonts\\msyh.ttc", drive)));
+            candidates.push(std::path::PathBuf::from(format!("{}\\Windows\\Fonts\\msyh.ttf", drive)));
+        }
+        // 最后兜底：常见 PE/系统盘符
+        for d in ["X", "Y", "Z", "W", "C"] {
+            candidates.push(std::path::PathBuf::from(format!("{}:\\Windows\\Fonts\\msyh.ttc", d)));
+        }
 
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Proportional)
-                .unwrap()
-                .insert(0, "msyh".to_owned());
+        let mut loaded = false;
+        for font_path in &candidates {
+            if let Ok(font_data) = std::fs::read(font_path) {
+                fonts.font_data.insert(
+                    "msyh".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+                );
+                fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Proportional)
+                    .unwrap()
+                    .insert(0, "msyh".to_owned());
+                fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Monospace)
+                    .unwrap()
+                    .insert(0, "msyh".to_owned());
+                log::info!("已加载中文字体: {}", font_path.display());
+                loaded = true;
+                break;
+            }
+        }
 
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Monospace)
-                .unwrap()
-                .insert(0, "msyh".to_owned());
-
-            log::info!("已加载中文字体: X:\\Windows\\Fonts\\msyh.ttc");
-        } else {
-            log::warn!("无法加载中文字体: X:\\Windows\\Fonts\\msyh.ttc");
+        if !loaded {
+            log::warn!("未能从任何候选路径加载中文字体（msyh.ttc/ttf）");
         }
 
         ctx.set_fonts(fonts);
@@ -207,6 +228,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     use crate::ui::advanced_options::apply_advanced_options;
 
     log::info!("========== 开始PE安装流程 ==========");
+    // 注：BitLocker 透传解锁已在 main() 最前面统一执行（早于操作类型检测），这里不再重复。
 
     // 查找配置文件所在分区
     let data_partition = match ConfigFileManager::find_data_partition() {
@@ -247,6 +269,42 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     log::info!("完整镜像路径: {}", image_path);
 
+    // Step 0: 校验镜像完整性（WIM/ESD）。放在格式化之前——镜像损坏就提前失败，
+    // 不会白白格式化目标盘，也能给出明确“镜像损坏”而不是释放到一半才崩。
+    // GHO 不是 WIM，跳过 wimlib 校验。
+    if !config.is_gho {
+        let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::VerifyImage));
+        let _ = tx.send(WorkerMessage::SetStatus(
+            "正在校验系统镜像完整性（可能需要几分钟）...".to_string(),
+        ));
+        log::info!("[PE安装] 开始校验镜像: {}", image_path);
+
+        let (verify_tx, verify_rx) = channel::<DismProgress>();
+        let tx_v = tx.clone();
+        let verify_handle = thread::spawn(move || {
+            while let Ok(progress) = verify_rx.recv() {
+                let _ = tx_v.send(WorkerMessage::SetProgress(progress.percentage));
+                let _ = tx_v.send(WorkerMessage::SetStatus(progress.status));
+            }
+        });
+
+        let verify_result = Dism::new().verify_image(&image_path, Some(verify_tx));
+        let _ = verify_handle.join();
+
+        if let Err(e) = verify_result {
+            log::error!("[PE安装] 镜像校验失败: {}", e);
+            let _ = tx.send(WorkerMessage::Failed(format!(
+                "镜像校验失败：镜像可能已损坏或不完整（{}）。请重新获取镜像后重试。",
+                e
+            )));
+            return;
+        }
+        log::info!("[PE安装] 镜像校验通过");
+        let _ = tx.send(WorkerMessage::SetProgress(100));
+    } else {
+        log::info!("[PE安装] GHO 镜像，跳过 wimlib 校验");
+    }
+
     // Step 1: 格式化分区
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::FormatPartition));
     let _ = tx.send(WorkerMessage::SetStatus("正在格式化目标分区...".to_string()));
@@ -264,6 +322,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             let _ = tx.send(WorkerMessage::SetProgress(100));
         }
         Err(e) => {
+            log::error!("[PE安装] 格式化分区失败: {}", e);
             let _ = tx.send(WorkerMessage::Failed(format!("格式化分区失败: {}", e)));
             return;
         }
@@ -274,6 +333,10 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetStatus("正在释放系统镜像...".to_string()));
 
     let apply_dir = format!("{}\\", target_partition);
+    log::info!(
+        "[PE安装] 开始释放镜像: 文件={} 卷索引={} is_gho={} -> 目标={}",
+        image_path, config.volume_index, config.is_gho, apply_dir
+    );
 
     // 创建进度通道
     let (progress_tx, progress_rx) = channel::<DismProgress>();
@@ -306,9 +369,11 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = progress_handle.join();
 
     if let Err(e) = apply_result {
+        log::error!("[PE安装] 释放镜像失败: {}", e);
         let _ = tx.send(WorkerMessage::Failed(format!("释放镜像失败: {}", e)));
         return;
     }
+    log::info!("[PE安装] 释放镜像完成");
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     // Step 3: 导入驱动
@@ -466,12 +531,30 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::GenerateUnattend));
 
     if config.unattended {
-        let _ = tx.send(WorkerMessage::SetStatus("正在生成无人值守配置...".to_string()));
-        if let Err(e) = generate_unattend_xml(&target_partition, &config) {
-            log::warn!("生成无人值守配置失败: {}", e);
+        if !config.custom_unattend_file.is_empty() {
+            // 用户提供了自定义无人值守文件：直接复制到目标系统（不再内置生成）
+            let _ = tx.send(WorkerMessage::SetStatus("正在应用自定义无人值守配置...".to_string()));
+            let src = format!("{}\\{}", data_dir, config.custom_unattend_file);
+            match apply_custom_unattend(&target_partition, &src) {
+                Ok(_) => log::info!("[UNATTEND] 已应用自定义无人值守文件: {}", src),
+                Err(e) => log::warn!("应用自定义无人值守文件失败: {}", e),
+            }
+        } else {
+            let _ = tx.send(WorkerMessage::SetStatus("正在生成无人值守配置...".to_string()));
+            if let Err(e) = generate_unattend_xml(&target_partition, &config) {
+                log::warn!("生成无人值守配置失败: {}", e);
+            }
         }
     } else {
         let _ = tx.send(WorkerMessage::SetStatus("跳过无人值守配置".to_string()));
+    }
+
+    // 离线登录兜底：放开空密码登录策略 +（已知用户名时）配置空密码自动登录。
+    // 解决整盘备份/未 sysprep 镜像下 unattend 不生效、登录界面退化为"其他用户"的问题。
+    if let Err(e) = crate::core::account_fix::ensure_offline_login(&target_partition, &config.custom_username) {
+        log::warn!("离线登录兜底设置失败（不影响安装）: {}", e);
+    } else {
+        log::info!("[LOGIN] 已应用离线登录兜底设置");
     }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
@@ -708,6 +791,22 @@ fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
 /// - windowsPE pass: 基本设置
 /// - specialize pass: 部署脚本执行
 /// - oobeSystem pass: OOBE设置、用户账户、首次登录命令
+/// 应用用户自定义的无人值守文件：复制到目标系统的 Panther 与 Sysprep 目录
+fn apply_custom_unattend(target_partition: &str, src: &str) -> anyhow::Result<()> {
+    let content = std::fs::read(src)
+        .map_err(|e| anyhow::anyhow!("读取自定义无人值守文件失败 {}: {}", src, e))?;
+
+    let panther_dir = format!("{}\\Windows\\Panther", target_partition);
+    std::fs::create_dir_all(&panther_dir)?;
+    std::fs::write(format!("{}\\unattend.xml", panther_dir), &content)?;
+
+    let sysprep_dir = format!("{}\\Windows\\System32\\Sysprep", target_partition);
+    if std::path::Path::new(&sysprep_dir).exists() {
+        let _ = std::fs::write(format!("{}\\unattend.xml", sysprep_dir), &content);
+    }
+    Ok(())
+}
+
 fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::InstallConfig) -> anyhow::Result<()> {
     use crate::ui::advanced_options::get_scripts_dir_name;
     use crate::core::system_utils::{get_file_version, get_offline_system_architecture};
@@ -956,12 +1055,12 @@ fn generate_win8_unattend_xml(username: &str, scripts_dir: &str, first_logon_com
 
 /// 生成 Windows 10/11 无人值守配置
 /// 
-/// 完整支持所有 OOBE 跳过选项：
+/// 通过预置 LocalAccount + 以下 OOBE 选项跳过账户/隐私等屏幕：
 /// - HideLocalAccountScreen
 /// - HideOnlineAccountScreens
 /// - HideWirelessSetupInOOBE
-/// - SkipMachineOOBE
-/// - SkipUserOOBE
+///
+/// 注：SkipMachineOOBE / SkipUserOOBE 已被微软弃用且在 Win11 上不可靠，故不再使用。
 fn generate_win10_unattend_xml(username: &str, scripts_dir: &str, first_logon_commands: &str, arch: &str) -> String {
     format!(r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -997,8 +1096,6 @@ fn generate_win10_unattend_xml(username: &str, scripts_dir: &str, first_logon_co
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>
             <UserAccounts>
                 <LocalAccounts>

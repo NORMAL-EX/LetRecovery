@@ -175,6 +175,8 @@ pub struct InstallOptions {
     pub boot_mode: BootModeSelection,
     pub advanced_options: AdvancedOptions,
     pub driver_action: DriverAction,
+    /// 自定义无人值守文件绝对路径（空=使用内置生成）
+    pub custom_unattend_path: String,
 }
 
 /// 主应用结构
@@ -449,7 +451,35 @@ pub struct App {
     pub image_verify_progress_rx: Option<Receiver<crate::core::image_verify::VerifyProgress>>,
     pub image_verify_result_rx: Option<Receiver<crate::ui::tools::ImageVerifyResult>>,
     pub image_verify_cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    
+
+    // 文件哈希(SHA-256)校验对话框
+    pub show_hash_verify_dialog: bool,
+    pub hash_verify_file_path: String,
+    pub hash_verify_expected: String,
+    pub hash_verify_loading: bool,
+    pub hash_verify_result: Option<crate::ui::tools::hash_verify::HashVerifyResult>,
+    pub hash_verify_progress: Option<u8>,
+    pub hash_verify_progress_rx: Option<Receiver<u8>>,
+    pub hash_verify_result_rx: Option<Receiver<crate::ui::tools::hash_verify::HashVerifyResult>>,
+
+    // 离线密码重置对话框
+    pub show_password_reset_dialog: bool,
+    pub password_reset_partition: String,
+    pub password_reset_username: String,
+    pub password_reset_loading: bool,
+    pub password_reset_message: String,
+    pub password_reset_rx: Option<Receiver<Result<bool, String>>>,
+    /// 选中的目标系统盘符（离线 Windows 所在分区），如 "D:"。
+    pub password_reset_target: Option<String>,
+    /// 目标系统的本地账户列表。
+    pub password_reset_users: Vec<lr_core::sam::SamAccount>,
+    /// 是否正在加载账户列表。
+    pub password_reset_users_loading: bool,
+    /// 账户列表加载结果通道。
+    pub password_reset_users_rx: Option<Receiver<Result<Vec<lr_core::sam::SamAccount>, String>>>,
+    /// 在列表中选中的账户名。
+    pub password_reset_selected_user: Option<String>,
+
     // 应用配置（小白模式等）
     pub app_config: crate::core::app_config::AppConfig,
     
@@ -484,6 +514,10 @@ pub struct App {
     pub last_unattend_check_partition: Option<String>,
     /// 是否显示无人值守冲突提示对话框
     pub show_unattend_conflict_modal: bool,
+    /// 用户选择的自定义无人值守文件路径（空=使用内置生成的）
+    pub custom_unattend_path: String,
+    /// 自定义无人值守文件语法校验错误（Some=有错，禁用安装按钮并提示）
+    pub custom_unattend_error: Option<String>,
     
     // 安装时BitLocker解锁对话框
     /// 是否显示安装前BitLocker解锁对话框
@@ -528,7 +562,39 @@ pub struct App {
     pub backup_bitlocker_rx: Option<Receiver<crate::ui::tools::bitlocker::UnlockResult>>,
     /// 备份前BitLocker检查完成后是否继续备份
     pub backup_bitlocker_continue_after: bool,
-    
+
+    // BitLocker 管理工具对话框
+    /// 是否显示 BitLocker 管理对话框
+    pub show_bitlocker_manage_dialog: bool,
+    /// 是否正在执行解锁/解密操作
+    pub bitlocker_manage_loading: bool,
+    /// 是否正在加载分区列表
+    pub bitlocker_manage_partitions_loading: bool,
+    /// 状态消息
+    pub bitlocker_manage_message: String,
+    /// 检测到的 BitLocker 加密分区列表
+    pub bitlocker_manage_partitions: Vec<crate::ui::tools::BitLockerPartition>,
+    /// 当前选中的分区盘符
+    pub bitlocker_manage_selected: Option<String>,
+    /// 解锁密码输入
+    pub bitlocker_manage_password: String,
+    /// 解锁恢复密钥输入
+    pub bitlocker_manage_recovery_key: String,
+    /// 解锁方式
+    pub bitlocker_manage_mode: BitLockerUnlockMode,
+    /// 分区列表加载结果接收器
+    pub bitlocker_manage_partitions_rx: Option<Receiver<Vec<crate::ui::tools::BitLockerPartition>>>,
+    /// 解锁结果接收器
+    pub bitlocker_manage_unlock_rx: Option<Receiver<crate::ui::tools::bitlocker::UnlockResult>>,
+    /// 解密结果接收器
+    pub bitlocker_manage_decrypt_rx: Option<Receiver<crate::core::bitlocker::DecryptResult>>,
+    /// 查看到的恢复密钥（用于展示/导出）
+    pub bitlocker_manage_recovery_display: Option<String>,
+    /// 获取恢复密钥结果接收器
+    pub bitlocker_manage_recovery_rx: Option<Receiver<Result<String, String>>>,
+    /// 挂起/恢复保护结果接收器
+    pub bitlocker_manage_protect_rx: Option<Receiver<Result<String, String>>>,
+
     // 安装时的 BitLocker 解密状态
     /// 正在解密的 BitLocker 分区列表
     pub decrypting_partitions: Vec<String>,
@@ -621,7 +687,7 @@ impl Default for App {
             repair_boot: true,
             unattended_install: true,
             export_drivers: true,
-            auto_reboot: false,
+            auto_reboot: true,
             selected_boot_mode: BootModeSelection::Auto,
             driver_action: DriverAction::AutoImport,
             advanced_options: AdvancedOptions::default(),
@@ -782,6 +848,27 @@ impl Default for App {
             image_verify_progress_rx: None,
             image_verify_result_rx: None,
             image_verify_cancel_flag: None,
+            // 文件哈希(SHA-256)校验对话框
+            show_hash_verify_dialog: false,
+            hash_verify_file_path: String::new(),
+            hash_verify_expected: String::new(),
+            hash_verify_loading: false,
+            hash_verify_result: None,
+            hash_verify_progress: None,
+            hash_verify_progress_rx: None,
+            hash_verify_result_rx: None,
+            // 离线密码重置对话框
+            show_password_reset_dialog: false,
+            password_reset_partition: String::new(),
+            password_reset_username: String::new(),
+            password_reset_loading: false,
+            password_reset_message: String::new(),
+            password_reset_rx: None,
+            password_reset_target: None,
+            password_reset_users: Vec::new(),
+            password_reset_users_loading: false,
+            password_reset_users_rx: None,
+            password_reset_selected_user: None,
             // 应用配置（小白模式等）
             app_config: crate::core::app_config::AppConfig::load(),
             // PE下载待校验的MD5
@@ -800,6 +887,8 @@ impl Default for App {
             embedded_assets: crate::ui::EmbeddedAssets::new(),
             // 无人值守检测相关
             partition_has_unattend: false,
+            custom_unattend_path: String::new(),
+            custom_unattend_error: None,
             unattend_check_loading: false,
             unattend_check_rx: None,
             last_unattend_check_partition: None,
@@ -826,6 +915,22 @@ impl Default for App {
             backup_bitlocker_mode: BitLockerUnlockMode::default(),
             backup_bitlocker_rx: None,
             backup_bitlocker_continue_after: false,
+            // BitLocker 管理工具对话框
+            show_bitlocker_manage_dialog: false,
+            bitlocker_manage_loading: false,
+            bitlocker_manage_partitions_loading: false,
+            bitlocker_manage_message: String::new(),
+            bitlocker_manage_partitions: Vec::new(),
+            bitlocker_manage_selected: None,
+            bitlocker_manage_password: String::new(),
+            bitlocker_manage_recovery_key: String::new(),
+            bitlocker_manage_mode: BitLockerUnlockMode::default(),
+            bitlocker_manage_partitions_rx: None,
+            bitlocker_manage_unlock_rx: None,
+            bitlocker_manage_decrypt_rx: None,
+            bitlocker_manage_recovery_display: None,
+            bitlocker_manage_recovery_rx: None,
+            bitlocker_manage_protect_rx: None,
             decrypting_partitions: Vec::new(),
             bitlocker_decryption_needed: false,
         }
@@ -1319,7 +1424,7 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(10.0);
-                        ui.colored_label(egui::Color32::RED, "❌");
+                        ui.colored_label(egui::Color32::RED, "");
                         ui.add_space(10.0);
                         ui.label(&self.error_dialog_message);
                         ui.add_space(20.0);
@@ -1342,7 +1447,7 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(10.0);
-                        ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "⚠");
+                        ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "");
                         ui.add_space(10.0);
                     });
                     
@@ -1446,7 +1551,7 @@ impl eframe::App for App {
                 if is_busy {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        format!("⚠ {}", tr!("操作进行中...")),
+                        format!("{}", tr!("操作进行中...")),
                     );
                     ui.add_space(5.0);
                 }

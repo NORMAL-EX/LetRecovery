@@ -32,6 +32,10 @@ pub struct AppConfig {
     /// 界面语言代码（默认 "zh-CN"）
     #[serde(default = "default_language")]
     pub language: String,
+
+    /// PE 配置缓存（原 pe_cache.json，已并入 config.json）
+    #[serde(default)]
+    pub pe_cache: crate::download::config::PeCache,
 }
 
 /// 日志默认启用
@@ -58,6 +62,7 @@ impl Default for AppConfig {
             log_enabled: true,  // 日志默认启用
             log_retention_days: 7,  // 默认保留7天
             language: String::from("zh-CN"),  // 默认简体中文
+            pe_cache: crate::download::config::PeCache::default(),
         }
     }
 }

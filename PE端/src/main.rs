@@ -7,16 +7,115 @@ mod utils;
 
 use eframe::egui;
 
-fn main() -> eframe::Result<()> {
-    // 初始化日志
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp(Some(env_logger::TimestampPrecision::Millis))
-        .init();
+/// 日志文件路径：优先 exe 同目录；取不到则退回当前目录。
+fn log_file_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("LetRecoveryPE.log")))
+        .unwrap_or_else(|| std::path::PathBuf::from("LetRecoveryPE.log"))
+}
 
-    log::info!("LetRecovery PE 启动中...");
+/// 文件日志器：每条日志**立即 flush 落盘**。
+/// 之前用 env_logger 的 file pipe，GUI 进程长期不退出导致缓冲日志不落盘，
+/// 安装流程的日志全丢失、无法排查；这里改为自实现、每条 flush。
+struct FileLogger {
+    file: std::sync::Mutex<std::fs::File>,
+    level: log::LevelFilter,
+}
+
+impl log::Log for FileLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= self.level
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+        if let Ok(mut f) = self.file.lock() {
+            use std::io::Write;
+            let _ = writeln!(
+                f,
+                "[{}] {} {} {}",
+                ts,
+                record.level(),
+                record.target(),
+                record.args()
+            );
+            let _ = f.flush(); // 关键：每条立即落盘，GUI 运行中也能实时看到
+        }
+    }
+
+    fn flush(&self) {
+        if let Ok(mut f) = self.file.lock() {
+            use std::io::Write;
+            let _ = f.flush();
+        }
+    }
+}
+
+/// 初始化日志：自实现的文件日志器（每条 flush）。文件打不开时静默跳过，不影响启动。
+fn init_file_logger() {
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file_path())
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let logger = Box::new(FileLogger {
+        file: std::sync::Mutex::new(file),
+        level: log::LevelFilter::Info,
+    });
+    if log::set_boxed_logger(logger).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
+/// 安装 panic 钩子，把线程 panic 的位置与信息写入日志（再调用默认钩子）。
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "未知位置".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<非字符串 panic>".to_string());
+        log::error!("[PANIC] 线程崩溃 @ {} : {}", location, msg);
+        default_hook(info);
+    }));
+}
+
+fn main() -> eframe::Result<()> {
+    // 初始化日志：写入到 exe 同目录的 LetRecoveryPE.log。
+    // PE 下 GUI 程序没有控制台，stderr 会被直接丢弃，必须落盘才能事后排查“怎么死的”。
+    init_file_logger();
+    // 安装 panic 钩子：安装流程跑在工作线程里，线程 panic 会“静默死亡”导致界面卡住，
+    // 必须把 panic 记到日志。
+    install_panic_hook();
+
+    log::info!("==================== LetRecovery PE 启动 ====================");
+    log::info!("版本: {} | 日志文件: {}", env!("CARGO_PKG_VERSION"), log_file_path().display());
 
     // 检查命令行参数
     let args: Vec<String> = std::env::args().collect();
+    log::info!("命令行参数: {:?}", args);
+
+    // 【关键】BitLocker 密钥透传解锁必须在**任何**操作类型检测之前执行。
+    // 安装标记文件(LetRecovery_Install.marker)位于目标系统卷上，若该卷被 BitLocker 加密，
+    // 则 PE 启动后它处于锁定状态，detect_operation_type()/find_install_marker_partition()
+    // 会读不到标记 → 返回 None → GUI 安装流程(execute_install_workflow)根本不会启动，
+    // 而解锁逻辑原先恰好埋在 execute_install_workflow 里，形成“要解锁才能检测、要检测才会解锁”
+    // 的死锁。这里提前到 main 最前面统一解锁，GUI/自动/命令行所有模式都覆盖，
+    // 且无论是否加密都会在日志里留下解锁尝试记录。无密钥文件=未启用=安全空操作。
+    unlock_bitlocker_passthrough();
 
     // 命令行模式（无GUI）
     if args.contains(&"/PEINSTALL".to_string()) || args.contains(&"--pe-install".to_string()) {
@@ -97,6 +196,120 @@ fn load_icon() -> egui::IconData {
     egui::IconData::default()
 }
 
+/// 【实验性】BitLocker 密钥透传解锁。
+///
+/// 若正常系统端在注入引导时把恢复密钥文件打包进了 boot.wim，则 PE 启动后该文件位于
+/// `X:\LR_BitLockerKeys.txt`。读取其中的恢复密钥，对 A–Z 各盘逐一尝试解锁。
+///
+/// 解锁优先用 fveapi，失败再回退 `manage-bde -unlock`（精简 WinPE 可能缺其一）。
+/// 全程写**日志**（GUI 无控制台，必须落盘到 LetRecoveryPE.log 才能排查），失败原因也记录。
+/// best-effort：无文件/无锁定卷/解锁失败都不致命。
+fn unlock_bitlocker_passthrough() {
+    let keys_path = format!("X:\\{}", lr_core::bl_passthrough::KEYS_FILE_NAME);
+    let content = match std::fs::read_to_string(&keys_path) {
+        Ok(c) => c,
+        Err(_) => {
+            log::info!("[实验] 未发现密钥透传文件 {}，跳过解锁（未启用透传/无加密卷）", keys_path);
+            return;
+        }
+    };
+    let keys = lr_core::bl_passthrough::parse_keys(&content);
+    if keys.is_empty() {
+        log::warn!("[实验] 密钥透传文件存在但未解析出任何恢复密钥: {}", keys_path);
+        return;
+    }
+    let fveapi_ok = lr_core::fveapi::FveApi::instance().is_ok();
+    log::info!(
+        "[实验] BitLocker 密钥透传：解析到 {} 个恢复密钥，fveapi.dll={}，开始逐盘尝试解锁…",
+        keys.len(),
+        if fveapi_ok { "可用(优先)" } else { "不可用(仅用 manage-bde)" }
+    );
+
+    let mut any_unlocked = false;
+    for byte in b'A'..=b'Z' {
+        let letter = byte as char;
+        if letter == 'X' {
+            continue; // 跳过 PE 系统盘
+        }
+        let drive = format!("{}:", letter);
+        for (i, key) in keys.iter().enumerate() {
+            if try_unlock_fveapi(letter, key) {
+                log::info!("[实验] {} 经 fveapi 用第 {} 个恢复密钥解锁成功", drive, i + 1);
+                any_unlocked = true;
+                break;
+            }
+            if try_unlock_manage_bde(&drive, key) {
+                log::info!("[实验] {} 经 manage-bde 用第 {} 个恢复密钥解锁成功", drive, i + 1);
+                any_unlocked = true;
+                break;
+            }
+        }
+    }
+    if !any_unlocked {
+        log::warn!("[实验] 未解锁任何卷（若有锁定卷，请看上方各盘的 fveapi/manage-bde 失败原因）");
+    }
+    log::info!("[实验] BitLocker 密钥透传解锁流程结束");
+}
+
+/// 用 fveapi 对单个卷尝试恢复密钥解锁。返回是否成功；失败原因写日志。
+fn try_unlock_fveapi(drive_letter: char, recovery_key: &str) -> bool {
+    let api = match lr_core::fveapi::FveApi::instance() {
+        Ok(a) => a,
+        Err(_) => return false, // fveapi.dll 不可用（上层已记录一次）
+    };
+    let formatted = match lr_core::fveapi::format_recovery_key(recovery_key) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("[实验] 恢复密钥格式化失败: {}", e);
+            return false;
+        }
+    };
+    let path = format!("{}:", drive_letter);
+    match api.open_volume(&path) {
+        Ok(handle) => match handle.unlock_with_recovery_key(&formatted) {
+            Ok(_) => true,
+            Err(e) => {
+                // 开卷成功（通常即加密卷，含锁定卷）但本密钥解锁失败：记录具体错误便于定位
+                log::info!("[实验] {} fveapi 解锁失败: {:?}", path, e);
+                false
+            }
+        },
+        Err(e) => {
+            // 非 BitLocker / 未加密卷会在此返回，属正常，debug 级
+            log::debug!("[实验] {} fveapi 开卷失败/非加密: {:?}", path, e);
+            false
+        }
+    }
+}
+
+/// 回退：manage-bde 解锁（WinPE 可能未含该工具）。失败原因写日志。
+fn try_unlock_manage_bde(drive: &str, recovery_key: &str) -> bool {
+    match std::process::Command::new("manage-bde")
+        .args(["-unlock", drive, "-RecoveryPassword", recovery_key])
+        .output()
+    {
+        Ok(o) => {
+            if o.status.success() {
+                true
+            } else {
+                let out = String::from_utf8_lossy(&o.stdout);
+                let err = String::from_utf8_lossy(&o.stderr);
+                log::debug!(
+                    "[实验] {} manage-bde 解锁未成功: {} {}",
+                    drive,
+                    out.trim(),
+                    err.trim()
+                );
+                false
+            }
+        }
+        Err(e) => {
+            log::debug!("[实验] {} manage-bde 不可用: {}", drive, e);
+            false
+        }
+    }
+}
+
 /// 命令行模式执行
 fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
     use core::bcdedit::BootManager;
@@ -131,6 +344,7 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
     if is_install {
         println!("[PE INSTALL] ========== PE自动安装模式 ==========");
+        // 注：BitLocker 透传解锁已在 main() 最前面统一执行，这里不再重复。
 
         // 查找配置文件所在分区
         let data_partition = match ConfigFileManager::find_data_partition() {
@@ -172,6 +386,23 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         }
 
         println!("[PE INSTALL] 完整镜像路径: {}", image_path);
+
+        // Step 0: 校验镜像完整性（WIM/ESD；GHO 跳过）——放在格式化之前，坏镜像不糟蹋目标盘
+        if !config.is_gho {
+            println!("[PE INSTALL] Step 0: 校验镜像完整性");
+            log::info!("[PE安装/CLI] 开始校验镜像: {}", image_path);
+            let dism = Dism::new();
+            if let Err(e) = dism.verify_image(&image_path, None) {
+                eprintln!("[PE INSTALL] 镜像校验失败: {}", e);
+                log::error!("[PE安装/CLI] 镜像校验失败: {}", e);
+                show_error_message(&format!(
+                    "镜像校验失败：镜像可能已损坏或不完整（{}）。请重新获取镜像后重试。",
+                    e
+                ));
+                return Ok(());
+            }
+            log::info!("[PE安装/CLI] 镜像校验通过");
+        }
 
         // Step 1: 格式化分区
         println!("[PE INSTALL] Step 1: 格式化分区");
@@ -292,7 +523,36 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         // Step 7: 生成无人值守配置
         if config.unattended {
             println!("[PE INSTALL] Step 7: 生成无人值守配置");
-            let _ = generate_unattend_xml(&target_partition, &config.custom_username);
+            if !config.custom_unattend_file.is_empty() {
+                // 用户自定义无人值守文件：直接复制到目标系统
+                let data_dir = ConfigFileManager::get_data_dir(&data_partition);
+                let src = format!("{}\\{}", data_dir, config.custom_unattend_file);
+                match std::fs::read(&src) {
+                    Ok(content) => {
+                        let panther_dir = format!("{}\\Windows\\Panther", target_partition);
+                        let _ = std::fs::create_dir_all(&panther_dir);
+                        let _ = std::fs::write(format!("{}\\unattend.xml", panther_dir), &content);
+                        let sysprep_dir =
+                            format!("{}\\Windows\\System32\\Sysprep", target_partition);
+                        if std::path::Path::new(&sysprep_dir).exists() {
+                            let _ = std::fs::write(format!("{}\\unattend.xml", sysprep_dir), &content);
+                        }
+                        println!("[PE INSTALL] 已应用自定义无人值守文件: {}", src);
+                    }
+                    Err(e) => eprintln!("[PE INSTALL] 读取自定义无人值守文件失败: {}", e),
+                }
+            } else {
+                let _ = generate_unattend_xml(&target_partition, &config.custom_username);
+            }
+        }
+
+        // Step 7.5: 离线登录兜底（放开空密码策略 + 已知用户名时配置自动登录）
+        if let Err(e) =
+            core::account_fix::ensure_offline_login(&target_partition, &config.custom_username)
+        {
+            eprintln!("[PE INSTALL] 离线登录兜底设置失败（不影响安装）: {}", e);
+        } else {
+            println!("[PE INSTALL] 已应用离线登录兜底设置");
         }
 
         // Step 8: 清理
@@ -438,8 +698,6 @@ fn generate_unattend_xml(target_partition: &str, username: &str) -> anyhow::Resu
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>
             <UserAccounts>
                 <LocalAccounts>

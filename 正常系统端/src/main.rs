@@ -65,6 +65,19 @@ fn main() -> eframe::Result<()> {
 
     log::info!("已获得管理员权限");
 
+    // 命令行无人值守安装：--install --config <install.json> [--advanced <advanced.json>]
+    // 放在确认管理员权限之后、GUI 初始化之前；不进 GUI，准备好后（默认）重启进 PE 完成安装。
+    if args.contains(&"/INSTALL".to_string()) || args.contains(&"--install".to_string()) {
+        let config = arg_value(&args, &["--config", "/CONFIG"]);
+        let advanced = arg_value(&args, &["--advanced", "/ADVANCED"]);
+        return run_cli_install_entry(config.as_deref(), advanced.as_deref());
+    }
+
+    // 记录本机配置信息，便于用户反馈问题时开发者排查
+    if app_config.log_enabled {
+        log_machine_info();
+    }
+
     // 检查是否为64位系统
     if !cfg!(target_arch = "x86_64") {
         log::error!("本程序仅支持64位系统");
@@ -255,6 +268,32 @@ fn check_dependencies() -> Result<(), Vec<String>> {
     }
 }
 
+/// 收集并记录本机配置信息到日志（便于用户反馈问题时排查）
+fn log_machine_info() {
+    log::info!("========== 本机配置信息 ==========");
+    let sys_info = core::system_info::SystemInfo::collect().ok();
+    match core::hardware_info::HardwareInfo::collect() {
+        Ok(hw) => {
+            let text = hw.to_formatted_text(sys_info.as_ref());
+            for line in text.lines() {
+                if !line.trim().is_empty() {
+                    log::info!("{}", line);
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("采集硬件信息失败: {}", e);
+            if let Some(si) = &sys_info {
+                log::info!(
+                    "启动模式: {} | 安全启动: {} | TPM: {} | 64位: {}",
+                    si.boot_mode, si.secure_boot, si.tpm_enabled, si.is_64bit
+                );
+            }
+        }
+    }
+    log::info!("==================================");
+}
+
 /// 检查系统核心组件完整性（用于检测极限精简系统）
 /// 返回 Ok(()) 表示所有组件存在，Err(Vec<String>) 包含缺失的组件列表
 fn check_system_components() -> Result<(), Vec<String>> {
@@ -266,9 +305,9 @@ fn check_system_components() -> Result<(), Vec<String>> {
     let system32_path = std::path::Path::new(&system_root).join("System32");
     
     // 必需的系统组件列表
+    // 注：WIM 处理已改用内置的 libwim-15.dll，不再依赖系统 wimgapi.dll
     let required_components = [
         ("diskpart.exe", "磁盘分区工具"),
-        ("wimgapi.dll", "WIM 镜像处理库"),
         ("advapi32.dll", "高级 Windows API 库"),
     ];
     
@@ -290,6 +329,40 @@ fn check_system_components() -> Result<(), Vec<String>> {
 }
 
 /// PE环境下自动执行安装
+/// 从参数列表取某个带值参数的值，支持 `--name value` 与 `--name=value`（名称大小写不敏感）。
+fn arg_value(args: &[String], names: &[&str]) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        for name in names {
+            if a.eq_ignore_ascii_case(name) {
+                return args.get(i + 1).cloned();
+            }
+            let prefix = format!("{}=", name);
+            if a.len() >= prefix.len() && a[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+                return Some(a[prefix.len()..].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// `--install` 入口：校验参数后调用命令行无人值守安装。
+fn run_cli_install_entry(config: Option<&str>, advanced: Option<&str>) -> eframe::Result<()> {
+    let config = match config {
+        Some(c) if !c.is_empty() => c,
+        _ => {
+            eprintln!("[CLI INSTALL] 缺少 --config <install.json>");
+            eprintln!(
+                "用法: LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]"
+            );
+            return Ok(());
+        }
+    };
+    if let Err(e) = core::cli_install::run_cli_install(config, advanced) {
+        eprintln!("[CLI INSTALL] 失败: {:#}", e);
+    }
+    Ok(())
+}
+
 fn run_pe_install() -> eframe::Result<()> {
     use core::install_config::ConfigFileManager;
     
@@ -635,8 +708,6 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>"#
     };
     
@@ -665,7 +736,7 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
                         <Description>Local User</Description>
                         <DisplayName>{user}</DisplayName>
                         <Group>Administrators</Group>
-                        <n>{user}</n>
+                        <Name>{user}</Name>
                     </LocalAccount>
                 </LocalAccounts>
             </UserAccounts>

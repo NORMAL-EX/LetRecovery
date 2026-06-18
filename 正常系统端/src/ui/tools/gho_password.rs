@@ -78,9 +78,9 @@ impl App {
 
                     // 显示有效性状态
                     if result.is_valid {
-                        ui.colored_label(egui::Color32::from_rgb(0, 180, 0), "✅ 有效的GHO文件");
+                        ui.colored_label(egui::Color32::from_rgb(0, 180, 0), "有效的GHO文件");
                     } else {
-                        ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "❌ 无效的GHO文件");
+                        ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "无效的GHO文件");
                     }
                     
                     ui.add_space(5.0);
@@ -88,7 +88,7 @@ impl App {
                     // 显示密码信息
                     if result.is_valid {
                         if result.has_password {
-                            ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "🔒 已设置密码保护");
+                            ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "已设置密码保护");
                             
                             ui.horizontal(|ui| {
                                 ui.label("密码长度:");
@@ -98,7 +98,7 @@ impl App {
                             if let Some(ref pwd) = result.password {
                                 ui.add_space(5.0);
                                 ui.horizontal(|ui| {
-                                    ui.label("🔑 密码:");
+                                    ui.label("密码:");
                                     // 使用可选择的文本框显示密码，方便复制
                                     let mut pwd_display = pwd.clone();
                                     ui.add(
@@ -113,10 +113,10 @@ impl App {
                                 });
                             } else if !result.message.is_empty() {
                                 ui.add_space(5.0);
-                                ui.colored_label(egui::Color32::YELLOW, format!("⚠️ {}", result.message));
+                                ui.colored_label(egui::Color32::YELLOW, format!("{}", result.message));
                             }
                         } else {
-                            ui.colored_label(egui::Color32::from_rgb(0, 180, 0), "🔓 未设置密码保护");
+                            ui.colored_label(egui::Color32::from_rgb(0, 180, 0), "未设置密码保护");
                         }
                     }
                     

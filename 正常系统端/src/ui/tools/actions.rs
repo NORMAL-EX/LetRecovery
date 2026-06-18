@@ -41,21 +41,6 @@ pub fn launch_ghost() -> Result<(), String> {
     }
 }
 
-/// 启动万能驱动工具
-pub fn launch_wandrv() -> Result<(), String> {
-    let tools_dir = get_tools_dir();
-    let wandrv_path = tools_dir.join("QDZC.exe");
-
-    if wandrv_path.exists() {
-        match Command::new(&wandrv_path).spawn() {
-            Ok(_) => Ok(()),
-            Err(e) => Err(format!("启动失败: QDZC.exe - {}", e)),
-        }
-    } else {
-        Err(format!("工具不存在: {:?}", wandrv_path))
-    }
-}
-
 /// 启动 SpaceSniffer 磁盘空间分析工具
 pub fn launch_space_sniffer() -> Result<(), String> {
     let tools_dir = get_tools_dir();

@@ -26,7 +26,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 181, 246),
-                    "💡 您可以在\"关于\"页面中关闭小白模式",
+                    "您可以在\"关于\"页面中关闭小白模式",
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").clicked() {
@@ -50,7 +50,7 @@ impl App {
             } else {
                 ui.colored_label(
                     egui::Color32::RED,
-                    "❌ 无法获取系统列表，请检查网络连接后重启程序",
+                    "无法获取系统列表，请检查网络连接后重启程序",
                 );
             }
             return;
@@ -61,7 +61,7 @@ impl App {
         if systems.is_empty() {
             ui.colored_label(
                 egui::Color32::from_rgb(255, 165, 0),
-                "⚠ 暂无可用的系统镜像",
+                "暂无可用的系统镜像",
             );
             return;
         }
@@ -166,7 +166,7 @@ impl App {
         system: &EasyModeSystem,
         is_selected: bool,
         width: f32,
-        height: f32,
+        _height: f32,
     ) -> (bool, bool) {
         let mut card_clicked = false;
         let mut install_clicked = false;
@@ -307,7 +307,7 @@ impl App {
                 return;
             } else {
                 // 内嵌 logo 加载失败，显示默认图标
-                ui.label(egui::RichText::new("💻").size(size * 0.6));
+                ui.label(egui::RichText::new("").size(size * 0.6));
                 return;
             }
         }
@@ -325,7 +325,7 @@ impl App {
                 }
                 EasyModeLogoState::Failed => {
                     // 显示默认图标
-                    ui.label(egui::RichText::new("💻").size(size * 0.6));
+                    ui.label(egui::RichText::new("").size(size * 0.6));
                     return;
                 }
             }
@@ -436,7 +436,7 @@ impl App {
                 
                 // 警告标题
                 ui.horizontal(|ui| {
-                    let text = egui::RichText::new("⚠️ 警告").size(20.0).strong();
+                    let text = egui::RichText::new("警告").size(20.0).strong();
                     let text_width = 80.0;
                     ui.add_space((window_width - text_width) / 2.0 - 16.0);
                     ui.colored_label(egui::Color32::from_rgb(255, 193, 7), text);

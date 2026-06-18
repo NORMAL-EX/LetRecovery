@@ -1,0 +1,21 @@
+{
+  "bypass_nro": true,
+  "remove_uwp_apps": true,
+  "import_storage_controller_drivers": true,
+  "disable_device_encryption": true,
+  "disable_windows_update": false,
+  "disable_windows_defender": false,
+  "disable_reserved_storage": false,
+  "disable_uac": false,
+  "remove_shortcut_arrow": false,
+  "restore_classic_context_menu": false,
+  "custom_username": true,
+  "username": "User",
+  "custom_volume_label": true,
+  "volume_label": "OS",
+  "win7_uefi_patch": false,
+  "win7_inject_usb3_driver": false,
+  "win7_inject_nvme_driver": false,
+  "win7_fix_acpi_bsod": false,
+  "win7_fix_storage_bsod": false
+}

@@ -1,0 +1,13 @@
+{
+  "target_partition": "C:",
+  "image_path": "D:\\Images\\Win11_24H2.wim",
+  "pe_path": "D:\\LetRecovery\\bin\\pe\\LetRecovery_PE.wim",
+  "volume_index": 1,
+  "is_gho": false,
+  "driver_action_mode": 2,
+  "unattended": true,
+  "auto_reboot": true,
+  "custom_unattend_path": "",
+  "data_partition": null,
+  "pe_display_name": "LetRecovery PE"
+}

@@ -1,7 +1,3 @@
-use encoding_rs::GBK;
+//! 编码转换（实现已移入共享库 lr-core，此处再导出以保持调用方不变）。
 
-/// 将 GBK 编码的字节转换为 UTF-8 字符串
-pub fn gbk_to_utf8(bytes: &[u8]) -> String {
-    let (cow, _, _) = GBK.decode(bytes);
-    cow.into_owned()
-}
+pub use lr_core::encoding::gbk_to_utf8;

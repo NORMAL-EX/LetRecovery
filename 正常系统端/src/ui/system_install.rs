@@ -22,6 +22,11 @@ impl App {
         ui.heading("系统安装");
         ui.separator();
 
+        // 整页套一层垂直滚动：窗口调小时也能滚动到底部的「开始安装」按钮等控件。
+        egui::ScrollArea::vertical()
+            .id_salt("system_install_page_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
         let is_pe = self.is_pe_environment();
         
         // 显示小白模式提示（非PE环境下，且未关闭提示）
@@ -29,7 +34,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 181, 246),
-                    "💡 新手用户？可以在\"关于\"页面中开启小白模式，获得更简单的操作体验",
+                    "新手用户？可以在\"关于\"页面中开启小白模式，获得更简单的操作体验",
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").clicked() {
@@ -120,7 +125,7 @@ impl App {
             if volumes_to_show.is_empty() {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 165, 0),
-                    "⚠ 该镜像中没有可用的系统版本",
+                    "该镜像中没有可用的系统版本",
                 );
             } else {
                 // 获取要选择的默认索引
@@ -136,7 +141,7 @@ impl App {
                 if use_original {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 未检测到标准系统镜像，显示所有分卷",
+                        "未检测到标准系统镜像，显示所有分卷",
                     );
                 }
                 
@@ -231,7 +236,7 @@ impl App {
                             // 显示 BitLocker 状态
                             let status_color = match partition.bitlocker_status {
                                 crate::core::bitlocker::VolumeStatus::EncryptedLocked => egui::Color32::RED,
-                                crate::core::bitlocker::VolumeStatus::EncryptedUnlocked => egui::Color32::GREEN,
+                                crate::core::bitlocker::VolumeStatus::EncryptedUnlocked => egui::Color32::from_rgb(102, 187, 106),
                                 crate::core::bitlocker::VolumeStatus::Encrypting | 
                                 crate::core::bitlocker::VolumeStatus::Decrypting => egui::Color32::YELLOW,
                                 _ => ui.visuals().text_color(),
@@ -320,36 +325,130 @@ impl App {
             ui.checkbox(&mut self.auto_reboot, "立即重启");
         });
 
-        // 引导模式选择
-        ui.horizontal(|ui| {
-            ui.label("引导模式:");
-            egui::ComboBox::from_id_salt("boot_mode_select")
-                .selected_text(format!("{}", self.selected_boot_mode))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.selected_boot_mode,
-                        BootModeSelection::Auto,
-                        "自动 (根据分区表)",
-                    );
-                    ui.selectable_value(
-                        &mut self.selected_boot_mode,
-                        BootModeSelection::UEFI,
-                        "UEFI",
-                    );
-                    ui.selectable_value(
-                        &mut self.selected_boot_mode,
-                        BootModeSelection::Legacy,
-                        "Legacy (BIOS)",
-                    );
-                });
+        // 自定义无人值守文件 + 引导模式（启用无人值守时两者并列；否则引导模式单独一行）
+        if self.unattended_install {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("自定义无人值守:");
+                if ui.button("选择文件…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("无人值守文件", &["xml"])
+                        .pick_file()
+                    {
+                        let p = path.to_string_lossy().to_string();
+                        match std::fs::read_to_string(&path) {
+                            Ok(content) => {
+                                self.custom_unattend_path = p;
+                                self.custom_unattend_error =
+                                    crate::core::install_config::validate_unattend_xml(&content)
+                                        .err();
+                            }
+                            Err(e) => {
+                                self.custom_unattend_path = p;
+                                self.custom_unattend_error = Some(format!("无法读取文件: {}", e));
+                            }
+                        }
+                    }
+                }
+                if !self.custom_unattend_path.is_empty()
+                    && ui.button("清除").clicked()
+                {
+                    self.custom_unattend_path.clear();
+                    self.custom_unattend_error = None;
+                }
 
-            if let Some(idx) = self.selected_partition {
-                if let Some(partition) = self.partitions.get(idx) {
-                    let actual_mode = Self::get_actual_boot_mode(self.selected_boot_mode, partition.partition_style);
-                    ui.label(format!("( 将使用: {} )", actual_mode));
+                // 引导模式与“自定义无人值守”并列在同一行
+                ui.separator();
+                ui.label("引导模式:");
+                egui::ComboBox::from_id_salt("boot_mode_select")
+                    .selected_text(format!("{}", self.selected_boot_mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::Auto,
+                            "自动 (根据分区表)",
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::UEFI,
+                            "UEFI",
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::Legacy,
+                            "Legacy (BIOS)",
+                        );
+                    });
+                if let Some(idx) = self.selected_partition {
+                    if let Some(partition) = self.partitions.get(idx) {
+                        let actual_mode = Self::get_actual_boot_mode(
+                            self.selected_boot_mode,
+                            partition.partition_style,
+                        );
+                        ui.label(format!("( 将使用: {} )", actual_mode));
+                    }
+                }
+            });
+
+            if self.custom_unattend_path.is_empty() {
+                ui.label(
+                    egui::RichText::new("未选择则使用内置生成的无人值守配置").weak(),
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("已选:");
+                    ui.monospace(self.custom_unattend_path.clone());
+                });
+                match &self.custom_unattend_error {
+                    Some(err) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 50, 47),
+                            format!("无人值守文件语法错误：{}（已禁用安装）", err),
+                        );
+                    }
+                    None => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0, 160, 0),
+                            "无人值守文件语法校验通过",
+                        );
+                    }
                 }
             }
-        });
+            ui.add_space(6.0);
+        } else {
+            // 未启用无人值守：引导模式单独一行
+            ui.horizontal(|ui| {
+                ui.label("引导模式:");
+                egui::ComboBox::from_id_salt("boot_mode_select")
+                    .selected_text(format!("{}", self.selected_boot_mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::Auto,
+                            "自动 (根据分区表)",
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::UEFI,
+                            "UEFI",
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_boot_mode,
+                            BootModeSelection::Legacy,
+                            "Legacy (BIOS)",
+                        );
+                    });
+                if let Some(idx) = self.selected_partition {
+                    if let Some(partition) = self.partitions.get(idx) {
+                        let actual_mode = Self::get_actual_boot_mode(
+                            self.selected_boot_mode,
+                            partition.partition_style,
+                        );
+                        ui.label(format!("( 将使用: {} )", actual_mode));
+                    }
+                }
+            });
+        }
 
         // PE选择（仅在需要通过PE安装时显示）
         if show_pe_selector {
@@ -357,33 +456,45 @@ impl App {
             ui.separator();
             
             ui.horizontal(|ui| {
-                ui.label("🔧 PE环境:");
+                ui.label("PE环境:");
                 
                 if pe_available {
+                    // 只有一个 PE 时自动选中（后面会隐藏下拉框）
+                    let pe_count = self.config.as_ref().map(|c| c.pe_list.len()).unwrap_or(0);
+                    if pe_count == 1 && self.selected_pe_for_install.is_none() {
+                        self.selected_pe_for_install = Some(0);
+                    }
                     if let Some(ref config) = self.config {
-                        egui::ComboBox::from_id_salt("pe_select_install")
-                            .selected_text(
-                                self.selected_pe_for_install
-                                    .and_then(|i| config.pe_list.get(i))
-                                    .map(|p| p.display_name.as_str())
-                                    .unwrap_or("请选择PE"),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (i, pe) in config.pe_list.iter().enumerate() {
-                                    ui.selectable_value(
-                                        &mut self.selected_pe_for_install,
-                                        Some(i),
-                                        &pe.display_name,
-                                    );
-                                }
-                            });
-                        
+                        if pe_count == 1 {
+                            // 仅一个 PE 环境：无需下拉框，直接显示其名称
+                            if let Some(pe) = config.pe_list.first() {
+                                ui.label(&pe.display_name);
+                            }
+                        } else {
+                            egui::ComboBox::from_id_salt("pe_select_install")
+                                .selected_text(
+                                    self.selected_pe_for_install
+                                        .and_then(|i| config.pe_list.get(i))
+                                        .map(|p| p.display_name.as_str())
+                                        .unwrap_or("请选择PE"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (i, pe) in config.pe_list.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut self.selected_pe_for_install,
+                                            Some(i),
+                                            &pe.display_name,
+                                        );
+                                    }
+                                });
+                        }
+
                         // 显示PE就绪状态
                         if let Some(idx) = self.selected_pe_for_install {
                             if let Some(pe) = config.pe_list.get(idx) {
                                 let (exists, _) = crate::core::pe::PeManager::check_pe_exists(&pe.filename);
                                 if exists {
-                                    ui.colored_label(egui::Color32::GREEN, "✓ 已就绪");
+                                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), "已就绪");
                                 } else {
                                     ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "需下载");
                                 }
@@ -397,7 +508,7 @@ impl App {
             
             ui.colored_label(
                 egui::Color32::from_rgb(255, 165, 0),
-                "⚠ 安装到当前系统分区需要先重启到PE环境",
+                "安装到当前系统分区需要先重启到PE环境",
             );
         }
 
@@ -406,13 +517,15 @@ impl App {
             ui.add_space(5.0);
             ui.colored_label(
                 egui::Color32::RED,
-                "❌ 无法获取PE配置，无法安装到当前系统分区。请检查网络连接后重试。",
+                "无法获取PE配置，无法安装到当前系统分区。请检查网络连接后重试。",
             );
         }
 
         ui.horizontal(|ui| {
             if ui.button("高级选项...").clicked() {
                 self.show_advanced_options = true;
+                // 每次打开重新检测 WiFi，决定是否显示“迁移当前 WiFi”选项
+                self.advanced_options.wifi_detected = None;
             }
             if ui.button("刷新分区").clicked() {
                 self.refresh_partitions();
@@ -421,12 +534,16 @@ impl App {
 
         ui.add_space(20.0);
 
+        ui.add_space(10.0);
+
         // 开始安装按钮
         let can_install = self.selected_partition.is_some()
             && !self.local_image_path.is_empty()
             && (self.local_image_path.ends_with(".gho") || self.selected_volume.is_some())
             && !install_blocked
-            && (!show_pe_selector || self.selected_pe_for_install.is_some());
+            && (!show_pe_selector || self.selected_pe_for_install.is_some())
+            // 选择了自定义无人值守但语法有误 -> 禁用安装
+            && self.custom_unattend_error.is_none();
 
         ui.horizontal(|ui| {
             if ui
@@ -456,11 +573,12 @@ impl App {
                     ui.add_space(5.0);
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "⚠ 目标分区已有系统，建议勾选\"格式化分区\"",
+                        "目标分区已有系统，建议勾选\"格式化分区\"",
                     );
                 }
             }
         }
+            }); // end ScrollArea
     }
 
     /// 检查是否需要通过PE安装
@@ -687,7 +805,7 @@ impl App {
     /// 排除的类型：
     /// - WindowsPE: PE环境镜像
     fn is_installable_image(vol: &ImageInfo) -> bool {
-        use crate::core::wimgapi::WimImageType;
+        use lr_core::image_meta::WimImageType;
         
         // 1. 优先使用 image_type 字段判断
         match vol.image_type {
@@ -764,7 +882,7 @@ impl App {
                     "{}::{}::{}",
                     self.local_image_path, vol.index, vol.name
                 ));
-                // 直接使用 wimgapi 解析出的版本号
+                // 直接使用 wimlib 解析出的版本号
                 // major_version >= 10 表示 Windows 10 或更高版本
                 is_win10_or_11 = vol.major_version.map(|v| v >= 10).unwrap_or(false);
             }
@@ -918,11 +1036,59 @@ impl App {
             return false;
         }
 
-        println!("[BITLOCKER] 开始检测并强制解密分区...");
+        let manager = crate::core::bitlocker::BitLockerManager::new();
+
+        // BitLocker 密钥透传现为默认行为（无开关）：正常端【不预解密】，改为把恢复密钥注入 PE、
+        // 由 PE 启动后用恢复密钥解锁锁定卷（见 PeManager::maybe_inject_bitlocker_keys 与 PE 端
+        // unlock_bitlocker_passthrough）。带 BitLocker 的系统盘重装无需漫长预解密。
+        //
+        // 前提：必须能拿到【目标系统盘】的恢复密钥——PE 要靠它解锁目标盘才能部署。
+        // 若目标盘加密但取不到恢复密钥（例如只有 TPM 保护器、无数字恢复密码），
+        // 透传进 PE 也解不开 → 回退到"彻底解密 BitLocker"方案（在正常端把卷全部解密）。
+        let target_letter = self
+            .selected_partition
+            .and_then(|i| self.partitions.get(i))
+            .and_then(|p| p.letter.chars().next())
+            .unwrap_or('C')
+            .to_ascii_uppercase();
+        let target_drive = format!("{}:", target_letter);
+        let target_status = manager.get_status(target_letter);
+        let target_encrypted = matches!(
+            target_status,
+            crate::core::bitlocker::VolumeStatus::EncryptedUnlocked
+                | crate::core::bitlocker::VolumeStatus::EncryptedLocked
+        );
+
+        if !target_encrypted {
+            // 目标盘未加密：无需任何 BitLocker 处理（数据盘若加密，由密钥注入一并处理）。
+            println!("[BITLOCKER] 目标盘 {} 未加密，无需预解密，正常继续", target_drive);
+            self.decrypting_partitions.clear();
+            return false;
+        }
+
+        match manager.get_recovery_key(&target_drive) {
+            Ok(_) => {
+                println!(
+                    "[BITLOCKER] 已成功获取目标盘 {} 恢复密钥 → 走密钥透传（不预解密，进 PE 解锁）",
+                    target_drive
+                );
+                self.decrypting_partitions.clear();
+                return false;
+            }
+            Err(e) => {
+                println!(
+                    "[BITLOCKER] 获取目标盘 {} 恢复密钥失败（{}）→ 回退彻底解密 BitLocker 方案",
+                    target_drive, e
+                );
+                // 落入下方预解密流程
+            }
+        }
+
+        println!("[BITLOCKER] 开始检测并强制解密分区（透传回退方案）...");
         self.decrypting_partitions.clear();
 
-        // 创建临时的管理器以查询实时状态
-        let manager = crate::core::bitlocker::BitLockerManager::new();
+        // 回退：PE 无法用密钥解锁目标盘，必须在正常端预解密所有【已解锁】的加密分区
+        // （含目标盘），否则进 PE 后这些卷处于锁定状态、无法访问/格式化。
         let mut decryption_started = false;
 
         for partition in &self.partitions {
@@ -1028,6 +1194,11 @@ impl App {
             boot_mode: self.selected_boot_mode,
             advanced_options: self.advanced_options.clone(),
             driver_action: self.driver_action,
+            custom_unattend_path: if self.unattended_install {
+                self.custom_unattend_path.clone()
+            } else {
+                String::new()
+            },
         };
 
         self.is_installing = true;
@@ -1134,8 +1305,7 @@ impl App {
                     self.pending_download_url = Some(pe.download_url.clone());
                     self.pending_download_filename = Some(pe.filename.clone());
                     self.pending_pe_md5 = pe.md5.clone();
-                    let pe_dir = crate::utils::path::get_exe_dir()
-                        .join("PE")
+                    let pe_dir = crate::utils::path::get_pe_dir()
                         .to_string_lossy()
                         .to_string();
                     self.download_save_path = pe_dir;

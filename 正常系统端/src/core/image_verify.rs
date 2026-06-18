@@ -21,8 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::core::iso::IsoMounter;
-use crate::core::wimgapi::{Wimgapi, WIM_COMPRESS_NONE, WIM_GENERIC_READ, WIM_OPEN_EXISTING, WIM_REFERENCE_APPEND};
-use crate::core::wimlib::Wimlib;
+use lr_core::wimlib::Wimlib;
 
 // ============================================================================
 // 类型定义
@@ -218,23 +217,44 @@ impl VerifyResult {
 struct ProgressReporter {
     tx: Option<Sender<VerifyProgress>>,
     progress: Arc<AtomicU8>,
+    /// 把内部 0-100 进度映射到 [base, base+span] 区间（用于把子流程进度并入整体进度条）。
+    base: u8,
+    span: u8,
 }
 
 impl ProgressReporter {
     fn new(tx: Option<Sender<VerifyProgress>>, progress: Arc<AtomicU8>) -> Self {
-        Self { tx, progress }
+        Self { tx, progress, base: 0, span: 100 }
+    }
+
+    /// 创建一个把内部 0-100 进度映射到 [base, base+span] 的子发送器（共用同一通道）。
+    fn scaled(
+        tx: Option<Sender<VerifyProgress>>,
+        progress: Arc<AtomicU8>,
+        base: u8,
+        span: u8,
+    ) -> Self {
+        Self { tx, progress, base, span }
+    }
+
+    /// 把内部 0-100 的百分比映射到实际进度条百分比。
+    fn map(&self, percentage: u8) -> u8 {
+        let p = percentage.min(100) as u32;
+        (self.base as u32 + p * self.span as u32 / 100).min(100) as u8
     }
 
     /// 发送进度更新
     fn report(&self, percentage: u8, status: impl Into<String>, current_item: impl Into<String>) {
-        self.progress.store(percentage, Ordering::SeqCst);
+        let mapped = self.map(percentage);
+        self.progress.store(mapped, Ordering::SeqCst);
 
         if let Some(ref sender) = self.tx {
-            let _ = sender.send(VerifyProgress::new(percentage, status, current_item));
+            let _ = sender.send(VerifyProgress::new(mapped, status, current_item));
         }
     }
 
     /// 发送简单进度更新
+    #[allow(dead_code)]
     fn report_simple(&self, percentage: u8, status: impl Into<String>) {
         self.report(percentage, status, "");
     }
@@ -340,7 +360,7 @@ impl ImageVerifier {
     // ========================================================================
 
     fn verify_wim_esd(&self, file_path: &str, reporter: &ProgressReporter) -> VerifyResult {
-        reporter.report(5, "正在加载 wimlib...", file_path);
+        reporter.report(0, "正在加载 wimlib...", file_path);
 
         // 加载 wimlib
         let wimlib = match Wimlib::new() {
@@ -348,7 +368,7 @@ impl ImageVerifier {
             Err(e) => return VerifyResult::error(file_path, ImageType::Wim, format!("无法加载 wimlib: {}", e)),
         };
 
-        reporter.report(10, "正在打开镜像文件...", file_path);
+        reporter.report(1, "正在打开镜像文件...", file_path);
 
         // 打开 WIM 文件
         let wim_handle = match wimlib.open_wim(file_path) {
@@ -356,7 +376,7 @@ impl ImageVerifier {
             Err(e) => return VerifyResult::corrupted(file_path, ImageType::Wim, format!("无法打开镜像: {}", e)),
         };
 
-        reporter.report(20, "正在读取镜像信息...", file_path);
+        reporter.report(2, "正在读取镜像信息...", file_path);
 
         // 获取镜像数量
         let image_count = wim_handle.get_image_count();
@@ -371,7 +391,7 @@ impl ImageVerifier {
         let mut result = VerifyResult::default();
         result.image_count = image_count as u32;
 
-        reporter.report(30, format!("发现 {} 个镜像，正在获取详细信息...", image_count), file_path);
+        reporter.report(3, format!("发现 {} 个镜像，正在获取详细信息...", image_count), file_path);
 
         // 获取镜像详细信息
         for i in 1..=image_count {
@@ -386,24 +406,35 @@ impl ImageVerifier {
             result.details.push(display);
         }
 
-        reporter.report(50, "正在校验完整性...", file_path);
+        reporter.report(5, "正在校验完整性...", file_path);
 
         // 启动进度监控线程
         let cancel_flag = Arc::clone(&self.cancel_flag);
-        let reporter_tx = reporter.tx.clone();
+        let m_tx = reporter.tx.clone();
+        let m_progress = Arc::clone(&reporter.progress);
+        let (m_base, m_span) = (reporter.base, reporter.span);
+        // done 标志：校验返回后置位，确保监控线程必定退出（避免 join 永久阻塞）。
+        // 之前仅靠 progress>=100 退出，但很多镜像无完整性表、进度到不了 100，
+        // 导致 verify() 结束后 join 永久阻塞、UI 卡在 50%。
+        let done = Arc::new(AtomicBool::new(false));
+        let done_monitor = Arc::clone(&done);
         let monitor = thread::spawn(move || {
-            let mut last_progress = 0u8;
+            let mut last_sent = 0u8;
             loop {
-                if cancel_flag.load(Ordering::SeqCst) {
+                if cancel_flag.load(Ordering::SeqCst) || done_monitor.load(Ordering::SeqCst) {
                     break;
                 }
 
-                let current = Wimlib::get_global_progress();
-                if current > last_progress {
-                    last_progress = current;
-                    if let Some(ref tx) = reporter_tx {
+                let current = Wimlib::get_global_progress(); // 0..100（实时）
+                // 准备阶段占内部 0-5%，数据校验映射到内部 5-99；再经区间映射并入整体进度条
+                let inner = (5u32 + current as u32 * 94 / 100).min(99) as u8;
+                let mapped = (m_base as u32 + inner as u32 * m_span as u32 / 100).min(100) as u8;
+                if mapped > last_sent {
+                    last_sent = mapped;
+                    m_progress.store(mapped, Ordering::SeqCst);
+                    if let Some(ref tx) = m_tx {
                         let _ = tx.send(VerifyProgress::new(
-                            current,
+                            mapped,
                             format!("正在校验完整性 ({}%)...", current),
                             "",
                         ));
@@ -421,7 +452,8 @@ impl ImageVerifier {
         // 执行校验
         let verify_result = wim_handle.verify();
 
-        // 等待监控线程结束
+        // 通知监控线程结束并等待
+        done.store(true, Ordering::SeqCst);
         let _ = monitor.join();
 
         // 检查取消状态
@@ -451,7 +483,7 @@ impl ImageVerifier {
     // ========================================================================
 
     fn verify_swm(&self, file_path: &str, reporter: &ProgressReporter) -> VerifyResult {
-        reporter.report(5, "正在扫描分卷文件...", file_path);
+        reporter.report(0, "正在扫描分卷文件...", file_path);
 
         // 查找所有分卷
         let swm_files = match Self::find_swm_parts(file_path) {
@@ -466,97 +498,122 @@ impl ImageVerifier {
         let mut result = VerifyResult::default();
         result.part_count = swm_files.len() as u16;
         result.details.push(format!("找到 {} 个分卷文件", swm_files.len()));
+        let total_parts = swm_files.len();
 
-        reporter.report(10, format!("找到 {} 个分卷，正在加载...", swm_files.len()), file_path);
+        reporter.report(1, format!("找到 {} 个分卷，正在加载...", swm_files.len()), file_path);
 
-        // 加载 wimgapi
-        let wimgapi = match Wimgapi::new(None) {
+        // 加载 wimlib
+        let wimlib = match Wimlib::new() {
             Ok(w) => w,
-            Err(e) => return VerifyResult::error(file_path, ImageType::Swm, format!("无法加载 wimgapi.dll: {}", e)),
+            Err(e) => return VerifyResult::error(file_path, ImageType::Swm, format!("无法加载 wimlib: {}", e)),
         };
 
-        reporter.report(20, "正在打开主分卷...", file_path);
+        reporter.report(2, "正在打开主分卷...", file_path);
 
         // 打开主 SWM 文件
-        let main_path = Path::new(&swm_files[0]);
-        let wim_handle = match wimgapi.open(main_path, WIM_GENERIC_READ, WIM_OPEN_EXISTING, WIM_COMPRESS_NONE) {
+        let wim_handle = match wimlib.open_wim(&swm_files[0]) {
             Ok(h) => h,
             Err(e) => return VerifyResult::corrupted(file_path, ImageType::Swm, format!("无法打开主分卷: {}", e)),
         };
 
-        // 设置临时路径
-        let temp_dir = std::env::temp_dir();
-        let _ = wimgapi.set_temp_path(wim_handle, &temp_dir);
+        reporter.report(3, "正在引入其余分卷...", file_path);
 
-        // 加载其他分卷
-        let total_parts = swm_files.len();
-        for (i, swm_path) in swm_files.iter().enumerate().skip(1) {
-            if self.is_cancelled() {
-                let _ = wimgapi.close(wim_handle);
-                result.status = VerifyStatus::Cancelled;
-                result.message = "校验已取消".to_string();
-                return result;
-            }
-
-            let progress = Self::calculate_progress(20, (i + 1) as u32, total_parts as u32, 30);
-            reporter.report(progress, format!("正在加载分卷 {}/{}...", i + 1, total_parts), swm_path);
-
-            let ref_path = Path::new(swm_path);
-            if let Err(e) = wimgapi.set_reference_file(wim_handle, ref_path, WIM_REFERENCE_APPEND) {
-                let _ = wimgapi.close(wim_handle);
-                return VerifyResult::corrupted(file_path, ImageType::Swm, format!("无法加载分卷 {}: {}", swm_path, e));
-            }
+        // 用 glob 引入同目录其余分卷（如 dir/install*.swm）
+        let glob = Self::build_swm_glob(&swm_files[0]);
+        if let Err(e) = wim_handle.reference_resource_globs(&[&glob]) {
+            return VerifyResult::corrupted(
+                file_path,
+                ImageType::Swm,
+                format!("无法引入分卷（{}）: {}", glob, e),
+            );
         }
 
-        reporter.report(55, "正在读取镜像信息...", file_path);
+        reporter.report(4, "正在读取镜像信息...", file_path);
 
         // 获取镜像数量
-        let image_count = wimgapi.get_image_count(wim_handle);
-        result.image_count = image_count;
-
-        if image_count == 0 {
-            let _ = wimgapi.close(wim_handle);
+        let image_count = wim_handle.get_image_count();
+        if image_count <= 0 {
             return VerifyResult::corrupted(file_path, ImageType::Swm, "分卷镜像中没有有效的系统镜像");
         }
+        result.image_count = image_count as u32;
 
-        // 获取镜像信息
-        if let Ok(xml) = wimgapi.get_image_information(wim_handle) {
-            let images = Wimgapi::parse_image_info_from_xml(&xml);
-            for img in &images {
-                result.details.push(format!("镜像 {}: {}", img.index, img.name));
+        for i in 1..=image_count {
+            let (name, _desc) = wim_handle.get_image_info(i);
+            if !name.is_empty() {
+                result.details.push(format!("镜像 {}: {}", i, name));
             }
         }
 
-        reporter.report(70, "正在验证镜像结构...", file_path);
+        reporter.report(5, "正在校验完整性...", file_path);
 
-        // 验证每个镜像
-        for index in 1..=image_count {
-            if self.is_cancelled() {
-                let _ = wimgapi.close(wim_handle);
-                result.status = VerifyStatus::Cancelled;
-                result.message = "校验已取消".to_string();
-                return result;
-            }
-
-            let progress = Self::calculate_progress(70, index, image_count, 25);
-            reporter.report(progress, format!("正在验证镜像 {}/{}...", index, image_count), file_path);
-
-            match wimgapi.load_image(wim_handle, index) {
-                Ok(image_handle) => {
-                    let _ = wimgapi.close(image_handle);
+        // 进度监控线程（复用全局进度，与 WIM/ESD 校验一致）
+        let cancel_flag = Arc::clone(&self.cancel_flag);
+        let reporter_tx = reporter.tx.clone();
+        // done 标志：校验返回后置位，确保监控线程必定退出（避免 join 永久阻塞）
+        let done = Arc::new(AtomicBool::new(false));
+        let done_monitor = Arc::clone(&done);
+        let monitor = thread::spawn(move || {
+            let mut last_progress = 0u8;
+            loop {
+                if cancel_flag.load(Ordering::SeqCst) || done_monitor.load(Ordering::SeqCst) {
+                    break;
                 }
-                Err(e) => {
-                    let _ = wimgapi.close(wim_handle);
-                    return VerifyResult::corrupted(file_path, ImageType::Swm, format!("镜像 {} 损坏: {}", index, e));
+                let current = Wimlib::get_global_progress();
+                if current > last_progress {
+                    last_progress = current;
+                    if let Some(ref tx) = reporter_tx {
+                        // 准备阶段只占 0-5%，真正的数据校验进度映射到 5-100 显示区间
+                        let mapped = 5 + (current as u32 * 95 / 100) as u8;
+                        let _ = tx.send(VerifyProgress::new(
+                            mapped.min(99),
+                            format!("正在校验完整性 ({}%)...", current),
+                            "",
+                        ));
+                    }
                 }
+                if current >= 100 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
             }
+        });
+
+        let verify_result = wim_handle.verify();
+        done.store(true, Ordering::SeqCst);
+        let _ = monitor.join();
+
+        if self.is_cancelled() {
+            result.status = VerifyStatus::Cancelled;
+            result.message = "校验已取消".to_string();
+            return result;
         }
 
-        let _ = wimgapi.close(wim_handle);
-
-        result.status = VerifyStatus::Valid;
-        result.message = format!("校验通过，{} 个分卷，{} 个镜像全部有效", total_parts, image_count);
+        match verify_result {
+            Ok(_) => {
+                result.status = VerifyStatus::Valid;
+                result.message =
+                    format!("校验通过，{} 个分卷，{} 个镜像全部有效", total_parts, image_count);
+            }
+            Err(e) => {
+                result.status = VerifyStatus::Corrupted;
+                result.message = format!("校验失败: {}", e);
+            }
+        }
         result
+    }
+
+    /// 由 SWM 主分卷路径构造引入其余分卷的 glob（dir/install.swm -> dir/install*.swm）
+    fn build_swm_glob(main_swm: &str) -> String {
+        let path = Path::new(main_swm);
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let base = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+        let base = if base.is_empty() { stem } else { base };
+        let pattern = format!("{}*.swm", base);
+        match dir {
+            Some(d) => d.join(pattern).to_string_lossy().into_owned(),
+            None => pattern,
+        }
     }
 
     /// 查找 SWM 分卷文件
@@ -691,7 +748,7 @@ impl ImageVerifier {
     // ========================================================================
 
     fn verify_iso(&self, file_path: &str, reporter: &ProgressReporter) -> VerifyResult {
-        reporter.report(5, "正在验证 ISO 文件结构...", file_path);
+        reporter.report(2, "正在验证 ISO 文件结构...", file_path);
 
         let path = Path::new(file_path);
 
@@ -706,7 +763,7 @@ impl ImageVerifier {
             return VerifyResult::corrupted(file_path, ImageType::Iso, "文件太小，不是有效的 ISO 文件");
         }
 
-        reporter.report(10, "正在验证 ISO 签名...", file_path);
+        reporter.report(3, "正在验证 ISO 签名...", file_path);
 
         // 验证 ISO 9660 签名
         let mut file = match File::open(path) {
@@ -731,14 +788,14 @@ impl ImageVerifier {
         let mut result = VerifyResult::default();
         result.details.push("ISO 9660 签名验证通过".to_string());
 
-        reporter.report(20, "正在挂载 ISO 文件...", file_path);
+        reporter.report(4, "正在挂载 ISO 文件...", file_path);
 
         // 挂载 ISO
         match IsoMounter::mount_iso(file_path) {
             Ok(drive) => {
                 result.details.push(format!("已挂载到驱动器 {}", drive));
 
-                reporter.report(40, "正在扫描安装镜像...", &drive);
+                reporter.report(5, "已挂载，正在扫描安装镜像...", &drive);
 
                 // 查找 sources 目录中的安装镜像
                 let sources_path = format!("{}\\sources", drive);
@@ -756,10 +813,17 @@ impl ImageVerifier {
                 if let Some(image_path) = install_image {
                     result.details.push(format!("找到安装镜像: {}", image_path));
 
-                    reporter.report(60, "正在验证内部镜像...", &image_path);
+                    reporter.report(8, "正在验证内部镜像...", &image_path);
 
-                    // 递归验证内部镜像
-                    let inner_reporter = ProgressReporter::new(None, Arc::new(AtomicU8::new(0)));
+                    // 递归验证内部镜像：把内部 0-100 进度映射到整体的 [10,95] 区间，
+                    // 并复用同一进度通道，从而把内部完整性校验的实时进度显示到进度条上
+                    // （此前用 None 通道导致内部进度无法上报、整段卡在 60%）。
+                    let inner_reporter = ProgressReporter::scaled(
+                        reporter.tx.clone(),
+                        Arc::clone(&reporter.progress),
+                        10,
+                        85,
+                    );
                     let inner_result = self.verify_wim_esd(&image_path, &inner_reporter);
 
                     result.image_count = inner_result.image_count;
@@ -775,7 +839,7 @@ impl ImageVerifier {
                     result.details.push("未找到 install.wim/esd，可能不是 Windows 安装 ISO".to_string());
                 }
 
-                reporter.report(90, "正在卸载 ISO...", file_path);
+                reporter.report(97, "正在卸载 ISO...", file_path);
                 let _ = IsoMounter::unmount();
 
                 result.status = VerifyStatus::Valid;

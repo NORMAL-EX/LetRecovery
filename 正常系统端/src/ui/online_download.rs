@@ -19,7 +19,7 @@ impl App {
         // 检查远程配置状态
         if let Some(ref remote_config) = self.remote_config {
             if !remote_config.loaded && !self.remote_config_loading {
-                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "⚠ 远程配置加载失败");
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "远程配置加载失败");
                 if let Some(ref error) = remote_config.error {
                     ui.label(format!("错误: {}", error));
                 }
@@ -44,7 +44,7 @@ impl App {
         ui.horizontal(|ui| {
             if ui.selectable_label(
                 self.online_download_tab == OnlineDownloadTab::SystemImage,
-                "📀 系统镜像"
+                "系统镜像"
             ).clicked() {
                 self.online_download_tab = OnlineDownloadTab::SystemImage;
             }
@@ -53,7 +53,7 @@ impl App {
             
             if ui.selectable_label(
                 self.online_download_tab == OnlineDownloadTab::Software,
-                "📦 软件下载"
+                "软件下载"
             ).clicked() {
                 self.online_download_tab = OnlineDownloadTab::Software;
             }
@@ -62,7 +62,7 @@ impl App {
             
             if ui.selectable_label(
                 self.online_download_tab == OnlineDownloadTab::GpuDriver,
-                "🎮 显卡驱动"
+                "显卡驱动"
             ).clicked() {
                 self.online_download_tab = OnlineDownloadTab::GpuDriver;
             }
@@ -379,7 +379,7 @@ impl App {
         
         // 默认图标
         ui.add_sized(icon_size, egui::Label::new(
-            egui::RichText::new("📦").size(32.0)
+            egui::RichText::new("").size(32.0)
         ));
     }
     
@@ -642,7 +642,7 @@ impl App {
         // 显示本机显卡信息
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.strong("🖥️ 本机显卡信息");
+                ui.strong("本机显卡信息");
             });
             ui.separator();
             
@@ -835,7 +835,7 @@ impl App {
         
         // 默认图标 - 使用显卡图标
         ui.add_sized(icon_size, egui::Label::new(
-            egui::RichText::new("🎮").size(32.0)
+            egui::RichText::new("").size(32.0)
         ));
     }
 

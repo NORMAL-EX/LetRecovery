@@ -314,7 +314,7 @@ impl App {
 
                 if result.success {
                     self.quick_partition_state.message = format!(
-                        "✓ 分区成功！已创建分区: {}",
+                        "分区成功！已创建分区: {}",
                         result.created_partitions.join(", ")
                     );
                     // 刷新磁盘列表
@@ -323,7 +323,7 @@ impl App {
                     // 刷新主分区列表
                     self.partitions = crate::core::disk::DiskManager::get_partitions().unwrap_or_default();
                 } else {
-                    self.quick_partition_state.message = format!("✗ 分区失败: {}", result.message);
+                    self.quick_partition_state.message = format!("分区失败: {}", result.message);
                 }
             }
         }
@@ -715,13 +715,13 @@ impl App {
                                 ui.label(egui::RichText::new(&disk.display_name()).strong());
                                 ui.add_space(20.0);
 
-                                if ui.button("➕ 添加分区").clicked() {
+                                if ui.button("添加分区").clicked() {
                                     should_add_partition = true;
                                 }
 
                                 if self.quick_partition_state.editor.show_esp_button {
                                     let has_esp = self.quick_partition_state.editor.partition_layouts.iter().any(|p| p.is_esp);
-                                    if ui.add_enabled(!has_esp, egui::Button::new("➕ 创建ESP分区 (500MB)")).clicked() {
+                                    if ui.add_enabled(!has_esp, egui::Button::new("创建ESP分区 (500MB)")).clicked() {
                                         should_add_esp = true;
                                     }
                                 }
@@ -861,23 +861,23 @@ impl App {
                                             ui.separator();
                                             
                                             if can_resize {
-                                                if ui.button("📏 调整分区大小").clicked() {
+                                                if ui.button("调整分区大小").clicked() {
                                                     should_show_resize_existing_dialog = Some(*idx);
                                                     ui.close_menu();
                                                 }
                                             } else {
-                                                ui.add_enabled(false, egui::Button::new("📏 调整分区大小"));
+                                                ui.add_enabled(false, egui::Button::new("调整分区大小"));
                                                 ui.label(egui::RichText::new(&reason).small().color(egui::Color32::GRAY));
                                             }
                                             
                                             ui.separator();
                                             ui.label(egui::RichText::new("提示: 一键分区会清除整个磁盘").small().color(egui::Color32::from_rgb(241, 196, 15)));
                                         } else {
-                                            if ui.button("📏 调整大小").clicked() {
+                                            if ui.button("调整大小").clicked() {
                                                 should_show_resize_dialog = Some(*idx);
                                                 ui.close_menu();
                                             }
-                                            if ui.button("🗑 删除分区").clicked() {
+                                            if ui.button("删除分区").clicked() {
                                                 should_delete_partition = Some(*idx);
                                                 ui.close_menu();
                                             }
@@ -982,10 +982,11 @@ impl App {
 
                             // 状态消息
                             if !self.quick_partition_state.message.is_empty() {
-                                let color = if self.quick_partition_state.message.starts_with('✓') {
-                                    egui::Color32::from_rgb(46, 204, 113)
-                                } else if self.quick_partition_state.message.starts_with('✗') {
+                                let m = &self.quick_partition_state.message;
+                                let color = if m.contains("失败") || m.contains("错误") || m.contains("无法") {
                                     egui::Color32::from_rgb(231, 76, 60)
+                                } else if m.contains("成功") || m.contains("完成") {
+                                    egui::Color32::from_rgb(102, 187, 106)
                                 } else {
                                     egui::Color32::GRAY
                                 };
@@ -997,7 +998,7 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(241, 196, 15),
-                                    "⚠ 警告: 一键分区将清除所选磁盘上的所有数据！请先备份重要文件。"
+                                    "警告: 一键分区将清除所选磁盘上的所有数据！请先备份重要文件。"
                                 );
                             });
 
@@ -1006,7 +1007,7 @@ impl App {
                             // 操作按钮
                             ui.horizontal(|ui| {
                                 if ui.add(
-                                    egui::Button::new("🔧 一键分区")
+                                    egui::Button::new("一键分区")
                                         .min_size(egui::vec2(120.0, 35.0))
                                 ).clicked() {
                                     should_show_confirm = true;
@@ -1030,7 +1031,7 @@ impl App {
                 .show(ui.ctx(), |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(10.0);
-                        ui.colored_label(egui::Color32::from_rgb(241, 196, 15), "⚠️");
+                        ui.colored_label(egui::Color32::from_rgb(241, 196, 15), "");
                         ui.add_space(10.0);
                         ui.label("确定要执行一键分区吗？");
                         ui.label("此操作将清除所选磁盘上的所有数据！");
@@ -1247,11 +1248,11 @@ impl App {
                                 // 提示信息
                                 ui.colored_label(
                                     egui::Color32::from_rgb(46, 204, 113),
-                                    "✓ 此操作会立即执行，分区数据会保留"
+                                    "此操作会立即执行，分区数据会保留"
                                 );
                                 ui.colored_label(
                                     egui::Color32::from_rgb(241, 196, 15),
-                                    "⚠ 调整可能需要一些时间，请勿中断！"
+                                    "调整可能需要一些时间，请勿中断！"
                                 );
                                 
                                 ui.add_space(15.0);
@@ -1469,14 +1470,14 @@ impl App {
                 self.resize_existing_result_rx = None;
                 
                 if result.success {
-                    self.quick_partition_state.message = format!("✓ {}", result.message);
+                    self.quick_partition_state.message = format!("操作成功：{}", result.message);
                     // 刷新磁盘列表
                     self.quick_partition_state.loading = true;
                     self.start_load_physical_disks();
                     // 刷新主分区列表
                     self.partitions = crate::core::disk::DiskManager::get_partitions().unwrap_or_default();
                 } else {
-                    self.quick_partition_state.message = format!("✗ {}", result.message);
+                    self.quick_partition_state.message = format!("操作失败：{}", result.message);
                 }
             }
         }

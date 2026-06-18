@@ -101,7 +101,7 @@ impl App {
                     let is_completed = effective_install_step > step_num;
 
                     let prefix = if is_completed {
-                        "✓"
+                        "●"
                     } else if is_current {
                         "→"
                     } else {
@@ -109,7 +109,7 @@ impl App {
                     };
 
                     let color = if is_completed {
-                        egui::Color32::GREEN
+                        egui::Color32::from_rgb(102, 187, 106)
                     } else if is_current {
                         egui::Color32::from_rgb(255, 165, 0)
                     } else {
@@ -131,7 +131,7 @@ impl App {
         if self.install_progress.total_progress >= 100 {
             match self.install_mode {
                 InstallMode::Direct => {
-                    ui.colored_label(egui::Color32::GREEN, "安装完成！");
+                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), "安装完成！");
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.button("立即重启").clicked() {
@@ -144,7 +144,7 @@ impl App {
                     });
                 }
                 InstallMode::ViaPE => {
-                    ui.colored_label(egui::Color32::GREEN, "PE环境准备完成！");
+                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), "PE环境准备完成！");
                     ui.label("系统将重启进入PE环境继续安装。");
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
@@ -609,10 +609,39 @@ impl App {
             send_step(&progress_tx, 3, "导出驱动", 100);
             std::thread::sleep(std::time::Duration::from_millis(100));
 
+            // Step 4 前置：校验源镜像完整性
+            // 坏镜像在“复制几个 GB + 重启进 PE”之前就终止，省去白等；不动磁盘。
+            {
+                use crate::core::image_verify::{ImageVerifier, VerifyStatus};
+                send_step(&progress_tx, 4, "校验镜像", 0);
+                println!("[INSTALL PE] 校验源镜像完整性: {}", image_path);
+                let (vtx, vrx) = mpsc::channel::<crate::core::image_verify::VerifyProgress>();
+                let ptx = progress_tx.clone();
+                let vh = std::thread::spawn(move || {
+                    while let Ok(p) = vrx.recv() {
+                        send_step(&ptx, 4, "校验镜像", p.percentage);
+                    }
+                });
+                let vres = ImageVerifier::new().verify(&image_path, Some(vtx));
+                let _ = vh.join();
+                if vres.status != VerifyStatus::Valid {
+                    println!("[INSTALL PE] 镜像校验失败: {} - {}", vres.status, vres.message);
+                    let _ = progress_tx.send(DismProgress {
+                        percentage: 0,
+                        status: format!(
+                            "ERROR:镜像校验失败：镜像可能已损坏或不完整（{}）。请重新获取镜像后重试。",
+                            vres.message
+                        ),
+                    });
+                    return;
+                }
+                println!("[INSTALL PE] 源镜像校验通过");
+            }
+
             // Step 4: 复制镜像文件
             send_step(&progress_tx, 4, "复制镜像文件", 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            
+
             println!("[INSTALL PE STEP 4] 复制镜像文件到数据分区");
             let image_filename = Path::new(&image_path)
                 .file_name()
@@ -645,12 +674,9 @@ impl App {
                 let uefiseven_dir = format!("{}\\uefiseven", data_dir);
                 let _ = std::fs::create_dir_all(&uefiseven_dir);
                 
-                // 从程序目录复制 UefiSeven 文件
-                if let Some(program_dir) = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                // 从程序目录复制 UefiSeven 文件（bin\uefiseven）
                 {
-                    let source_uefiseven_dir = program_dir.join("uefiseven");
+                    let source_uefiseven_dir = crate::utils::path::get_uefiseven_dir();
                     if source_uefiseven_dir.exists() {
                         // 复制 bootx64.efi
                         let src_efi = source_uefiseven_dir.join("bootx64.efi");
@@ -716,6 +742,7 @@ impl App {
                 } else {
                     String::new()
                 },
+                custom_unattend_path: options.custom_unattend_path.clone(),
                 win7_uefi_patch: advanced_options.win7_uefi_patch,
                 win7_inject_usb3_driver: advanced_options.win7_inject_usb3_driver,
                 win7_inject_nvme_driver: advanced_options.win7_inject_nvme_driver,
@@ -966,8 +993,6 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>"#.to_string()
     };
     
@@ -1010,7 +1035,7 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                         <Description>Local User</Description>
                         <DisplayName>{username}</DisplayName>
                         <Group>Administrators</Group>
-                        <n>{username}</n>
+                        <Name>{username}</Name>
                     </LocalAccount>
                 </LocalAccounts>
             </UserAccounts>
@@ -1039,8 +1064,10 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
     let sysprep_dir = format!("{}\\Windows\\System32\\Sysprep", target_partition);
     if Path::new(&sysprep_dir).exists() {
         let sysprep_unattend = format!("{}\\unattend.xml", sysprep_dir);
-        let _ = std::fs::write(&sysprep_unattend, &xml_content);
-        println!("[UNATTEND] 已写入: {}", sysprep_unattend);
+        match std::fs::write(&sysprep_unattend, &xml_content) {
+            Ok(_) => println!("[UNATTEND] 已写入: {}", sysprep_unattend),
+            Err(e) => println!("[UNATTEND] 警告：写入 Sysprep unattend 失败: {} ({})", sysprep_unattend, e),
+        }
     }
     
     Ok(())

@@ -48,7 +48,7 @@ const About: React.FC = () => {
             <CardContent>
               <dl className="grid grid-cols-[6rem_1fr] gap-y-3 text-sm">
                 <dt className="text-muted-foreground">版本</dt>
-                <dd className="text-foreground">v2026.2.6</dd>
+                <dd className="text-foreground">{__APP_VERSION__}</dd>
 
                 <dt className="text-muted-foreground">许可证</dt>
                 <dd className="text-foreground">PolyForm Noncommercial 1.0.0</dd>

@@ -13,16 +13,8 @@ concurrency:
 
 jobs:
   rust:
-    name: Build Rust · ${{ matrix.name }}
+    name: Build Rust workspace
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: PE端
-            dir: PE端
-          - name: 正常系统端
-            dir: 正常系统端
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,20 +24,38 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ matrix.dir }}
 
-      - name: Verify Cargo.lock is up to date
-        working-directory: ${{ matrix.dir }}
-        run: cargo metadata --locked --format-version 1 > metadata.json
+      # 工作区改造后依赖图变化：重新生成 Cargo.lock（不使用 --locked）
+      - name: Generate lockfile
+        run: cargo generate-lockfile
 
-      - name: Cargo check
-        working-directory: ${{ matrix.dir }}
-        run: cargo check --locked
+      - name: Cargo check (workspace)
+        run: cargo check --workspace
 
-      - name: Cargo build
-        working-directory: ${{ matrix.dir }}
-        run: cargo build --locked
+      - name: Cargo build (workspace)
+        run: cargo build --workspace
+
+      # 编译所有测试目标（含 #[cfg(test)]），把“测试代码编不过”也变成阻塞失败。
+      # cargo check/build 不编译测试，此前测试目标的编译错误只会在非阻塞 clippy 里暴露。
+      - name: Compile all test targets
+        run: cargo test --workspace --no-run
+
+      # 运行确定性的纯逻辑单元测试（不触碰真实磁盘 / BitLocker / PE 环境）：
+      #   lr-core 全部（镜像 XML 解析）、PE端 account_fix（离线 SAM 改密）、正常端 fveapi（恢复密钥/错误码）
+      - name: Run pure-logic unit tests
+        run: |
+          cargo test -p lr-core
+          cargo test -p letrecovery-pe account_fix
+          cargo test -p LetRecovery fveapi
+
+      # 以下为代码质量检查，非阻塞（不影响构建结论），仅供参考
+      - name: Cargo fmt check
+        run: cargo fmt --all --check
+        continue-on-error: true
+
+      - name: Cargo clippy
+        run: cargo clippy --workspace --all-targets
+        continue-on-error: true
 
   website:
     name: Build 官网

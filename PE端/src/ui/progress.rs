@@ -3,6 +3,7 @@ use egui::{Color32, RichText};
 /// 安装/备份步骤
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallStep {
+    VerifyImage,
     FormatPartition,
     ApplyImage,
     ImportDrivers,
@@ -17,6 +18,7 @@ pub enum InstallStep {
 impl InstallStep {
     pub fn name(&self) -> &'static str {
         match self {
+            InstallStep::VerifyImage => "校验镜像",
             InstallStep::FormatPartition => "格式化分区",
             InstallStep::ApplyImage => "释放系统镜像",
             InstallStep::ImportDrivers => "导入驱动",
@@ -31,24 +33,26 @@ impl InstallStep {
 
     pub fn index(&self) -> usize {
         match self {
-            InstallStep::FormatPartition => 0,
-            InstallStep::ApplyImage => 1,
-            InstallStep::ImportDrivers => 2,
-            InstallStep::InstallCabPackages => 3,
-            InstallStep::RepairBoot => 4,
-            InstallStep::ApplyAdvancedOptions => 5,
-            InstallStep::GenerateUnattend => 6,
-            InstallStep::Cleanup => 7,
-            InstallStep::Complete => 8,
+            InstallStep::VerifyImage => 0,
+            InstallStep::FormatPartition => 1,
+            InstallStep::ApplyImage => 2,
+            InstallStep::ImportDrivers => 3,
+            InstallStep::InstallCabPackages => 4,
+            InstallStep::RepairBoot => 5,
+            InstallStep::ApplyAdvancedOptions => 6,
+            InstallStep::GenerateUnattend => 7,
+            InstallStep::Cleanup => 8,
+            InstallStep::Complete => 9,
         }
     }
 
     pub fn total() -> usize {
-        9
+        10
     }
 
     pub fn all() -> Vec<InstallStep> {
         vec![
+            InstallStep::VerifyImage,
             InstallStep::FormatPartition,
             InstallStep::ApplyImage,
             InstallStep::ImportDrivers,

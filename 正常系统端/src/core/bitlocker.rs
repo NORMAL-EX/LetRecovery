@@ -21,9 +21,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 
 #[cfg(windows)]
-use super::fveapi::{
-    format_recovery_key, FveAccessMode, FveApi, FveError, FveLockStatus, FveProtectionStatus,
-    FveVolumeStatus,
+use lr_core::fveapi::{
+    format_recovery_key, FveApi, FveError, FveLockStatus, FveProtectionStatus, FveVolumeStatus,
 };
 
 /// 驱动器类型常量
@@ -77,8 +76,8 @@ impl VolumeStatus {
 }
 
 #[cfg(windows)]
-impl From<&super::fveapi::FveVolumeInfo> for VolumeStatus {
-    fn from(info: &super::fveapi::FveVolumeInfo) -> Self {
+impl From<&lr_core::fveapi::FveVolumeInfo> for VolumeStatus {
+    fn from(info: &lr_core::fveapi::FveVolumeInfo) -> Self {
         // 关键：检查解密百分比！
         // 当 manage-bde -off 开始解密后，状态可能显示为 FullyDecrypted，
         // 但 encryption_percentage 仍然 > 0，表示还在解密过程中
@@ -107,6 +106,8 @@ impl From<&super::fveapi::FveVolumeInfo> for VolumeStatus {
             FveVolumeStatus::DecryptionInProgress | FveVolumeStatus::DecryptionPaused => {
                 VolumeStatus::Decrypting
             }
+            // 读取到非法/未知 conversion_status：不臆断为已解密，按未知处理
+            FveVolumeStatus::Unknown => VolumeStatus::Unknown,
         }
     }
 }
@@ -499,11 +500,20 @@ impl BitLockerManager {
             return UnlockResult::success(&letter, "驱动器已经是解锁状态");
         }
 
-        let result = if self.use_fveapi {
+        let mut result = if self.use_fveapi {
             self.unlock_with_password_fveapi(drive_letter, password)
         } else {
             self.unlock_with_password_manage_bde(drive_letter, password)
         };
+
+        // fveapi 解锁失败时回退 manage-bde（与状态查询/解密一致）；密码明确错误(0x80310027)不回退
+        if !result.success && self.use_fveapi && result.error_code != Some(0x80310027) {
+            log::warn!("fveapi 解锁失败({})，回退 manage-bde", result.message);
+            let fb = self.unlock_with_password_manage_bde(drive_letter, password);
+            if fb.success {
+                result = fb;
+            }
+        }
 
         // 如果解锁成功，等待分区完全可访问
         if result.success {
@@ -627,11 +637,23 @@ impl BitLockerManager {
             return UnlockResult::success(&letter, "驱动器已经是解锁状态");
         }
 
-        let result = if self.use_fveapi {
+        let mut result = if self.use_fveapi {
             self.unlock_with_recovery_key_fveapi(drive_letter, &formatted_key)
         } else {
             self.unlock_with_recovery_key_manage_bde(drive_letter, &formatted_key)
         };
+
+        // fveapi 解锁失败时回退 manage-bde；恢复密钥明确错误(0x80310028)不回退
+        if !result.success && self.use_fveapi && result.error_code != Some(0x80310028) {
+            log::warn!(
+                "fveapi 恢复密钥解锁失败({})，回退 manage-bde",
+                result.message
+            );
+            let fb = self.unlock_with_recovery_key_manage_bde(drive_letter, &formatted_key);
+            if fb.success {
+                result = fb;
+            }
+        }
 
         // 如果解锁成功，等待分区完全可访问
         if result.success {
@@ -874,7 +896,14 @@ impl BitLockerManager {
         DecryptResult::failure(drive, "仅支持Windows系统", None)
     }
 
-    /// 使用fveapi解密
+    /// 使用fveapi解密（对齐 a1ive/fvetool 的可靠实现）
+    ///
+    /// 关键修正：过去用裸盘符 `"X:"` 读写开卷会被 fveapi 当成根目录、用
+    /// FILE_NON_DIRECTORY_FILE 打开 → STATUS_FILE_IS_A_DIRECTORY → 映射成假的
+    /// ERROR_ACCESS_DENIED(0x80070005)，导致 fveapi 解密恒失败、只能回退 manage-bde。
+    /// 现改为调用 `decrypt_unlocked_volume_blocking`：开卷路径优先
+    /// `\\?\Volume{GUID}\` → `\\.\X:` → `X:`，解密首选 `FveConversionDecrypt`，
+    /// 纯普通管理员、无需 SYSTEM 冒充。解密一旦发起即视为成功（后台继续）。
     #[cfg(windows)]
     fn decrypt_fveapi(&self, drive_letter: char) -> DecryptResult {
         let letter = format!("{}:", drive_letter);
@@ -885,28 +914,15 @@ impl BitLockerManager {
             Err(e) => return DecryptResult::failure(&letter, &e, None),
         };
 
-        // 重要：解密操作需要写权限，必须使用 FveAccessMode::ReadWrite
-        // 根据逆向分析，FveConversionDecryptEx 内部会验证句柄的访问模式 (mode=1)
-        match api.open_volume_ex(&volume_path, FveAccessMode::ReadWrite) {
-            Ok(handle) => match handle.start_decryption() {
-                Ok(()) => {
-                    log::info!("BitLocker 分区 {} 开始解密 (fveapi)", letter);
-                    DecryptResult::success(&letter, "已开始解密，此过程可能需要较长时间，请勿中断")
-                }
-                Err(FveError::NotEncrypted) => {
-                    DecryptResult::success(&letter, "分区已经是未加密状态")
-                }
-                Err(e) => {
-                    log::error!("BitLocker 分区 {} 解密失败: {} (fveapi)", letter, e);
-                    DecryptResult::failure(&letter, &e.to_string(), Some(e.code()))
-                }
-            },
+        // poll/timeout 参数仅为兼容签名保留：解密发起后立即返回，真实进度由调用方/manage-bde 复核
+        match api.decrypt_unlocked_volume_blocking(&volume_path, 1000, 0) {
+            Ok(_) => {
+                log::info!("BitLocker 分区 {} 开始解密 (fveapi)", letter);
+                DecryptResult::success(&letter, "已开始解密，此过程可能需要较长时间，请勿中断")
+            }
+            Err(FveError::NotEncrypted) => DecryptResult::success(&letter, "分区已经是未加密状态"),
             Err(e) => {
-                log::error!(
-                    "BitLocker 分区 {} 打开失败（需要写权限）: {} (fveapi)",
-                    letter,
-                    e
-                );
+                log::error!("BitLocker 分区 {} 解密失败: {} (fveapi)", letter, e);
                 DecryptResult::failure(&letter, &e.to_string(), Some(e.code()))
             }
         }
@@ -970,6 +986,53 @@ impl BitLockerManager {
             self.get_status(drive_letter),
             VolumeStatus::EncryptedUnlocked
         )
+    }
+
+    /// 挂起 BitLocker 保护（manage-bde -protectors -disable）。
+    /// 卷仍解密可读，但密钥以明文存放；重启后仍挂起，直到手动恢复。常用于换 BIOS/固件前。
+    #[cfg(windows)]
+    pub fn suspend_protection(&self, drive: &str) -> Result<String, String> {
+        self.run_protectors_cmd(drive, "-disable", "已挂起 BitLocker 保护（重启后仍挂起，直到手动恢复）")
+    }
+
+    /// 恢复 BitLocker 保护（manage-bde -protectors -enable）。
+    #[cfg(windows)]
+    pub fn resume_protection(&self, drive: &str) -> Result<String, String> {
+        self.run_protectors_cmd(drive, "-enable", "已恢复 BitLocker 保护")
+    }
+
+    #[cfg(windows)]
+    fn run_protectors_cmd(&self, drive: &str, action: &str, ok_msg: &str) -> Result<String, String> {
+        use std::process::Command;
+        let letter = drive.chars().next().unwrap_or('C');
+        let d = format!("{}:", letter);
+        let output = Command::new("manage-bde")
+            .args(["-protectors", action, &d])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output()
+            .map_err(|e| format!("执行 manage-bde 失败: {}", e))?;
+        if output.status.success() {
+            log::info!("BitLocker {} {} 成功", action, d);
+            Ok(format!("{} {}", d, ok_msg))
+        } else {
+            let mut msg = decode_windows_output(&output.stdout);
+            let err = decode_windows_output(&output.stderr);
+            if !err.trim().is_empty() {
+                msg.push_str(&err);
+            }
+            Err(extract_error_message(&msg)
+                .unwrap_or_else(|| format!("操作失败: {}", msg.trim())))
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn suspend_protection(&self, _drive: &str) -> Result<String, String> {
+        Err("仅支持Windows系统".to_string())
+    }
+
+    #[cfg(not(windows))]
+    pub fn resume_protection(&self, _drive: &str) -> Result<String, String> {
+        Err("仅支持Windows系统".to_string())
     }
 
     /// 获取所有BitLocker加密的卷
@@ -1492,6 +1555,16 @@ pub fn partition_can_decrypt(drive: &str) -> bool {
 /// 获取指定分区的恢复密钥
 pub fn get_recovery_key_partition(drive: &str) -> Result<String, String> {
     BitLockerManager::new().get_recovery_key(drive)
+}
+
+/// 挂起指定分区的 BitLocker 保护
+pub fn suspend_partition_protection(drive: &str) -> Result<String, String> {
+    BitLockerManager::new().suspend_protection(drive)
+}
+
+/// 恢复指定分区的 BitLocker 保护
+pub fn resume_partition_protection(drive: &str) -> Result<String, String> {
+    BitLockerManager::new().resume_protection(drive)
 }
 
 #[cfg(test)]

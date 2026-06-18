@@ -17,10 +17,10 @@ impl App {
 
                 ui.add_space(20.0);
 
-                // 版本信息
+                // 版本信息（编译时按日期自动生成，见 build.rs）
                 ui.horizontal(|ui| {
                     ui.label(tr!("版本:"));
-                    ui.strong("v2026.2.6");
+                    ui.strong(env!("BUILD_VERSION"));
                 });
 
                 ui.add_space(15.0);
@@ -60,7 +60,7 @@ impl App {
                         });
                     
                     // 刷新语言列表按钮
-                    if ui.button("🔄").on_hover_text(tr!("刷新语言列表")).clicked() {
+                    if ui.button("").on_hover_text(tr!("刷新语言列表")).clicked() {
                         i18n::refresh_available_languages();
                     }
                 });
@@ -78,18 +78,6 @@ impl App {
                     }
                 }
                 
-                ui.add_space(5.0);
-                ui.indent("lang_desc", |ui| {
-                    ui.colored_label(
-                        egui::Color32::GRAY,
-                        tr!("将语言文件放入程序目录的 lang 文件夹中，"),
-                    );
-                    ui.colored_label(
-                        egui::Color32::GRAY,
-                        tr!("然后点击刷新按钮即可添加新语言。"),
-                    );
-                });
-
                 ui.add_space(10.0);
                 ui.separator();
                 
@@ -151,66 +139,28 @@ impl App {
                 ui.indent("log_desc", |ui| {
                     ui.colored_label(
                         egui::Color32::GRAY,
-                        tr!("日志文件保存在程序目录的 log 文件夹中，"),
+                        tr!("反馈软件问题时，请将日志（log）等必要信息一并提供给开发者，"),
                     );
                     ui.colored_label(
                         egui::Color32::GRAY,
-                        tr!("用于故障排查和问题诊断。关闭后将在下次启动时生效。"),
+                        tr!("以便更快定位与解决问题。开关在下次启动时生效。"),
                     );
                 });
-                
-                // 日志目录信息
+
+                // 提供一个入口便于用户找到并发送日志
                 if self.app_config.log_enabled {
                     ui.add_space(8.0);
-                    
                     let log_dir = LogManager::get_log_dir();
-                    let log_size = LogManager::get_log_dir_size();
-                    let size_str = LogManager::format_size(log_size);
-                    
-                    ui.horizontal(|ui| {
-                        ui.label(tr!("日志目录:"));
-                        ui.monospace(log_dir.display().to_string());
-                    });
-                    
-                    ui.horizontal(|ui| {
-                        ui.label(tr!("日志大小:"));
-                        ui.monospace(&size_str);
-                        
-                        ui.add_space(20.0);
-                        
-                        // 打开日志目录按钮
-                        if ui.button(format!("📂 {}", tr!("打开日志目录"))).clicked() {
-                            if log_dir.exists() {
-                                #[cfg(windows)]
-                                {
-                                    let _ = std::process::Command::new("explorer")
-                                        .arg(&log_dir)
-                                        .spawn();
-                                }
+                    if ui.button(format!("{}", tr!("打开日志目录"))).clicked() {
+                        if log_dir.exists() {
+                            #[cfg(windows)]
+                            {
+                                let _ = std::process::Command::new("explorer")
+                                    .arg(&log_dir)
+                                    .spawn();
                             }
                         }
-                        
-                        // 清理日志按钮
-                        if ui.button(format!("🗑 {}", tr!("清理旧日志"))).clicked() {
-                            if let Err(e) = LogManager::cleanup_old_logs(self.app_config.log_retention_days) {
-                                log::warn!("清理日志失败: {}", e);
-                            } else {
-                                log::info!("日志清理完成");
-                            }
-                        }
-                    });
-                    
-                    // 日志保留天数设置
-                    ui.add_space(5.0);
-                    ui.horizontal(|ui| {
-                        ui.label(tr!("日志保留天数:"));
-                        let mut days = self.app_config.log_retention_days;
-                        let slider = egui::Slider::new(&mut days, 1..=30)
-                            .suffix(format!(" {}", tr!("天")));
-                        if ui.add(slider).changed() {
-                            self.app_config.set_log_retention_days(days);
-                        }
-                    });
+                    }
                 }
 
                 ui.add_space(10.0);
@@ -242,45 +192,6 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(tr!("许可证:"));
                     ui.strong("PolyForm Noncommercial License 1.0.0");
-                });
-
-                ui.add_space(20.0);
-                ui.separator();
-
-                // 免费声明
-                ui.heading(tr!("免费声明"));
-                ui.add_space(10.0);
-
-                ui.colored_label(
-                    egui::Color32::from_rgb(0, 200, 83),
-                    format!("✓ {}", tr!("本软件完全免费，禁止任何形式的倒卖行为！")),
-                );
-
-                ui.add_space(8.0);
-
-                ui.label(tr!("如果您是通过付费渠道获取本软件，您已被骗，请立即举报并申请退款。"));
-
-                ui.add_space(15.0);
-
-                // 使用条款
-                ui.heading(tr!("使用条款"));
-                ui.add_space(10.0);
-
-                ui.colored_label(egui::Color32::from_rgb(100, 181, 246), format!("{}：", tr!("允许")));
-                ui.indent("allowed", |ui| {
-                    ui.label(format!("• {}", tr!("个人学习、研究和非盈利使用")));
-                    ui.label(format!("• {}", tr!("修改源代码并用于非盈利用途")));
-                    ui.label(format!("• {}", tr!("在注明出处的前提下进行非商业性质的分发")));
-                });
-
-                ui.add_space(10.0);
-
-                ui.colored_label(egui::Color32::from_rgb(239, 83, 80), format!("{}：", tr!("禁止")));
-                ui.indent("forbidden", |ui| {
-                    ui.label(format!("• {}", tr!("将本软件或其源代码用于任何商业/盈利用途")));
-                    ui.label(format!("• {}", tr!("销售、倒卖本软件或其衍生作品")));
-                    ui.label(format!("• {}", tr!("将本软件整合到商业产品或服务中")));
-                    ui.label(format!("• {}", tr!("个人利用本软件或其代码进行盈利活动")));
                 });
 
                 ui.add_space(20.0);

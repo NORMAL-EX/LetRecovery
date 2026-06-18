@@ -197,7 +197,7 @@ impl App {
                                 });
                             }
                             Md5VerifyState::Passed => {
-                                ui.colored_label(egui::Color32::GREEN, "✓ 下载完成！");
+                                ui.colored_label(egui::Color32::from_rgb(102, 187, 106), "下载完成！");
                                 
                                 // 清除MD5校验值
                                 self.pending_pe_md5 = None;
@@ -304,7 +304,7 @@ impl App {
                                 // MD5校验失败
                                 ui.colored_label(
                                     egui::Color32::RED, 
-                                    "✗ 文件校验失败！文件可能已损坏。"
+                                    "文件校验失败！文件可能已损坏。"
                                 );
                                 ui.add_space(5.0);
                                 ui.label(format!("预期MD5: {}", expected));
@@ -337,7 +337,7 @@ impl App {
                             Md5VerifyState::Error(err) => {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(255, 165, 0),
-                                    format!("⚠ 校验出错: {}", err)
+                                    format!("校验出错: {}", err)
                                 );
                                 ui.add_space(5.0);
                                 ui.label("文件可能正常，但无法验证完整性。");
@@ -430,10 +430,10 @@ impl App {
                     log::info!("[MD5] 计算完成，耗时: {:?}, 实际MD5: {}", elapsed, actual_md5);
                     
                     if actual_md5 == expected_md5 {
-                        log::info!("[MD5] ✓ 校验通过！");
+                        log::info!("[MD5] 校验通过！");
                         let _ = tx.send(Md5VerifyState::Passed);
                     } else {
-                        log::error!("[MD5] ✗ 校验失败！预期: {}, 实际: {}", expected_md5, actual_md5);
+                        log::error!("[MD5] 校验失败！预期: {}, 实际: {}", expected_md5, actual_md5);
                         let _ = tx.send(Md5VerifyState::Failed {
                             expected: expected_md5,
                             actual: actual_md5,
@@ -606,7 +606,7 @@ impl App {
                         }
                         aria2.add_download_with_headers(&final_url, &save_path, filename.as_deref(), Some(hdrs)).await
                     }
-                    Some(hdrs) => {
+                    Some(_hdrs) => {
                         log::warn!("[下载] headers为空列表，使用普通下载方法");
                         aria2.add_download(&final_url, &save_path, filename.as_deref()).await
                     }
