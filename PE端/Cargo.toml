@@ -30,7 +30,7 @@ windows = { version = "0.58", features = [
 # 两端共享核心库
 lr-core = { path = "../lr-core" }
 
-# wimgapi.dll / setupapi.dll 动态加载
+# 动态加载 DLL（libwim-15.dll 由 lr-core 内置释放；setupapi.dll 等系统库）
 libloading = "0.8"
 
 # 编码转换
