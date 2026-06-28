@@ -97,6 +97,24 @@ pub struct InstallConfig {
     pub win7_fix_acpi_bsod: bool,
     /// Win7 修复存储控制器蓝屏
     pub win7_fix_storage_bsod: bool,
+
+    /// WIM 镜像引擎：0=libwim（默认），1=wimgapi。由正常系统端随重启传入。
+    pub wim_engine: u8,
+
+    /// 目标镜像是否为 XP/2003：为真时写 XP 引导（ntldr/boot.ini 或 UEFI/GPT）而非 bcdboot。
+    pub is_xp: bool,
+
+    // XP 专用选项（仅 is_xp 为真时生效）
+    /// XP 注入 USB3(xHCI) 驱动（默认勾选）
+    pub xp_inject_usb3_driver: bool,
+    /// XP 注入 NVMe 驱动（默认勾选）
+    pub xp_inject_nvme_driver: bool,
+
+    /// 是否在释放镜像前运行 diskpart 脚本（数据分区暂存的 diskpart 目录）。
+    pub run_diskpart_scripts: bool,
+
+    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    pub language: String,
 }
 
 impl InstallConfig {
@@ -158,6 +176,11 @@ pub struct BackupConfig {
     pub format: BackupFormat,
     /// SWM分卷大小（MB）
     pub swm_split_size: u32,
+    /// WIM 镜像引擎：0=libwim（默认），1=wimgapi。由正常系统端随重启传入。
+    pub wim_engine: u8,
+
+    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    pub language: String,
 }
 
 /// 配置文件管理器
@@ -167,10 +190,12 @@ impl ConfigFileManager {
     /// 标记文件名
     const INSTALL_MARKER: &'static str = "LetRecovery_Install.marker";
     const BACKUP_MARKER: &'static str = "LetRecovery_Backup.marker";
+    const EXPAND_MARKER: &'static str = "LetRecovery_Expand.marker";
 
     /// 配置文件名
     const INSTALL_CONFIG: &'static str = "LetRecovery_Install.ini";
     const BACKUP_CONFIG: &'static str = "LetRecovery_Backup.ini";
+    const EXPAND_CONFIG: &'static str = "LetRecovery_Expand.ini";
 
     /// PE文件目录名
     const PE_DIR: &'static str = "LetRecovery_PE";
@@ -202,6 +227,18 @@ impl ConfigFileManager {
         None
     }
 
+    /// 查找包含扩容标记文件的分区
+    pub fn find_expand_marker_partition() -> Option<String> {
+        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+            let marker_path = format!("{}:\\{}", letter, Self::EXPAND_MARKER);
+            if Path::new(&marker_path).exists() {
+                log::info!("找到扩容标记分区: {}:", letter);
+                return Some(format!("{}:", letter));
+            }
+        }
+        None
+    }
+
     /// 查找包含配置文件的数据分区
     pub fn find_data_partition() -> Option<String> {
         for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
@@ -214,6 +251,12 @@ impl ConfigFileManager {
                 format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::BACKUP_CONFIG);
             if Path::new(&backup_config_path).exists() {
                 log::info!("找到备份配置分区: {}:", letter);
+                return Some(format!("{}:", letter));
+            }
+            let expand_config_path =
+                format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::EXPAND_CONFIG);
+            if Path::new(&expand_config_path).exists() {
+                log::info!("找到扩容配置分区: {}:", letter);
                 return Some(format!("{}:", letter));
             }
         }
@@ -248,7 +291,55 @@ impl ConfigFileManager {
             }
         }
 
+        // 再检查扩容标记
+        if Self::find_expand_marker_partition().is_some() {
+            if let Some(data_part) = Self::find_data_partition() {
+                let expand_config_path =
+                    format!("{}\\{}\\{}", data_part, Self::DATA_DIR, Self::EXPAND_CONFIG);
+                if Path::new(&expand_config_path).exists() {
+                    return Some(OperationType::Expand);
+                }
+            }
+        }
+
         None
+    }
+
+    /// 读取扩容配置
+    pub fn read_expand_config(data_partition: &str) -> Result<ExpandConfig> {
+        let config_path = format!(
+            "{}\\{}\\{}",
+            data_partition,
+            Self::DATA_DIR,
+            Self::EXPAND_CONFIG
+        );
+        log::info!("读取扩容配置: {}", config_path);
+        let content =
+            std::fs::read_to_string(&config_path).context("读取扩容配置文件失败")?;
+        Self::deserialize_expand_config(&content)
+    }
+
+    /// 反序列化扩容配置
+    fn deserialize_expand_config(content: &str) -> Result<ExpandConfig> {
+        let mut config = ExpandConfig::default();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('[') || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+                match key {
+                    "TargetPartition" => config.target_partition = value.to_string(),
+                    "TargetSizeMb" => config.target_size_mb = value.parse().unwrap_or(0),
+                    "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
+                    "Language" => config.language = value.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        Ok(config)
     }
 
     /// 读取安装配置
@@ -304,6 +395,13 @@ impl ConfigFileManager {
             log::debug!("删除备份标记失败 (可能不存在): {}", e);
         } else {
             log::info!("已删除备份标记: {}", backup_marker);
+        }
+
+        let expand_marker = format!("{}\\{}", partition, Self::EXPAND_MARKER);
+        if let Err(e) = std::fs::remove_file(&expand_marker) {
+            log::debug!("删除扩容标记失败 (可能不存在): {}", e);
+        } else {
+            log::info!("已删除扩容标记: {}", expand_marker);
         }
     }
 
@@ -362,6 +460,10 @@ impl ConfigFileManager {
                     "TargetPartition" => config.target_partition = value.to_string(),
                     "ImagePath" => config.image_path = value.to_string(),
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
+                    "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
+                    "IsXp" => config.is_xp = value.parse().unwrap_or(false),
+                    "RunDiskpartScripts" => config.run_diskpart_scripts = value.parse().unwrap_or(false),
+                    "Language" => config.language = value.to_string(),
                     "InstallCabPackages" => config.install_cab_packages = value.parse().unwrap_or(false),
                     "RemoveShortcutArrow" => {
                         config.remove_shortcut_arrow = value.parse().unwrap_or(false)
@@ -395,6 +497,8 @@ impl ConfigFileManager {
                     "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
                     "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
                     "Win7FixStorageBsod" => config.win7_fix_storage_bsod = value.parse().unwrap_or(false),
+                    "XpInjectUsb3Driver" => config.xp_inject_usb3_driver = value.parse().unwrap_or(false),
+                    "XpInjectNvmeDriver" => config.xp_inject_nvme_driver = value.parse().unwrap_or(false),
                     _ => {}
                 }
             }
@@ -429,6 +533,8 @@ impl ConfigFileManager {
                         config.format = BackupFormat::from_u8(format_value);
                     }
                     "SwmSplitSize" => config.swm_split_size = value.parse().unwrap_or(4096),
+                    "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
+                    "Language" => config.language = value.to_string(),
                     _ => {}
                 }
             }
@@ -443,4 +549,18 @@ impl ConfigFileManager {
 pub enum OperationType {
     Install,
     Backup,
+    Expand,
+}
+
+/// 无损扩容配置（进 PE 后无损扩大目标分区，通常为系统盘 C:）。
+#[derive(Debug, Clone, Default)]
+pub struct ExpandConfig {
+    /// 要扩大的目标分区（如 "C:"）。
+    pub target_partition: String,
+    /// 期望的最终总大小（MB）；0 表示尽可能扩到最大。
+    pub target_size_mb: u64,
+    /// WIM 引擎选择（与其它流程一致）：0=libwim，1=wimgapi。
+    pub wim_engine: u8,
+    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    pub language: String,
 }

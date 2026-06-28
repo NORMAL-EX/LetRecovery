@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW};
 
+use crate::tr;
 use crate::utils::command::new_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
@@ -189,8 +190,21 @@ impl DiskManager {
             };
         }
 
+        let script_path_str = match script_path.to_str() {
+            Some(s) => s,
+            None => {
+                log::error!("[disk] 临时脚本路径包含非 UTF-8 字符: {}", script_path.display());
+                let _ = std::fs::remove_file(&script_path);
+                return PartitionDetail {
+                    style: PartitionStyle::Unknown,
+                    disk_number: None,
+                    partition_number: None,
+                };
+            }
+        };
+
         let output = match new_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().unwrap()])
+            .args(["/s", script_path_str])
             .output()
         {
             Ok(o) => o,
@@ -256,8 +270,17 @@ impl DiskManager {
             return PartitionStyle::Unknown;
         }
 
+        let script_path_str = match script_path.to_str() {
+            Some(s) => s,
+            None => {
+                log::error!("[disk] 临时脚本路径包含非 UTF-8 字符: {}", script_path.display());
+                let _ = std::fs::remove_file(&script_path);
+                return PartitionStyle::Unknown;
+            }
+        };
+
         let output = match new_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().unwrap()])
+            .args(["/s", script_path_str])
             .output()
         {
             Ok(o) => o,
@@ -340,9 +363,9 @@ impl DiskManager {
                 || stdout.contains("denied") || stdout.contains("error") || stdout.contains("拒绝") {
                 stdout.trim().to_string()
             } else {
-                format!("格式化失败: {}", stdout.trim())
+                tr!("格式化失败: {}", stdout.trim())
             };
-            
+
             log::error!("格式化失败: {}", error_msg);
             anyhow::bail!("{}", error_msg);
         }
@@ -510,8 +533,11 @@ impl DiskManager {
         let script_path = temp_dir.join("lr_delete_part.txt");
         std::fs::write(&script_path, &script_content)?;
 
+        let script_path_str = script_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("临时脚本路径包含非 UTF-8 字符"))?;
         let output = new_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().unwrap()])
+            .args(["/s", script_path_str])
             .output()?;
 
         let _ = std::fs::remove_file(&script_path);
@@ -573,8 +599,11 @@ impl DiskManager {
         let script_path = temp_dir.join("lr_delete_part.txt");
         std::fs::write(&script_path, &delete_script)?;
 
+        let script_path_str = script_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("临时脚本路径包含非 UTF-8 字符"))?;
         let output = new_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().unwrap()])
+            .args(["/s", script_path_str])
             .output()?;
 
         let _ = std::fs::remove_file(&script_path);
@@ -674,12 +703,17 @@ impl DiskManager {
         let script_path = temp_dir.join("lr_rescan.txt");
         
         if std::fs::write(&script_path, script_content).is_ok() {
+            let Some(script_path_str) = script_path.to_str() else {
+                log::error!("[CLEANUP] 临时脚本路径包含非 UTF-8 字符: {}", script_path.display());
+                let _ = std::fs::remove_file(&script_path);
+                return;
+            };
             let output = new_command(&get_diskpart_path())
-                .args(["/s", script_path.to_str().unwrap()])
+                .args(["/s", script_path_str])
                 .output();
-            
+
             let _ = std::fs::remove_file(&script_path);
-            
+
             if let Ok(output) = output {
                 let output_text = gbk_to_utf8(&output.stdout);
                 log::info!("[CLEANUP] rescan 输出: {}", output_text);
@@ -697,8 +731,11 @@ impl DiskManager {
         let script_path = temp_dir.join("lr_extend.txt");
         std::fs::write(&script_path, &extend_script)?;
 
+        let script_path_str = script_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("临时脚本路径包含非 UTF-8 字符"))?;
         let output = new_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().unwrap()])
+            .args(["/s", script_path_str])
             .output()?;
 
         let _ = std::fs::remove_file(&script_path);
@@ -741,8 +778,11 @@ impl DiskManager {
             let script_path2 = temp_dir.join("lr_extend2.txt");
             std::fs::write(&script_path2, &extend_script2)?;
 
+            let script_path2_str = script_path2
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("临时脚本路径包含非 UTF-8 字符"))?;
             let output2 = new_command(&get_diskpart_path())
-                .args(["/s", script_path2.to_str().unwrap()])
+                .args(["/s", script_path2_str])
                 .output()?;
 
             let _ = std::fs::remove_file(&script_path2);
@@ -775,5 +815,70 @@ impl DiskManager {
 
         // 不确定状态，假设失败
         anyhow::bail!("extend 状态不确定: {}", output_text)
+    }
+
+    /// 无损扩大分区到指定大小（仅并入紧邻其后的未分配空间；不移动其它分区）。
+    ///
+    /// - `letter`：目标分区盘符（如 'C'）。在 PE 下应由扩容标记定位后传入。
+    /// - `target_size_mb`：期望最终总大小（MB）；0 = 尽可能扩到最大（吃光相邻未分配空间）。
+    ///
+    /// 实现：diskpart `select volume L` + `extend [size=delta]`。`extend` 只能并入紧跟该
+    /// 卷之后的未分配空间——这是无损、安全的操作。若其后是别的分区(需要分区移动)，diskpart
+    /// 会报“没有可用的未分配空间”，本函数据此返回明确错误（分区移动属另一条尚未启用的路径）。
+    pub fn expand_partition_lossless(letter: char, target_size_mb: u64) -> Result<String> {
+        let current_mb = Self::get_partition_size_mb(letter)
+            .ok_or_else(|| anyhow::anyhow!("{}", tr!("无法获取分区 {}: 的当前大小", letter)))?;
+        log::info!("[EXPAND] 目标分区 {}: 当前 {} MB，目标 {} MB", letter, current_mb, target_size_mb);
+
+        // 计算 extend 的 size 参数（MB）。0 或不大于当前 → 扩到最大（不带 size）。
+        let size_arg = if target_size_mb == 0 || target_size_mb <= current_mb {
+            None
+        } else {
+            Some(target_size_mb - current_mb)
+        };
+
+        let script = match size_arg {
+            Some(delta) => format!("select volume {}\r\nextend size={}\r\n", letter, delta),
+            None => format!("select volume {}\r\nextend\r\n", letter),
+        };
+
+        let temp_dir = Self::reliable_temp_dir();
+        let script_path = temp_dir.join("lr_expand.txt");
+        std::fs::write(&script_path, &script)?;
+        let script_path_str = script_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("临时脚本路径包含非 UTF-8 字符"))?;
+        let output = new_command(&get_diskpart_path())
+            .args(["/s", script_path_str])
+            .output()?;
+        let _ = std::fs::remove_file(&script_path);
+
+        let text = gbk_to_utf8(&output.stdout);
+        let lower = text.to_lowercase();
+        log::info!("[EXPAND] diskpart 输出: {}", text);
+
+        let has_success = lower.contains("成功")
+            || lower.contains("successfully")
+            || lower.contains("extended the volume");
+        let no_space = lower.contains("没有可用")
+            || lower.contains("no usable")
+            || lower.contains("not enough")
+            || lower.contains("空间不足");
+
+        if no_space {
+            anyhow::bail!(
+                "{}",
+                tr!("C 盘后面没有相邻的未分配空间可并入。若要从后面的分区夺取空间，需要分区移动功能（暂未启用）。")
+            );
+        }
+        if !has_success {
+            anyhow::bail!("{}", tr!("扩容失败: {}", text));
+        }
+
+        let new_mb = Self::get_partition_size_mb(letter).unwrap_or(current_mb);
+        if new_mb <= current_mb {
+            anyhow::bail!("{}", tr!("diskpart 报告成功，但分区大小未增加（{} MB）。可能没有相邻未分配空间。", new_mb));
+        }
+        Ok(tr!("分区 {}: 已从 {} MB 扩大到 {} MB", letter, current_mb, new_mb))
     }
 }

@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::tr;
+
 // =============================================================================
 // Windows 版本信息
 // =============================================================================
@@ -771,15 +773,15 @@ pub fn format_file_size(bytes: u64) -> String {
 /// 格式化持续时间
 pub fn format_duration(seconds: u64) -> String {
     if seconds < 60 {
-        format!("{}秒", seconds)
+        tr!("{}秒", seconds)
     } else if seconds < 3600 {
         let minutes = seconds / 60;
         let secs = seconds % 60;
-        format!("{}分{}秒", minutes, secs)
+        tr!("{}分{}秒", minutes, secs)
     } else {
         let hours = seconds / 3600;
         let minutes = (seconds % 3600) / 60;
-        format!("{}小时{}分", hours, minutes)
+        tr!("{}小时{}分", hours, minutes)
     }
 }
 

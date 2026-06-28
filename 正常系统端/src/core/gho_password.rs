@@ -16,6 +16,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use crate::tr;
+
 /// GHO 密码信息
 #[derive(Debug, Clone, Default)]
 pub struct GhoPasswordInfo {
@@ -80,7 +82,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
     if !path.exists() {
         return GhoPasswordInfo {
             is_valid_gho: false,
-            error: Some(format!("文件不存在: {}", path.display())),
+            error: Some(tr!("文件不存在: {}", path.display())),
             ..Default::default()
         };
     }
@@ -95,7 +97,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
     if ext != "gho" && ext != "ghs" {
         return GhoPasswordInfo {
             is_valid_gho: false,
-            error: Some(format!("不支持的文件格式: .{}", ext)),
+            error: Some(tr!("不支持的文件格式: .{}", ext)),
             ..Default::default()
         };
     }
@@ -106,7 +108,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
         Err(e) => {
             return GhoPasswordInfo {
                 is_valid_gho: false,
-                error: Some(format!("无法打开文件: {}", e)),
+                error: Some(tr!("无法打开文件: {}", e)),
                 ..Default::default()
             };
         }
@@ -118,7 +120,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
         Err(e) => {
             return GhoPasswordInfo {
                 is_valid_gho: false,
-                error: Some(format!("无法读取文件信息: {}", e)),
+                error: Some(tr!("无法读取文件信息: {}", e)),
                 ..Default::default()
             };
         }
@@ -127,7 +129,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
     if file_size < 64 {
         return GhoPasswordInfo {
             is_valid_gho: false,
-            error: Some("文件太小，不是有效的GHO文件".to_string()),
+            error: Some(tr!("文件太小，不是有效的GHO文件")),
             ..Default::default()
         };
     }
@@ -137,7 +139,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
     if let Err(e) = file.read_exact(&mut header_bytes) {
         return GhoPasswordInfo {
             is_valid_gho: false,
-            error: Some(format!("无法读取文件头: {}", e)),
+            error: Some(tr!("无法读取文件头: {}", e)),
             ..Default::default()
         };
     }
@@ -158,9 +160,10 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
         
         return GhoPasswordInfo {
             is_valid_gho: false,
-            error: Some(format!(
-                "无效的GHO文件签名: 0x{:02X} 0x{:02X}",
-                header_bytes[0], header_bytes[1]
+            error: Some(tr!(
+                "无效的GHO文件签名: 0x{} 0x{}",
+                format!("{:02X}", header_bytes[0]),
+                format!("{:02X}", header_bytes[1])
             )),
             ..Default::default()
         };
@@ -245,7 +248,7 @@ fn try_read_password_v1(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
         has_password: true,
         password: None,
         password_length,
-        error: Some("密码已加密，无法解密".to_string()),
+        error: Some(tr!("密码已加密，无法解密")),
     })
 }
 
@@ -425,27 +428,27 @@ pub fn format_gho_password_info(info: &GhoPasswordInfo) -> String {
     
     if !info.is_valid_gho {
         if let Some(ref err) = info.error {
-            result.push_str(&format!("无效的GHO文件: {}\n", err));
+            result.push_str(&tr!("无效的GHO文件: {}\n", err));
         } else {
-            result.push_str("无效的GHO文件\n");
+            result.push_str(&tr!("无效的GHO文件\n"));
         }
         return result;
     }
-    
-    result.push_str("有效的GHO文件\n");
-    
+
+    result.push_str(&tr!("有效的GHO文件\n"));
+
     if !info.has_password {
-        result.push_str("未设置密码保护\n");
+        result.push_str(&tr!("未设置密码保护\n"));
     } else {
-        result.push_str("已设置密码保护\n");
-        result.push_str(&format!("密码长度: {} 字符\n", info.password_length));
-        
+        result.push_str(&tr!("已设置密码保护\n"));
+        result.push_str(&tr!("密码长度: {} 字符\n", info.password_length));
+
         if let Some(ref pwd) = info.password {
-            result.push_str(&format!("密码: {}\n", pwd));
+            result.push_str(&tr!("密码: {}\n", pwd));
         } else if let Some(ref err) = info.error {
             result.push_str(&format!("{}\n", err));
         } else {
-            result.push_str("无法解密密码\n");
+            result.push_str(&tr!("无法解密密码\n"));
         }
     }
     

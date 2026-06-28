@@ -2,13 +2,14 @@ use egui;
 use std::sync::mpsc;
 use std::path::Path;
 
+use crate::tr;
 use crate::app::{App, BackupFormat, BackupMode, Panel};
 use crate::core::dism::{Dism, DismProgress};
 use crate::core::install_config::{BackupConfig, ConfigFileManager};
 
 impl App {
     pub fn show_system_backup(&mut self, ui: &mut egui::Ui) {
-        ui.heading("系统备份");
+        ui.heading(tr!("系统备份"));
         ui.separator();
 
         // 整页套一层垂直滚动：窗口调小时也能滚动到底部的「开始备份」按钮等控件。
@@ -31,7 +32,7 @@ impl App {
         let backup_blocked = show_pe_selector && !pe_available;
 
         // 选择要备份的分区
-        ui.label("选择要备份的分区:");
+        ui.label(tr!("选择要备份的分区:"));
 
         egui::ScrollArea::vertical()
             .max_height(150.0)
@@ -40,12 +41,12 @@ impl App {
                     .striped(true)
                     .min_col_width(80.0)
                     .show(ui, |ui| {
-                        ui.label("分区卷");
-                        ui.label("总空间");
-                        ui.label("已用空间");
-                        ui.label("卷标");
+                        ui.label(tr!("分区卷"));
+                        ui.label(tr!("总空间"));
+                        ui.label(tr!("已用空间"));
+                        ui.label(tr!("卷标"));
                         ui.label("BitLocker");
-                        ui.label("状态");
+                        ui.label(tr!("状态"));
                         ui.end_row();
 
                         for (i, partition) in self.partitions.iter().enumerate() {
@@ -53,15 +54,15 @@ impl App {
                             
                             let label = if is_pe {
                                 if partition.has_windows {
-                                    format!("{} (有系统)", partition.letter)
+                                    tr!("{} (有系统)", partition.letter)
                                 } else {
                                     partition.letter.clone()
                                 }
                             } else {
                                 if partition.is_system_partition {
-                                    format!("{} (当前系统)", partition.letter)
+                                    tr!("{} (当前系统)", partition.letter)
                                 } else if partition.has_windows {
-                                    format!("{} (有系统)", partition.letter)
+                                    tr!("{} (有系统)", partition.letter)
                                 } else {
                                     partition.letter.clone()
                                 }
@@ -86,12 +87,12 @@ impl App {
                                 crate::core::bitlocker::VolumeStatus::Decrypting => egui::Color32::YELLOW,
                                 _ => ui.visuals().text_color(),
                             };
-                            ui.colored_label(status_color, partition.bitlocker_status.as_str());
+                            ui.colored_label(status_color, tr!(partition.bitlocker_status.as_str()));
 
                             let status = if partition.has_windows {
-                                "有系统"
+                                tr!("有系统")
                             } else {
-                                "无系统"
+                                tr!("无系统")
                             };
                             ui.label(status);
                             
@@ -105,7 +106,7 @@ impl App {
 
         // 备份格式选择
         ui.horizontal(|ui| {
-            ui.label("备份格式:");
+            ui.label(tr!("备份格式:"));
             egui::ComboBox::from_id_salt("backup_format_select")
                 .selected_text(format!("{}", self.backup_format))
                 .width(80.0)
@@ -113,38 +114,38 @@ impl App {
                     ui.selectable_value(
                         &mut self.backup_format,
                         BackupFormat::Wim,
-                        "WIM (推荐)",
+                        tr!("WIM (推荐)"),
                     );
                     ui.selectable_value(
                         &mut self.backup_format,
                         BackupFormat::Esd,
-                        "ESD (高压缩)",
+                        tr!("ESD (高压缩)"),
                     );
                     ui.selectable_value(
                         &mut self.backup_format,
                         BackupFormat::Swm,
-                        "SWM (分卷)",
+                        tr!("SWM (分卷)"),
                     );
                     ui.selectable_value(
                         &mut self.backup_format,
                         BackupFormat::Gho,
-                        "GHO (Ghost)",
+                        tr!("GHO (Ghost)"),
                     );
                 });
             
             // 显示格式说明
             match self.backup_format {
                 BackupFormat::Wim => {
-                    ui.label("标准WIM格式，兼容性好");
+                    ui.label(tr!("标准WIM格式，兼容性好"));
                 }
                 BackupFormat::Esd => {
-                    ui.label("高压缩率，体积更小");
+                    ui.label(tr!("高压缩率，体积更小"));
                 }
                 BackupFormat::Swm => {
-                    ui.label("分卷存储，便于传输");
+                    ui.label(tr!("分卷存储，便于传输"));
                 }
                 BackupFormat::Gho => {
-                    ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "需要Ghost工具支持");
+                    ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("需要Ghost工具支持"));
                 }
             }
         });
@@ -152,7 +153,7 @@ impl App {
         // SWM分卷大小设置
         if self.backup_format == BackupFormat::Swm {
             ui.horizontal(|ui| {
-                ui.label("分卷大小:");
+                ui.label(tr!("分卷大小:"));
                 ui.add(egui::DragValue::new(&mut self.backup_swm_split_size)
                     .range(512..=8192)
                     .speed(100)
@@ -165,11 +166,11 @@ impl App {
 
         // 备份保存位置
         ui.horizontal(|ui| {
-            ui.label("保存位置:");
+            ui.label(tr!("保存位置:"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.backup_save_path).desired_width(400.0),
             );
-            if ui.button("浏览...").clicked() {
+            if ui.button(tr!("浏览...")).clicked() {
                 let ext = self.backup_format.extension();
                 let desc = self.backup_format.filter_description();
                 let default_name = format!("backup.{}", ext);
@@ -188,7 +189,7 @@ impl App {
 
         // 备份名称
         ui.horizontal(|ui| {
-            ui.label("备份名称:");
+            ui.label(tr!("备份名称:"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.backup_name).desired_width(300.0),
             );
@@ -196,7 +197,7 @@ impl App {
 
         // 备份描述
         ui.horizontal(|ui| {
-            ui.label("备份描述:");
+            ui.label(tr!("备份描述:"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.backup_description).desired_width(300.0),
             );
@@ -205,7 +206,7 @@ impl App {
         ui.add_space(15.0);
 
         // 备份选项
-        ui.checkbox(&mut self.backup_incremental, "增量备份 (追加到现有镜像)");
+        ui.checkbox(&mut self.backup_incremental, tr!("增量备份 (追加到现有镜像)"));
 
         // PE选择（仅在需要通过PE备份时显示）
         if show_pe_selector {
@@ -222,7 +223,7 @@ impl App {
                 if pe_count > 1 {
                     if let Some(ref config) = self.config {
                         ui.horizontal(|ui| {
-                            ui.label("PE环境:");
+                            ui.label(tr!("PE环境:"));
                             egui::ComboBox::from_id_salt("pe_select_backup")
                                 .selected_text(
                                     self.selected_pe_for_backup
@@ -243,12 +244,12 @@ impl App {
                     }
                 }
             } else {
-                ui.colored_label(egui::Color32::RED, "未找到PE配置");
+                ui.colored_label(egui::Color32::RED, tr!("未找到PE配置"));
             }
 
             ui.colored_label(
                 egui::Color32::from_rgb(255, 165, 0),
-                "备份当前系统分区需要先重启到PE环境",
+                tr!("备份当前系统分区需要先重启到PE环境"),
             );
         }
 
@@ -257,7 +258,7 @@ impl App {
             ui.add_space(5.0);
             ui.colored_label(
                 egui::Color32::RED,
-                "无法获取PE配置，无法备份当前系统分区。请检查网络连接后重试。",
+                tr!("无法获取PE配置，无法备份当前系统分区。请检查网络连接后重试。"),
             );
         }
 
@@ -274,7 +275,7 @@ impl App {
             if ui
                 .add_enabled(
                     can_backup && !self.is_backing_up,
-                    egui::Button::new("开始备份").min_size(egui::vec2(120.0, 35.0)),
+                    egui::Button::new(tr!("开始备份")).min_size(egui::vec2(120.0, 35.0)),
                 )
                 .clicked()
             {
@@ -284,9 +285,9 @@ impl App {
             // 显示备份模式提示
             if can_backup {
                 if needs_pe && !is_pe {
-                    ui.label("(将通过PE环境备份)");
+                    ui.label(tr!("(将通过PE环境备份)"));
                 } else {
-                    ui.label("(直接备份)");
+                    ui.label(tr!("(直接备份)"));
                 }
             }
         });
@@ -297,7 +298,7 @@ impl App {
             
             ui.add_space(15.0);
             ui.separator();
-            ui.label(format!("备份进度: {}%", self.backup_progress));
+            ui.label(tr!("备份进度: {}%", self.backup_progress));
             ui.add(
                 egui::ProgressBar::new(self.backup_progress as f32 / 100.0)
                     .show_percentage()
@@ -310,12 +311,12 @@ impl App {
             ui.add_space(10.0);
             match self.backup_mode {
                 BackupMode::Direct => {
-                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), "备份完成！");
+                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), tr!("备份完成！"));
                 }
                 BackupMode::ViaPE => {
                     // ViaPE模式完成提示在 BackupProgress 页面显示
                     // 这里只显示简单状态
-                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), "PE环境准备完成，请重启进入PE继续备份");
+                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), tr!("PE环境准备完成，请重启进入PE继续备份"));
                 }
             }
         }
@@ -330,11 +331,11 @@ impl App {
         if !can_backup && !self.is_backing_up {
             ui.add_space(10.0);
             if self.backup_source_partition.is_none() {
-                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "请选择要备份的分区");
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("请选择要备份的分区"));
             } else if self.backup_save_path.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "请选择保存位置");
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("请选择保存位置"));
             } else if self.backup_name.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "请输入备份名称");
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("请输入备份名称"));
             }
         }
 
@@ -345,7 +346,7 @@ impl App {
                     ui.add_space(5.0);
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "所选分区似乎没有 Windows 系统",
+                        tr!("所选分区似乎没有 Windows 系统"),
                     );
                 }
             }
@@ -404,9 +405,16 @@ impl App {
     }
 
     fn start_backup(&mut self) {
+        let source_index = match self.backup_source_partition {
+            Some(idx) => idx,
+            None => {
+                log::error!("[BACKUP] 未选择备份源分区，无法开始备份");
+                return;
+            }
+        };
         let source_partition = self
             .partitions
-            .get(self.backup_source_partition.unwrap())
+            .get(source_index)
             .cloned();
         if source_partition.is_none() {
             return;
@@ -416,7 +424,7 @@ impl App {
         let locked_partitions = self.check_bitlocker_for_backup();
         if !locked_partitions.is_empty() {
             // 有锁定的分区，显示解锁对话框
-            println!("[BACKUP] 检测到 {} 个BitLocker锁定的分区，需要先解锁", locked_partitions.len());
+            log::info!("[BACKUP] 检测到 {} 个BitLocker锁定的分区，需要先解锁", locked_partitions.len());
             self.backup_bitlocker_partitions = locked_partitions;
             self.backup_bitlocker_current = self.backup_bitlocker_partitions.first().map(|p| p.letter.clone());
             self.backup_bitlocker_message.clear();
@@ -434,9 +442,16 @@ impl App {
     
     /// BitLocker解锁完成后继续备份
     pub fn continue_backup_after_bitlocker(&mut self) {
+        let source_index = match self.backup_source_partition {
+            Some(idx) => idx,
+            None => {
+                log::error!("[BACKUP] 未选择备份源分区，无法继续备份");
+                return;
+            }
+        };
         let source_partition = self
             .partitions
-            .get(self.backup_source_partition.unwrap())
+            .get(source_index)
             .cloned();
         if source_partition.is_none() {
             return;
@@ -463,7 +478,7 @@ impl App {
                 let (pe_exists, _) = crate::core::pe::PeManager::check_pe_exists(&pe.filename);
                 if !pe_exists {
                     // PE不存在，先下载PE
-                    println!("[BACKUP] PE文件不存在，开始下载: {}", pe.filename);
+                    log::info!("[BACKUP] PE文件不存在，开始下载: {}", pe.filename);
                     self.pending_download_url = Some(pe.download_url.clone());
                     self.pending_download_filename = Some(pe.filename.clone());
                     self.pending_pe_md5 = pe.md5.clone();  // 设置MD5校验值
@@ -487,9 +502,16 @@ impl App {
     
     /// 内部备份函数，PE下载完成后调用
     pub fn start_backup_internal(&mut self) {
+        let source_index = match self.backup_source_partition {
+            Some(idx) => idx,
+            None => {
+                log::error!("[BACKUP] 未选择备份源分区，无法开始备份");
+                return;
+            }
+        };
         let source_partition = self
             .partitions
-            .get(self.backup_source_partition.unwrap())
+            .get(source_index)
             .cloned();
         if source_partition.is_none() {
             return;
@@ -520,26 +542,57 @@ impl App {
         let (progress_tx, progress_rx) = mpsc::channel::<DismProgress>();
         self.backup_progress_rx = Some(progress_rx);
 
+        let source_letter = source_partition.letter.clone();
         let capture_dir = format!("{}\\", source_partition.letter);
         let image_file = self.backup_save_path.clone();
         let name = self.backup_name.clone();
         let description = self.backup_description.clone();
         let is_incremental = self.backup_incremental;
+        let format = self.backup_format;
+        let swm_split_size = self.backup_swm_split_size;
 
         std::thread::spawn(move || {
-            let dism = Dism::new();
-            
-            let result = if is_incremental && Path::new(&image_file).exists() {
-                dism.append_image(&image_file, &capture_dir, &name, &description, Some(progress_tx.clone()))
-            } else {
-                dism.capture_image(&image_file, &capture_dir, &name, &description, Some(progress_tx.clone()))
+            // 按用户选择的备份格式分发（与 PE 端 app.rs 备份 worker 一致）。
+            // 此前这里无视格式恒走 LZX WIM —— ESD/SWM/GHO 都会产出错误文件。
+            let result = match format {
+                BackupFormat::Gho => {
+                    let ghost = crate::core::ghost::Ghost::new();
+                    if !ghost.is_available() {
+                        let _ = progress_tx.send(DismProgress {
+                            percentage: 0,
+                            status: "备份失败: Ghost 工具不可用".to_string(),
+                        });
+                        return;
+                    }
+                    ghost.create_image_from_letter(&source_letter, &image_file, Some(progress_tx.clone()))
+                }
+                BackupFormat::Esd => {
+                    let dism = Dism::new();
+                    if is_incremental && Path::new(&image_file).exists() {
+                        dism.append_image_esd(&image_file, &capture_dir, &name, &description, Some(progress_tx.clone()))
+                    } else {
+                        dism.capture_image_esd(&image_file, &capture_dir, &name, &description, Some(progress_tx.clone()))
+                    }
+                }
+                BackupFormat::Swm => {
+                    let dism = Dism::new();
+                    dism.capture_image_swm(&image_file, &capture_dir, &name, &description, swm_split_size, Some(progress_tx.clone()))
+                }
+                BackupFormat::Wim => {
+                    let dism = Dism::new();
+                    if is_incremental && Path::new(&image_file).exists() {
+                        dism.append_image(&image_file, &capture_dir, &name, &description, Some(progress_tx.clone()))
+                    } else {
+                        dism.capture_image(&image_file, &capture_dir, &name, &description, Some(progress_tx.clone()))
+                    }
+                }
             };
 
             match result {
                 Ok(_) => {
                     let _ = progress_tx.send(DismProgress {
                         percentage: 100,
-                        status: "备份完成".to_string(),
+                        status: tr!("备份完成"),
                     });
                 }
                 Err(e) => {
@@ -553,7 +606,7 @@ impl App {
     }
 
     fn start_pe_backup(&mut self, source_partition: crate::core::disk::Partition) {
-        println!("[BACKUP PE] ========== 开始PE备份准备 ==========");
+        log::info!("[BACKUP PE] ========== 开始PE备份准备 ==========");
         
         let (progress_tx, progress_rx) = mpsc::channel::<DismProgress>();
         self.backup_progress_rx = Some(progress_rx);
@@ -574,7 +627,7 @@ impl App {
             // Step 1: 检查PE
             let _ = progress_tx.send(DismProgress {
                 percentage: 10,
-                status: "检查PE环境".to_string(),
+                status: tr!("检查PE环境"),
             });
             
             let pe_info = match pe_info {
@@ -600,7 +653,7 @@ impl App {
             // Step 2: 安装PE引导
             let _ = progress_tx.send(DismProgress {
                 percentage: 30,
-                status: "安装PE引导".to_string(),
+                status: tr!("安装PE引导"),
             });
             
             let pe_manager = crate::core::pe::PeManager::new();
@@ -615,7 +668,7 @@ impl App {
             // Step 3: 写入配置文件
             let _ = progress_tx.send(DismProgress {
                 percentage: 60,
-                status: "写入配置文件".to_string(),
+                status: tr!("写入配置文件"),
             });
             
             // 找数据分区
@@ -629,6 +682,7 @@ impl App {
                 incremental: is_incremental,
                 format: backup_format,
                 swm_split_size: swm_split_size,
+                wim_engine: lr_core::active_engine().as_u8(),
             };
             
             if let Err(e) = ConfigFileManager::write_backup_config(&source_letter, &data_partition, &backup_config) {
@@ -642,10 +696,10 @@ impl App {
             // Step 4: 完成
             let _ = progress_tx.send(DismProgress {
                 percentage: 100,
-                status: "PE备份准备完成".to_string(),
+                status: tr!("PE备份准备完成"),
             });
             
-            println!("[BACKUP PE] ========== PE备份准备结束 ==========");
+            log::info!("[BACKUP PE] ========== PE备份准备结束 ==========");
         });
     }
 
@@ -687,14 +741,14 @@ impl App {
 
     /// 显示备份进度页面
     pub fn show_backup_progress(&mut self, ui: &mut egui::Ui) {
-        ui.heading("备份进度");
+        ui.heading(tr!("备份进度"));
         ui.separator();
 
         self.update_backup_progress();
 
         if !self.is_backing_up && self.backup_progress < 100 {
-            ui.label("没有正在进行的备份任务");
-            if ui.button("返回").clicked() {
+            ui.label(tr!("没有正在进行的备份任务"));
+            if ui.button(tr!("返回")).clicked() {
                 self.current_panel = Panel::SystemBackup;
             }
             return;
@@ -702,14 +756,14 @@ impl App {
 
         // 显示备份模式
         let mode_text = match self.backup_mode {
-            BackupMode::Direct => "直接备份",
-            BackupMode::ViaPE => "通过PE备份",
+            BackupMode::Direct => tr!("直接备份"),
+            BackupMode::ViaPE => tr!("通过PE备份"),
         };
-        ui.label(format!("备份模式: {}", mode_text));
+        ui.label(tr!("备份模式: {}", mode_text));
 
         ui.add_space(15.0);
 
-        ui.label("备份进度:");
+        ui.label(tr!("备份进度:"));
         ui.add(
             egui::ProgressBar::new(self.backup_progress as f32 / 100.0)
                 .text(format!("{}%", self.backup_progress))
@@ -719,38 +773,38 @@ impl App {
         ui.add_space(20.0);
 
         if let Some(ref error) = self.backup_error {
-            ui.colored_label(egui::Color32::RED, format!("错误: {}", error));
+            ui.colored_label(egui::Color32::RED, tr!("错误: {}", error));
             ui.add_space(10.0);
         }
 
         if self.backup_progress >= 100 {
             match self.backup_mode {
                 BackupMode::Direct => {
-                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), "备份完成！");
+                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), tr!("备份完成！"));
                     ui.add_space(10.0);
-                    if ui.button("返回").clicked() {
+                    if ui.button(tr!("返回")).clicked() {
                         self.current_panel = Panel::SystemBackup;
                     }
                 }
                 BackupMode::ViaPE => {
-                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), "PE环境准备完成！");
-                    ui.label("系统将重启进入PE环境继续备份。");
+                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), tr!("PE环境准备完成！"));
+                    ui.label(tr!("系统将重启进入PE环境继续备份。"));
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui.button("立即重启").clicked() {
+                        if ui.button(tr!("立即重启")).clicked() {
                             let _ = crate::utils::cmd::create_command("shutdown")
                                 .args(["/r", "/t", "5", "/c", "LetRecovery 即将重启到PE环境进行备份..."])
                                 .spawn();
                         }
-                        if ui.button("稍后重启").clicked() {
+                        if ui.button(tr!("稍后重启")).clicked() {
                             self.current_panel = Panel::SystemBackup;
                         }
                     });
                 }
             }
         } else if self.is_backing_up {
-            if ui.button("取消备份").clicked() {
-                println!("[BACKUP] 用户取消备份");
+            if ui.button(tr!("取消备份")).clicked() {
+                log::info!("[BACKUP] 用户取消备份");
                 self.is_backing_up = false;
                 self.current_panel = Panel::SystemBackup;
             }

@@ -5,6 +5,7 @@
 use egui;
 use std::sync::mpsc;
 
+use crate::tr;
 use crate::app::App;
 use crate::core::nvidia_driver::{
     beautify_gpu_name, get_system_hardware_summary,
@@ -25,12 +26,12 @@ impl App {
         let is_loading_partitions = self.windows_partitions_loading;
         let is_pe = self.is_pe_environment();
 
-        egui::Window::new("英伟达显卡驱动卸载")
+        egui::Window::new(tr!("英伟达显卡驱动卸载"))
             .resizable(true)
             .default_width(600.0)
             .default_height(500.0)
             .show(ui.ctx(), |ui| {
-                ui.label("此工具用于卸载系统中的英伟达(NVIDIA)显卡驱动");
+                ui.label(tr!("此工具用于卸载系统中的英伟达(NVIDIA)显卡驱动"));
                 ui.add_space(10.0);
 
                 // 硬件信息显示区域
@@ -42,7 +43,7 @@ impl App {
                         if self.nvidia_uninstall_hardware_loading {
                             ui.horizontal(|ui| {
                                 ui.spinner();
-                                ui.label("正在加载硬件信息...");
+                                ui.label(tr!("正在加载硬件信息..."));
                             });
                         } else if let Some(ref summary) = self.nvidia_uninstall_hardware_summary {
                             // 显示显卡信息
@@ -54,7 +55,7 @@ impl App {
                                 };
 
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("显卡{}型号:", i + 1));
+                                    ui.label(tr!("显卡{}型号:", i + 1));
                                     if gpu.is_nvidia {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(118, 185, 0),
@@ -70,7 +71,7 @@ impl App {
                                 });
                                 
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("显卡{}硬件ID:", i + 1));
+                                    ui.label(tr!("显卡{}硬件ID:", i + 1));
                                     ui.monospace(&gpu.hardware_id);
                                 });
                             }
@@ -78,7 +79,7 @@ impl App {
                             if summary.gpu_devices.is_empty() {
                                 ui.colored_label(
                                     egui::Color32::YELLOW,
-                                    "未检测到显卡设备",
+                                    tr!("未检测到显卡设备"),
                                 );
                             }
 
@@ -98,13 +99,13 @@ impl App {
                             // 内存信息
                             let total_gb = summary.memory_size as f64 / (1024.0 * 1024.0 * 1024.0);
                             let avail_gb = summary.memory_available as f64 / (1024.0 * 1024.0 * 1024.0);
-                            ui.label(format!(
-                                "内存大小: {:.0} GB ({:.1} GB可用)",
-                                total_gb.ceil(),
-                                avail_gb
+                            ui.label(tr!(
+                                "内存大小: {} GB ({} GB可用)",
+                                format!("{:.0}", total_gb.ceil()),
+                                format!("{:.1}", avail_gb)
                             ));
                         } else {
-                            ui.label("无法获取硬件信息");
+                            ui.label(tr!("无法获取硬件信息"));
                         }
                     });
 
@@ -114,23 +115,23 @@ impl App {
                 if is_loading_partitions {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("正在检测Windows分区...");
+                        ui.label(tr!("正在检测Windows分区..."));
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        ui.label("请选择Windows系统:");
+                        ui.label(tr!("请选择Windows系统:"));
 
                         let current_text = self
                             .nvidia_uninstall_target
                             .as_ref()
                             .map(|letter| {
                                 if letter == "__CURRENT__" {
-                                    "当前系统".to_string()
+                                    tr!("当前系统")
                                 } else {
                                     format_partition_display(&windows_partitions, letter)
                                 }
                             })
-                            .unwrap_or_else(|| "请选择".to_string());
+                            .unwrap_or_else(|| tr!("请选择"));
 
                         egui::ComboBox::from_id_salt("nvidia_uninstall_partition")
                             .selected_text(current_text)
@@ -141,7 +142,7 @@ impl App {
                                     ui.selectable_value(
                                         &mut self.nvidia_uninstall_target,
                                         Some("__CURRENT__".to_string()),
-                                        "当前系统",
+                                        tr!("当前系统"),
                                     );
                                     if !windows_partitions.is_empty() {
                                         ui.separator();
@@ -191,13 +192,13 @@ impl App {
                     .show(ui, |ui| {
                         ui.colored_label(
                             egui::Color32::from_rgb(255, 200, 100),
-                            "注意事项:",
+                            tr!("注意事项:"),
                         );
-                        ui.label("1. 卸载驱动后可能需要重启系统");
-                        ui.label("2. 卸载后显示可能切换到基本显示适配器");
-                        ui.label("3. 建议在卸载前备份重要数据");
+                        ui.label(tr!("1. 卸载驱动后可能需要重启系统"));
+                        ui.label(tr!("2. 卸载后显示可能切换到基本显示适配器"));
+                        ui.label(tr!("3. 建议在卸载前备份重要数据"));
                         if is_pe {
-                            ui.label("4. 当前在PE环境中，将清理离线系统的英伟达驱动文件");
+                            ui.label(tr!("4. 当前在PE环境中，将清理离线系统的英伟达驱动文件"));
                         }
                     });
 
@@ -207,7 +208,7 @@ impl App {
                 ui.horizontal(|ui| {
                     if self.nvidia_uninstall_loading {
                         ui.spinner();
-                        ui.label("正在卸载驱动，请稍候...");
+                        ui.label(tr!("正在卸载驱动，请稍候..."));
                     } else {
                         // 检查是否有英伟达设备
                         let has_nvidia = self
@@ -224,24 +225,24 @@ impl App {
                         if !has_nvidia && !is_pe {
                             ui.colored_label(
                                 egui::Color32::YELLOW,
-                                "当前系统未检测到英伟达显卡",
+                                tr!("当前系统未检测到英伟达显卡"),
                             );
                             ui.add_space(10.0);
                         }
 
                         if ui
-                            .add_enabled(can_uninstall, egui::Button::new("开始卸载"))
+                            .add_enabled(can_uninstall, egui::Button::new(tr!("开始卸载")))
                             .clicked()
                         {
                             do_uninstall = true;
                         }
 
-                        if ui.button("刷新").clicked() {
+                        if ui.button(tr!("刷新")).clicked() {
                             self.start_load_nvidia_hardware_summary();
                             self.refresh_windows_partitions_cache();
                         }
 
-                        if ui.button("关闭").clicked() {
+                        if ui.button(tr!("关闭")).clicked() {
                             should_close = true;
                         }
                     }
@@ -284,13 +285,13 @@ impl App {
         let target = match &self.nvidia_uninstall_target {
             Some(t) => t.clone(),
             None => {
-                self.nvidia_uninstall_message = "请先选择目标系统".to_string();
+                self.nvidia_uninstall_message = tr!("请先选择目标系统");
                 return;
             }
         };
 
         self.nvidia_uninstall_loading = true;
-        self.nvidia_uninstall_message = "正在卸载英伟达驱动...".to_string();
+        self.nvidia_uninstall_message = tr!("正在卸载英伟达驱动...");
 
         let (tx, rx) = mpsc::channel();
         self.nvidia_uninstall_rx = Some(rx);
@@ -310,7 +311,7 @@ impl App {
                     },
                     Err(e) => NvidiaUninstallResult {
                         success: false,
-                        message: format!("卸载失败: {}", e),
+                        message: tr!("卸载失败: {}", e),
                         ..Default::default()
                     },
                 }
@@ -326,7 +327,7 @@ impl App {
                     },
                     Err(e) => NvidiaUninstallResult {
                         success: false,
-                        message: format!("卸载失败: {}", e),
+                        message: tr!("卸载失败: {}", e),
                         ..Default::default()
                     },
                 }
@@ -352,7 +353,7 @@ impl App {
             if let Ok(result) = rx.try_recv() {
                 self.nvidia_uninstall_message = if result.success {
                     if result.needs_reboot {
-                        format!("{}，建议重启系统", result.message)
+                        tr!("{}，建议重启系统", result.message)
                     } else {
                         result.message
                     }

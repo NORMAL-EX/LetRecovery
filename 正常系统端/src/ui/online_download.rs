@@ -2,6 +2,7 @@ use egui;
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::tr;
 use crate::app::{App, OnlineDownloadTab, PendingSoftDownload, SoftIconState};
 use crate::download::config::{OnlineSystem, OnlineSoftware, OnlineGpuDriver};
 
@@ -13,18 +14,18 @@ struct IconLoadResult {
 
 impl App {
     pub fn show_online_download(&mut self, ui: &mut egui::Ui) {
-        ui.heading("在线下载");
+        ui.heading(tr!("在线下载"));
         ui.separator();
 
         // 检查远程配置状态
         if let Some(ref remote_config) = self.remote_config {
             if !remote_config.loaded && !self.remote_config_loading {
-                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "远程配置加载失败");
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("远程配置加载失败"));
                 if let Some(ref error) = remote_config.error {
-                    ui.label(format!("错误: {}", error));
+                    ui.label(tr!("错误: {}", error));
                 }
                 ui.add_space(10.0);
-                if ui.button("重试加载").clicked() {
+                if ui.button(tr!("重试加载")).clicked() {
                     self.start_remote_config_loading();
                 }
                 return;
@@ -35,7 +36,7 @@ impl App {
         if self.remote_config_loading {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("正在加载在线资源...");
+                ui.label(tr!("正在加载在线资源..."));
             });
             ui.add_space(10.0);
         }
@@ -44,25 +45,25 @@ impl App {
         ui.horizontal(|ui| {
             if ui.selectable_label(
                 self.online_download_tab == OnlineDownloadTab::SystemImage,
-                "系统镜像"
+                tr!("系统镜像")
             ).clicked() {
                 self.online_download_tab = OnlineDownloadTab::SystemImage;
             }
-            
+
             ui.add_space(10.0);
-            
+
             if ui.selectable_label(
                 self.online_download_tab == OnlineDownloadTab::Software,
-                "软件下载"
+                tr!("软件下载")
             ).clicked() {
                 self.online_download_tab = OnlineDownloadTab::Software;
             }
-            
+
             ui.add_space(10.0);
-            
+
             if ui.selectable_label(
                 self.online_download_tab == OnlineDownloadTab::GpuDriver,
-                "显卡驱动"
+                tr!("显卡驱动")
             ).clicked() {
                 self.online_download_tab = OnlineDownloadTab::GpuDriver;
             }
@@ -86,10 +87,10 @@ impl App {
     fn show_system_image_tab(&mut self, ui: &mut egui::Ui) {
         if self.config.is_none() || self.config.as_ref().map(|c| c.systems.is_empty()).unwrap_or(true) {
             if !self.remote_config_loading {
-                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "未找到在线系统镜像资源");
-                ui.label("服务器可能暂时不可用，请稍后重试");
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("未找到在线系统镜像资源"));
+                ui.label(tr!("服务器可能暂时不可用，请稍后重试"));
 
-                if ui.button("刷新配置").clicked() {
+                if ui.button(tr!("刷新配置")).clicked() {
                     self.start_remote_config_loading();
                 }
             }
@@ -115,9 +116,9 @@ impl App {
                     .striped(true)
                     .min_col_width(150.0)
                     .show(ui, |ui| {
-                        ui.label("系统名称");
-                        ui.label("类型");
-                        ui.label("操作");
+                        ui.label(tr!("系统名称"));
+                        ui.label(tr!("类型"));
+                        ui.label(tr!("操作"));
                         ui.end_row();
 
                         for (i, system) in systems.iter().enumerate() {
@@ -134,10 +135,10 @@ impl App {
                             ui.label(if system.is_win11 { "Win11" } else { "Win10" });
 
                             ui.horizontal(|ui| {
-                                if ui.button("下载").clicked() {
+                                if ui.button(tr!("下载")).clicked() {
                                     system_to_download = Some(i);
                                 }
-                                if ui.button("安装").clicked() {
+                                if ui.button(tr!("安装")).clicked() {
                                     system_to_install = Some(i);
                                 }
                             });
@@ -201,11 +202,11 @@ impl App {
 
         // 下载保存位置
         ui.horizontal(|ui| {
-            ui.label("保存位置:");
+            ui.label(tr!("保存位置:"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.download_save_path).desired_width(400.0),
             );
-            if ui.button("浏览...").clicked() {
+            if ui.button(tr!("浏览...")).clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.download_save_path = path.to_string_lossy().to_string();
                 }
@@ -215,7 +216,7 @@ impl App {
         // 刷新按钮
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.remote_config_loading, egui::Button::new("刷新在线资源")).clicked() {
+            if ui.add_enabled(!self.remote_config_loading, egui::Button::new(tr!("刷新在线资源"))).clicked() {
                 self.start_remote_config_loading();
             }
             if self.remote_config_loading {
@@ -223,18 +224,18 @@ impl App {
             }
         });
     }
-    
+
     /// 显示软件下载选项卡
     fn show_software_download_tab(&mut self, ui: &mut egui::Ui) {
         // 提示信息
         ui.horizontal(|ui| {
             ui.label("ℹ");
-            ui.label("本页面提供的软件均由互联网收集整理，仅供学习交流使用，请于下载后24小时内删除。");
+            ui.label(tr!("本页面提供的软件均由互联网收集整理，仅供学习交流使用，请于下载后24小时内删除。"));
         });
         ui.add_space(5.0);
         ui.separator();
         ui.add_space(5.0);
-        
+
         // 检查软件列表
         let software_list: Vec<OnlineSoftware> = self
             .config
@@ -244,10 +245,10 @@ impl App {
         
         if software_list.is_empty() {
             if !self.remote_config_loading {
-                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "未找到在线软件资源");
-                ui.label("服务器可能暂未提供软件列表，请稍后重试");
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("未找到在线软件资源"));
+                ui.label(tr!("服务器可能暂未提供软件列表，请稍后重试"));
 
-                if ui.button("刷新配置").clicked() {
+                if ui.button(tr!("刷新配置")).clicked() {
                     self.start_remote_config_loading();
                 }
             }
@@ -298,11 +299,11 @@ impl App {
                                     ui.label(format!("| {}", soft.file_size));
                                 });
                                 ui.label(&soft.description);
-                                ui.small(format!("更新日期: {}", soft.update_date));
+                                ui.small(tr!("更新日期: {}", soft.update_date));
                             });
-                            
+
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("下载").clicked() {
+                                if ui.button(tr!("下载")).clicked() {
                                     soft_to_download = Some(i);
                                 }
                             });
@@ -339,7 +340,7 @@ impl App {
         ui.add_space(10.0);
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.remote_config_loading, egui::Button::new("刷新在线资源")).clicked() {
+            if ui.add_enabled(!self.remote_config_loading, egui::Button::new(tr!("刷新在线资源"))).clicked() {
                 self.start_remote_config_loading();
             }
             if self.remote_config_loading {
@@ -347,7 +348,7 @@ impl App {
             }
         });
     }
-    
+
     /// 显示软件图标
     fn show_soft_icon(&mut self, ui: &mut egui::Ui, soft: &OnlineSoftware) {
         let icon_size = egui::vec2(48.0, 48.0);
@@ -553,7 +554,7 @@ impl App {
         
         let is_pe = self.system_info.as_ref().map(|s| s.is_pe_environment).unwrap_or(false);
         
-        egui::Window::new(format!("下载 - {}", pending.name))
+        egui::Window::new(tr!("下载 - {}", pending.name))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -563,14 +564,14 @@ impl App {
                 
                 // 保存目录
                 ui.horizontal(|ui| {
-                    ui.label("保存目录:");
+                    ui.label(tr!("保存目录:"));
                 });
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.soft_download_save_path)
                             .desired_width(350.0)
                     );
-                    if ui.button("浏览...").clicked() {
+                    if ui.button(tr!("浏览...")).clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             self.soft_download_save_path = path.to_string_lossy().to_string();
                         }
@@ -579,14 +580,14 @@ impl App {
                 
                 // 路径为空时提示
                 if self.soft_download_save_path.is_empty() {
-                    ui.colored_label(egui::Color32::RED, "请选择下载保存目录");
+                    ui.colored_label(egui::Color32::RED, tr!("请选择下载保存目录"));
                 }
-                
+
                 ui.add_space(10.0);
-                
+
                 // 非PE环境下显示"下载后运行"选项
                 if !is_pe {
-                    ui.checkbox(&mut self.soft_download_run_after, "下载后运行软件");
+                    ui.checkbox(&mut self.soft_download_run_after, tr!("下载后运行软件"));
                 }
                 
                 ui.add_space(15.0);
@@ -597,7 +598,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let can_download = !self.soft_download_save_path.is_empty();
                     
-                    if ui.add_enabled(can_download, egui::Button::new("开始下载")).clicked() {
+                    if ui.add_enabled(can_download, egui::Button::new(tr!("开始下载"))).clicked() {
                         // 创建保存目录
                         let _ = std::fs::create_dir_all(&self.soft_download_save_path);
                         
@@ -627,7 +628,7 @@ impl App {
                         self.current_panel = crate::app::Panel::DownloadProgress;
                     }
                     
-                    if ui.button("取消").clicked() {
+                    if ui.button(tr!("取消")).clicked() {
                         self.show_soft_download_modal = false;
                         self.pending_soft_download = None;
                     }
@@ -642,31 +643,31 @@ impl App {
         // 显示本机显卡信息
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.strong("本机显卡信息");
+                ui.strong(tr!("本机显卡信息"));
             });
             ui.separator();
-            
+
             if let Some(ref hw_info) = self.hardware_info {
                 if hw_info.gpus.is_empty() {
-                    ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "未检测到显卡");
+                    ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("未检测到显卡"));
                 } else {
                     for (i, gpu) in hw_info.gpus.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(format!("显卡 {}:", i + 1));
+                            ui.label(tr!("显卡 {}:", i + 1));
                             ui.strong(crate::core::hardware_info::beautify_gpu_name(&gpu.name));
                         });
-                        
+
                         if !gpu.current_resolution.is_empty() {
                             ui.horizontal(|ui| {
                                 ui.add_space(55.0);
-                                ui.label(format!("分辨率: {} @ {}Hz", gpu.current_resolution, gpu.refresh_rate));
+                                ui.label(tr!("分辨率: {} @ {}Hz", gpu.current_resolution, gpu.refresh_rate));
                             });
                         }
-                        
+
                         if !gpu.driver_version.is_empty() {
                             ui.horizontal(|ui| {
                                 ui.add_space(55.0);
-                                ui.label(format!("驱动版本: {}", gpu.driver_version));
+                                ui.label(tr!("驱动版本: {}", gpu.driver_version));
                             });
                         }
                         
@@ -678,17 +679,17 @@ impl App {
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("正在检测显卡信息...");
+                    ui.label(tr!("正在检测显卡信息..."));
                 });
             }
         });
-        
+
         ui.add_space(10.0);
-        
+
         // 提示信息
         ui.horizontal(|ui| {
             ui.label("ℹ");
-            ui.label("请根据您的显卡型号选择合适的驱动程序下载。");
+            ui.label(tr!("请根据您的显卡型号选择合适的驱动程序下载。"));
         });
         ui.add_space(5.0);
         ui.separator();
@@ -703,10 +704,10 @@ impl App {
         
         if gpu_driver_list.is_empty() {
             if !self.remote_config_loading {
-                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "未找到在线显卡驱动资源");
-                ui.label("服务器可能暂未提供显卡驱动列表，请稍后重试");
+                ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("未找到在线显卡驱动资源"));
+                ui.label(tr!("服务器可能暂未提供显卡驱动列表，请稍后重试"));
 
-                if ui.button("刷新配置").clicked() {
+                if ui.button(tr!("刷新配置")).clicked() {
                     self.start_remote_config_loading();
                 }
             }
@@ -757,11 +758,11 @@ impl App {
                                     ui.label(format!("| {}", driver.file_size));
                                 });
                                 ui.label(&driver.description);
-                                ui.small(format!("更新日期: {}", driver.update_date));
+                                ui.small(tr!("更新日期: {}", driver.update_date));
                             });
-                            
+
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("下载").clicked() {
+                                if ui.button(tr!("下载")).clicked() {
                                     driver_to_download = Some(i);
                                 }
                             });
@@ -795,7 +796,7 @@ impl App {
         ui.add_space(10.0);
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.remote_config_loading, egui::Button::new("刷新在线资源")).clicked() {
+            if ui.add_enabled(!self.remote_config_loading, egui::Button::new(tr!("刷新在线资源"))).clicked() {
                 self.start_remote_config_loading();
             }
             if self.remote_config_loading {
@@ -803,7 +804,7 @@ impl App {
             }
         });
     }
-    
+
     /// 显示GPU驱动图标
     fn show_gpu_driver_icon(&mut self, ui: &mut egui::Ui, driver: &OnlineGpuDriver) {
         let icon_size = egui::vec2(48.0, 48.0);

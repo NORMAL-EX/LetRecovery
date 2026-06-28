@@ -4,7 +4,35 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ========== Cal Sans 字体（SIL OFL 1.1，免费商用） ========== */
+/* 拉丁文/数字/品牌名走 Cal Sans；中文自动回退到系统字体（PingFang / 微软雅黑） */
+@font-face {
+  font-family: "Cal Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/CalSans-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Cal Sans UI";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("/fonts/CalSansUI.woff2") format("woff2");
+}
+
 @theme inline {
+  --breakpoint-3xl: 1600px;
+  --breakpoint-4xl: 2000px;
+
+  --font-sans: "Cal Sans UI", ui-sans-serif, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "PingFang SC", "Microsoft YaHei", "微软雅黑", "Hiragino Sans GB",
+    "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-heading: "Cal Sans", "Cal Sans UI", ui-sans-serif, -apple-system,
+    "Segoe UI", "PingFang SC", "Microsoft YaHei", "微软雅黑", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", "Cascadia Code",
+    "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -40,6 +68,9 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-code: var(--code);
+  --color-code-foreground: var(--code-foreground);
+  --color-code-highlight: var(--code-highlight);
   --animate-skeleton: skeleton 2s -1s infinite linear;
   --color-warning-foreground: var(--warning-foreground);
   --color-warning: var(--warning);
@@ -55,6 +86,7 @@
   }
 }
 
+/* ========== 设计令牌（对齐 coss.com/ui 的极简单色调） ========== */
 :root {
   --radius: 0.625rem;
   --background: var(--color-white);
@@ -72,22 +104,6 @@
   --accent: --alpha(var(--color-black) / 4%);
   --accent-foreground: var(--color-neutral-800);
   --destructive: var(--color-red-500);
-  --border: --alpha(var(--color-black) / 12%);
-  --input: --alpha(var(--color-black) / 12%);
-  --ring: var(--color-neutral-400);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-primary: oklch(0.21 0.006 285.885);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.967 0.001 286.375);
-  --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-  --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.705 0.015 286.067);
   --destructive-foreground: var(--color-red-700);
   --info: var(--color-blue-500);
   --info-foreground: var(--color-blue-700);
@@ -95,41 +111,44 @@
   --success-foreground: var(--color-emerald-700);
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
+  --border: --alpha(var(--color-black) / 8%);
+  --input: --alpha(var(--color-black) / 10%);
+  --ring: var(--color-neutral-400);
+  --chart-1: var(--color-orange-600);
+  --chart-2: var(--color-teal-600);
+  --chart-3: var(--color-cyan-900);
+  --chart-4: var(--color-amber-400);
+  --chart-5: var(--color-amber-500);
+  --sidebar: var(--color-neutral-50);
+  --sidebar-foreground: color-mix(in srgb, var(--color-neutral-800) 64%, var(--sidebar));
+  --sidebar-primary: var(--color-neutral-800);
+  --sidebar-primary-foreground: var(--color-neutral-50);
+  --sidebar-accent: --alpha(var(--color-black) / 4%);
+  --sidebar-accent-foreground: var(--color-neutral-800);
+  --sidebar-border: --alpha(var(--color-black) / 6%);
+  --sidebar-ring: var(--color-neutral-400);
+  --code: var(--color-white);
+  --code-foreground: var(--foreground);
+  --code-highlight: --alpha(var(--color-black) / 4%);
   --main-photo-background: oklch(26.9% 0 0);
 }
 
 .dark {
-  --background: color-mix(in srgb, var(--color-neutral-950) 98%, var(--color-white));
-  --foreground: var(--color-neutral-200);
+  --background: color-mix(in srgb, var(--color-neutral-950) 96%, var(--color-white));
+  --foreground: var(--color-neutral-100);
   --card: color-mix(in srgb, var(--background) 98%, var(--color-white));
-  --card-foreground: var(--color-neutral-200);
+  --card-foreground: var(--color-neutral-100);
   --popover: color-mix(in srgb, var(--background) 96%, var(--color-white));
-  --popover-foreground: var(--color-neutral-200);
-  --primary: var(--color-neutral-200);
+  --popover-foreground: var(--color-neutral-100);
+  --primary: var(--color-neutral-100);
   --primary-foreground: var(--color-neutral-800);
-  --secondary: --alpha(var(--color-white) / 6%);
-  --secondary-foreground: var(--color-neutral-200);
-  --muted: --alpha(var(--color-white) / 6%);
+  --secondary: --alpha(var(--color-white) / 4%);
+  --secondary-foreground: var(--color-neutral-100);
+  --muted: --alpha(var(--color-white) / 4%);
   --muted-foreground: color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-white));
-  --accent: --alpha(var(--color-white) / 6%);
-  --accent-foreground: var(--color-neutral-200);
-  --destructive: var(--color-red-500);
-  --border: --alpha(var(--color-white) / 12%);
-  --input: --alpha(var(--color-white) / 12%);
-  --ring: var(--color-neutral-500);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.21 0.006 285.885);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.274 0.006 286.033);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.552 0.016 285.938);
+  --accent: --alpha(var(--color-white) / 4%);
+  --accent-foreground: var(--color-neutral-100);
+  --destructive: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
   --destructive-foreground: var(--color-red-400);
   --info: var(--color-blue-500);
   --info-foreground: var(--color-blue-400);
@@ -137,6 +156,25 @@
   --success-foreground: var(--color-emerald-400);
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-400);
+  --border: --alpha(var(--color-white) / 6%);
+  --input: --alpha(var(--color-white) / 8%);
+  --ring: var(--color-neutral-500);
+  --chart-1: var(--color-blue-700);
+  --chart-2: var(--color-emerald-500);
+  --chart-3: var(--color-amber-500);
+  --chart-4: var(--color-purple-500);
+  --chart-5: var(--color-rose-500);
+  --sidebar: color-mix(in srgb, var(--color-neutral-950) 97%, var(--color-white));
+  --sidebar-foreground: color-mix(in srgb, var(--color-neutral-100) 64%, var(--sidebar));
+  --sidebar-primary: var(--color-neutral-100);
+  --sidebar-primary-foreground: var(--color-neutral-800);
+  --sidebar-accent: --alpha(var(--color-white) / 4%);
+  --sidebar-accent-foreground: var(--color-neutral-100);
+  --sidebar-border: --alpha(var(--color-white) / 5%);
+  --sidebar-ring: var(--color-neutral-400);
+  --code: color-mix(in srgb, var(--background) 98%, var(--color-white));
+  --code-foreground: var(--foreground);
+  --code-highlight: --alpha(var(--color-white) / 4%);
   --main-photo-background: color-mix(in oklab, var(--input) 32%, transparent);
 }
 
@@ -146,60 +184,46 @@
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply bg-sidebar font-sans text-foreground antialiased;
   }
 
-  /* Custom Scrollbar */
-  ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+  /* 始终预留滚动条槽位：在"有滚动条/无滚动条"页面间切换时页面不再左右跳动。
+     配合下方 scrollbar-color 把轨道设为透明 —— 内容不溢出时滚动条不可见，只占位，
+     溢出时才显示细滑块。（不用 scrollbar-gutter：部分 Chromium 不渲染它。） */
+  html {
+    overflow-y: scroll;
   }
 
-  ::-webkit-scrollbar-track {
-    background: transparent;
+  /* 选中文字：coss 风格黑白反色（浅色=黑底白字，深色=白底黑字），不要默认蓝色 */
+  ::selection {
+    background-color: var(--foreground);
+    color: var(--background);
   }
 
-  ::-webkit-scrollbar-thumb {
-    background: var(--muted-foreground);
-    border-radius: 4px;
+  /* 移动端点按轻微反馈（来自 coss） */
+  a:active,
+  button:active {
+    @apply opacity-[0.72] md:opacity-100;
   }
 
-  ::-webkit-scrollbar-thumb:hover {
-    background: var(--foreground);
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
   }
 
-  /* Firefox scrollbar */
+  /* 细滚动条：用标准属性（Chromium 121+ / Firefox 均支持），不能用 ::-webkit-scrollbar，
+     否则会禁用上面 html 的 scrollbar-gutter，导致切换页面时左右跳动。 */
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--muted-foreground) transparent;
   }
 }
 
-p {
-  font-size: 16px;
-}
-
-/* ========== Gradient Highlight 渐变高亮样式 ========== */
-.gradient-highlight {
-  background: linear-gradient(
-    to right,
-    rgba(59, 130, 246, 0.15),
-    rgba(168, 85, 247, 0.15),
-    rgba(249, 115, 22, 0.15)
-  );
-  padding: 0.15em 0.25em;
-  line-height: 1.8;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-}
-
-/* 按钮悬停效果增强 */
-.button-header {
-  transition: all 0.2s ease;
-}
-
-.button-header:active {
-  transform: scale(0.97);
+/* ========== 框线网格容器（coss 招牌宽幅栏） ========== */
+@utility container {
+  @apply mx-auto max-w-[1416px] px-6 sm:px-10 lg:px-16 xl:px-24;
 }
 
 /* ========== Menu Popup 弹出动画 ========== */
@@ -232,4 +256,208 @@ p {
 
 .menu-popup-animated[data-ending-style] {
   animation: menu-popup-out 0.1s ease-in forwards;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+/* ============================================================
+   文档（cosspress markdown）内容样式 —— 仅作用于 .prose 正文
+   ============================================================ */
+
+/* 行内代码 */
+.prose :not(pre) > code {
+  background-color: var(--muted);
+  padding: 0.15em 0.4em;
+  border-radius: var(--radius-sm);
+  font-size: 0.85em;
+  font-weight: 500;
+}
+.prose :not(pre) > code::before,
+.prose :not(pre) > code::after {
+  content: none;
+}
+
+/* 代码块 —— coss ui 卡片表面 + 行号 + 复制按钮 */
+.prose .cosspress-code {
+  position: relative;
+  margin: 1.5rem 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background-color: var(--background);
+  background-clip: padding-box;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+}
+.dark .prose .cosspress-code {
+  background-color: color-mix(in srgb, var(--input) 32%, transparent);
+  background-clip: border-box;
+}
+.prose .cosspress-code pre.shiki {
+  margin: 0;
+  padding: 1.1rem 1.1rem 1.1rem 1rem;
+  background-color: transparent !important;
+  overflow-x: auto;
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+.prose .cosspress-code pre.shiki code {
+  background: transparent;
+  font-family: var(--font-mono);
+  counter-reset: cosspress-line;
+}
+.prose .cosspress-code pre.shiki .line::before {
+  counter-increment: cosspress-line;
+  content: counter(cosspress-line);
+  display: inline-block;
+  width: 1.1rem;
+  margin-right: 1rem;
+  text-align: right;
+  color: var(--muted-foreground);
+  opacity: 0.5;
+  user-select: none;
+}
+.prose .cosspress-code pre.shiki .line:last-child:empty::before {
+  content: none;
+}
+html.dark .prose .cosspress-code pre.shiki span {
+  color: var(--shiki-dark) !important;
+}
+.prose .cosspress-code pre.shiki .line.highlighted {
+  background-color: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+/* 复制按钮 */
+.prose .cosspress-code-copy {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  height: 1.9rem;
+  width: 1.9rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background-color: var(--background);
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+}
+.dark .prose .cosspress-code-copy {
+  background-color: color-mix(in srgb, var(--input) 50%, var(--background));
+}
+.prose .cosspress-code-copy:hover {
+  color: var(--foreground);
+  background-color: var(--muted);
+}
+.prose .cosspress-code-copy svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+.prose .cosspress-code-copy .cosspress-copied-text {
+  display: none;
+}
+.prose .cosspress-code-copy.copied {
+  width: auto;
+  padding: 0 0.6rem;
+  color: var(--foreground);
+}
+.prose .cosspress-code-copy.copied .cosspress-copy-icon {
+  display: none;
+}
+.prose .cosspress-code-copy.copied .cosspress-copied-text {
+  display: inline;
+}
+
+/* 标题锚点偏移（避开 sticky 页头） */
+.prose :where(h1, h2, h3, h4, h5, h6) {
+  scroll-margin-top: 8.5rem;
+}
+@media (min-width: 1024px) {
+  .prose :where(h1, h2, h3, h4, h5, h6) {
+    scroll-margin-top: 5.5rem;
+  }
+}
+
+/* 标题本身即锚点链接（仿 coss.com/ui）：无前置 "#"，hover 显示下划线 */
+.prose .header-anchor {
+  color: inherit;
+  font-weight: inherit;
+  text-decoration: none;
+}
+.prose .header-anchor:hover {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+/* 表格卡片 */
+.prose .table-wrapper {
+  margin: 1.25rem 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.prose .table-wrapper > table {
+  margin: 0;
+  width: 100%;
+  border-collapse: collapse;
+}
+.prose .table-wrapper :where(th, td) {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 0.6rem 0.95rem;
+  text-align: left;
+}
+.prose .table-wrapper thead th {
+  background-color: var(--muted);
+  font-weight: 600;
+}
+.prose .table-wrapper tbody tr:last-child :where(td) {
+  border-bottom: none;
+}
+
+/* 容器警告框（coss ui Alert）内部 prose 间距收紧 */
+.prose .cosspress-alert-desc > :first-child {
+  margin-top: 0;
+}
+.prose .cosspress-alert-desc > :last-child {
+  margin-bottom: 0;
+}
+/* 警告框内文字：普通与 strong 同色（继承 muted），strong 不要太粗（仅限警告框内） */
+.prose .cosspress-alert-desc :where(strong, b) {
+  color: inherit;
+  font-weight: 500;
+}
+/* 警告框标题：用 prose 正文色，与页面正文精确一致（不再是浅灰 muted） */
+.prose [data-slot='alert-title'] {
+  color: var(--tw-prose-body);
+}
+
+/* 状态图标（替换内容里的 ✅/❌） */
+.prose .cosspress-tick {
+  display: inline-block;
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.22em;
+}
+.prose .cosspress-tick-yes {
+  color: var(--success);
+}
+.prose .cosspress-tick-no {
+  color: var(--destructive);
+}
+
+/* 折叠块 details */
+.prose .cosspress-details > summary {
+  cursor: pointer;
+  user-select: none;
 }

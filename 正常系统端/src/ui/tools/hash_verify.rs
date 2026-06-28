@@ -8,6 +8,7 @@ use egui;
 use std::sync::mpsc;
 
 use crate::app::App;
+use crate::tr;
 
 /// 哈希校验结果
 #[derive(Clone, Default)]
@@ -33,27 +34,27 @@ impl App {
 
         let mut should_close = false;
 
-        egui::Window::new("文件哈希校验 (SHA-256)")
+        egui::Window::new(tr!("文件哈希校验 (SHA-256)"))
             .resizable(true)
             .default_width(600.0)
             .default_height(360.0)
             .show(ui.ctx(), |ui| {
-                ui.label("计算文件的 SHA-256，并可与期望值比对（核对下载完整性）。");
+                ui.label(tr!("计算文件的 SHA-256，并可与期望值比对（核对下载完整性）。"));
                 ui.add_space(10.0);
 
                 // 文件路径
                 ui.horizontal(|ui| {
-                    ui.label("文件:");
+                    ui.label(tr!("文件:"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.hash_verify_file_path)
-                            .hint_text("输入或选择文件路径")
+                            .hint_text(tr!("输入或选择文件路径"))
                             .desired_width(380.0),
                     );
                     let can_browse = !self.hash_verify_loading;
-                    if ui.add_enabled(can_browse, egui::Button::new("浏览...")).clicked() {
+                    if ui.add_enabled(can_browse, egui::Button::new(tr!("浏览..."))).clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("系统镜像", &["wim", "esd", "swm", "gho", "ghs", "iso"])
-                            .add_filter("所有文件", &["*"])
+                            .add_filter(tr!("系统镜像"), &["wim", "esd", "swm", "gho", "ghs", "iso"])
+                            .add_filter(tr!("所有文件"), &["*"])
                             .pick_file()
                         {
                             self.hash_verify_file_path = path.to_string_lossy().to_string();
@@ -64,10 +65,10 @@ impl App {
 
                 // 期望哈希（可选）
                 ui.horizontal(|ui| {
-                    ui.label("期望哈希:");
+                    ui.label(tr!("期望哈希:"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.hash_verify_expected)
-                            .hint_text("可选：粘贴官方 SHA-256 以比对")
+                            .hint_text(tr!("可选：粘贴官方 SHA-256 以比对"))
                             .desired_width(380.0),
                     );
                 });
@@ -78,7 +79,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let can_run =
                         !self.hash_verify_file_path.is_empty() && !self.hash_verify_loading;
-                    if ui.add_enabled(can_run, egui::Button::new("计算 SHA-256")).clicked() {
+                    if ui.add_enabled(can_run, egui::Button::new(tr!("计算 SHA-256"))).clicked() {
                         self.start_hash_verify();
                     }
                     if self.hash_verify_loading {
@@ -103,12 +104,12 @@ impl App {
                 if let Some(result) = self.hash_verify_result.clone() {
                     Self::render_hash_result(ui, &result);
                 } else if !self.hash_verify_loading {
-                    ui.colored_label(egui::Color32::GRAY, "请选择文件并点击「计算 SHA-256」");
+                    ui.colored_label(egui::Color32::GRAY, tr!("请选择文件并点击「计算 SHA-256」"));
                 }
 
                 ui.add_space(20.0);
                 ui.horizontal(|ui| {
-                    if ui.button("关闭").clicked() {
+                    if ui.button(tr!("关闭")).clicked() {
                         should_close = true;
                     }
                 });
@@ -122,11 +123,11 @@ impl App {
     /// 渲染哈希结果
     fn render_hash_result(ui: &mut egui::Ui, result: &HashVerifyResult) {
         ui.horizontal(|ui| {
-            ui.label("文件:");
+            ui.label(tr!("文件:"));
             ui.label(&result.file_path);
         });
         ui.horizontal(|ui| {
-            ui.label("大小:");
+            ui.label(tr!("大小:"));
             ui.label(Self::format_hash_file_size(result.file_size));
         });
 
@@ -145,18 +146,18 @@ impl App {
         match result.matched {
             Some(true) => {
                 ui.add_space(6.0);
-                ui.colored_label(egui::Color32::from_rgb(0, 200, 0), "与期望哈希一致");
+                ui.colored_label(egui::Color32::from_rgb(0, 200, 0), tr!("与期望哈希一致"));
             }
             Some(false) => {
                 ui.add_space(6.0);
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 80, 80),
-                    "与期望哈希不一致（文件可能损坏或被篡改）",
+                    tr!("与期望哈希不一致（文件可能损坏或被篡改）"),
                 );
             }
             None => {
                 ui.add_space(6.0);
-                ui.colored_label(egui::Color32::GRAY, "（未提供期望哈希，仅展示计算值）");
+                ui.colored_label(egui::Color32::GRAY, tr!("（未提供期望哈希，仅展示计算值）"));
             }
         }
     }
@@ -172,7 +173,7 @@ impl App {
         } else if size >= KB {
             format!("{:.2} KB", size as f64 / KB as f64)
         } else {
-            format!("{} 字节", size)
+            tr!("{} 字节", size)
         }
     }
 
@@ -188,7 +189,7 @@ impl App {
         if !std::path::Path::new(&file_path).exists() {
             self.hash_verify_result = Some(HashVerifyResult {
                 file_path,
-                error: Some("文件不存在".to_string()),
+                error: Some(tr!("文件不存在")),
                 ..Default::default()
             });
             return;
@@ -232,7 +233,7 @@ impl App {
                 Err(e) => HashVerifyResult {
                     file_path,
                     file_size,
-                    error: Some(format!("读取/计算失败: {}", e)),
+                    error: Some(tr!("读取/计算失败: {}", e)),
                     ..Default::default()
                 },
             };

@@ -14,6 +14,7 @@ use std::sync::mpsc::Sender;
 
 use anyhow::{bail, Context, Result};
 
+use crate::tr;
 use crate::utils::encoding::gbk_to_utf8;
 
 /// Windows CREATE_NO_WINDOW 标志，用于隐藏控制台窗口
@@ -117,10 +118,11 @@ impl DismExe {
         }
 
         bail!(
-            "无法找到 dism.exe。请确保在 PE 环境或 Windows 系统中运行。\n\
+            "{}",
+            tr!("无法找到 dism.exe。请确保在 PE 环境或 Windows 系统中运行。\n\
              已搜索的路径:\n\
              - X:\\Windows\\System32\\dism.exe (PE 环境)\n\
-             - C:\\Windows\\System32\\dism.exe (Windows 系统)"
+             - C:\\Windows\\System32\\dism.exe (Windows 系统)")
         )
     }
 
@@ -197,10 +199,10 @@ impl DismExe {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("启动 dism.exe 失败")?;
+            .context(tr!("启动 dism.exe 失败"))?;
 
-        let stdout = child.stdout.take().context("无法获取 stdout")?;
-        let stderr = child.stderr.take().context("无法获取 stderr")?;
+        let stdout = child.stdout.take().context(tr!("无法获取 stdout"))?;
+        let stderr = child.stderr.take().context(tr!("无法获取 stderr"))?;
 
         // 读取并解析 stdout
         let progress_tx_clone = progress_tx.clone();
@@ -258,7 +260,7 @@ impl DismExe {
         });
 
         // 等待进程完成
-        let status = child.wait().context("等待 dism.exe 完成失败")?;
+        let status = child.wait().context(tr!("等待 dism.exe 完成失败"))?;
 
         // 获取输出
         let stdout_text = stdout_handle.join().unwrap_or_default();
@@ -268,7 +270,7 @@ impl DismExe {
         if let Some(ref tx) = progress_tx {
             let _ = tx.send(DismExeProgress {
                 percentage: 100,
-                status: "完成".to_string(),
+                status: tr!("完成"),
             });
         }
 
@@ -279,10 +281,10 @@ impl DismExe {
                 // DISM 有时会将错误信息输出到 stdout
                 Self::extract_error_from_output(&stdout_text)
             } else {
-                format!("dism.exe 退出码: {:?}", status.code())
+                tr!("dism.exe 退出码: {}", format!("{:?}", status.code()))
             };
 
-            bail!("DISM 操作失败: {}", error_msg);
+            bail!("{}", tr!("DISM 操作失败: {}", error_msg));
         }
 
         log::info!("[DISM.EXE] 操作成功完成");
@@ -311,7 +313,7 @@ impl DismExe {
                 let pct = (percentage as u8).min(100);
                 return Some(DismExeProgress {
                     percentage: pct,
-                    status: format!("处理中 {}%", pct),
+                    status: tr!("处理中 {}%", pct),
                 });
             }
         }
@@ -321,7 +323,7 @@ impl DismExe {
         if lower.contains("完成") || lower.contains("successfully") || lower.contains("success") {
             return Some(DismExeProgress {
                 percentage: 100,
-                status: "完成".to_string(),
+                status: tr!("完成"),
             });
         }
 
@@ -391,7 +393,7 @@ impl DismExe {
         // 验证路径
         let driver_path_obj = Path::new(driver_path);
         if !driver_path_obj.exists() {
-            bail!("驱动路径不存在: {}", driver_path);
+            bail!("{}", tr!("驱动路径不存在: {}", driver_path));
         }
 
         // 规范化镜像路径（确保以反斜杠结尾）
@@ -462,7 +464,7 @@ impl DismExe {
 
         // 验证文件存在
         if !Path::new(package_path).exists() {
-            bail!("CAB 包文件不存在: {}", package_path);
+            bail!("{}", tr!("CAB 包文件不存在: {}", package_path));
         }
 
         // 规范化镜像路径
@@ -519,7 +521,7 @@ impl DismExe {
                 let overall_pct = ((index * 100) / total.max(1)) as u8;
                 let _ = tx.send(DismExeProgress {
                     percentage: overall_pct,
-                    status: format!("安装更新 {}/{}", index + 1, total),
+                    status: tr!("安装更新 {}/{}", index + 1, total),
                 });
             }
 
@@ -544,7 +546,7 @@ impl DismExe {
         if let Some(ref tx) = progress_tx {
             let _ = tx.send(DismExeProgress {
                 percentage: 100,
-                status: format!("完成: {} 成功, {} 失败", success_count, fail_count),
+                status: tr!("完成: {} 成功, {} 失败", success_count, fail_count),
             });
         }
 

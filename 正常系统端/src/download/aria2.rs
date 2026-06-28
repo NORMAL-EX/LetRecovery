@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 
+use crate::tr;
 use crate::utils::cmd::create_command;
 use crate::utils::path::get_bin_dir;
 
@@ -163,7 +164,7 @@ impl Aria2Manager {
         }
 
         let client = client.ok_or_else(|| {
-            anyhow::anyhow!("初始化aria2失败: {}", last_error)
+            anyhow::anyhow!("{}", tr!("初始化aria2失败: {}", last_error))
         })?;
 
         Ok(Self {
@@ -239,7 +240,12 @@ impl Aria2Manager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("aria2 client not connected"))?;
 
-        let status = client.tell_status(gid).await?;
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.tell_status(gid),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("{}", tr!("查询下载状态超时")))??;
 
         let completed = status.completed_length;
         let total = status.total_length;
@@ -257,7 +263,7 @@ impl Aria2Manager {
             TaskStatus::Paused => DownloadStatus::Paused,
             TaskStatus::Complete => DownloadStatus::Complete,
             TaskStatus::Error => DownloadStatus::Error(status.error_message.unwrap_or_default()),
-            TaskStatus::Removed => DownloadStatus::Error("已移除".to_string()),
+            TaskStatus::Removed => DownloadStatus::Error(tr!("已移除")),
         };
 
         Ok(DownloadProgress {
@@ -273,7 +279,9 @@ impl Aria2Manager {
     /// 暂停下载
     pub async fn pause(&self, gid: &str) -> Result<()> {
         if let Some(client) = &self.client {
-            client.pause(gid).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(8), client.pause(gid))
+                .await
+                .map_err(|_| anyhow::anyhow!("{}", tr!("下载操作超时")))??;
         }
         Ok(())
     }
@@ -281,7 +289,9 @@ impl Aria2Manager {
     /// 恢复下载
     pub async fn resume(&self, gid: &str) -> Result<()> {
         if let Some(client) = &self.client {
-            client.unpause(gid).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(8), client.unpause(gid))
+                .await
+                .map_err(|_| anyhow::anyhow!("{}", tr!("下载操作超时")))??;
         }
         Ok(())
     }
@@ -289,7 +299,9 @@ impl Aria2Manager {
     /// 取消下载
     pub async fn cancel(&self, gid: &str) -> Result<()> {
         if let Some(client) = &self.client {
-            client.remove(gid).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(8), client.remove(gid))
+                .await
+                .map_err(|_| anyhow::anyhow!("{}", tr!("下载操作超时")))??;
         }
         Ok(())
     }

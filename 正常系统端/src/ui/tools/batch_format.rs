@@ -4,6 +4,8 @@
 
 use std::path::Path;
 
+use crate::tr;
+
 #[cfg(windows)]
 use windows::{
     core::PCWSTR,
@@ -200,10 +202,10 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
     let drive_letter = letter
         .chars()
         .next()
-        .ok_or_else(|| "无效的盘符".to_string())?;
+        .ok_or_else(|| tr!("无效的盘符"))?;
 
     if !drive_letter.is_ascii_alphabetic() {
-        return Err("无效的盘符".to_string());
+        return Err(tr!("无效的盘符"));
     }
 
     let drive = format!("{}:", drive_letter.to_ascii_uppercase());
@@ -214,7 +216,7 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
     } else {
         file_system
     };
-    
+
     // 卷标处理
     let vol_label = if label.is_empty() { "OS" } else { label };
 
@@ -233,7 +235,7 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
     let output = create_command("cmd")
         .args(["/c", &cmd_args])
         .output()
-        .map_err(|e| format!("执行 format 命令失败: {}", e))?;
+        .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
     let stdout = gbk_to_utf8(&output.stdout);
     let stderr = gbk_to_utf8(&output.stderr);
@@ -258,7 +260,7 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
             || stdout.contains("denied") || stdout.contains("error") || stdout.contains("拒绝") {
             stdout.trim().to_string()
         } else {
-            format!("格式化失败: {}", stdout.trim())
+            tr!("格式化失败: {}", stdout.trim())
         };
         
         log::error!("格式化失败: {}", error_msg);
@@ -284,10 +286,10 @@ where
     let drive_letter = letter
         .chars()
         .next()
-        .ok_or_else(|| "无效的盘符".to_string())?;
+        .ok_or_else(|| tr!("无效的盘符"))?;
 
     if !drive_letter.is_ascii_alphabetic() {
-        return Err("无效的盘符".to_string());
+        return Err(tr!("无效的盘符"));
     }
 
     let drive = format!("{}:", drive_letter.to_ascii_uppercase());
@@ -307,21 +309,21 @@ where
         vol_label
     );
 
-    progress_callback(0, &format!("准备格式化 {} ...", drive));
+    progress_callback(0, &tr!("准备格式化 {} ...", drive));
 
-    progress_callback(10, "启动格式化进程...");
+    progress_callback(10, &tr!("启动格式化进程..."));
 
     // 使用系统 format 命令
     let cmd_args = format!("format {} /FS:{} /V:{} /Q /Y", drive, fs, vol_label);
 
     log::info!("执行命令: cmd /c {}", cmd_args);
 
-    progress_callback(20, "正在格式化...");
+    progress_callback(20, &tr!("正在格式化..."));
 
     let output = create_command("cmd")
         .args(["/c", &cmd_args])
         .output()
-        .map_err(|e| format!("执行 format 命令失败: {}", e))?;
+        .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
     let stdout = gbk_to_utf8(&output.stdout);
     let stderr = gbk_to_utf8(&output.stderr);
@@ -334,7 +336,7 @@ where
     let has_success_indicator = success_indicators.iter().any(|s| stdout_lower.contains(&s.to_lowercase()));
 
     if output.status.success() || has_success_indicator {
-        progress_callback(100, &format!("分区 {} 格式化完成", drive));
+        progress_callback(100, &tr!("分区 {} 格式化完成", drive));
         log::info!("分区 {} 格式化成功", drive);
         Ok(())
     } else {
@@ -344,7 +346,7 @@ where
             || stdout.contains("denied") || stdout.contains("error") || stdout.contains("拒绝") {
             stdout.trim().to_string()
         } else {
-            format!("格式化失败: {}", stdout.trim())
+            tr!("格式化失败: {}", stdout.trim())
         };
         log::error!("{}", error_msg);
         Err(error_msg)
@@ -353,7 +355,7 @@ where
 
 #[cfg(not(windows))]
 pub fn format_partition(_letter: &str, _label: &str, _file_system: &str) -> Result<(), String> {
-    Err("仅支持Windows系统".to_string())
+    Err(tr!("仅支持Windows系统"))
 }
 
 #[cfg(not(windows))]
@@ -366,7 +368,7 @@ pub fn format_partition_with_progress<F>(
 where
     F: Fn(u8, &str) + Send + 'static,
 {
-    Err("仅支持Windows系统".to_string())
+    Err(tr!("仅支持Windows系统"))
 }
 
 /// 批量格式化分区
@@ -385,7 +387,7 @@ pub fn batch_format_partitions(
                 results.push(FormatResult {
                     letter: partition.clone(),
                     success: true,
-                    message: "格式化成功".to_string(),
+                    message: tr!("格式化成功"),
                 });
                 success_count += 1;
             }

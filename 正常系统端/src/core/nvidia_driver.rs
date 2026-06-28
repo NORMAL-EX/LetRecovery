@@ -17,6 +17,8 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
+use crate::tr;
+
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -202,7 +204,7 @@ pub fn enumerate_gpu_devices() -> Result<Vec<GpuDeviceInfo>> {
         )?;
 
         if dev_info.is_invalid() {
-            bail!("SetupDiGetClassDevsW 失败");
+            bail!("{}", tr!("SetupDiGetClassDevsW 失败"));
         }
 
         let mut dev_info_data = SP_DEVINFO_DATA {
@@ -346,7 +348,7 @@ pub fn get_system_hardware_summary() -> Result<SystemHardwareSummary> {
     let gpu_devices = enumerate_gpu_devices()?;
 
     // 获取 CPU 信息
-    let cpu_name = get_cpu_name().unwrap_or_else(|| "未知CPU".to_string());
+    let cpu_name = get_cpu_name().unwrap_or_else(|| tr!("未知CPU"));
 
     // 获取内存信息
     let mut mem_info = MEMORYSTATUSEX {
@@ -443,7 +445,7 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
         )?;
 
         if dev_info.is_invalid() {
-            bail!("SetupDiGetClassDevsW 失败");
+            bail!("{}", tr!("SetupDiGetClassDevsW 失败"));
         }
 
         let mut dev_info_data = SP_DEVINFO_DATA {
@@ -479,7 +481,7 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
 
                 if is_nvidia_device(&hardware_id, &manufacturer, &name) {
                     nvidia_devices.push(dev_info_data);
-                    println!("[NvidiaUninstall] 找到英伟达设备: {}", name);
+                    log::info!("[NvidiaUninstall] 找到英伟达设备: {}", name);
                 }
             }
 
@@ -489,7 +491,7 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
         if nvidia_devices.is_empty() {
             let _ = SetupDiDestroyDeviceInfoList(dev_info);
             result.success = true;
-            result.message = "未找到英伟达显卡设备".to_string();
+            result.message = tr!("未找到英伟达显卡设备");
             return Ok(result);
         }
 
@@ -498,11 +500,11 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
             let name = get_device_registry_property_string(dev_info, &device_data, SPDRP_DEVICEDESC)
                 .unwrap_or_else(|| "未知设备".to_string());
 
-            println!("[NvidiaUninstall] 正在卸载: {}", name);
+            log::info!("[NvidiaUninstall] 正在卸载: {}", name);
 
             // 方法1：尝试使用 SetupDiRemoveDevice - 返回 BOOL 类型
             if SetupDiRemoveDevice(dev_info, &mut device_data).as_bool() {
-                println!("[NvidiaUninstall] 成功卸载: {}", name);
+                log::info!("[NvidiaUninstall] 成功卸载: {}", name);
                 uninstalled += 1;
                 result.needs_reboot = true;
             } else {
@@ -532,11 +534,11 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
                     if SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, dev_info, Some(&device_data))
                         .is_ok()
                     {
-                        println!("[NvidiaUninstall] 已禁用设备: {}", name);
+                        log::info!("[NvidiaUninstall] 已禁用设备: {}", name);
                         uninstalled += 1;
                         result.needs_reboot = true;
                     } else {
-                        println!(
+                        log::error!(
                             "[NvidiaUninstall] 禁用失败: {} (错误: {:?})",
                             name,
                             GetLastError()
@@ -544,7 +546,7 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
                         failed += 1;
                     }
                 } else {
-                    println!(
+                    log::error!(
                         "[NvidiaUninstall] 设置参数失败: {} (错误: {:?})",
                         name,
                         GetLastError()
@@ -562,11 +564,11 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
     result.success = uninstalled > 0;
 
     if uninstalled > 0 && failed == 0 {
-        result.message = format!("成功卸载 {} 个英伟达驱动", uninstalled);
+        result.message = tr!("成功卸载 {} 个英伟达驱动", uninstalled);
     } else if uninstalled > 0 && failed > 0 {
-        result.message = format!("卸载完成: 成功 {}, 失败 {}", uninstalled, failed);
+        result.message = tr!("卸载完成: 成功 {}, 失败 {}", uninstalled, failed);
     } else {
-        result.message = "卸载失败，请尝试手动卸载".to_string();
+        result.message = tr!("卸载失败，请尝试手动卸载");
     }
 
     Ok(result)
@@ -587,7 +589,7 @@ pub fn uninstall_nvidia_drivers_offline(target_partition: &str) -> Result<Uninst
     let driver_store_path = Path::new(&driver_store);
 
     if !driver_store_path.exists() {
-        result.message = format!("驱动存储目录不存在: {}", driver_store);
+        result.message = tr!("驱动存储目录不存在: {}", driver_store);
         return Ok(result);
     }
 
@@ -622,16 +624,16 @@ pub fn uninstall_nvidia_drivers_offline(target_partition: &str) -> Result<Uninst
                 || dir_name.contains("nvdisplay");
 
             if is_nvidia {
-                println!("[NvidiaUninstall] 删除离线驱动目录: {}", dir_name);
+                log::info!("[NvidiaUninstall] 删除离线驱动目录: {}", dir_name);
 
                 match remove_directory_recursive(&path) {
                     Ok(_) => {
                         removed_count += 1;
-                        println!("[NvidiaUninstall] 成功删除: {}", dir_name);
+                        log::info!("[NvidiaUninstall] 成功删除: {}", dir_name);
                     }
                     Err(e) => {
                         failed_count += 1;
-                        println!("[NvidiaUninstall] 删除失败: {} - {}", dir_name, e);
+                        log::error!("[NvidiaUninstall] 删除失败: {} - {}", dir_name, e);
                     }
                 }
             }
@@ -658,7 +660,7 @@ pub fn uninstall_nvidia_drivers_offline(target_partition: &str) -> Result<Uninst
                             if name_lower.starts_with("nv") || name_lower.contains("nvidia") {
                                 // 尝试读取文件内容确认
                                 if is_nvidia_inf_file(&path) {
-                                    println!("[NvidiaUninstall] 删除INF文件: {}", name);
+                                    log::info!("[NvidiaUninstall] 删除INF文件: {}", name);
                                     if std::fs::remove_file(&path).is_ok() {
                                         // 同时删除对应的 PNF 文件
                                         let pnf_path = path.with_extension("pnf");
@@ -681,13 +683,13 @@ pub fn uninstall_nvidia_drivers_offline(target_partition: &str) -> Result<Uninst
     result.success = removed_count > 0;
 
     if removed_count > 0 && failed_count == 0 {
-        result.message = format!("成功删除 {} 个英伟达驱动文件/目录", removed_count);
+        result.message = tr!("成功删除 {} 个英伟达驱动文件/目录", removed_count);
     } else if removed_count > 0 && failed_count > 0 {
-        result.message = format!("删除完成: 成功 {}, 失败 {}", removed_count, failed_count);
+        result.message = tr!("删除完成: 成功 {}, 失败 {}", removed_count, failed_count);
     } else if failed_count > 0 {
-        result.message = format!("删除失败: {} 个文件无法删除", failed_count);
+        result.message = tr!("删除失败: {} 个文件无法删除", failed_count);
     } else {
-        result.message = "未找到英伟达驱动文件".to_string();
+        result.message = tr!("未找到英伟达驱动文件");
     }
 
     Ok(result)
@@ -736,7 +738,7 @@ fn remove_directory_recursive(path: &Path) -> Result<()> {
     let _ = make_writable(path);
 
     // 再次尝试删除
-    std::fs::remove_dir_all(path).context("无法删除目录")
+    std::fs::remove_dir_all(path).context(tr!("无法删除目录"))
 }
 
 // ============================================================================
@@ -757,7 +759,7 @@ pub fn get_system_hardware_summary() -> Result<SystemHardwareSummary> {
 pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
     Ok(UninstallResult {
         success: false,
-        message: "此功能仅支持 Windows 系统".to_string(),
+        message: tr!("此功能仅支持 Windows 系统"),
         ..Default::default()
     })
 }
@@ -766,7 +768,7 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
 pub fn uninstall_nvidia_drivers_offline(_target_partition: &str) -> Result<UninstallResult> {
     Ok(UninstallResult {
         success: false,
-        message: "此功能仅支持 Windows 系统".to_string(),
+        message: tr!("此功能仅支持 Windows 系统"),
         ..Default::default()
     })
 }
@@ -783,8 +785,8 @@ pub fn format_hardware_summary(summary: &SystemHardwareSummary) -> String {
             beautify_gpu_name(&gpu.name)
         };
 
-        output.push_str(&format!("显卡{}型号: {}\n", i + 1, display_name));
-        output.push_str(&format!("显卡{}硬件ID: {}\n", i + 1, gpu.hardware_id));
+        output.push_str(&tr!("显卡{}型号: {}\n", i + 1, display_name));
+        output.push_str(&tr!("显卡{}硬件ID: {}\n", i + 1, gpu.hardware_id));
     }
 
     // 分隔线
@@ -799,10 +801,10 @@ pub fn format_hardware_summary(summary: &SystemHardwareSummary) -> String {
     // 内存信息
     let total_gb = summary.memory_size as f64 / (1024.0 * 1024.0 * 1024.0);
     let avail_gb = summary.memory_available as f64 / (1024.0 * 1024.0 * 1024.0);
-    output.push_str(&format!(
-        "内存大小: {:.0} GB ({:.1} GB可用)\n",
-        total_gb.ceil(),
-        avail_gb
+    output.push_str(&tr!(
+        "内存大小: {} GB ({} GB可用)\n",
+        format!("{:.0}", total_gb.ceil()),
+        format!("{:.1}", avail_gb)
     ));
 
     output

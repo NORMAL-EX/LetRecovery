@@ -3,6 +3,7 @@
 //! 提供驱动备份、还原和导入功能
 
 use std::path::Path;
+use crate::tr;
 
 /// 导出驱动到指定目录（离线系统）
 pub fn export_drivers_offline(source_partition: &str, export_dir: &str) -> Result<(), String> {
@@ -22,7 +23,7 @@ pub fn export_drivers_online(export_dir: &str) -> Result<(), String> {
 pub fn import_drivers_offline(target_partition: &str, driver_dir: &str) -> Result<(), String> {
     // 检查驱动目录是否存在
     if !Path::new(driver_dir).exists() {
-        return Err(format!("驱动目录不存在: {}", driver_dir));
+        return Err(tr!("驱动目录不存在: {}", driver_dir));
     }
 
     let dism = crate::core::dism::Dism::new();
@@ -45,7 +46,7 @@ pub fn get_storage_driver_dir() -> Option<std::path::PathBuf> {
 /// 导入存储控制器驱动到离线系统
 pub fn import_storage_drivers(target_partition: &str) -> Result<(), String> {
     let driver_dir = get_storage_driver_dir()
-        .ok_or_else(|| "存储控制器驱动目录不存在".to_string())?;
+        .ok_or_else(|| tr!("存储控制器驱动目录不存在"))?;
     
     import_drivers_offline(target_partition, &driver_dir.to_string_lossy())
 }

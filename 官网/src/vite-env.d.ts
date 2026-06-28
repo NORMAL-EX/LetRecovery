@@ -1,5 +1,18 @@
 /// <reference types="vite/client" />
 
+// Markdown 文档由 plugins/markdown.ts 在构建期转换为模块，导出预渲染 HTML、frontmatter 与标题列表
+declare module '*.md' {
+  export const html: string
+  export const frontmatter: Record<string, unknown> & {
+    title?: string
+    description?: string
+    layout?: string
+  }
+  export const headings: { level: number; title: string; slug: string }[]
+  const fm: Record<string, unknown>
+  export default fm
+}
+
 export {}
 
 declare global {

@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 
 use crate::app::App;
 use crate::core::image_verify::{ImageType, ImageVerifier, VerifyProgress, VerifyStatus};
+use crate::tr;
 use super::types::ImageVerifyResult;
 
 impl App {
@@ -22,31 +23,31 @@ impl App {
 
         let mut should_close = false;
 
-        egui::Window::new("镜像校验")
+        egui::Window::new(tr!("镜像校验"))
             .resizable(true)
             .default_width(600.0)
             .default_height(450.0)
             .show(ui.ctx(), |ui| {
-                ui.label("校验镜像文件的完整性，支持 WIM、ESD、SWM、GHO、ISO 格式");
+                ui.label(tr!("校验镜像文件的完整性，支持 WIM、ESD、SWM、GHO、ISO 格式"));
                 ui.add_space(10.0);
 
                 // 文件路径输入区域
                 ui.horizontal(|ui| {
-                    ui.label("镜像文件:");
+                    ui.label(tr!("镜像文件:"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.image_verify_file_path)
-                            .hint_text("输入或选择镜像文件路径")
+                            .hint_text(tr!("输入或选择镜像文件路径"))
                             .desired_width(380.0),
                     );
 
                     let can_browse = !self.image_verify_loading;
-                    if ui.add_enabled(can_browse, egui::Button::new("浏览...")).clicked() {
+                    if ui.add_enabled(can_browse, egui::Button::new(tr!("浏览..."))).clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("系统镜像", &["wim", "esd", "swm", "gho", "ghs", "iso"])
+                            .add_filter(tr!("系统镜像"), &["wim", "esd", "swm", "gho", "ghs", "iso"])
                             .add_filter("WIM/ESD/SWM", &["wim", "esd", "swm"])
                             .add_filter("GHO", &["gho", "ghs"])
                             .add_filter("ISO", &["iso"])
-                            .add_filter("所有文件", &["*"])
+                            .add_filter(tr!("所有文件"), &["*"])
                             .pick_file()
                         {
                             self.image_verify_file_path = path.to_string_lossy().to_string();
@@ -62,24 +63,24 @@ impl App {
                 ui.horizontal(|ui| {
                     let can_verify = !self.image_verify_file_path.is_empty() && !self.image_verify_loading;
 
-                    if ui.add_enabled(can_verify, egui::Button::new("开始校验")).clicked() {
+                    if ui.add_enabled(can_verify, egui::Button::new(tr!("开始校验"))).clicked() {
                         self.start_image_verify();
                     }
 
                     if self.image_verify_loading {
                         // 显示取消按钮
-                        if ui.button("取消").clicked() {
+                        if ui.button(tr!("取消")).clicked() {
                             self.cancel_image_verify();
                         }
-                        
+
                         ui.add_space(10.0);
                         ui.spinner();
-                        
+
                         // 显示进度信息
                         if let Some(ref progress) = self.image_verify_progress {
-                            ui.label(format!("{}% - {}", progress.percentage, progress.status));
+                            ui.label(tr!("{}% - {}", progress.percentage, progress.status));
                         } else {
-                            ui.label("正在初始化...");
+                            ui.label(tr!("正在初始化..."));
                         }
                     }
                 });
@@ -104,7 +105,7 @@ impl App {
                 } else if !self.image_verify_loading {
                     ui.colored_label(
                         egui::Color32::GRAY,
-                        "请选择镜像文件并点击「开始校验」",
+                        tr!("请选择镜像文件并点击「开始校验」"),
                     );
                 }
 
@@ -112,7 +113,7 @@ impl App {
 
                 // 关闭按钮
                 ui.horizontal(|ui| {
-                    if ui.button("关闭").clicked() {
+                    if ui.button(tr!("关闭")).clicked() {
                         should_close = true;
                     }
                 });
@@ -131,17 +132,17 @@ impl App {
     fn render_verify_result(ui: &mut egui::Ui, result: &ImageVerifyResult) {
         // 文件信息
         ui.horizontal(|ui| {
-            ui.label("文件:");
+            ui.label(tr!("文件:"));
             ui.label(&result.file_path);
         });
 
         ui.horizontal(|ui| {
-            ui.label("类型:");
+            ui.label(tr!("类型:"));
             ui.label(&result.image_type);
         });
 
         ui.horizontal(|ui| {
-            ui.label("大小:");
+            ui.label(tr!("大小:"));
             ui.label(Self::format_file_size(result.file_size));
         });
 
@@ -152,7 +153,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     egui::Color32::from_rgb(0, 200, 0),
-                    "校验通过",
+                    tr!("校验通过"),
                 );
             });
         } else {
@@ -169,7 +170,7 @@ impl App {
         // 详细消息
         if !result.message.is_empty() {
             ui.horizontal(|ui| {
-                ui.label("说明:");
+                ui.label(tr!("说明:"));
                 ui.label(&result.message);
             });
         }
@@ -177,14 +178,14 @@ impl App {
         // 镜像数量信息
         if result.image_count > 0 {
             ui.horizontal(|ui| {
-                ui.label("镜像数量:");
+                ui.label(tr!("镜像数量:"));
                 ui.label(format!("{}", result.image_count));
             });
         }
 
         if result.part_count > 1 {
             ui.horizontal(|ui| {
-                ui.label("分卷数量:");
+                ui.label(tr!("分卷数量:"));
                 ui.label(format!("{}", result.part_count));
             });
         }
@@ -192,8 +193,8 @@ impl App {
         // 详细信息列表
         if !result.details.is_empty() {
             ui.add_space(10.0);
-            ui.label("详细信息:");
-            
+            ui.label(tr!("详细信息:"));
+
             egui::ScrollArea::vertical()
                 .max_height(150.0)
                 .show(ui, |ui| {
@@ -220,7 +221,7 @@ impl App {
         } else if size >= KB {
             format!("{:.2} KB", size as f64 / KB as f64)
         } else {
-            format!("{} 字节", size)
+            tr!("{} 字节", size)
         }
     }
 
@@ -241,8 +242,8 @@ impl App {
                 file_path: file_path.clone(),
                 image_type: ImageType::from_extension(&file_path).to_string(),
                 is_valid: false,
-                status_text: "文件不存在".to_string(),
-                message: "请检查文件路径是否正确".to_string(),
+                status_text: tr!("文件不存在"),
+                message: tr!("请检查文件路径是否正确"),
                 ..Default::default()
             });
             return;
@@ -252,7 +253,7 @@ impl App {
         self.image_verify_result = None;
         self.image_verify_progress = Some(VerifyProgress {
             percentage: 0,
-            status: "正在初始化...".to_string(),
+            status: tr!("正在初始化..."),
             current_item: String::new(),
         });
 
@@ -270,11 +271,11 @@ impl App {
 
         // 在后台线程中执行校验
         std::thread::spawn(move || {
-            println!("[IMAGE VERIFY] 开始校验: {}", file_path);
+            log::info!("[IMAGE VERIFY] 开始校验: {}", file_path);
 
             let result = verifier.verify(&file_path, Some(progress_tx));
 
-            println!("[IMAGE VERIFY] 校验完成: {:?}", result.status);
+            log::info!("[IMAGE VERIFY] 校验完成: {:?}", result.status);
 
             // 转换为 UI 使用的结果类型
             let ui_result = ImageVerifyResult {
@@ -297,7 +298,7 @@ impl App {
     fn cancel_image_verify(&mut self) {
         if let Some(ref cancel_flag) = self.image_verify_cancel_flag {
             cancel_flag.store(true, Ordering::SeqCst);
-            println!("[IMAGE VERIFY] 已发送取消请求");
+            log::info!("[IMAGE VERIFY] 已发送取消请求");
         }
     }
 

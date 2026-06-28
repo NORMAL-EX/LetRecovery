@@ -79,6 +79,38 @@ jobs:
           test -f "pkg/LetRecovery.exe"            || { echo "底包缺少 LetRecovery.exe"; exit 1; }
           test -f "pkg/bin/pe/LetRecovery_PE.wim"  || { echo "底包缺少 bin/pe/LetRecovery_PE.wim"; exit 1; }
 
+      - name: Strip runtime junk from package
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 底包里可能混入 Ghost 运行时垃圾（崩溃转储 *.dmp / 错误日志 GHOSTERR.TXT、ghstwarn.txt），
+          # 与源码仓库 .gitignore 同一套规则删掉，别让它们随正式 release 发出去。
+          find pkg -type f \( \
+            -iname '*.dmp' -o \
+            -iname 'GHOSTERR.TXT' -o \
+            -iname 'ghstwarn.txt' -o \
+            -iname '*.tmp' -o \
+            -iname 'Thumbs.db' -o \
+            -iname '.DS_Store' -o \
+            -iname '*.swp' \
+          \) -print -delete || true
+          echo "运行时垃圾清理完成。"
+
+      - name: Relocate system-side lang/diskpart into bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 正常系统端新布局：底包根目录的 lang/diskpart 收进 bin/（PE 端在 WIM 内的 lang 不受影响）。
+          mkdir -p pkg/bin
+          for d in lang diskpart; do
+            if [ -d "pkg/$d" ]; then
+              mkdir -p "pkg/bin/$d"
+              cp -rf "pkg/$d/." "pkg/bin/$d/"
+              rm -rf "pkg/$d"
+              echo "relocated pkg/$d -> pkg/bin/$d"
+            fi
+          done
+
       - name: Replace system-side exe
         shell: bash
         run: |
@@ -168,6 +200,24 @@ jobs:
           PY
           echo "--- updated config.json ---"
           cat pkg/config.json
+
+      - name: Force safe defaults in config.json (advanced options OFF)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 正式 release 发给终端用户：强制「高级选项」总开关关闭。
+          # 高级选项面向高级用户，需用户自行在软件设置里开启；正式版默认不该开。
+          test -f pkg/config.json || { echo "pkg/config.json 不存在，跳过"; exit 0; }
+          python - <<'PY'
+          import json, io
+          p = "pkg/config.json"
+          d = json.load(open(p, encoding="utf-8"))
+          before = d.get("enable_advanced_options")
+          d["enable_advanced_options"] = False
+          io.open(p, "w", encoding="utf-8", newline="\n").write(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+          print("enable_advanced_options:", before, "-> False")
+          PY
+          echo "已强制 enable_advanced_options=False"
 
       - name: Add README and CSDN evidence into package
         shell: bash

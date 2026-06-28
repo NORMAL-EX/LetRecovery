@@ -1,6 +1,7 @@
 //! 服务器配置模块
 //! 从远程服务器获取 PE 和系统镜像配置
 
+use crate::tr;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -85,7 +86,7 @@ impl RemoteConfig {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .context("创建 HTTP 客户端失败")?;
+            .context(tr!("创建 HTTP 客户端失败"))?;
         
         // 请求服务器配置
         let config_url = SERVER_BASE_URL;
@@ -94,18 +95,18 @@ impl RemoteConfig {
         let response = client
             .get(config_url)
             .send()
-            .context("请求服务器配置失败")?;
-        
+            .context(tr!("请求服务器配置失败"))?;
+
         if !response.status().is_success() {
-            anyhow::bail!("服务器返回错误状态码: {}", response.status());
+            anyhow::bail!("{}", tr!("服务器返回错误状态码: {}", response.status()));
         }
-        
+
         let config_response: ServerConfigResponse = response
             .json()
-            .context("解析服务器响应失败")?;
-        
+            .context(tr!("解析服务器响应失败"))?;
+
         if config_response.code != 200 {
-            anyhow::bail!("服务器返回错误: {}", config_response.message);
+            anyhow::bail!("{}", tr!("服务器返回错误: {}", config_response.message));
         }
         
         let data = config_response.data;
@@ -166,13 +167,13 @@ impl RemoteConfig {
         let response = client
             .get(url)
             .send()
-            .context(format!("请求 {} 失败", url))?;
-        
+            .context(tr!("请求 {} 失败", url))?;
+
         if !response.status().is_success() {
-            anyhow::bail!("请求 {} 返回错误状态码: {}", url, response.status());
+            anyhow::bail!("{}", tr!("请求 {} 返回错误状态码: {}", url, response.status()));
         }
-        
-        let content = response.text().context("读取响应内容失败")?;
+
+        let content = response.text().context(tr!("读取响应内容失败"))?;
         
         Ok(content)
     }

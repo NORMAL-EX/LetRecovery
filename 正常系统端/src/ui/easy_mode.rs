@@ -5,6 +5,7 @@ use egui;
 
 use crate::app::{App, EasyModeLogoState, Panel};
 use crate::download::config::EasyModeSystem;
+use crate::tr;
 
 /// Logo加载结果
 pub struct LogoLoadResult {
@@ -18,7 +19,7 @@ impl App {
         // 检查ISO挂载状态和镜像信息加载状态（支持小白模式自动安装）
         self.check_iso_mount_status();
         
-        ui.heading("系统重装");
+        ui.heading(tr!("系统重装"));
         ui.separator();
         
         // 显示设置提示
@@ -26,7 +27,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 181, 246),
-                    "您可以在\"关于\"页面中关闭小白模式",
+                    tr!("您可以在\"关于\"页面中关闭小白模式"),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").clicked() {
@@ -45,12 +46,12 @@ impl App {
             if self.remote_config_loading {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("正在加载系统列表...");
+                    ui.label(tr!("正在加载系统列表..."));
                 });
             } else {
                 ui.colored_label(
                     egui::Color32::RED,
-                    "无法获取系统列表，请检查网络连接后重启程序",
+                    tr!("无法获取系统列表，请检查网络连接后重启程序"),
                 );
             }
             return;
@@ -61,13 +62,13 @@ impl App {
         if systems.is_empty() {
             ui.colored_label(
                 egui::Color32::from_rgb(255, 165, 0),
-                "暂无可用的系统镜像",
+                tr!("暂无可用的系统镜像"),
             );
             return;
         }
         
         ui.add_space(10.0);
-        ui.label("请选择要安装的系统：");
+        ui.label(tr!("请选择要安装的系统："));
         ui.add_space(15.0);
         
         // 显示系统选择卡片
@@ -267,7 +268,7 @@ impl App {
                             let can_install = self.easy_mode_selected_volume.is_some();
                             
                             let button = egui::Button::new(
-                                egui::RichText::new("开始安装").strong()
+                                egui::RichText::new(tr!("开始安装")).strong()
                             );
                             
                             if ui.add_enabled(can_install, button).clicked() {
@@ -275,10 +276,10 @@ impl App {
                             }
                             
                             if !can_install {
-                                ui.label(egui::RichText::new("请先选择版本").small().weak());
+                                ui.label(egui::RichText::new(tr!("请先选择版本")).small().weak());
                             }
                         } else {
-                            ui.label(egui::RichText::new("无可用版本").weak());
+                            ui.label(egui::RichText::new(tr!("无可用版本")).weak());
                         }
                     });
                 }
@@ -347,12 +348,10 @@ impl App {
                 ctx_clone.request_repaint();
                 
                 // 通过静态变量传递结果
-                unsafe {
-                    LOGO_LOAD_RESULTS.push(LogoLoadResult {
-                        url,
-                        data: result,
-                    });
-                }
+                LOGO_LOAD_RESULTS.lock().unwrap().push(LogoLoadResult {
+                    url,
+                    data: result,
+                });
             });
         }
         
@@ -361,9 +360,7 @@ impl App {
     
     /// 处理Logo加载结果
     pub fn process_easy_mode_logo_results(&mut self, ctx: &egui::Context) {
-        let results: Vec<LogoLoadResult> = unsafe {
-            std::mem::take(&mut LOGO_LOAD_RESULTS)
-        };
+        let results: Vec<LogoLoadResult> = std::mem::take(&mut *LOGO_LOAD_RESULTS.lock().unwrap());
         
         for result in results {
             self.easy_mode_logo_loading.remove(&result.url);
@@ -426,7 +423,7 @@ impl App {
         
         let window_width = 420.0;
         
-        egui::Window::new("确认重装系统")
+        egui::Window::new(tr!("确认重装系统"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -436,7 +433,7 @@ impl App {
                 
                 // 警告标题
                 ui.horizontal(|ui| {
-                    let text = egui::RichText::new("警告").size(20.0).strong();
+                    let text = egui::RichText::new(tr!("警告")).size(20.0).strong();
                     let text_width = 80.0;
                     ui.add_space((window_width - text_width) / 2.0 - 16.0);
                     ui.colored_label(egui::Color32::from_rgb(255, 193, 7), text);
@@ -446,7 +443,7 @@ impl App {
                 
                 // 安装信息
                 ui.horizontal(|ui| {
-                    let text = format!("您即将安装: {} - {}", system_name, volume.name);
+                    let text = tr!("您即将安装: {} - {}", system_name, volume.name);
                     let text_width = text.len() as f32 * 7.0;
                     ui.add_space((window_width - text_width) / 2.0 - 16.0);
                     ui.label(&text);
@@ -456,7 +453,7 @@ impl App {
                 
                 // 警告文字
                 ui.horizontal(|ui| {
-                    let text = "此操作将清除 C 盘（系统盘）上的所有数据！";
+                    let text = tr!("此操作将清除 C 盘（系统盘）上的所有数据！");
                     let text_width = 280.0;
                     ui.add_space((window_width - text_width) / 2.0 - 16.0);
                     ui.colored_label(egui::Color32::RED, text);
@@ -466,7 +463,7 @@ impl App {
                 
                 // 备份提示
                 ui.horizontal(|ui| {
-                    let text = "请确保已备份重要文件。";
+                    let text = tr!("请确保已备份重要文件。");
                     let text_width = 150.0;
                     ui.add_space((window_width - text_width) / 2.0 - 16.0);
                     ui.label(text);
@@ -480,7 +477,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let text_width = 130.0;
                     ui.add_space((window_width - text_width) / 2.0 - 16.0);
-                    ui.label(egui::RichText::new("将自动应用以下优化：").small().strong());
+                    ui.label(egui::RichText::new(tr!("将自动应用以下优化：")).small().strong());
                 });
                 
                 ui.add_space(5.0);
@@ -493,11 +490,11 @@ impl App {
                         .num_columns(2)
                         .spacing([20.0, 4.0])
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("• OOBE绕过强制联网").small());
-                            ui.label(egui::RichText::new("• 删除预装UWP应用").small());
+                            ui.label(egui::RichText::new(tr!("• OOBE绕过强制联网")).small());
+                            ui.label(egui::RichText::new(tr!("• 删除预装UWP应用")).small());
                             ui.end_row();
-                            ui.label(egui::RichText::new("• 导入磁盘控制器驱动").small());
-                            ui.label(egui::RichText::new("• 自动导入当前驱动").small());
+                            ui.label(egui::RichText::new(tr!("• 导入磁盘控制器驱动")).small());
+                            ui.label(egui::RichText::new(tr!("• 自动导入当前驱动")).small());
                             ui.end_row();
                         });
                 });
@@ -509,14 +506,14 @@ impl App {
                     let buttons_width = 150.0;
                     ui.add_space((window_width - buttons_width) / 2.0 - 16.0);
                     
-                    if ui.button("取消").clicked() {
+                    if ui.button(tr!("取消")).clicked() {
                         self.easy_mode_show_confirm_dialog = false;
                     }
                     
                     ui.add_space(20.0);
                     
                     let confirm_btn = egui::Button::new(
-                        egui::RichText::new("确认安装").color(egui::Color32::WHITE)
+                        egui::RichText::new(tr!("确认安装")).color(egui::Color32::WHITE)
                     ).fill(egui::Color32::from_rgb(200, 60, 60));
                     
                     if ui.add(confirm_btn).clicked() {
@@ -573,7 +570,7 @@ impl App {
             .position(|p| p.is_system_partition);
         
         if system_partition_idx.is_none() {
-            self.show_error("未找到系统分区，无法进行安装");
+            self.show_error(&tr!("未找到系统分区，无法进行安装"));
             return;
         }
         
@@ -624,4 +621,4 @@ fn load_logo_from_url(url: &str) -> Result<Vec<u8>, String> {
 }
 
 // 静态变量存储Logo加载结果
-static mut LOGO_LOAD_RESULTS: Vec<LogoLoadResult> = Vec::new();
+static LOGO_LOAD_RESULTS: std::sync::Mutex<Vec<LogoLoadResult>> = std::sync::Mutex::new(Vec::new());

@@ -18,6 +18,7 @@ use std::sync::mpsc::Sender;
 
 use anyhow::{bail, Context, Result};
 
+use crate::tr;
 use crate::utils::command::new_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_exe_dir;
@@ -115,11 +116,14 @@ impl DismCmd {
         }
 
         bail!(
-            "未找到可用的 dism.exe。请确保系统已安装 DISM 或将 dism.exe 放置于程序目录的 bin\\Dism\\ 下\n\
-             已搜索路径:\n\
-             - {{程序目录}}\\bin\\Dism\\dism.exe\n\
-             - X:\\Windows\\System32\\dism.exe (PE 环境)\n\
-             - C:\\Windows\\System32\\dism.exe (Windows 系统)"
+            "{}",
+            tr!(
+                "未找到可用的 dism.exe。请确保系统已安装 DISM 或将 dism.exe 放置于程序目录的 bin\\Dism\\ 下\n\
+                 已搜索路径:\n\
+                 - {程序目录}\\bin\\Dism\\dism.exe\n\
+                 - X:\\Windows\\System32\\dism.exe (PE 环境)\n\
+                 - C:\\Windows\\System32\\dism.exe (Windows 系统)"
+            )
         )
     }
 
@@ -227,10 +231,10 @@ impl DismCmd {
 
         // 验证路径
         if !Path::new(&image_path.trim_end_matches('\\')).exists() {
-            bail!("离线映像路径不存在: {}", image_path);
+            bail!("{}", tr!("离线映像路径不存在: {}", image_path));
         }
         if !Path::new(&driver_path_normalized).exists() {
-            bail!("驱动路径不存在: {}", driver_path_normalized);
+            bail!("{}", tr!("驱动路径不存在: {}", driver_path_normalized));
         }
 
         log::info!(
@@ -240,7 +244,7 @@ impl DismCmd {
         );
 
         // 发送初始进度
-        Self::send_progress(&progress_tx, 0, "正在准备添加驱动...");
+        Self::send_progress(&progress_tx, 0, &tr!("正在准备添加驱动..."));
 
         // 确保临时目录存在
         let scratch_dir = Self::ensure_scratch_directory();
@@ -263,7 +267,7 @@ impl DismCmd {
 
         // 执行命令
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        self.execute_with_progress_args(&args_ref, progress_tx, "驱动添加")
+        self.execute_with_progress_args(&args_ref, progress_tx, &tr!("驱动添加"))
     }
 
     /// 批量添加驱动目录
@@ -309,15 +313,15 @@ impl DismCmd {
         let package_path = package_path.trim().to_string();
 
         if !Path::new(&image_path.trim_end_matches('\\')).exists() {
-            bail!("离线映像路径不存在: {}", image_path);
+            bail!("{}", tr!("离线映像路径不存在: {}", image_path));
         }
         if !Path::new(&package_path).exists() {
-            bail!("包路径不存在: {}", package_path);
+            bail!("{}", tr!("包路径不存在: {}", package_path));
         }
 
         log::info!("[DismCmd] 添加包: {} -> {}", package_path, image_path);
 
-        Self::send_progress(&progress_tx, 0, "正在准备添加更新包...");
+        Self::send_progress(&progress_tx, 0, &tr!("正在准备添加更新包..."));
 
         // 确保临时目录存在
         let scratch_dir = Self::ensure_scratch_directory();
@@ -336,7 +340,7 @@ impl DismCmd {
 
         // 执行命令
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        self.execute_with_progress_args(&args_ref, progress_tx, "包添加")
+        self.execute_with_progress_args(&args_ref, progress_tx, &tr!("包添加"))
     }
 
     /// 向离线映像添加 CAB 包（简化版，兼容旧接口）
@@ -365,7 +369,7 @@ impl DismCmd {
     ) -> Result<()> {
         let package_dir_path = Path::new(package_dir);
         if !package_dir_path.exists() {
-            bail!("包目录不存在: {}", package_dir);
+            bail!("{}", tr!("包目录不存在: {}", package_dir));
         }
 
         // 收集所有 CAB 文件
@@ -392,7 +396,7 @@ impl DismCmd {
             Self::send_progress(
                 &progress_tx,
                 progress_pct,
-                &format!("正在添加: {} ({}/{})", cab_name, idx + 1, total),
+                &tr!("正在添加: {} ({}/{})", cab_name, idx + 1, total),
             );
 
             match self.add_package_offline(
@@ -412,7 +416,7 @@ impl DismCmd {
             }
         }
 
-        Self::send_progress(&progress_tx, 100, "CAB 包添加完成");
+        Self::send_progress(&progress_tx, 100, &tr!("CAB 包添加完成"));
 
         log::info!(
             "[DismCmd] CAB 包添加完成: 成功 {}/{}, 失败 {}",
@@ -422,7 +426,7 @@ impl DismCmd {
         );
 
         if success_count == 0 && !cab_files.is_empty() {
-            bail!("所有 CAB 包添加失败: {:?}", failed_packages);
+            bail!("{}", tr!("所有 CAB 包添加失败: {}", format!("{:?}", failed_packages)));
         }
 
         Ok(())
@@ -450,15 +454,15 @@ impl DismCmd {
         let destination = destination.trim().to_string();
 
         if !Path::new(&image_path.trim_end_matches('\\')).exists() {
-            bail!("离线映像路径不存在: {}", image_path);
+            bail!("{}", tr!("离线映像路径不存在: {}", image_path));
         }
 
         // 确保目标目录存在
-        std::fs::create_dir_all(&destination).context("创建导出目录失败")?;
+        std::fs::create_dir_all(&destination).context(tr!("创建导出目录失败"))?;
 
         log::info!("[DismCmd] 导出驱动: {} -> {}", image_path, destination);
 
-        Self::send_progress(&progress_tx, 0, "正在准备导出驱动...");
+        Self::send_progress(&progress_tx, 0, &tr!("正在准备导出驱动..."));
 
         // 确保临时目录存在
         let scratch_dir = Self::ensure_scratch_directory();
@@ -470,7 +474,7 @@ impl DismCmd {
             &format!("/scratchdir:{}", scratch_dir),
         ];
 
-        self.execute_with_progress_args(&args, progress_tx, "驱动导出")
+        self.execute_with_progress_args(&args, progress_tx, &tr!("驱动导出"))
     }
 
     // ========================================================================
@@ -495,7 +499,7 @@ impl DismCmd {
     ) -> Result<()> {
         let source_path = Path::new(source_dir);
         if !source_path.exists() {
-            bail!("源目录不存在: {}", source_dir);
+            bail!("{}", tr!("源目录不存在: {}", source_dir));
         }
 
         // 分析目录内容
@@ -511,7 +515,7 @@ impl DismCmd {
 
         // 处理 CAB 包（Windows 更新）
         if has_cab_files {
-            Self::send_progress(&progress_tx, 0, "正在添加 CAB 更新包...");
+            Self::send_progress(&progress_tx, 0, &tr!("正在添加 CAB 更新包..."));
 
             if let Err(e) = self.add_packages_from_directory(image_path, source_dir, None) {
                 log::warn!("[DismCmd] CAB 包添加失败: {}", e);
@@ -524,7 +528,7 @@ impl DismCmd {
             Self::send_progress(
                 &progress_tx,
                 if has_cab_files { 50 } else { 0 },
-                "正在添加驱动...",
+                &tr!("正在添加驱动..."),
             );
 
             if let Err(e) = self.add_drivers_from_directory(image_path, source_dir, None) {
@@ -536,11 +540,11 @@ impl DismCmd {
             }
         }
 
-        Self::send_progress(&progress_tx, 100, "导入完成");
+        Self::send_progress(&progress_tx, 100, &tr!("导入完成"));
 
         // 如果两个操作都失败了，返回错误
         if !has_inf_files && !has_cab_files {
-            bail!("目录中没有找到驱动文件（.inf）或 CAB 包（.cab）");
+            bail!("{}", tr!("目录中没有找到驱动文件（.inf）或 CAB 包（.cab）"));
         }
 
         if let Some(e) = last_error {
@@ -612,7 +616,7 @@ impl DismCmd {
         let mut cmd = new_command(&self.dism_path);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let output = cmd.output().context("执行 DISM 命令失败")?;
+        let output = cmd.output().context(tr!("执行 DISM 命令失败"))?;
 
         let stdout = if output.stdout.is_empty() {
             String::new()
@@ -643,10 +647,10 @@ impl DismCmd {
             } else if !stdout.trim().is_empty() {
                 Self::extract_error_from_output(&stdout)
             } else {
-                format!("DISM 退出码: {:?}", output.status.code())
+                tr!("DISM 退出码: {}", format!("{:?}", output.status.code()))
             };
 
-            bail!("DISM 操作失败: {}", error_msg);
+            bail!("{}", tr!("DISM 操作失败: {}", error_msg));
         }
 
         Ok(stdout)
@@ -669,22 +673,22 @@ impl DismCmd {
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         // 启动进程
-        let mut child = cmd.spawn().context("启动 DISM 进程失败")?;
+        let mut child = cmd.spawn().context(tr!("启动 DISM 进程失败"))?;
 
         // 读取并处理输出
         let result = self.process_output(&mut child, &progress_tx, operation_name);
 
         // 等待进程结束
-        let status = child.wait().context("等待 DISM 进程失败")?;
+        let status = child.wait().context(tr!("等待 DISM 进程失败"))?;
 
         // 处理结果
         match result {
             Ok(_) => {
                 if status.success() {
-                    Self::send_progress(&progress_tx, 100, &format!("{}完成", operation_name));
+                    Self::send_progress(&progress_tx, 100, &tr!("{}完成", operation_name));
                     Ok(())
                 } else {
-                    bail!("{}失败，退出代码: {:?}", operation_name, status.code())
+                    bail!("{}", tr!("{}失败，退出代码: {}", operation_name, format!("{:?}", status.code())))
                 }
             }
             Err(e) => Err(e),
@@ -723,7 +727,7 @@ impl DismCmd {
                             Self::send_progress(
                                 progress_tx,
                                 pct,
-                                &format!("{}中... {}%", operation_name, pct),
+                                &tr!("{}中... {}%", operation_name, pct),
                             );
                         }
                     }
@@ -888,7 +892,12 @@ impl DismCmd {
 
 impl Default for DismCmd {
     fn default() -> Self {
-        Self::new().expect("无法初始化 DISM 命令行执行器")
+        Self::new().unwrap_or_else(|e| {
+            log::error!("[DismCmd] 初始化 DISM 命令行执行器失败，回退到 PATH 中的 dism.exe: {}", e);
+            Self {
+                dism_path: PathBuf::from("dism.exe"),
+            }
+        })
     }
 }
 

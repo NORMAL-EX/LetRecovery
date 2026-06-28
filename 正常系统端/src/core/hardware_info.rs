@@ -6,6 +6,8 @@ use std::ffi::OsString;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStringExt;
 
+use crate::tr;
+
 use windows::core::{BSTR, PCWSTR, VARIANT};
 use windows::Win32::Foundation::{BOOL, CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Graphics::Gdi::{
@@ -58,12 +60,12 @@ pub enum DeviceType {
 impl std::fmt::Display for DeviceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DeviceType::Desktop => write!(f, "台式机"),
-            DeviceType::Laptop => write!(f, "笔记本"),
-            DeviceType::Tablet => write!(f, "平板电脑"),
-            DeviceType::Server => write!(f, "服务器"),
-            DeviceType::Workstation => write!(f, "工作站"),
-            DeviceType::Unknown => write!(f, "未知"),
+            DeviceType::Desktop => write!(f, "{}", tr!("台式机")),
+            DeviceType::Laptop => write!(f, "{}", tr!("笔记本")),
+            DeviceType::Tablet => write!(f, "{}", tr!("平板电脑")),
+            DeviceType::Server => write!(f, "{}", tr!("服务器")),
+            DeviceType::Workstation => write!(f, "{}", tr!("工作站")),
+            DeviceType::Unknown => write!(f, "{}", tr!("未知")),
         }
     }
 }
@@ -982,33 +984,33 @@ impl HardwareInfo {
         let arch_str = match self.os.architecture.as_str() {
             "64 位" => "X64", "32 位" => "X86", "ARM64" => "ARM64", _ => &self.os.architecture,
         };
-        lines.push(format!("系统名称: {} {} [10.0.{} ({})]", self.os.name, arch_str, self.os.build_number, self.os.version));
-        lines.push(format!("计算机名: {}", self.computer_name));
-        if !self.os.install_date.is_empty() { lines.push(format!("安装日期: {}", self.os.install_date)); }
-        let boot_mode = sys_info.map(|s| format!("{}", s.boot_mode)).unwrap_or_else(|| "未知".to_string());
-        lines.push(format!("启动模式: {}  设备类型: {}", boot_mode, self.device_type));
-        let tpm_str = if let Some(s) = sys_info { if s.tpm_enabled { format!("已开启 v{}", s.tpm_version) } else { "未开启".to_string() } } else { "未知".to_string() };
+        lines.push(tr!("系统名称: {} {} [10.0.{} ({})]", self.os.name, arch_str, self.os.build_number, self.os.version));
+        lines.push(tr!("计算机名: {}", self.computer_name));
+        if !self.os.install_date.is_empty() { lines.push(tr!("安装日期: {}", self.os.install_date)); }
+        let boot_mode = sys_info.map(|s| format!("{}", s.boot_mode)).unwrap_or_else(|| tr!("未知"));
+        lines.push(tr!("启动模式: {}  设备类型: {}", boot_mode, self.device_type));
+        let tpm_str = if let Some(s) = sys_info { if s.tpm_enabled { tr!("已开启 v{}", s.tpm_version) } else { tr!("未开启") } } else { tr!("未知") };
         let secure_boot_str = if let Some(s) = sys_info { if s.secure_boot { "已启用" } else { "未启用" } } else { "未知" };
         let bitlocker_str = match self.system_bitlocker_status { BitLockerStatus::Encrypted => "是", BitLockerStatus::NotEncrypted => "否", BitLockerStatus::EncryptionInProgress => "加密中", BitLockerStatus::DecryptionInProgress => "解密中", BitLockerStatus::Unknown => "未知", };
-        lines.push(format!(" TPM模块: {} 安全启动: {} BitLocker加密启动: {}", tpm_str, secure_boot_str, bitlocker_str));
+        lines.push(tr!(" TPM模块: {} 安全启动: {} BitLocker加密启动: {}", tpm_str, secure_boot_str, bitlocker_str));
         let mfr_beautified = beautify_manufacturer_name(&self.computer_manufacturer);
-        lines.push(format!("电脑型号: {} {}", mfr_beautified, self.computer_model));
-        lines.push(format!("  制造商: {}", mfr_beautified));
-        if !self.system_serial_number.is_empty() { lines.push(format!("设备编号: {}", self.system_serial_number)); }
+        lines.push(tr!("电脑型号: {} {}", mfr_beautified, self.computer_model));
+        lines.push(tr!("  制造商: {}", mfr_beautified));
+        if !self.system_serial_number.is_empty() { lines.push(tr!("设备编号: {}", self.system_serial_number)); }
         let mb_product = if !self.motherboard.product.is_empty() && !is_placeholder(&self.motherboard.product) { &self.motherboard.product } else { "未知" };
-        lines.push(format!("主板型号: {}", mb_product));
+        lines.push(tr!("主板型号: {}", mb_product));
         let mb_serial = if !self.motherboard.serial_number.is_empty() && !is_placeholder(&self.motherboard.serial_number) { &self.motherboard.serial_number } else { "未知" };
-        lines.push(format!("主板编号: {}", mb_serial));
+        lines.push(tr!("主板编号: {}", mb_serial));
         let mb_version = if !self.motherboard.version.is_empty() && !is_placeholder(&self.motherboard.version) { &self.motherboard.version } else { "N/A" };
         let bios_version = if !self.bios.version.is_empty() { &self.bios.version } else { "未知" };
         let bios_date = if !self.bios.release_date.is_empty() { &self.bios.release_date } else { "未知" };
-        lines.push(format!("主板版本: {}  BIOS版本: {}  更新日期: {}", mb_version, bios_version, bios_date));
-        lines.push(format!(" CPU型号: {}", self.cpu.name));
+        lines.push(tr!("主板版本: {}  BIOS版本: {}  更新日期: {}", mb_version, bios_version, bios_date));
+        lines.push(tr!(" CPU型号: {}", self.cpu.name));
         let ai_str = if self.cpu.supports_ai { " [支持AI人工智能]" } else { "" };
-        lines.push(format!("  核心数: {} 线程数: {}{}", self.cpu.cores, self.cpu.logical_processors, ai_str));
+        lines.push(tr!("  核心数: {} 线程数: {}{}", self.cpu.cores, self.cpu.logical_processors, ai_str));
         let total_gb = self.memory.total_physical as f64 / (1024.0 * 1024.0 * 1024.0);
         let available_gb = self.memory.available_physical as f64 / (1024.0 * 1024.0 * 1024.0);
-        lines.push(format!("内存信息: 总大小 {:.0} GB ({:.1} GB可用) 插槽数: {}", total_gb.round(), available_gb, self.memory.slot_count));
+        lines.push(tr!("内存信息: 总大小 {} GB ({} GB可用) 插槽数: {}", format!("{:.0}", total_gb.round()), format!("{:.1}", available_gb), self.memory.slot_count));
         for (i, stick) in self.memory.sticks.iter().enumerate() {
             let mfr = beautify_memory_manufacturer(&stick.manufacturer);
             let capacity_gb = stick.capacity / (1024 * 1024 * 1024);
@@ -1017,24 +1019,24 @@ impl HardwareInfo {
             lines.push(format!("          {}: {} {}/{}GB/{} {}", i + 1, mfr, part, capacity_gb, mem_type, stick.speed));
         }
         if !self.gpus.is_empty() {
-            lines.push(format!("显卡信息: 1: {}", beautify_gpu_name(&self.gpus[0].name)));
+            lines.push(tr!("显卡信息: 1: {}", beautify_gpu_name(&self.gpus[0].name)));
             for (i, gpu) in self.gpus.iter().skip(1).enumerate() { lines.push(format!("          {}: {}", i + 2, beautify_gpu_name(&gpu.name))); }
         }
         if !self.network_adapters.is_empty() {
-            lines.push(format!("网卡信息: 1: {}", self.network_adapters[0].description));
+            lines.push(tr!("网卡信息: 1: {}", self.network_adapters[0].description));
             for (i, adapter) in self.network_adapters.iter().skip(1).enumerate() { lines.push(format!("          {}: {}", i + 2, adapter.description)); }
         }
         if let Some(battery) = &self.battery {
             let charging_str = if battery.is_charging { "充电中" } else if battery.is_ac_connected { "未充电" } else { "放电中" };
-            lines.push(format!("电池信息: 当前电量: {}% 充电状态: {}", battery.charge_percent, charging_str));
-            if !battery.model.is_empty() && !is_placeholder(&battery.model) { lines.push(format!("    型号: {}", battery.model)); }
-            if !battery.manufacturer.is_empty() && !is_placeholder(&battery.manufacturer) { lines.push(format!("  制造商: {} ", beautify_manufacturer_name(&battery.manufacturer))); }
-            if battery.design_capacity_mwh > 0 { lines.push(format!("设计容量: {} mWh", battery.design_capacity_mwh)); }
-            if battery.full_charge_capacity_mwh > 0 { lines.push(format!("最大容量: {} mWh", battery.full_charge_capacity_mwh)); }
-            if battery.current_capacity_mwh > 0 { lines.push(format!("当前容量: {} mWh", battery.current_capacity_mwh)); }
+            lines.push(tr!("电池信息: 当前电量: {}% 充电状态: {}", battery.charge_percent, charging_str));
+            if !battery.model.is_empty() && !is_placeholder(&battery.model) { lines.push(tr!("    型号: {}", battery.model)); }
+            if !battery.manufacturer.is_empty() && !is_placeholder(&battery.manufacturer) { lines.push(tr!("  制造商: {} ", beautify_manufacturer_name(&battery.manufacturer))); }
+            if battery.design_capacity_mwh > 0 { lines.push(tr!("设计容量: {} mWh", battery.design_capacity_mwh)); }
+            if battery.full_charge_capacity_mwh > 0 { lines.push(tr!("最大容量: {} mWh", battery.full_charge_capacity_mwh)); }
+            if battery.current_capacity_mwh > 0 { lines.push(tr!("当前容量: {} mWh", battery.current_capacity_mwh)); }
         }
         if !self.disks.is_empty() {
-            lines.push(format!("硬盘信息: 1: {}", Self::format_disk_info(&self.disks[0])));
+            lines.push(tr!("硬盘信息: 1: {}", Self::format_disk_info(&self.disks[0])));
             for (i, disk) in self.disks.iter().skip(1).enumerate() { lines.push(format!("          {}: {}", i + 2, Self::format_disk_info(disk))); }
         }
         lines.join("\n")
@@ -1208,8 +1210,8 @@ impl HardwareInfo {
                 let ip_bytes: Vec<u8> = adapter.IpAddressList.IpAddress.iter().take_while(|&&b| b != 0).map(|&b| b as u8).collect();
                 let ip = String::from_utf8_lossy(&ip_bytes).to_string();
                 if !ip.is_empty() && ip != "0.0.0.0" { ip_addresses.push(ip); }
-                let adapter_type = match adapter.Type { 6 => "以太网".to_string(), 71 => "无线网络".to_string(), _ => format!("类型 {}", adapter.Type) };
-                if !description.is_empty() { adapters.push(NetworkAdapterInfo { name: description.clone(), description, mac_address: mac, ip_addresses, adapter_type, status: "已连接".to_string(), speed: 0 }); }
+                let adapter_type = match adapter.Type { 6 => tr!("以太网"), 71 => tr!("无线网络"), _ => tr!("类型 {}", adapter.Type) };
+                if !description.is_empty() { adapters.push(NetworkAdapterInfo { name: description.clone(), description, mac_address: mac, ip_addresses, adapter_type, status: tr!("已连接"), speed: 0 }); }
                 current = adapter.Next;
             }
         }

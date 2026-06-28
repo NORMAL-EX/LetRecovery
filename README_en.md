@@ -21,10 +21,10 @@ English | [简体中文](README.md)
 ## ✨ Features
 
 ### 🖥️ System Installation
-- **Multi-format images** - WIM / ESD / SWM / GHO / ISO, auto mount & parse, multi-edition selection
+- **Multi-format images** - WIM / ESD / SWM / GHO / ISO (including Windows XP / 2003 i386 text-mode setup), auto mount & parse, multi-edition selection
 - **Desktop & WinPE** - One-click deploy from desktop; when reinstalling the current system drive it auto-writes boot and reboots into WinPE to finish
 - **BitLocker-encrypted system reinstall** - Automatically unlocks/decrypts the BitLocker-encrypted system drive before deployment
-- **Unattended install** - Built-in generated or custom unattend.xml
+- **Unattended install** - Built-in generated or custom unattend.xml, and auto-detects answer files embedded in the source image / install media to default the checkbox accordingly
 - **Boot mode** - UEFI / Legacy auto-detected, manually selectable
 
 ### 💾 System Backup
@@ -45,6 +45,7 @@ English | [简体中文](README.md)
 - **Password reset** - clear account password online (current system) or offline (other systems)
 - **Image verify / file hash verify** - check image integrity before deployment
 - **Quick partition / partition clone / batch format**
+- **Losslessly expand C: drive** - losslessly expand the current system C: drive: auto-downloads WinPE if missing, installs PE boot, then reboots into WinPE to resize
 - **Driver backup & restore, import storage drivers**
 - **Remove APPX apps, NVIDIA driver uninstall, time sync, view GHO password, SpaceSniffer disk analysis, one-click boot repair**
 

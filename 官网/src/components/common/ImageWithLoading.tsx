@@ -1,5 +1,4 @@
 import React, { useState } from 'react'
-import { ImageOff } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 
@@ -30,16 +29,14 @@ const ImageWithLoading: React.FC<ImageWithLoadingProps> = ({
   const [error, setError] = useState(false)
 
   if (error) {
+    // 加载失败 → 显示灰色占位图（响应式，填满图片应占的宽度）
     return (
-      <div
-        className={cn(
-          'flex items-center justify-center bg-muted text-muted-foreground',
-          rounded,
-          wrapperClassName,
-          className,
-        )}
-      >
-        <ImageOff className="h-6 w-6" />
+      <div className={cn('overflow-hidden', rounded, wrapperClassName)}>
+        <img
+          src="/img-placeholder.svg"
+          alt={alt}
+          className={cn('select-none', className)}
+        />
       </div>
     )
   }

@@ -36,6 +36,20 @@ pub struct AppConfig {
     /// PE 配置缓存（原 pe_cache.json，已并入 config.json）
     #[serde(default)]
     pub pe_cache: crate::download::config::PeCache,
+
+    /// WIM 镜像引擎：0=libwim（默认，内置），1=wimgapi（系统原生 API）
+    #[serde(default)]
+    pub wim_engine: u8,
+
+    /// 是否启用「高级选项」（设置页总开关）。默认关闭，需在设置里或 config.json 显式置 true。
+    /// 开启后解锁：安装 XP 时可选 UEFI 引导（魔改镜像用）、系统安装页的「运行 Diskpart 脚本」复选框、
+    /// 以及自定义修复引导脚本 bin\repair_boot.txt。面向高级用户，小白不要开。
+    #[serde(default)]
+    pub enable_advanced_options: bool,
+
+    /// 「系统安装」页选项偏好（记住上次勾选状态，下次启动自动恢复）。
+    #[serde(default)]
+    pub install_prefs: crate::app::InstallPrefs,
 }
 
 /// 日志默认启用
@@ -63,6 +77,9 @@ impl Default for AppConfig {
             log_retention_days: 7,  // 默认保留7天
             language: String::from("zh-CN"),  // 默认简体中文
             pe_cache: crate::download::config::PeCache::default(),
+            wim_engine: 0,  // 默认 libwim
+            enable_advanced_options: false,
+            install_prefs: crate::app::InstallPrefs::default(),
         }
     }
 }
@@ -185,6 +202,28 @@ impl AppConfig {
         self.log_enabled
     }
     
+    /// 设置 WIM 镜像引擎并保存（同时更新进程级引擎选择，立即生效）
+    pub fn set_wim_engine(&mut self, engine: u8) {
+        self.wim_engine = engine;
+        lr_core::set_active_engine(lr_core::WimEngine::from_u8(engine));
+        if let Err(e) = self.save() {
+            log::warn!("保存配置失败: {}", e);
+        }
+    }
+
+    /// 将当前配置中的引擎选择应用到进程级全局（启动时调用一次）
+    pub fn apply_wim_engine(&self) {
+        lr_core::set_active_engine(lr_core::WimEngine::from_u8(self.wim_engine));
+    }
+
+    /// 设置「高级选项」总开关并保存
+    pub fn set_advanced_options(&mut self, enabled: bool) {
+        self.enable_advanced_options = enabled;
+        if let Err(e) = self.save() {
+            log::warn!("保存配置失败: {}", e);
+        }
+    }
+
     /// 设置界面语言并保存
     /// 
     /// # Arguments

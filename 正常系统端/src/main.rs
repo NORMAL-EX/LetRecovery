@@ -38,6 +38,9 @@ fn main() -> eframe::Result<()> {
     // 初始化国际化系统
     utils::i18n::init(&app_config.language);
 
+    // 应用 WIM 镜像引擎选择（libwim / wimgapi），供后续所有镜像操作使用
+    app_config.apply_wim_engine();
+
     log::info!("LetRecovery 启动中...");
 
     // 检查命令行参数，处理PE环境下的自动安装/备份
@@ -58,7 +61,7 @@ fn main() -> eframe::Result<()> {
         log::warn!("需要管理员权限，正在尝试提升权限...");
         if let Err(e) = utils::privilege::restart_as_admin() {
             log::error!("提升权限失败: {}", e);
-            eprintln!("需要管理员权限运行此程序");
+            log::error!("需要管理员权限运行此程序");
         }
         return Ok(());
     }
@@ -81,7 +84,7 @@ fn main() -> eframe::Result<()> {
     // 检查是否为64位系统
     if !cfg!(target_arch = "x86_64") {
         log::error!("本程序仅支持64位系统");
-        eprintln!("本程序仅支持64位系统");
+        log::error!("本程序仅支持64位系统");
         return Ok(());
     }
 
@@ -155,7 +158,7 @@ fn main() -> eframe::Result<()> {
     log::info!("启动 eframe 窗口...");
     let config_clone = preloaded_config.clone();
     eframe::run_native(
-        "LetRecovery - Windows系统一键重装工具",
+        &crate::tr!("LetRecovery - Windows系统一键重装工具"),
         options,
         Box::new(move |cc| {
             log::info!("eframe 回调开始创建 App...");
@@ -350,15 +353,15 @@ fn run_cli_install_entry(config: Option<&str>, advanced: Option<&str>) -> eframe
     let config = match config {
         Some(c) if !c.is_empty() => c,
         _ => {
-            eprintln!("[CLI INSTALL] 缺少 --config <install.json>");
-            eprintln!(
+            log::error!("[CLI INSTALL] 缺少 --config <install.json>");
+            log::error!(
                 "用法: LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]"
             );
             return Ok(());
         }
     };
     if let Err(e) = core::cli_install::run_cli_install(config, advanced) {
-        eprintln!("[CLI INSTALL] 失败: {:#}", e);
+        log::error!("[CLI INSTALL] 失败: {:#}", e);
     }
     Ok(())
 }
@@ -366,32 +369,32 @@ fn run_cli_install_entry(config: Option<&str>, advanced: Option<&str>) -> eframe
 fn run_pe_install() -> eframe::Result<()> {
     use core::install_config::ConfigFileManager;
     
-    println!("[PE INSTALL] ========== PE自动安装模式 ==========");
-    
+    log::info!("[PE INSTALL] ========== PE自动安装模式 ==========");
+
     // 查找配置文件所在分区
     let data_partition = match ConfigFileManager::find_data_partition() {
         Some(p) => p,
         None => {
-            eprintln!("[PE INSTALL] 错误: 未找到安装配置文件");
+            log::error!("[PE INSTALL] 错误: 未找到安装配置文件");
             show_error_message("未找到安装配置文件，无法继续安装。");
             return Ok(());
         }
     };
-    
-    println!("[PE INSTALL] 数据分区: {}", data_partition);
-    
+
+    log::info!("[PE INSTALL] 数据分区: {}", data_partition);
+
     // 读取安装配置
     let config = match ConfigFileManager::read_install_config(&data_partition) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[PE INSTALL] 错误: 读取配置失败: {}", e);
+            log::error!("[PE INSTALL] 错误: 读取配置失败: {}", e);
             show_error_message(&format!("读取安装配置失败: {}", e));
             return Ok(());
         }
     };
-    
-    println!("[PE INSTALL] 目标分区: {}", config.target_partition);
-    println!("[PE INSTALL] 镜像文件: {}", config.image_path);
+
+    log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
+    log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
     
     // 查找安装标记分区
     let target_partition = match ConfigFileManager::find_install_marker_partition() {
@@ -404,12 +407,12 @@ fn run_pe_install() -> eframe::Result<()> {
     let image_path = format!("{}\\{}", data_dir, config.image_path);
     
     if !std::path::Path::new(&image_path).exists() {
-        eprintln!("[PE INSTALL] 错误: 镜像文件不存在: {}", image_path);
+        log::error!("[PE INSTALL] 错误: 镜像文件不存在: {}", image_path);
         show_error_message(&format!("镜像文件不存在: {}", image_path));
         return Ok(());
     }
-    
-    println!("[PE INSTALL] 完整镜像路径: {}", image_path);
+
+    log::info!("[PE INSTALL] 完整镜像路径: {}", image_path);
     
     // 执行安装
     let result = execute_pe_install(&target_partition, &image_path, &config, &data_dir);
@@ -419,9 +422,9 @@ fn run_pe_install() -> eframe::Result<()> {
     
     match result {
         Ok(_) => {
-            println!("[PE INSTALL] 安装完成!");
+            log::info!("[PE INSTALL] 安装完成!");
             if config.auto_reboot {
-                println!("[PE INSTALL] 即将重启...");
+                log::info!("[PE INSTALL] 即将重启...");
                 let _ = utils::cmd::create_command("shutdown")
                     .args(["/r", "/t", "10", "/c", "LetRecovery 系统安装完成，即将重启..."])
                     .spawn();
@@ -430,7 +433,7 @@ fn run_pe_install() -> eframe::Result<()> {
             }
         }
         Err(e) => {
-            eprintln!("[PE INSTALL] 安装失败: {}", e);
+            log::error!("[PE INSTALL] 安装失败: {}", e);
             show_error_message(&format!("系统安装失败: {}", e));
         }
     }
@@ -442,32 +445,32 @@ fn run_pe_install() -> eframe::Result<()> {
 fn run_pe_backup() -> eframe::Result<()> {
     use core::install_config::ConfigFileManager;
     
-    println!("[PE BACKUP] ========== PE自动备份模式 ==========");
-    
+    log::info!("[PE BACKUP] ========== PE自动备份模式 ==========");
+
     // 查找配置文件所在分区
     let data_partition = match ConfigFileManager::find_data_partition() {
         Some(p) => p,
         None => {
-            eprintln!("[PE BACKUP] 错误: 未找到备份配置文件");
+            log::error!("[PE BACKUP] 错误: 未找到备份配置文件");
             show_error_message("未找到备份配置文件，无法继续备份。");
             return Ok(());
         }
     };
-    
-    println!("[PE BACKUP] 数据分区: {}", data_partition);
-    
+
+    log::info!("[PE BACKUP] 数据分区: {}", data_partition);
+
     // 读取备份配置
     let config = match ConfigFileManager::read_backup_config(&data_partition) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[PE BACKUP] 错误: 读取配置失败: {}", e);
+            log::error!("[PE BACKUP] 错误: 读取配置失败: {}", e);
             show_error_message(&format!("读取备份配置失败: {}", e));
             return Ok(());
         }
     };
-    
-    println!("[PE BACKUP] 源分区: {}", config.source_partition);
-    println!("[PE BACKUP] 保存路径: {}", config.save_path);
+
+    log::info!("[PE BACKUP] 源分区: {}", config.source_partition);
+    log::info!("[PE BACKUP] 保存路径: {}", config.save_path);
     
     // 查找备份标记分区
     let source_partition = match ConfigFileManager::find_backup_marker_partition() {
@@ -483,11 +486,11 @@ fn run_pe_backup() -> eframe::Result<()> {
     
     match result {
         Ok(_) => {
-            println!("[PE BACKUP] 备份完成!");
+            log::info!("[PE BACKUP] 备份完成!");
             show_success_message(&format!("系统备份完成！\n保存位置: {}", config.save_path));
         }
         Err(e) => {
-            eprintln!("[PE BACKUP] 备份失败: {}", e);
+            log::error!("[PE BACKUP] 备份失败: {}", e);
             show_error_message(&format!("系统备份失败: {}", e));
         }
     }
@@ -504,7 +507,7 @@ fn execute_pe_install(
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     
-    println!("[PE INSTALL] Step 1: 格式化分区");
+    log::info!("[PE INSTALL] Step 1: 格式化分区");
     // 格式化目标分区
     let output = utils::cmd::create_command("cmd")
         .args(["/c", &format!("format {} /FS:NTFS /Q /Y", target_partition)])
@@ -516,7 +519,7 @@ fn execute_pe_install(
         anyhow::bail!("格式化分区失败: {}", stderr);
     }
     
-    println!("[PE INSTALL] Step 2: 释放镜像");
+    log::info!("[PE INSTALL] Step 2: 释放镜像");
     // 释放镜像
     let apply_dir = format!("{}\\", target_partition);
     
@@ -535,7 +538,7 @@ fn execute_pe_install(
         dism.apply_image(image_path, &apply_dir, config.volume_index, None)?;
     }
     
-    println!("[PE INSTALL] Step 3: 导入驱动");
+    log::info!("[PE INSTALL] Step 3: 导入驱动");
     // 导入驱动
     if config.restore_drivers {
         let driver_path = format!("{}\\drivers", data_dir);
@@ -545,13 +548,29 @@ fn execute_pe_install(
         }
     }
     
-    println!("[PE INSTALL] Step 4: 修复引导");
+    log::info!("[PE INSTALL] Step 4: 修复引导");
     // 修复引导
     let boot_manager = core::bcdedit::BootManager::new();
     let use_uefi = detect_uefi_mode();
-    boot_manager.repair_boot_advanced(target_partition, use_uefi)?;
-    
-    println!("[PE INSTALL] Step 5: 应用高级选项");
+    // XP/2003 判定：配置标记 或 释放后缺少 \Windows\Boot（仅 Vista+ 才有）
+    let is_xp = config.is_xp
+        || !std::path::Path::new(&format!("{}\\Windows\\Boot", target_partition)).exists();
+    if is_xp {
+        if use_uefi {
+            log::info!("[PE INSTALL] XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
+            if let Err(e) = boot_manager.write_xp_uefi_gpt_boot(target_partition) {
+                log::warn!("[PE INSTALL] XP UEFI 引导失败({})，回退 Legacy(ntldr)", e);
+                boot_manager.write_xp_boot(target_partition)?;
+            }
+        } else {
+            log::info!("[PE INSTALL] XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
+            boot_manager.write_xp_boot(target_partition)?;
+        }
+    } else {
+        boot_manager.repair_boot_advanced(target_partition, use_uefi)?;
+    }
+
+    log::info!("[PE INSTALL] Step 5: 应用高级选项");
     // 应用高级选项
     let mut advanced_options = ui::advanced_options::AdvancedOptions::default();
     advanced_options.remove_shortcut_arrow = config.remove_shortcut_arrow;
@@ -566,45 +585,59 @@ fn execute_pe_install(
     advanced_options.import_storage_controller_drivers = config.import_storage_controller_drivers;
     advanced_options.custom_username = !config.custom_username.is_empty();
     advanced_options.username = config.custom_username.clone();
-    
-    let _ = advanced_options.apply_to_system(target_partition);
+    advanced_options.xp_inject_usb3_driver = config.xp_inject_usb3_driver;
+    advanced_options.xp_inject_nvme_driver = config.xp_inject_nvme_driver;
+
+    let _ = advanced_options.apply_to_system(target_partition, is_xp);
     
     // 生成无人值守配置
     if config.unattended {
         let _ = generate_unattend_xml_pe(target_partition, &config.custom_username);
     }
     
-    println!("[PE INSTALL] Step 6: 清理临时文件");
+    log::info!("[PE INSTALL] Step 6: 清理临时文件");
     // 清理数据目录
     let _ = std::fs::remove_dir_all(data_dir);
     
     Ok(())
 }
 
-/// 执行PE备份
+/// 执行PE备份（按格式分发：0=WIM,1=ESD,2=SWM,3=GHO）。
+/// 此前恒走 LZX WIM，忽略 format/swm —— ESD/SWM/GHO 都会产出错误文件。
 fn execute_pe_backup(
     source_partition: &str,
     config: &core::install_config::BackupConfig,
 ) -> anyhow::Result<()> {
-    let dism = core::dism::Dism::new();
     let capture_dir = format!("{}\\", source_partition);
-    
-    if config.incremental && std::path::Path::new(&config.save_path).exists() {
-        dism.append_image(
-            &config.save_path,
-            &capture_dir,
-            &config.name,
-            &config.description,
-            None,
-        )
-    } else {
-        dism.capture_image(
-            &config.save_path,
-            &capture_dir,
-            &config.name,
-            &config.description,
-            None,
-        )
+
+    match config.format {
+        3 => {
+            let ghost = core::ghost::Ghost::new();
+            if !ghost.is_available() {
+                anyhow::bail!("Ghost 工具不可用");
+            }
+            ghost.create_image_from_letter(source_partition, &config.save_path, None)
+        }
+        1 => {
+            let dism = core::dism::Dism::new();
+            if config.incremental && std::path::Path::new(&config.save_path).exists() {
+                dism.append_image_esd(&config.save_path, &capture_dir, &config.name, &config.description, None)
+            } else {
+                dism.capture_image_esd(&config.save_path, &capture_dir, &config.name, &config.description, None)
+            }
+        }
+        2 => {
+            let dism = core::dism::Dism::new();
+            dism.capture_image_swm(&config.save_path, &capture_dir, &config.name, &config.description, config.swm_split_size, None)
+        }
+        _ => {
+            let dism = core::dism::Dism::new();
+            if config.incremental && std::path::Path::new(&config.save_path).exists() {
+                dism.append_image(&config.save_path, &capture_dir, &config.name, &config.description, None)
+            } else {
+                dism.capture_image(&config.save_path, &capture_dir, &config.name, &config.description, None)
+            }
+        }
     }
 }
 
@@ -790,7 +823,7 @@ fn show_error_message(message: &str) {
     
     #[cfg(not(windows))]
     {
-        eprintln!("错误: {}", message);
+        log::error!("错误: {}", message);
     }
 }
 
@@ -822,6 +855,6 @@ fn show_success_message(message: &str) {
     
     #[cfg(not(windows))]
     {
-        println!("成功: {}", message);
+        log::info!("成功: {}", message);
     }
 }

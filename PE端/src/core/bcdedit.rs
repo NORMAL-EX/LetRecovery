@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::tr;
 use crate::utils::command::new_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
@@ -75,7 +76,7 @@ detail volume
             }
         }
 
-        let disk_num = disk_num.ok_or_else(|| anyhow::anyhow!("无法确定分区所在磁盘"))?;
+        let disk_num = disk_num.ok_or_else(|| anyhow::anyhow!("{}", tr!("无法确定分区所在磁盘")))?;
         log::info!("目标分区在磁盘 {}", disk_num);
 
         // Step 2: 查找该磁盘上的 ESP 分区
@@ -118,7 +119,7 @@ list partition
             }
         }
 
-        let esp_partition = esp_partition.ok_or_else(|| anyhow::anyhow!("未找到 ESP 分区"))?;
+        let esp_partition = esp_partition.ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
 
         // Step 3: 为 ESP 分配盘符
         let _ = new_command("mountvol").args(["S:", "/d"]).output();
@@ -148,7 +149,7 @@ assign letter=S
             log::info!("ESP 已挂载到 S:");
             Ok("S:".to_string())
         } else {
-            anyhow::bail!("ESP 盘符分配失败")
+            anyhow::bail!("{}", tr!("ESP 盘符分配失败"))
         }
     }
 
@@ -235,7 +236,7 @@ assign letter=S
             }
         }
 
-        anyhow::bail!("未找到 EFI 系统分区")
+        anyhow::bail!("{}", tr!("未找到 EFI 系统分区"))
     }
 
     /// 删除当前PE引导项
@@ -269,11 +270,38 @@ assign letter=S
 
         // 验证 Windows 目录存在
         if !Path::new(&windows_path).exists() {
-            anyhow::bail!("Windows 目录不存在: {}", windows_path);
+            anyhow::bail!("{}", tr!("Windows 目录不存在: {}", windows_path));
         }
 
         // 先删除当前PE引导项
         let _ = self.delete_current_boot_entry();
+
+        // 用户可编辑的修复引导脚本（bin\repair_boot.txt）优先；失败则回退默认逻辑
+        let repair_script = get_bin_dir().join("repair_boot.txt");
+        if repair_script.exists() {
+            log::info!("检测到自定义修复引导脚本: {}", repair_script.display());
+            let esp = if use_uefi {
+                self.find_esp_on_same_disk(windows_partition)
+                    .or_else(|_| self.find_and_mount_esp())
+                    .ok()
+            } else {
+                None
+            };
+            match lr_core::boot::run_repair_script(
+                &repair_script,
+                &get_bin_dir(),
+                windows_partition,
+                use_uefi,
+                esp.as_deref(),
+            ) {
+                Ok(out) => {
+                    log::info!("自定义修复引导脚本执行完成:\n{}", out);
+                    log::info!("========== 引导修复完成（自定义脚本）==========");
+                    return Ok(());
+                }
+                Err(e) => log::warn!("自定义修复引导脚本失败，回退默认逻辑: {}", e),
+            }
+        }
 
         if use_uefi {
             log::info!("UEFI 模式：查找 ESP 分区");
@@ -342,7 +370,7 @@ assign letter=S
 
                             let stderr = gbk_to_utf8(&output.stderr);
                             if !output.status.success() {
-                                anyhow::bail!("UEFI 引导修复失败: {}", stderr);
+                                anyhow::bail!("{}", tr!("UEFI 引导修复失败: {}", stderr));
                             }
                         }
                     }
@@ -377,7 +405,7 @@ assign letter=S
                     log::debug!("bcdboot (auto) stderr: {}", stderr);
 
                     if !output.status.success() {
-                        anyhow::bail!("引导修复失败: {}", stderr);
+                        anyhow::bail!("{}", tr!("引导修复失败: {}", stderr));
                     }
                 }
             }
@@ -415,7 +443,7 @@ assign letter=S
 
                 let stderr = gbk_to_utf8(&output.stderr);
                 if !output.status.success() {
-                    anyhow::bail!("Legacy 引导修复失败: {}", stderr);
+                    anyhow::bail!("{}", tr!("Legacy 引导修复失败: {}", stderr));
                 }
             }
 
@@ -424,6 +452,49 @@ assign letter=S
 
         log::info!("========== 引导修复完成 ==========");
         Ok(())
+    }
+
+    /// 为已释放的 XP/2003 系统写入引导（ntldr/boot.ini + MBR，仅 Legacy）。
+    pub fn write_xp_boot(&self, windows_partition: &str) -> Result<()> {
+        log::info!("========== 写入 XP 引导 ==========");
+        let _ = self.delete_current_boot_entry();
+        match lr_core::boot::write_xp_boot(&get_bin_dir(), windows_partition) {
+            Ok(out) => {
+                log::info!("XP 引导写入完成:\n{}", out);
+                log::info!("========== XP 引导完成 ==========");
+                Ok(())
+            }
+            Err(e) => anyhow::bail!("{}", tr!("XP 引导写入失败: {}", e)),
+        }
+    }
+
+    /// 为已释放的「UEFI 化」XP/2003 系统写入 UEFI/GPT 引导。
+    ///
+    /// 查找同盘 ESP 并挂载，再用映像自带的 `WINDOWS\Boot\EFI`（bootxp64.efi + BCC）复刻
+    /// 社区方案的 UEFI 引导写入。映像若不含这些文件，返回 Err，调用方应回退 Legacy。
+    pub fn write_xp_uefi_gpt_boot(&self, windows_partition: &str) -> Result<()> {
+        log::info!("========== 写入 XP UEFI/GPT 引导 ==========");
+        let _ = self.delete_current_boot_entry();
+
+        // 找到并挂载同盘 ESP（先同盘查找，失败再全局查找/挂载）
+        let esp = self
+            .find_esp_on_same_disk(windows_partition)
+            .or_else(|_| self.find_and_mount_esp())
+            .map_err(|e| anyhow::anyhow!("{}", tr!("未找到 ESP，无法写 UEFI 引导: {}", e)))?;
+        log::info!("使用 ESP: {}", esp);
+
+        match lr_core::xp::write_xp_uefi_gpt_boot(
+            windows_partition,
+            &esp,
+            Path::new(&self.bcdedit_path),
+        ) {
+            Ok(out) => {
+                log::info!("XP UEFI 引导写入完成:\n{}", out);
+                log::info!("========== XP UEFI 引导完成 ==========");
+                Ok(())
+            }
+            Err(e) => anyhow::bail!("{}", tr!("XP UEFI 引导写入失败: {}", e)),
+        }
     }
 }
 

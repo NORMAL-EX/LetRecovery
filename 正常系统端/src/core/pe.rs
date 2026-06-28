@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::Path;
+use crate::tr;
 use crate::utils::cmd::create_command;
 
 use crate::utils::encoding::gbk_to_utf8;
@@ -77,7 +78,7 @@ impl PeManager {
         } else if pe_path_lower.ends_with(".wim") {
             self.boot_from_wim(pe_path, display_name)
         } else {
-            anyhow::bail!("不支持的PE文件格式，请使用 .iso 或 .wim 文件")
+            anyhow::bail!("{}", tr!("不支持的PE文件格式，请使用 .iso 或 .wim 文件"))
         }
     }
 
@@ -88,7 +89,7 @@ impl PeManager {
         // 1. 挂载ISO
         crate::core::iso::IsoMounter::mount_iso(iso_path)?;
         let mount_point = crate::core::iso::IsoMounter::find_iso_drive()
-            .ok_or_else(|| anyhow::anyhow!("无法找到ISO挂载点"))?;
+            .ok_or_else(|| anyhow::anyhow!("{}", tr!("无法找到ISO挂载点")))?;
         log::info!("[PE] ISO已挂载到: {}", mount_point);
 
         // 2. 查找PE WIM文件
@@ -107,7 +108,7 @@ impl PeManager {
             }
         }
 
-        let wim_path = wim_path.ok_or_else(|| anyhow::anyhow!("ISO中未找到 boot.wim"))?;
+        let wim_path = wim_path.ok_or_else(|| anyhow::anyhow!("{}", tr!("ISO中未找到 boot.wim")))?;
         log::info!("[PE] 找到WIM: {}", wim_path);
 
         // 3. 查找boot.sdi
@@ -577,7 +578,7 @@ impl PeManager {
             }
         }
         
-        anyhow::bail!("无法从bcdedit输出中提取GUID: {}", output)
+        anyhow::bail!("{}", tr!("无法从bcdedit输出中提取GUID: {}", output))
     }
 }
 

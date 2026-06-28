@@ -21,6 +21,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::core::registry::OfflineRegistry;
+use crate::tr;
 
 /// 离线 SYSTEM 配置单元在目标系统中的相对路径
 fn system_hive_path(target_partition: &str) -> String {
@@ -44,12 +45,12 @@ pub fn ensure_offline_login(target_partition: &str, username: &str) -> Result<()
     let software_hive = software_hive_path(target_partition);
 
     if !Path::new(&system_hive).exists() {
-        anyhow::bail!("目标 SYSTEM 配置单元不存在: {}", system_hive);
+        anyhow::bail!("{}", tr!("目标 SYSTEM 配置单元不存在: {}", system_hive));
     }
 
     // 1) SYSTEM：放开空密码使用限制（离线时控制集通常是 ControlSet001）
     if let Err(e) = OfflineRegistry::load_hive("LR_SYS", &system_hive) {
-        anyhow::bail!("加载 SYSTEM 配置单元失败: {}", e);
+        anyhow::bail!("{}", tr!("加载 SYSTEM 配置单元失败: {}", e));
     }
     let lsa_keys = [
         "HKLM\\LR_SYS\\ControlSet001\\Control\\Lsa",
@@ -65,7 +66,7 @@ pub fn ensure_offline_login(target_partition: &str, username: &str) -> Result<()
     if !username.is_empty() {
         if Path::new(&software_hive).exists() {
             if let Err(e) = OfflineRegistry::load_hive("LR_SOFT", &software_hive) {
-                anyhow::bail!("加载 SOFTWARE 配置单元失败: {}", e);
+                anyhow::bail!("{}", tr!("加载 SOFTWARE 配置单元失败: {}", e));
             }
             let winlogon = "HKLM\\LR_SOFT\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon";
             let _ = OfflineRegistry::create_key(winlogon);

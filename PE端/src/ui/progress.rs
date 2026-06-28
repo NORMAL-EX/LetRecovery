@@ -1,5 +1,7 @@
 use egui::{Color32, RichText};
 
+use crate::tr;
+
 /// 安装/备份步骤
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallStep {
@@ -130,6 +132,8 @@ pub enum StepStatus {
 pub struct ProgressState {
     /// 是否为安装模式（否则为备份模式）
     pub is_install_mode: bool,
+    /// 是否为扩容模式（无损扩大系统盘）。为真时只显示状态+总进度，不显示安装/备份步骤列表。
+    pub is_expand_mode: bool,
     /// 当前安装步骤
     pub current_install_step: InstallStep,
     /// 当前备份步骤
@@ -152,6 +156,7 @@ impl Default for ProgressState {
     fn default() -> Self {
         Self {
             is_install_mode: true,
+            is_expand_mode: false,
             current_install_step: InstallStep::FormatPartition,
             current_backup_step: BackupStep::ReadConfig,
             step_progress: 0,
@@ -175,6 +180,14 @@ impl ProgressState {
     pub fn new_backup() -> Self {
         Self {
             is_install_mode: false,
+            ..Default::default()
+        }
+    }
+
+    pub fn new_expand() -> Self {
+        Self {
+            is_install_mode: false,
+            is_expand_mode: true,
             ..Default::default()
         }
     }
@@ -245,45 +258,49 @@ impl ProgressUI {
             ui.add_space(20.0);
 
             // 标题
-            let title = if state.is_install_mode {
-                "LetRecovery PE 安装助手"
+            let title = if state.is_expand_mode {
+                tr!("LetRecovery PE 扩容助手")
+            } else if state.is_install_mode {
+                tr!("LetRecovery PE 安装助手")
             } else {
-                "LetRecovery PE 备份助手"
+                tr!("LetRecovery PE 备份助手")
             };
             ui.heading(RichText::new(title).size(24.0).strong());
 
             ui.add_space(30.0);
 
-            // 当前步骤
-            let current_step_name = if state.is_install_mode {
-                state.current_install_step.name()
-            } else {
-                state.current_backup_step.name()
-            };
-            ui.label(
-                RichText::new(format!("当前步骤: [{}]", current_step_name))
-                    .size(16.0)
-                    .color(Color32::from_rgb(100, 180, 255)),
-            );
-
-            ui.add_space(20.0);
-
-            // 步骤进度条
-            ui.horizontal(|ui| {
-                ui.label("步骤进度:");
-                let progress = state.step_progress as f32 / 100.0;
-                ui.add(
-                    egui::ProgressBar::new(progress)
-                        .desired_width(400.0)
-                        .show_percentage(),
+            // 当前步骤（扩容模式无步骤列表，跳过）
+            if !state.is_expand_mode {
+                let current_step_name = if state.is_install_mode {
+                    state.current_install_step.name()
+                } else {
+                    state.current_backup_step.name()
+                };
+                ui.label(
+                    RichText::new(tr!("当前步骤: [{}]", current_step_name))
+                        .size(16.0)
+                        .color(Color32::from_rgb(100, 180, 255)),
                 );
-            });
 
-            ui.add_space(10.0);
+                ui.add_space(20.0);
+
+                // 步骤进度条
+                ui.horizontal(|ui| {
+                    ui.label(tr!("步骤进度:"));
+                    let progress = state.step_progress as f32 / 100.0;
+                    ui.add(
+                        egui::ProgressBar::new(progress)
+                            .desired_width(400.0)
+                            .show_percentage(),
+                    );
+                });
+
+                ui.add_space(10.0);
+            }
 
             // 总体进度条
             ui.horizontal(|ui| {
-                ui.label("总体进度:");
+                ui.label(tr!("总体进度:"));
                 let progress = state.overall_progress as f32 / 100.0;
                 ui.add(
                     egui::ProgressBar::new(progress)
@@ -299,11 +316,13 @@ impl ProgressUI {
 
             ui.add_space(20.0);
 
-            // 步骤列表
-            if state.is_install_mode {
-                Self::show_install_steps(ui, state);
-            } else {
-                Self::show_backup_steps(ui, state);
+            // 步骤列表（扩容模式不显示）
+            if !state.is_expand_mode {
+                if state.is_install_mode {
+                    Self::show_install_steps(ui, state);
+                } else {
+                    Self::show_backup_steps(ui, state);
+                }
             }
 
             // 状态消息
@@ -320,7 +339,7 @@ impl ProgressUI {
             if let Some(ref error) = state.error_message {
                 ui.add_space(20.0);
                 ui.label(
-                    RichText::new(format!("错误: {}", error))
+                    RichText::new(tr!("错误: {}", error))
                         .size(14.0)
                         .color(Color32::from_rgb(255, 100, 100)),
                 );
@@ -329,10 +348,12 @@ impl ProgressUI {
             // 完成提示
             if state.is_completed {
                 ui.add_space(30.0);
-                let message = if state.is_install_mode {
-                    "系统安装完成！即将重启..."
+                let message = if state.is_expand_mode {
+                    tr!("系统盘扩容完成！即将重启...")
+                } else if state.is_install_mode {
+                    tr!("系统安装完成！即将重启...")
                 } else {
-                    "系统备份完成！即将重启..."
+                    tr!("系统备份完成！即将重启...")
                 };
                 ui.label(
                     RichText::new(message)
@@ -398,7 +419,7 @@ impl ProgressUI {
 
             ui.label(RichText::new(icon).size(14.0).color(color).monospace());
             ui.add_space(10.0);
-            ui.label(RichText::new(name).size(14.0).color(color));
+            ui.label(RichText::new(tr!(name)).size(14.0).color(color));
         });
         ui.add_space(5.0);
     }

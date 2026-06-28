@@ -4,6 +4,7 @@
 
 use std::process::Command;
 use crate::utils::path::{get_bin_dir, get_tools_dir};
+use crate::tr;
 
 /// 启动指定工具
 pub fn launch_tool(tool_name: &str) -> Result<(), String> {
@@ -19,10 +20,10 @@ pub fn launch_tool(tool_name: &str) -> Result<(), String> {
 
         match result {
             Ok(_) => Ok(()),
-            Err(e) => Err(format!("启动失败: {} - {}", tool_name, e)),
+            Err(e) => Err(tr!("启动失败: {} - {}", tool_name, e)),
         }
     } else {
-        Err(format!("工具不存在: {:?}", tool_path))
+        Err(tr!("工具不存在: {}", format!("{:?}", tool_path)))
     }
 }
 
@@ -34,10 +35,10 @@ pub fn launch_ghost() -> Result<(), String> {
     if ghost_path.exists() {
         match Command::new(&ghost_path).spawn() {
             Ok(_) => Ok(()),
-            Err(e) => Err(format!("启动失败: Ghost64.exe - {}", e)),
+            Err(e) => Err(tr!("启动失败: Ghost64.exe - {}", e)),
         }
     } else {
-        Err(format!("工具不存在: {:?}", ghost_path))
+        Err(tr!("工具不存在: {}", format!("{:?}", ghost_path)))
     }
 }
 
@@ -49,10 +50,10 @@ pub fn launch_space_sniffer() -> Result<(), String> {
     if space_sniffer_path.exists() {
         match Command::new(&space_sniffer_path).spawn() {
             Ok(_) => Ok(()),
-            Err(e) => Err(format!("启动失败: SpaceSniffer.exe - {}", e)),
+            Err(e) => Err(tr!("启动失败: SpaceSniffer.exe - {}", e)),
         }
     } else {
-        Err(format!("工具不存在: {:?}", space_sniffer_path))
+        Err(tr!("工具不存在: {}", format!("{:?}", space_sniffer_path)))
     }
 }
 
@@ -76,3 +77,4 @@ pub fn export_drivers_from_partition(source_partition: &str, export_dir: &str) -
     dism.export_drivers_from_system(source_partition, export_dir)
         .map_err(|e| e.to_string())
 }
+

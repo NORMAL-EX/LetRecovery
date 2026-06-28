@@ -18,6 +18,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
+use crate::tr;
 use crate::core::disk::DiskManager;
 use crate::core::install_config::{ConfigFileManager, InstallConfig};
 use crate::core::pe::PeManager;
@@ -68,36 +69,36 @@ struct CliInstallSpec {
 
 /// 入口：`--install --config <json> [--advanced <json>]`。
 pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result<()> {
-    println!("[CLI INSTALL] ========== 命令行无人值守安装 ==========");
+    log::info!("[CLI INSTALL] ========== 命令行无人值守安装 ==========");
 
     // 1) 安装配置
     let spec: CliInstallSpec = {
         let text = std::fs::read_to_string(config_path)
-            .with_context(|| format!("读取安装配置失败: {}", config_path))?;
+            .with_context(|| tr!("读取安装配置失败: {}", config_path))?;
         serde_json::from_str(&text)
-            .with_context(|| format!("解析安装配置 JSON 失败: {}", config_path))?
+            .with_context(|| tr!("解析安装配置 JSON 失败: {}", config_path))?
     };
 
     // 2) 高级选项（可选）
     let advanced: AdvancedOptions = match advanced_path {
         Some(p) => {
             let text = std::fs::read_to_string(p)
-                .with_context(|| format!("读取高级选项失败: {}", p))?;
+                .with_context(|| tr!("读取高级选项失败: {}", p))?;
             serde_json::from_str(&text)
-                .with_context(|| format!("解析高级选项 JSON 失败: {}", p))?
+                .with_context(|| tr!("解析高级选项 JSON 失败: {}", p))?
         }
         None => AdvancedOptions::default(),
     };
 
     // 3) 校验
     if spec.target_partition.trim().is_empty() {
-        return Err(anyhow!("target_partition 不能为空"));
+        return Err(anyhow!("{}", tr!("target_partition 不能为空")));
     }
     if !std::path::Path::new(&spec.image_path).exists() {
-        return Err(anyhow!("镜像文件不存在: {}", spec.image_path));
+        return Err(anyhow!("{}", tr!("镜像文件不存在: {}", spec.image_path)));
     }
     if !std::path::Path::new(&spec.pe_path).exists() {
-        return Err(anyhow!("PE 启动文件不存在: {}", spec.pe_path));
+        return Err(anyhow!("{}", tr!("PE 启动文件不存在: {}", spec.pe_path)));
     }
 
     let is_gho = spec.is_gho.unwrap_or_else(|| {
@@ -105,9 +106,9 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         l.ends_with(".gho") || l.ends_with(".ghs")
     });
 
-    println!("[CLI INSTALL] 目标分区: {}", spec.target_partition);
-    println!("[CLI INSTALL] 镜像: {}", spec.image_path);
-    println!("[CLI INSTALL] PE: {}", spec.pe_path);
+    log::info!("[CLI INSTALL] 目标分区: {}", spec.target_partition);
+    log::info!("[CLI INSTALL] 镜像: {}", spec.image_path);
+    log::info!("[CLI INSTALL] PE: {}", spec.pe_path);
 
     // 4) 数据分区（暂存配置 + 镜像）
     let image_size = std::fs::metadata(&spec.image_path).map(|m| m.len()).unwrap_or(0);
@@ -117,33 +118,36 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
             Ok(Some((p, _auto))) => p,
             Ok(None) => {
                 return Err(anyhow!(
-                    "未找到空间足够的数据分区来暂存镜像（需约 {:.2} GB）",
-                    image_size as f64 / 1024.0 / 1024.0 / 1024.0
+                    "{}",
+                    tr!(
+                        "未找到空间足够的数据分区来暂存镜像（需约 {} GB）",
+                        format!("{:.2}", image_size as f64 / 1024.0 / 1024.0 / 1024.0)
+                    )
                 ))
             }
-            Err(e) => return Err(anyhow!("查找数据分区失败: {}", e)),
+            Err(e) => return Err(anyhow!("{}", tr!("查找数据分区失败: {}", e))),
         },
     };
-    println!("[CLI INSTALL] 数据分区: {}", data_partition);
+    log::info!("[CLI INSTALL] 数据分区: {}", data_partition);
 
     // 5) 把镜像放进数据目录（InstallConfig.image_path 存相对文件名）
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
     std::fs::create_dir_all(&data_dir)
-        .with_context(|| format!("创建数据目录失败: {}", data_dir))?;
+        .with_context(|| tr!("创建数据目录失败: {}", data_dir))?;
     let image_filename = std::path::Path::new(&spec.image_path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .ok_or_else(|| anyhow!("无法取得镜像文件名: {}", spec.image_path))?;
+        .ok_or_else(|| anyhow!("{}", tr!("无法取得镜像文件名: {}", spec.image_path)))?;
     let staged_image = format!("{}\\{}", data_dir, image_filename);
     if same_file(&staged_image, &spec.image_path) {
-        println!("[CLI INSTALL] 镜像已在数据目录，跳过拷贝");
+        log::info!("[CLI INSTALL] 镜像已在数据目录，跳过拷贝");
     } else {
-        println!(
+        log::info!(
             "[CLI INSTALL] 拷贝镜像到数据目录: {} -> {}",
             spec.image_path, staged_image
         );
         std::fs::copy(&spec.image_path, &staged_image)
-            .with_context(|| format!("拷贝镜像失败: {} -> {}", spec.image_path, staged_image))?;
+            .with_context(|| tr!("拷贝镜像失败: {} -> {}", spec.image_path, staged_image))?;
     }
 
     // 6) 构造 InstallConfig：基础项 + 高级选项子集（映射与 install_progress.rs 的 PE 路径一致）
@@ -183,11 +187,18 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         win7_inject_nvme_driver: advanced.win7_inject_nvme_driver,
         win7_fix_acpi_bsod: advanced.win7_fix_acpi_bsod,
         win7_fix_storage_bsod: advanced.win7_fix_storage_bsod,
+        wim_engine: lr_core::active_engine().as_u8(),
+        // CLI 不强制标记 XP；PE 端会按「释放后系统缺少 \Windows\Boot」兜底识别 XP，
+        // 并据此写 XP 引导 + 注入下列驱动（GUI 路径则显式设置 is_xp）。
+        is_xp: false,
+        xp_inject_usb3_driver: advanced.xp_inject_usb3_driver,
+        xp_inject_nvme_driver: advanced.xp_inject_nvme_driver,
+        run_diskpart_scripts: false,
     };
 
     // 7) 写安装配置（含目标盘标记；自定义无人值守 XML 会被复制进数据目录）
     ConfigFileManager::write_install_config(&spec.target_partition, &data_partition, &install_config)
-        .map_err(|e| anyhow!("写入安装配置失败: {}", e))?;
+        .map_err(|e| anyhow!("{}", tr!("写入安装配置失败: {}", e)))?;
 
     // 8) 设置下次重启进 PE
     let display_name = spec
@@ -196,18 +207,18 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         .unwrap_or_else(|| "LetRecovery PE".to_string());
     PeManager::new()
         .boot_to_pe(&spec.pe_path, &display_name)
-        .map_err(|e| anyhow!("设置 PE 引导失败: {}", e))?;
+        .map_err(|e| anyhow!("{}", tr!("设置 PE 引导失败: {}", e)))?;
 
-    println!("[CLI INSTALL] 准备完成。");
+    log::info!("[CLI INSTALL] 准备完成。");
 
     // 9) 重启（如启用）
     if spec.auto_reboot {
-        println!("[CLI INSTALL] 即将重启进入 PE 完成安装...");
+        log::info!("[CLI INSTALL] 即将重启进入 PE 完成安装...");
         let _ = crate::utils::cmd::create_command("shutdown")
             .args(["/r", "/t", "5", "/c", "LetRecovery 即将重启进入 PE 完成系统安装..."])
             .spawn();
     } else {
-        println!("[CLI INSTALL] 未启用自动重启，请手动重启进入 PE 完成安装。");
+        log::info!("[CLI INSTALL] 未启用自动重启，请手动重启进入 PE 完成安装。");
     }
 
     Ok(())

@@ -2,6 +2,7 @@
 //!
 //! 使用NTP协议从网络服务器同步系统时间
 
+use crate::tr;
 use std::net::UdpSocket;
 use std::time::Duration;
 
@@ -123,36 +124,36 @@ fn get_ntp_time(server: &str) -> Result<u64, String> {
     
     // 创建UDP socket
     let socket = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| format!("无法创建套接字: {}", e))?;
-    
+        .map_err(|e| tr!("无法创建套接字: {}", e))?;
+
     // 设置超时
     socket.set_read_timeout(Some(Duration::from_secs(3)))
-        .map_err(|e| format!("设置超时失败: {}", e))?;
+        .map_err(|e| tr!("设置超时失败: {}", e))?;
     socket.set_write_timeout(Some(Duration::from_secs(3)))
-        .map_err(|e| format!("设置超时失败: {}", e))?;
-    
+        .map_err(|e| tr!("设置超时失败: {}", e))?;
+
     // 发送NTP请求
     let request = NtpPacket::new_request();
     socket.send_to(request.as_bytes(), &addr)
-        .map_err(|e| format!("发送请求失败: {}", e))?;
-    
+        .map_err(|e| tr!("发送请求失败: {}", e))?;
+
     // 接收响应
     let mut buffer = [0u8; 48];
     let (len, _) = socket.recv_from(&mut buffer)
-        .map_err(|e| format!("接收响应失败: {}", e))?;
-    
+        .map_err(|e| tr!("接收响应失败: {}", e))?;
+
     if len < 48 {
-        return Err("响应数据不完整".to_string());
+        return Err(tr!("响应数据不完整"));
     }
-    
+
     // 解析响应
     let response = NtpPacket::from_bytes(&buffer)
-        .ok_or_else(|| "解析响应失败".to_string())?;
-    
+        .ok_or_else(|| tr!("解析响应失败"))?;
+
     // 获取传输时间戳并转换为Unix时间戳
     let ntp_secs = response.get_transmit_timestamp_secs();
     if ntp_secs < NTP_EPOCH_OFFSET {
-        return Err("时间戳无效".to_string());
+        return Err(tr!("时间戳无效"));
     }
     
     let unix_secs = ntp_secs - NTP_EPOCH_OFFSET;
@@ -231,15 +232,15 @@ fn set_system_time(year: u16, month: u16, day: u16, hour: u16, minute: u16, seco
     
     unsafe {
         SetLocalTime(&st)
-            .map_err(|e| format!("设置系统时间失败: {}", e))?;
+            .map_err(|e| tr!("设置系统时间失败: {}", e))?;
     }
-    
+
     Ok(())
 }
 
 #[cfg(not(windows))]
 fn set_system_time(_year: u16, _month: u16, _day: u16, _hour: u16, _minute: u16, _second: u16, _day_of_week: u16) -> Result<(), String> {
-    Err("仅支持Windows系统".to_string())
+    Err(tr!("仅支持Windows系统"))
 }
 
 /// 获取当前本地时间字符串
@@ -288,7 +289,7 @@ pub fn sync_time_to_beijing() -> TimeSyncResult {
                         let actual_new_time = get_local_time_string();
                         return TimeSyncResult {
                             success: true,
-                            message: format!("时间同步成功！服务器: {}", server),
+                            message: tr!("时间同步成功！服务器: {}", server),
                             old_time: Some(old_time),
                             new_time: Some(actual_new_time),
                         };
@@ -297,7 +298,7 @@ pub fn sync_time_to_beijing() -> TimeSyncResult {
                         log::error!("设置系统时间失败: {}", e);
                         return TimeSyncResult {
                             success: false,
-                            message: format!("设置系统时间失败: {}。可能需要管理员权限。", e),
+                            message: tr!("设置系统时间失败: {}。可能需要管理员权限。", e),
                             old_time: Some(old_time),
                             new_time: None,
                         };
@@ -313,7 +314,7 @@ pub fn sync_time_to_beijing() -> TimeSyncResult {
     
     TimeSyncResult {
         success: false,
-        message: format!("无法连接到任何NTP服务器。最后错误: {}", last_error),
+        message: tr!("无法连接到任何NTP服务器。最后错误: {}", last_error),
         old_time: Some(old_time),
         new_time: None,
     }

@@ -12,11 +12,12 @@ import {
   Info,
   Cloud,
   HardDrive,
-  Github
+  Github,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ImageWithLoading } from '@/components/common'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { FramedSection } from '@/components/layout'
+import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card'
 import {
   Dialog,
   DialogTrigger,
@@ -26,12 +27,70 @@ import {
   DialogDescription,
   DialogPanel,
   DialogFooter,
-  DialogClose
+  DialogClose,
 } from '@/components/ui/dialog'
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
+import { useLang, useT } from '@/lib/i18n'
 import Artplayer from 'artplayer'
 
+const featureIcons = [Zap, Shield, Sparkles, Rocket, Gauge, BadgeCheck]
+
+const downloadLinks = [
+  { name: '123云盘', url: 'https://www.123865.com/s/5ZD9-OZ2fd', icon: HardDrive },
+  { name: 'Cloud-PE 云盘', url: 'https://pan.sysre.cn/s/N3iW', icon: Cloud },
+  { name: 'GitHub', url: 'https://github.com/NORMAL-EX/LetRecovery/releases', icon: Github },
+]
+
+const DownloadDialog: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const t = useT()
+  return (
+    <Dialog>
+      <DialogTrigger render={<Button size="lg" />}>{children}</DialogTrigger>
+      <DialogPopup className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Download className="size-5" />
+            {t.home.dialogTitle}
+          </DialogTitle>
+          <DialogDescription>{t.home.dialogDesc}</DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <div className="space-y-4">
+            <Alert variant="info">
+              <Info className="size-4" />
+              <AlertTitle>{t.home.alertTitle}</AlertTitle>
+              <AlertDescription>{t.home.alertDesc}</AlertDescription>
+            </Alert>
+
+            <div className="pt-2">
+              <p className="mb-3 text-sm text-muted-foreground">{t.home.sourceLabel}</p>
+              <div className="flex flex-wrap gap-2">
+                {downloadLinks.map((link) => (
+                  <Button
+                    key={link.name}
+                    variant="outline"
+                    size="sm"
+                    render={<a href={link.url} target="_blank" rel="noopener noreferrer" />}
+                  >
+                    <link.icon className="size-4" />
+                    {link.name}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </DialogPanel>
+        <DialogFooter>
+          <DialogClose render={<Button variant="outline" />}>{t.home.close}</DialogClose>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  )
+}
+
 const Home: React.FC = () => {
+  const t = useT()
+  const { lang } = useLang()
   const artRef = useRef<HTMLDivElement>(null)
   const playerRef = useRef<Artplayer | null>(null)
 
@@ -63,8 +122,8 @@ const Home: React.FC = () => {
         playsInline: true,
         autoPlayback: true,
         airplay: true,
-        theme: '#3b82f6',
-        lang: 'zh-cn',
+        theme: '#262626',
+        lang: lang === 'en' ? 'en' : 'zh-cn',
       })
     }
 
@@ -74,229 +133,100 @@ const Home: React.FC = () => {
         playerRef.current = null
       }
     }
-  }, [])
-
-  const features = [
-    {
-      icon: Zap,
-      title: '极致高效',
-      description: '基于 Rust 语言开发，享有卓越的性能表现和极低的资源占用，系统重装快人一步。',
-    },
-    {
-      icon: Shield,
-      title: '纯净无捆绑',
-      description: '完全开源透明，不附带任何广告或捆绑软件，给您一个清爽干净的使用体验。',
-    },
-    {
-      icon: Sparkles,
-      title: '简单易用',
-      description: '精心设计的现代化界面，操作直观明了，即使是电脑小白也能轻松驾驭。',
-    },
-    {
-      icon: Rocket,
-      title: '快速部署',
-      description: '一键式操作流程，从启动到完成系统重装仅需几步，大幅节省您的宝贵时间。',
-    },
-    {
-      icon: Gauge,
-      title: '功能强大',
-      description: '支持多种系统镜像格式，提供丰富的自定义选项，满足各类重装需求。',
-    },
-    {
-      icon: BadgeCheck,
-      title: '安全可靠',
-      description: '采用先进的安全机制，确保数据传输和系统安装过程的稳定与安全。',
-    },
-  ]
-
-  const downloadLinks = [
-    {
-      name: '123云盘',
-      url: 'https://www.123865.com/s/5ZD9-OZ2fd',
-      icon: HardDrive,
-    },
-    {
-      name: 'Cloud-PE 云盘',
-      url: 'https://pan.sysre.cn/s/N3iW',
-      icon: Cloud,
-    },
-    {
-      name: 'GitHub',
-      url: 'https://github.com/NORMAL-EX/LetRecovery/releases',
-      icon: Github,
-    }
-  ]
+  }, [lang])
 
   return (
     <>
-      {/* Hero Section */}
-      <section className="relative overflow-hidden bg-gradient-to-br from-primary/5 via-background to-accent/5 py-16 md:py-24 lg:py-32">
-        <div className="absolute inset-0 bg-grid-pattern opacity-5" />
-        <div className="container mx-auto px-4 relative z-10">
-          <div className="grid lg:grid-cols-2 gap-12 items-center">
-            {/* Left Content */}
-            <div className="text-center lg:text-left">
-              <h1 className="text-3xl md:text-4xl lg:text-5xl font-bold text-foreground mb-6 leading-tight">
-                一款{' '}
-                <span className="gradient-highlight">
-                  纯净的系统重装工具
-                </span>
-              </h1>
-              <p className="text-lg md:text-xl text-muted-foreground mb-8 max-w-xl mx-auto lg:mx-0">
-                采用 Rust + egui 精心打造，拥有极致的运行效率，零广告零捆绑的纯净体验，
-                简洁直观的操作界面让电脑小白也能轻松上手！
-              </p>
-              <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start">
-                <Dialog>
-                  <DialogTrigger
-                    render={<Button size="lg" />}
-                  >
-                    <Download className="mr-2 size-5" />
-                    立即下载
-                  </DialogTrigger>
-                  <DialogPopup className="max-w-2xl">
-                    <DialogHeader>
-                      <DialogTitle className="flex items-center gap-2">
-                        <Download className="size-5" />
-                        下载 LetRecovery
-                      </DialogTitle>
-                      <DialogDescription>
-                        获取最新版本的 LetRecovery 系统重装工具
-                      </DialogDescription>
-                    </DialogHeader>
-                    <DialogPanel>
-                      <div className="space-y-4">
-
-                        {/* 说明信息 */}
-                        <Alert variant="info">
-                          <Info className="size-4" />
-                          <AlertTitle>关于此下载</AlertTitle>
-                          <AlertDescription>
-                            下方所有下载源提供的均为同一份内容——已内置 WinPE 环境的 LetRecovery
-                            完整版，下载后开箱即用，无需再单独获取 WinPE。各下载源内容完全一致，
-                            您可任选其一，建议优先选择访问速度较快的来源。
-                          </AlertDescription>
-                        </Alert>
-
-                        {/* 下载链接按钮组 */}
-                        <div className="pt-2">
-                          <p className="text-sm text-muted-foreground mb-3">选择下载源：</p>
-                          <div className="flex flex-wrap gap-2">
-                            {downloadLinks.map((link) => (
-                              <Button
-                                key={link.name}
-                                variant="outline"
-                                size="sm"
-                                render={
-                                  <a
-                                    href={link.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                  />
-                                }
-                              >
-                                <link.icon className="mr-1.5 size-4" />
-                                {link.name}
-                              </Button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    </DialogPanel>
-                    <DialogFooter>
-                      <DialogClose render={<Button variant="outline" />}>
-                        关闭
-                      </DialogClose>
-                    </DialogFooter>
-                  </DialogPopup>
-                </Dialog>
-                <Button
-                  variant="outline"
-                  size="lg"
-                  render={<Link to="/qqg" />}
-                >
-                  <Users className="mr-2 size-5" />
-                  加入社区
-                </Button>
-              </div>
-            </div>
-
-            {/* Right Image */}
-            <div className="relative">
-              <div className="relative overflow-hidden shadow-2xl border border-border/50 bg-card" style={{ borderRadius: 6 }}>
-                <ImageWithLoading
-                  src="https://pic1.imgdb.cn/item/6a339a3591b65c4475ab67b2.png"
-                  alt="LetRecovery"
-                  className="w-full h-auto"
-                  wrapperClassName="w-full"
-                  rounded="rounded-none"
-                  loadingMinHeight="260px"
-                  loading="lazy"
-                />
-              </div>
-              {/* Decorative elements */}
-              <div className="absolute -z-10 -top-4 -right-4 w-72 h-72 bg-primary/10 rounded-full blur-3xl" />
-              <div className="absolute -z-10 -bottom-4 -left-4 w-72 h-72 bg-accent/10 rounded-full blur-3xl" />
+      {/* Hero */}
+      <section className="relative">
+        <div className="container grid items-center gap-10 py-12 md:py-16 lg:grid-cols-2 lg:gap-14 lg:py-24">
+          {/* 文案 */}
+          <div className="flex flex-col items-start gap-6 text-left">
+            <h1 className="font-heading text-4xl leading-[1.08] tracking-tight md:text-5xl lg:text-6xl">
+              {t.home.heroTitleLines[0]}
+              <br />
+              {t.home.heroTitleLines[1]}
+            </h1>
+            <p className="max-w-xl text-balance text-muted-foreground md:text-lg">
+              {t.home.heroDesc}
+            </p>
+            <div className="flex flex-wrap gap-3">
+              <DownloadDialog>
+                <Download className="size-5" />
+                {t.home.download}
+              </DownloadDialog>
+              <Button variant="outline" size="lg" render={<Link to="/qqg" />}>
+                <Users className="size-5" />
+                {t.home.joinCommunity}
+              </Button>
             </div>
           </div>
-        </div>
-      </section>
 
-      {/* Features Section */}
-      <section className="py-16 md:py-24 bg-background">
-        <div className="container mx-auto px-4">
-          <div className="text-center mb-12">
-            <h2 className="text-2xl md:text-3xl lg:text-4xl font-bold text-foreground mb-4">
-              产品特性
-            </h2>
-            <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-              探索 LetRecovery 的核心功能，让系统重装变得前所未有的简单
-            </p>
-          </div>
-
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {features.map((feature) => (
-              <Card key={feature.title}>
-                <CardHeader>
-                  <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
-                    <feature.icon className="size-6 text-primary" />
-                  </div>
-                  <CardTitle className="text-xl">{feature.title}</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <CardDescription className="text-base leading-relaxed">
-                    {feature.description}
-                  </CardDescription>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Video Demo Section */}
-      <section className="py-16 md:py-24 bg-muted/30">
-        <div className="container mx-auto px-4">
-          <div className="text-center mb-12">
-            <h2 className="text-2xl md:text-3xl lg:text-4xl font-bold text-foreground mb-4">
-              操作演示
-            </h2>
-            <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-              观看视频了解如何使用 LetRecovery 快速完成系统重装<br></br>
-              （该视频由 <strong>电脑病毒爱好者</strong> 制作）
-            </p>
-          </div>
-
-          <div className="max-w-4xl mx-auto">
-            <div className="relative rounded-2xl overflow-hidden shadow-2xl border border-border/50 bg-card">
-              <div
-                ref={artRef}
-                className="w-full aspect-video"
+          {/* 产品截图 */}
+          <div className="relative w-full">
+            <div className="overflow-hidden rounded-xl border bg-card bg-clip-padding shadow-xs dark:bg-clip-border">
+              <ImageWithLoading
+                src="https://pic1.imgdb.cn/item/6a339a3591b65c4475ab67b2.png"
+                alt={t.home.screenshotAlt}
+                className="h-auto w-full"
+                wrapperClassName="w-full"
+                rounded="rounded-none"
+                loadingMinHeight="260px"
+                loading="lazy"
               />
             </div>
           </div>
         </div>
       </section>
+
+      {/* 产品特性 */}
+      <FramedSection className="py-16 md:py-24">
+        <div className="mx-auto mb-12 max-w-2xl text-center">
+          <h2 className="font-heading text-3xl tracking-tight md:text-4xl">
+            {t.home.featuresTitle}
+          </h2>
+          <p className="mt-3 text-muted-foreground md:text-lg">{t.home.featuresDesc}</p>
+        </div>
+
+        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {t.home.features.map((feature, i) => {
+            const Icon = featureIcons[i]
+            return (
+              <Card key={feature.title} className="gap-4 transition-colors hover:border-foreground/20">
+                <CardHeader>
+                  <div className="mb-1 flex size-10 items-center justify-center rounded-lg border bg-muted/40 text-foreground">
+                    <Icon className="size-5" />
+                  </div>
+                  <CardTitle className="text-base">{feature.title}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <CardDescription className="leading-relaxed">{feature.desc}</CardDescription>
+                </CardContent>
+              </Card>
+            )
+          })}
+        </div>
+      </FramedSection>
+
+      {/* 操作演示 */}
+      <FramedSection className="py-16 md:py-24">
+        <div className="mx-auto mb-12 max-w-2xl text-center">
+          <h2 className="font-heading text-3xl tracking-tight md:text-4xl">{t.home.demoTitle}</h2>
+          <p className="mt-3 text-muted-foreground md:text-lg">
+            {t.home.demoDescLine}
+            <br />
+            {t.home.demoCreditPrefix}
+            <strong className="font-medium text-foreground">电脑病毒爱好者</strong>
+            {t.home.demoCreditSuffix}
+          </p>
+        </div>
+
+        <div className="mx-auto max-w-4xl">
+          <div className="overflow-hidden rounded-xl border bg-card bg-clip-padding shadow-xs dark:bg-clip-border">
+            <div ref={artRef} className="aspect-video w-full" />
+          </div>
+        </div>
+      </FramedSection>
     </>
   )
 }

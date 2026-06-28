@@ -26,7 +26,7 @@ pub fn run_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Resul
 
     #[cfg(debug_assertions)]
     {
-        println!("[CMD] {} {}", program_str, args.join(" "));
+        log::debug!("[CMD] {} {}", program_str, args.join(" "));
     }
 
     let output = create_command(program).args(args).output()?;
@@ -37,13 +37,13 @@ pub fn run_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Resul
         let stderr = gbk_to_utf8(&output.stderr);
 
         if !stdout.trim().is_empty() {
-            println!("[STDOUT] {}", stdout.trim());
+            log::debug!("[STDOUT] {}", stdout.trim());
         }
         if !stderr.trim().is_empty() {
-            println!("[STDERR] {}", stderr.trim());
+            log::debug!("[STDERR] {}", stderr.trim());
         }
-        println!("[EXIT] {}", output.status);
-        println!("---");
+        log::debug!("[EXIT] {}", output.status);
+        log::debug!("---");
     }
 
     Ok(output)
@@ -55,7 +55,7 @@ pub fn spawn_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Res
 
     #[cfg(debug_assertions)]
     {
-        println!("[SPAWN] {} {}", program_str, args.join(" "));
+        log::debug!("[SPAWN] {} {}", program_str, args.join(" "));
     }
 
     create_command(program).args(args).spawn()
@@ -73,7 +73,7 @@ pub fn run_command_with_args<S: AsRef<OsStr>>(program: S, args: Vec<String>) -> 
 
     #[cfg(debug_assertions)]
     {
-        println!("[CMD] {} {}", program_str, args.join(" "));
+        log::debug!("[CMD] {} {}", program_str, args.join(" "));
     }
 
     let output = create_command(program).args(&args).output()?;
@@ -84,13 +84,13 @@ pub fn run_command_with_args<S: AsRef<OsStr>>(program: S, args: Vec<String>) -> 
         let stderr = gbk_to_utf8(&output.stderr);
 
         if !stdout.trim().is_empty() {
-            println!("[STDOUT] {}", stdout.trim());
+            log::debug!("[STDOUT] {}", stdout.trim());
         }
         if !stderr.trim().is_empty() {
-            println!("[STDERR] {}", stderr.trim());
+            log::debug!("[STDERR] {}", stderr.trim());
         }
-        println!("[EXIT] {}", output.status);
-        println!("---");
+        log::debug!("[EXIT] {}", output.status);
+        log::debug!("---");
     }
 
     Ok(output)
@@ -102,7 +102,7 @@ pub fn spawn_command_piped<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::i
 
     #[cfg(debug_assertions)]
     {
-        println!("[SPAWN PIPED] {} {}", program_str, args.join(" "));
+        log::debug!("[SPAWN PIPED] {} {}", program_str, args.join(" "));
     }
 
     create_command(program)

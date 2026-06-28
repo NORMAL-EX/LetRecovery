@@ -6,6 +6,7 @@ pub mod dism;
 pub mod dism_exe;
 pub mod disk;
 pub mod driver;
+pub mod expand_move;
 pub mod ghost;
 pub mod registry;
 pub mod system_utils;

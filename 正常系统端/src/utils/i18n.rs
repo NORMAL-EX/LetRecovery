@@ -1,7 +1,7 @@
 //! 国际化（i18n）模块
 //!
 //! 提供多语言支持，包括：
-//! - 从 `{软件运行目录}/lang` 目录加载语言文件
+//! - 从 `{软件运行目录}/bin/lang` 目录加载语言文件（不存在则回退旧位置 `{软件运行目录}/lang`）
 //! - 支持运行时切换语言
 //! - 语言设置持久化到配置文件
 //! - 高性能翻译查找
@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use super::path::get_exe_dir;
+use super::path::{get_bin_dir, get_exe_dir};
 
 /// 语言文件结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,9 +60,14 @@ impl I18nManager {
 /// 全局翻译管理器实例
 static I18N_MANAGER: OnceLock<RwLock<I18nManager>> = OnceLock::new();
 
-/// 获取语言文件目录路径
+/// 获取语言文件目录路径（优先 bin/lang，不存在则回退 exe 同级 lang，兼容旧包）
 pub fn get_lang_dir() -> PathBuf {
-    get_exe_dir().join("lang")
+    let in_bin = get_bin_dir().join("lang");
+    if in_bin.exists() {
+        in_bin
+    } else {
+        get_exe_dir().join("lang")
+    }
 }
 
 /// 初始化国际化系统
@@ -260,14 +265,47 @@ pub fn refresh_available_languages() {
     guard.available_languages = scan_available_languages();
 }
 
+/// 翻译并按顺序填充参数。
+///
+/// 先翻译模板 `text`，再把译文中出现的每个 `{}` 依次替换为 `args` 中的参数。
+///
+/// 由于 Rust 的 `format!` 要求格式串为编译期字面量，无法对运行期得到的译文直接格式化，
+/// 因此这里采用顺序替换 `{}` 的方式实现参数插值。调用方需保证：
+/// - 模板（即翻译表的 key）与译文中 `{}` 的数量、顺序一致，且与参数个数一致；
+/// - 形如 `{:.1}`、`{:?}`、`{:x}` 等带格式说明的占位符，应在调用 `tr!` 之前
+///   先用 `format!` 预格式化为普通字符串再作为参数传入（模板里统一写成 `{}`）。
+///
+/// 若参数不足以填满所有 `{}`，多余的占位符将原样保留。
+pub fn translate_with_args(text: &str, args: &[String]) -> String {
+    let translated = translate(text);
+    let mut result = String::with_capacity(translated.len());
+    let mut rest = translated.as_str();
+    let mut iter = args.iter();
+
+    while let Some(pos) = rest.find("{}") {
+        result.push_str(&rest[..pos]);
+        match iter.next() {
+            Some(arg) => result.push_str(arg),
+            None => result.push_str("{}"),
+        }
+        rest = &rest[pos + 2..];
+    }
+    result.push_str(rest);
+    result
+}
+
 /// 翻译宏
 ///
 /// 用于在代码中方便地进行文本翻译。
 ///
 /// # Examples
 /// ```
+/// // 直接翻译字面量
 /// let text = tr!("你好");
+/// // 带参数：模板用 `{}` 占位，先翻译再按顺序填参
 /// let formatted = tr!("欢迎使用 {}", "LetRecovery");
+/// // 带格式说明的值需先预格式化为字符串再传入
+/// let size = tr!("已用 {} GB", format!("{:.1}", 12.34_f64));
 /// ```
 #[macro_export]
 macro_rules! tr {
@@ -275,21 +313,19 @@ macro_rules! tr {
     ($text:expr) => {
         $crate::utils::i18n::translate($text)
     };
-    // 带格式化参数的翻译
-    ($text:expr, $($arg:tt)*) => {{
-        let translated = $crate::utils::i18n::translate($text);
-        format!($($arg)*)
-            .split("{}")
-            .enumerate()
-            .fold(translated, |acc, (i, _)| {
-                acc.replacen("{}", &format!("{{{}}}", i), 1)
-            })
-    }};
+    // 带参数的翻译：先翻译模板，再按顺序把译文中的 `{}` 替换为各参数（参数需实现 Display）
+    ($text:expr, $($arg:expr),+ $(,)?) => {
+        $crate::utils::i18n::translate_with_args(
+            $text,
+            &[$(format!("{}", $arg)),+],
+        )
+    };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tr;
 
     #[test]
     fn test_translate_no_translation() {
@@ -301,5 +337,41 @@ mod tests {
     fn test_default_language() {
         init("");
         assert_eq!(current_language(), "zh-CN");
+    }
+
+    #[test]
+    fn test_translate_with_args_sequential() {
+        init("zh-CN");
+        // zh-CN 下译文即原文，验证占位符按顺序被替换
+        assert_eq!(
+            translate_with_args("已选择 {} 个分区", &["3".to_string()]),
+            "已选择 3 个分区"
+        );
+        assert_eq!(
+            translate_with_args("{} -> {}", &["A".to_string(), "B".to_string()]),
+            "A -> B"
+        );
+    }
+
+    #[test]
+    fn test_translate_with_args_arity_mismatch() {
+        init("zh-CN");
+        // 参数不足时，多余占位符原样保留
+        assert_eq!(
+            translate_with_args("{} / {}", &["仅一个".to_string()]),
+            "仅一个 / {}"
+        );
+        // 参数过多时，多余参数被忽略
+        assert_eq!(
+            translate_with_args("只有 {}", &["A".to_string(), "B".to_string()]),
+            "只有 A"
+        );
+    }
+
+    #[test]
+    fn test_tr_macro_with_args() {
+        init("zh-CN");
+        assert_eq!(tr!("欢迎使用 {}", "LetRecovery"), "欢迎使用 LetRecovery");
+        assert_eq!(tr!("已用 {} GB", format!("{:.1}", 12.34_f64)), "已用 12.3 GB");
     }
 }

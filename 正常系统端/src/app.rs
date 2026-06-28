@@ -44,7 +44,7 @@ pub struct InstallProgress {
 }
 
 /// 引导模式选择
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum BootModeSelection {
     #[default]
     Auto,
@@ -55,7 +55,7 @@ pub enum BootModeSelection {
 impl std::fmt::Display for BootModeSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BootModeSelection::Auto => write!(f, "自动"),
+            BootModeSelection::Auto => write!(f, "{}", tr!("自动")),
             BootModeSelection::UEFI => write!(f, "UEFI"),
             BootModeSelection::Legacy => write!(f, "Legacy"),
         }
@@ -143,7 +143,7 @@ impl BackupFormat {
 }
 
 /// 驱动操作选项
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum DriverAction {
     /// 无操作
     None,
@@ -157,9 +157,9 @@ pub enum DriverAction {
 impl std::fmt::Display for DriverAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DriverAction::None => write!(f, "无"),
-            DriverAction::SaveOnly => write!(f, "仅保存"),
-            DriverAction::AutoImport => write!(f, "自动导入"),
+            DriverAction::None => write!(f, "{}", tr!("无")),
+            DriverAction::SaveOnly => write!(f, "{}", tr!("仅保存")),
+            DriverAction::AutoImport => write!(f, "{}", tr!("自动导入")),
         }
     }
 }
@@ -177,6 +177,60 @@ pub struct InstallOptions {
     pub driver_action: DriverAction,
     /// 自定义无人值守文件绝对路径（空=使用内置生成）
     pub custom_unattend_path: String,
+    /// 目标镜像是否为 XP/2003（NT 5.x）
+    pub is_xp: bool,
+    /// 目标镜像为 XP/2003 的 i386 文本安装介质（无 install.wim，仅 \I386 文本安装结构）。
+    /// 为真时走 `lr_core::xp_i386::install_from_i386`（复制 i386 + 写 NTLDR/bootsect），
+    /// 跳过常规 WIM 释放/引导修复/高级选项。仅 Legacy/MBR。
+    pub is_xp_i386: bool,
+    /// 是否在释放镜像前运行 diskpart 脚本
+    pub run_diskpart_scripts: bool,
+}
+
+/// 「系统安装」页选项偏好（持久化到 config.json）。
+///
+/// 记住用户上次的勾选状态，下次启动自动恢复——任意选项变动后自动写回 config.json，
+/// 无需手动保存。注：AdvancedOptions 内的 WiFi 明文等字段标了 #[serde(skip)]，不持久化。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InstallPrefs {
+    #[serde(default = "lr_pref_true")]
+    pub format_partition: bool,
+    #[serde(default = "lr_pref_true")]
+    pub repair_boot: bool,
+    #[serde(default = "lr_pref_true")]
+    pub unattended_install: bool,
+    #[serde(default = "lr_pref_true")]
+    pub export_drivers: bool,
+    #[serde(default = "lr_pref_true")]
+    pub auto_reboot: bool,
+    #[serde(default)]
+    pub run_diskpart_scripts: bool,
+    #[serde(default)]
+    pub boot_mode: BootModeSelection,
+    #[serde(default)]
+    pub driver_action: DriverAction,
+    #[serde(default)]
+    pub advanced_options: AdvancedOptions,
+}
+
+fn lr_pref_true() -> bool {
+    true
+}
+
+impl Default for InstallPrefs {
+    fn default() -> Self {
+        Self {
+            format_partition: true,
+            repair_boot: true,
+            unattended_install: true,
+            export_drivers: true,
+            auto_reboot: true,
+            run_diskpart_scripts: false,
+            boot_mode: BootModeSelection::Auto,
+            driver_action: DriverAction::AutoImport,
+            advanced_options: AdvancedOptions::default(),
+        }
+    }
 }
 
 /// 主应用结构
@@ -211,12 +265,17 @@ pub struct App {
     pub local_image_path: String,
     pub image_volumes: Vec<ImageInfo>,
     pub selected_volume: Option<usize>,
+    /// 选择的镜像被识别为 Windows XP/2003 的 i386 文本安装介质时，
+    /// 这里存挂载 ISO 上的 i386 源目录（如 `F:\I386`）。非 None 即走 XP 文本安装路径。
+    pub xp_i386_source: Option<String>,
 
 
     // Win7检测日志去重（仅在结果变化时输出）
     pub last_is_win7: Option<bool>,
     // UEFI模式检测追踪（用于自动勾选Win7 UEFI补丁）
     pub last_is_uefi_mode: Option<bool>,
+    // XP检测追踪（用于首次检测到 XP 时自动勾选 注入USB3/NVMe）
+    pub last_is_xp: Option<bool>,
     // 安装选项
     pub format_partition: bool,
     pub repair_boot: bool,
@@ -225,6 +284,8 @@ pub struct App {
     pub auto_reboot: bool,
     pub selected_boot_mode: BootModeSelection,
     pub driver_action: DriverAction,
+    /// 安装前运行 diskpart 脚本（系统安装页复选框；受「高级选项」总开关 enable_advanced_options 控制是否显示）
+    pub run_diskpart_scripts: bool,
 
     // 高级选项
     pub advanced_options: AdvancedOptions,
@@ -441,7 +502,12 @@ pub struct App {
     pub quick_partition_disks_rx: Option<Receiver<Vec<crate::core::quick_partition::PhysicalDisk>>>,
     pub quick_partition_result_rx: Option<Receiver<crate::core::quick_partition::QuickPartitionResult>>,
     pub resize_existing_result_rx: Option<Receiver<crate::core::quick_partition::ResizePartitionResult>>,
-    
+
+    // 无损扩大C盘对话框
+    pub show_expand_c_dialog: bool,
+    pub expand_c_state: crate::ui::tools::ExpandCDialogState,
+    pub expand_c_load_rx: Option<Receiver<crate::ui::tools::expand_c::ExpandCLoadResult>>,
+
     // 镜像校验对话框
     pub show_image_verify_dialog: bool,
     pub image_verify_file_path: String,
@@ -506,6 +572,9 @@ pub struct App {
     // 无人值守检测相关
     /// 当前选中分区是否存在无人值守配置文件
     pub partition_has_unattend: bool,
+    /// 源镜像/安装介质是否自带无人值守应答（XP 的 winnt.sif / 介质根的 autounattend.xml 等）。
+    /// 为真时默认取消勾选「无人值守」（仅改默认，不禁用，用户仍可手动勾上）。
+    pub source_has_unattend: bool,
     /// 无人值守检测是否正在进行
     pub unattend_check_loading: bool,
     /// 无人值守检测结果接收器
@@ -640,6 +709,7 @@ pub enum SoftIconState {
 pub enum PeDownloadThenAction {
     Install,  // 继续安装
     Backup,   // 继续备份
+    Expand,   // 继续无损扩大C盘
 }
 
 /// BitLocker解锁模式
@@ -681,13 +751,16 @@ impl Default for App {
             local_image_path: String::new(),
             image_volumes: Vec::new(),
             selected_volume: None,
+            xp_i386_source: None,
             last_is_win7: None,
             last_is_uefi_mode: None,
+            last_is_xp: None,
             format_partition: true,
             repair_boot: true,
             unattended_install: true,
             export_drivers: true,
             auto_reboot: true,
+            run_diskpart_scripts: false,
             selected_boot_mode: BootModeSelection::Auto,
             driver_action: DriverAction::AutoImport,
             advanced_options: AdvancedOptions::default(),
@@ -839,6 +912,10 @@ impl Default for App {
             quick_partition_disks_rx: None,
             quick_partition_result_rx: None,
             resize_existing_result_rx: None,
+            // 无损扩大C盘对话框
+            show_expand_c_dialog: false,
+            expand_c_state: crate::ui::tools::ExpandCDialogState::default(),
+            expand_c_load_rx: None,
             // 镜像校验对话框
             show_image_verify_dialog: false,
             image_verify_file_path: String::new(),
@@ -887,6 +964,7 @@ impl Default for App {
             embedded_assets: crate::ui::EmbeddedAssets::new(),
             // 无人值守检测相关
             partition_has_unattend: false,
+            source_has_unattend: false,
             custom_unattend_path: String::new(),
             custom_unattend_error: None,
             unattend_check_loading: false,
@@ -946,6 +1024,7 @@ impl App {
         Self::setup_style(&cc.egui_ctx);
 
         let mut app = Self::default();
+        app.apply_install_prefs();
         app.load_initial_data();
         app
     }
@@ -964,12 +1043,56 @@ impl App {
 
         log::info!("创建App实例...");
         let mut app = Self::default();
-        
+        app.apply_install_prefs();
+
         log::info!("加载预加载数据...");
         app.load_initial_data_with_preloaded(preloaded);
         
         log::info!("App::new_with_preloaded 完成");
         app
+    }
+
+    /// 把当前「系统安装」页的选项打包成可持久化的偏好快照。
+    pub fn snapshot_install_prefs(&self) -> InstallPrefs {
+        InstallPrefs {
+            format_partition: self.format_partition,
+            repair_boot: self.repair_boot,
+            unattended_install: self.unattended_install,
+            export_drivers: self.export_drivers,
+            auto_reboot: self.auto_reboot,
+            run_diskpart_scripts: self.run_diskpart_scripts,
+            boot_mode: self.selected_boot_mode,
+            driver_action: self.driver_action,
+            advanced_options: self.advanced_options.clone(),
+        }
+    }
+
+    /// 启动时用持久化的偏好恢复「系统安装」页选项。
+    pub fn apply_install_prefs(&mut self) {
+        let p = self.app_config.install_prefs.clone();
+        self.format_partition = p.format_partition;
+        self.repair_boot = p.repair_boot;
+        self.unattended_install = p.unattended_install;
+        self.export_drivers = p.export_drivers;
+        self.auto_reboot = p.auto_reboot;
+        self.run_diskpart_scripts = p.run_diskpart_scripts;
+        self.selected_boot_mode = p.boot_mode;
+        self.driver_action = p.driver_action;
+        self.advanced_options = p.advanced_options;
+    }
+
+    /// 选项有变化就自动写回 config.json（用序列化结果比对，天然忽略 #[serde(skip)] 字段，
+    /// 避免 WiFi 等非持久化字段变动导致每帧重复落盘）。仅在真正变化时写一次盘。
+    pub fn autosave_install_prefs_if_changed(&mut self) {
+        let current = self.snapshot_install_prefs();
+        let cur_json = serde_json::to_string(&current).ok();
+        let saved_json = serde_json::to_string(&self.app_config.install_prefs).ok();
+        if cur_json != saved_json {
+            self.app_config.install_prefs = current;
+            if let Err(e) = self.app_config.save() {
+                log::warn!("自动保存安装选项偏好失败: {}", e);
+            }
+        }
     }
 
     fn setup_fonts(ctx: &egui::Context) {
@@ -985,17 +1108,17 @@ impl App {
                 std::sync::Arc::new(egui::FontData::from_owned(font_data)),
             );
 
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Proportional)
-                .unwrap()
-                .insert(0, "msyh".to_owned());
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.insert(0, "msyh".to_owned());
+            } else {
+                log::warn!("[App] 未找到 Proportional 字体族，跳过中文字体注入");
+            }
 
-            fonts
-                .families
-                .get_mut(&egui::FontFamily::Monospace)
-                .unwrap()
-                .insert(0, "msyh".to_owned());
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                family.insert(0, "msyh".to_owned());
+            } else {
+                log::warn!("[App] 未找到 Monospace 字体族，跳过中文字体注入");
+            }
         }
 
         ctx.set_fonts(fonts);
@@ -1101,8 +1224,8 @@ impl App {
         self.download_save_path = exe_dir.join("downloads").to_string_lossy().to_string();
 
         // 设置默认备份名称
-        self.backup_name = format!("系统备份_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
-        self.backup_description = "使用 LetRecovery 创建的系统备份".to_string();
+        self.backup_name = tr!("系统备份_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+        self.backup_description = tr!("使用 LetRecovery 创建的系统备份");
         
         // 预加载Windows分区信息（后台异步）
         self.start_load_windows_partitions();
@@ -1224,8 +1347,8 @@ impl App {
         self.download_save_path = exe_dir.join("downloads").to_string_lossy().to_string();
 
         // 设置默认备份名称
-        self.backup_name = format!("系统备份_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
-        self.backup_description = "使用 LetRecovery 创建的系统备份".to_string();
+        self.backup_name = tr!("系统备份_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+        self.backup_description = tr!("使用 LetRecovery 创建的系统备份");
         
         // 预加载Windows分区信息（后台异步）
         self.start_load_windows_partitions();
@@ -1400,6 +1523,9 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 「系统安装」页选项变化时自动记住（写回 config.json，下次启动自动恢复）
+        self.autosave_install_prefs_if_changed();
+
         // 检查远程配置加载状态
         self.check_remote_config_loading();
         
@@ -1417,7 +1543,7 @@ impl eframe::App for App {
         
         // 错误对话框
         if self.show_error_dialog {
-            egui::Window::new("错误")
+            egui::Window::new(tr!("错误"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1428,7 +1554,7 @@ impl eframe::App for App {
                         ui.add_space(10.0);
                         ui.label(&self.error_dialog_message);
                         ui.add_space(20.0);
-                        if ui.button("确定").clicked() {
+                        if ui.button(tr!("确定")).clicked() {
                             self.show_error_dialog = false;
                             self.error_dialog_message.clear();
                         }
@@ -1439,7 +1565,7 @@ impl eframe::App for App {
         
         // 无人值守冲突提示对话框
         if self.show_unattend_conflict_modal {
-            egui::Window::new("无人值守选项不可用")
+            egui::Window::new(tr!("无人值守选项不可用"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1451,31 +1577,31 @@ impl eframe::App for App {
                         ui.add_space(10.0);
                     });
                     
-                    ui.label("目标分区的系统文件中已存在无人值守配置文件（unattend.xml）。");
+                    ui.label(tr!("目标分区的系统文件中已存在无人值守配置文件（unattend.xml）。"));
                     ui.add_space(10.0);
-                    ui.label("为避免配置冲突导致安装失败，无人值守选项已被禁用。");
+                    ui.label(tr!("为避免配置冲突导致安装失败，无人值守选项已被禁用。"));
                     ui.add_space(10.0);
                     
                     ui.separator();
                     ui.add_space(5.0);
                     
-                    ui.label(egui::RichText::new("以下高级选项也将受到影响：").strong());
+                    ui.label(egui::RichText::new(tr!("以下高级选项也将受到影响：")).strong());
                     ui.add_space(5.0);
-                    ui.label("• OOBE绕过强制联网");
-                    ui.label("• 自定义用户名");
-                    ui.label("• 删除预装UWP应用");
+                    ui.label(tr!("• OOBE绕过强制联网"));
+                    ui.label(tr!("• 自定义用户名"));
+                    ui.label(tr!("• 删除预装UWP应用"));
                     
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(5.0);
                     
-                    ui.label(egui::RichText::new("解决方法：").small());
-                    ui.label(egui::RichText::new("勾选「格式化分区」选项，安装时将清除现有配置文件。").small());
+                    ui.label(egui::RichText::new(tr!("解决方法：")).small());
+                    ui.label(egui::RichText::new(tr!("勾选「格式化分区」选项，安装时将清除现有配置文件。")).small());
                     
                     ui.add_space(15.0);
                     
                     ui.vertical_centered(|ui| {
-                        if ui.button("我知道了").clicked() {
+                        if ui.button(tr!("我知道了")).clicked() {
                             self.show_unattend_conflict_modal = false;
                         }
                     });
@@ -1501,13 +1627,13 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some(info) = &self.system_info {
-                    ui.label(format!(
+                    ui.label(tr!(
                         "启动模式: {} | TPM: {} {} | 安全启动: {} | {}",
                         info.boot_mode,
                         if info.tpm_enabled {
-                            "已启用"
+                            tr!("已启用")
                         } else {
-                            "已禁用"
+                            tr!("已禁用")
                         },
                         if !info.tpm_version.is_empty() {
                             format!("v{}", info.tpm_version)
@@ -1515,14 +1641,14 @@ impl eframe::App for App {
                             String::new()
                         },
                         if info.secure_boot {
-                            "已开启"
+                            tr!("已开启")
                         } else {
-                            "已关闭"
+                            tr!("已关闭")
                         },
                         if info.is_pe_environment {
-                            "PE环境"
+                            tr!("PE环境")
                         } else {
-                            "桌面环境"
+                            tr!("桌面环境")
                         },
                     ));
                 }
@@ -1761,14 +1887,34 @@ impl eframe::App for App {
                 self.last_is_win7 = Some(is_win7);
                 self.last_is_uefi_mode = Some(is_uefi_mode);
             }
-            
-            egui::Window::new("高级选项")
+
+            // 检测当前选择的镜像是否为 XP/2003（NT 5.x，major_version==5）
+            let is_xp = self.selected_volume
+                .and_then(|idx| self.image_volumes.get(idx))
+                .map(|img| img.major_version == Some(5))
+                .unwrap_or(false);
+            let xp_changed = self.last_is_xp != Some(is_xp);
+            if xp_changed {
+                if is_xp {
+                    // 首次检测到 XP：默认勾选 注入USB3 / 注入NVMe（用户随后可手动取消）
+                    log::info!("[AUTO] 检测到 XP/2003 镜像，默认勾选 注入USB3/NVMe 驱动");
+                    self.advanced_options.apply_xp_defaults_if_needed(true);
+                } else {
+                    // 非 XP：重置 XP 选项与「已应用默认」标记
+                    self.advanced_options.xp_inject_usb3_driver = false;
+                    self.advanced_options.xp_inject_nvme_driver = false;
+                    self.advanced_options.xp_defaults_applied = false;
+                }
+                self.last_is_xp = Some(is_xp);
+            }
+
+            egui::Window::new(tr!("高级选项"))
                 .open(&mut self.show_advanced_options)
                 .min_width(500.0)
                 .min_height(400.0)
                 .show(ctx, |ui| {
                     self.advanced_options
-                        .show_ui(ui, self.hardware_info.as_ref(), unattend_disabled, is_win7, is_uefi_mode);
+                        .show_ui(ui, self.hardware_info.as_ref(), unattend_disabled, is_win7, is_xp, is_uefi_mode);
                 });
         }
 
@@ -1784,6 +1930,8 @@ impl eframe::App for App {
             || self.partition_copy_copying
             || self.quick_partition_state.loading
             || self.quick_partition_state.executing
+            || self.expand_c_state.loading
+            || self.expand_c_state.executing
             || self.unattend_check_loading
             || self.install_bitlocker_loading
             || self.backup_bitlocker_loading;

@@ -12,6 +12,8 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
+use crate::tr;
+
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -262,7 +264,7 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
 
         // OpenProcessToken 返回 Result
         if let Err(e) = OpenProcessToken(process, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token_handle) {
-            bail!("OpenProcessToken 失败: {}", e);
+            bail!("{}", tr!("OpenProcessToken 失败: {}", e));
         }
 
         let wide_name = to_wide(privilege_name);
@@ -271,7 +273,7 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
         // LookupPrivilegeValueW 返回 Result
         if let Err(e) = LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide_name.as_ptr()), &mut luid) {
             let _ = CloseHandle(token_handle);
-            bail!("LookupPrivilegeValueW 失败: {}", e);
+            bail!("{}", tr!("LookupPrivilegeValueW 失败: {}", e));
         }
 
         let tp = TOKEN_PRIVILEGES {
@@ -292,7 +294,7 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
             None,
         ) {
             let _ = CloseHandle(token_handle);
-            bail!("AdjustTokenPrivileges 失败: {}", e);
+            bail!("{}", tr!("AdjustTokenPrivileges 失败: {}", e));
         }
 
         // 检查 GetLastError，AdjustTokenPrivileges 即使成功也可能设置错误码
@@ -301,7 +303,7 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
         
         if last_error.0 != 0 && last_error.0 != 1300 {
             // 1300 = ERROR_NOT_ALL_ASSIGNED，表示部分权限未能分配，可以忽略
-            println!("[SystemUtils] AdjustTokenPrivileges 警告: 错误码 {}", last_error.0);
+            log::warn!("[SystemUtils] AdjustTokenPrivileges 警告: 错误码 {}", last_error.0);
         }
     }
 
@@ -363,7 +365,7 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
         .join("SOFTWARE");
 
     if !software_hive.exists() {
-        bail!("SOFTWARE hive 不存在: {:?}", software_hive);
+        bail!("{}", tr!("SOFTWARE hive 不存在: {}", format!("{:?}", software_hive)));
     }
 
     // 生成唯一的临时键名
@@ -371,7 +373,7 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
     let wide_key_name = to_wide(&temp_key_name);
     let wide_hive_path = path_to_wide(&software_hive);
 
-    println!("[SystemUtils] 加载离线注册表: {:?}", software_hive);
+    log::info!("[SystemUtils] 加载离线注册表: {:?}", software_hive);
 
     // 加载 hive 到 HKEY_LOCAL_MACHINE
     let load_result = unsafe {
@@ -379,7 +381,7 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
     };
 
     if load_result.0 != 0 {
-        bail!("RegLoadKeyW 失败: 错误码 {}", load_result.0);
+        bail!("{}", tr!("RegLoadKeyW 失败: 错误码 {}", load_result.0));
     }
 
     // 确保在函数退出时卸载 hive
@@ -418,7 +420,7 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
     };
 
     if open_result.0 != 0 {
-        bail!("RegOpenKeyExW 失败: 错误码 {}", open_result.0);
+        bail!("{}", tr!("RegOpenKeyExW 失败: 错误码 {}", open_result.0));
     }
 
     // 读取值的辅助函数
@@ -472,13 +474,13 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
         let _ = RegCloseKey(hkey);
     }
 
-    println!("[SystemUtils] 读取到系统信息: {:?}", info);
+    log::info!("[SystemUtils] 读取到系统信息: {:?}", info);
     Ok(info)
 }
 
 #[cfg(not(windows))]
 pub fn get_offline_system_info(_system_root: &str) -> Result<OfflineSystemInfo> {
-    bail!("仅支持 Windows 平台")
+    bail!("{}", tr!("仅支持 Windows 平台"))
 }
 
 /// 获取离线系统版本字符串（简化版）
@@ -512,7 +514,7 @@ pub fn get_offline_system_edition(system_root: &str) -> Result<String> {
 pub fn cleanup_component_store() -> Result<()> {
     use std::process::Command;
 
-    println!("[SystemUtils] 触发组件存储清理任务...");
+    log::info!("[SystemUtils] 触发组件存储清理任务...");
 
     // 方法1: 使用 schtasks.exe 触发已有任务
     let output = Command::new("schtasks.exe")
@@ -521,11 +523,11 @@ pub fn cleanup_component_store() -> Result<()> {
 
     match output {
         Ok(result) if result.status.success() => {
-            println!("[SystemUtils] 组件清理任务已触发");
+            log::info!("[SystemUtils] 组件清理任务已触发");
             return Ok(());
         }
         _ => {
-            println!("[SystemUtils] schtasks 触发失败，尝试 cleanmgr...");
+            log::warn!("[SystemUtils] schtasks 触发失败，尝试 cleanmgr...");
         }
     }
 
@@ -537,18 +539,18 @@ pub fn cleanup_component_store() -> Result<()> {
 
     match output {
         Ok(_) => {
-            println!("[SystemUtils] cleanmgr 已启动");
+            log::info!("[SystemUtils] cleanmgr 已启动");
             Ok(())
         }
         Err(e) => {
-            bail!("无法启动清理工具: {}", e);
+            bail!("{}", tr!("无法启动清理工具: {}", e));
         }
     }
 }
 
 #[cfg(not(windows))]
 pub fn cleanup_component_store() -> Result<()> {
-    bail!("仅支持 Windows 平台")
+    bail!("{}", tr!("仅支持 Windows 平台"))
 }
 
 /// 清理离线系统的组件存储
@@ -572,19 +574,19 @@ pub fn cleanup_offline_component_store(system_root: &str) -> Result<()> {
 
     for dir in &cleanup_dirs {
         if dir.exists() {
-            println!("[SystemUtils] 清理目录: {:?}", dir);
+            log::info!("[SystemUtils] 清理目录: {:?}", dir);
             match cleanup_directory(dir) {
                 Ok(size) => {
                     cleaned_size += size;
                 }
                 Err(e) => {
-                    println!("[SystemUtils] 清理 {:?} 失败: {}", dir, e);
+                    log::warn!("[SystemUtils] 清理 {:?} 失败: {}", dir, e);
                 }
             }
         }
     }
 
-    println!(
+    log::info!(
         "[SystemUtils] 离线清理完成，释放空间: {:.2} MB",
         cleaned_size as f64 / 1024.0 / 1024.0
     );
@@ -643,7 +645,7 @@ pub fn analyze_component_store(system_root: &str) -> Result<ComponentStoreAnalys
     let winsxs_path = system_root_path.join("Windows").join("WinSxS");
 
     if !winsxs_path.exists() {
-        bail!("WinSxS 目录不存在");
+        bail!("{}", tr!("WinSxS 目录不存在"));
     }
 
     let temp_path = winsxs_path.join("Temp");
@@ -699,7 +701,7 @@ fn get_dir_size(path: &Path) -> Result<u64> {
 pub fn check_system_files() -> Result<bool> {
     use std::process::Command;
 
-    println!("[SystemUtils] 运行系统文件检查...");
+    log::info!("[SystemUtils] 运行系统文件检查...");
 
     let output = Command::new("sfc")
         .args(["/scannow"])
@@ -717,7 +719,7 @@ pub fn check_system_files() -> Result<bool> {
 
 #[cfg(not(windows))]
 pub fn check_system_files() -> Result<bool> {
-    bail!("仅支持 Windows 平台")
+    bail!("{}", tr!("仅支持 Windows 平台"))
 }
 
 /// 检查离线系统文件完整性
@@ -751,7 +753,7 @@ pub fn check_offline_system_files(system_root: &str) -> Result<bool> {
     }
 
     if !missing_files.is_empty() {
-        println!("[SystemUtils] 缺失关键文件: {:?}", missing_files);
+        log::warn!("[SystemUtils] 缺失关键文件: {:?}", missing_files);
         return Ok(false);
     }
 

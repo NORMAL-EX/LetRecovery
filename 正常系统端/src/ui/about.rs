@@ -54,13 +54,30 @@ impl App {
                                 if ui.selectable_label(is_selected, &lang.display_name).clicked() {
                                     if lang.code != current_language {
                                         self.app_config.set_language(&lang.code);
+                                        // 备份名/描述在启动时按当时语言生成并缓存，切换语言后需重新生成，
+                                        // 否则会停留在旧语言（其余界面文本每帧用 tr! 渲染会自动刷新）。
+                                        self.backup_name = tr!(
+                                            "系统备份_{}",
+                                            chrono::Local::now().format("%Y%m%d_%H%M%S")
+                                        );
+                                        self.backup_description =
+                                            tr!("使用 LetRecovery 创建的系统备份");
+                                        // 远程配置错误信息在加载时按当时语言生成并缓存于
+                                        // remote_config.error，切换语言后重新拉取，使其也用新语言显示。
+                                        self.start_remote_config_loading();
+                                        // 窗口标题在启动时设定，切换语言时通过 viewport 命令同步更新。
+                                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
+                                            tr!("LetRecovery - Windows系统一键重装工具"),
+                                        ));
+                                        // 立即重绘，使整个界面即时应用新语言（否则需下一次交互才刷新）
+                                        ui.ctx().request_repaint();
                                     }
                                 }
                             }
                         });
                     
                     // 刷新语言列表按钮
-                    if ui.button("").on_hover_text(tr!("刷新语言列表")).clicked() {
+                    if ui.button(tr!("刷新")).on_hover_text(tr!("刷新语言列表")).clicked() {
                         i18n::refresh_available_languages();
                     }
                 });
@@ -162,6 +179,84 @@ impl App {
                         }
                     }
                 }
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                // 镜像引擎设置
+                ui.add_space(10.0);
+                ui.heading(tr!("镜像引擎"));
+                ui.add_space(10.0);
+
+                let current_engine = self.app_config.wim_engine;
+                let current_label = if current_engine == 1 {
+                    tr!("wimgapi（系统原生 API）")
+                } else {
+                    tr!("libwim（内置，默认）")
+                };
+                ui.horizontal(|ui| {
+                    ui.label(tr!("WIM 引擎:"));
+                    egui::ComboBox::from_id_salt("wim_engine_selector")
+                        .selected_text(current_label)
+                        .width(280.0)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(current_engine == 0, tr!("libwim（内置，默认）"))
+                                .clicked()
+                                && current_engine != 0
+                            {
+                                self.app_config.set_wim_engine(0);
+                            }
+                            if ui
+                                .selectable_label(current_engine == 1, tr!("wimgapi（系统原生 API）"))
+                                .clicked()
+                                && current_engine != 1
+                            {
+                                self.app_config.set_wim_engine(1);
+                            }
+                        });
+                });
+
+                ui.add_space(5.0);
+                ui.indent("wim_engine_desc", |ui| {
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        tr!("镜像释放/备份使用的底层引擎。libwim 为内置默认；wimgapi 为 Windows 原生接口。"),
+                    );
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        tr!("切换后正常系统端与 PE 端均使用该引擎；若 wimgapi 不可用会自动回退到 libwim。"),
+                    );
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                // 高级选项（总开关，存 config.json；小白勿开）
+                ui.add_space(10.0);
+                ui.heading(tr!("高级选项"));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let mut adv = self.app_config.enable_advanced_options;
+                    if ui.checkbox(&mut adv, tr!("启用高级选项")).changed() {
+                        self.app_config.set_advanced_options(adv);
+                    }
+                });
+                ui.add_space(5.0);
+                ui.indent("advanced_options_desc", |ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 80, 80),
+                        tr!("⚠ 面向高级用户，小白请勿开启，设置不当可能导致无法开机。"),
+                    );
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        tr!("开启后解锁：安装 XP 时可选 UEFI 引导（供 UEFI 化魔改镜像）、"),
+                    );
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        tr!("系统安装页「运行 Diskpart 脚本」、自定义修复引导脚本 bin\\repair_boot.txt。"),
+                    );
+                });
 
                 ui.add_space(10.0);
                 ui.separator();

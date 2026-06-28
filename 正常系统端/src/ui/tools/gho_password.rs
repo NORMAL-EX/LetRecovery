@@ -7,6 +7,7 @@ use std::sync::mpsc;
 
 use crate::app::App;
 use crate::core::gho_password::read_gho_password;
+use crate::tr;
 use super::types::GhoPasswordResult;
 
 impl App {
@@ -18,27 +19,27 @@ impl App {
 
         let mut should_close = false;
 
-        egui::Window::new("查看GHO密码")
+        egui::Window::new(tr!("查看GHO密码"))
             .resizable(true)
             .default_width(500.0)
             .default_height(300.0)
             .show(ui.ctx(), |ui| {
-                ui.label("查看Ghost镜像文件(.gho)的密码信息");
+                ui.label(tr!("查看Ghost镜像文件(.gho)的密码信息"));
                 ui.add_space(10.0);
 
                 // 文件路径输入
                 ui.horizontal(|ui| {
-                    ui.label("GHO文件路径:");
+                    ui.label(tr!("GHO文件路径:"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.gho_password_file_path)
-                            .hint_text("输入或选择GHO文件路径")
+                            .hint_text(tr!("输入或选择GHO文件路径"))
                             .desired_width(300.0),
                     );
-                    
-                    if ui.button("浏览...").clicked() {
+
+                    if ui.button(tr!("浏览...")).clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("GHO镜像文件", &["gho", "GHO", "ghs", "GHS"])
-                            .add_filter("所有文件", &["*"])
+                            .add_filter(tr!("GHO镜像文件"), &["gho", "GHO", "ghs", "GHS"])
+                            .add_filter(tr!("所有文件"), &["*"])
                             .pick_file()
                         {
                             self.gho_password_file_path = path.to_string_lossy().to_string();
@@ -52,13 +53,13 @@ impl App {
                 ui.horizontal(|ui| {
                     let can_view = !self.gho_password_file_path.is_empty() && !self.gho_password_loading;
                     
-                    if ui.add_enabled(can_view, egui::Button::new("查看密码")).clicked() {
+                    if ui.add_enabled(can_view, egui::Button::new(tr!("查看密码"))).clicked() {
                         self.start_read_gho_password();
                     }
 
                     if self.gho_password_loading {
                         ui.spinner();
-                        ui.label("正在读取...");
+                        ui.label(tr!("正在读取..."));
                     }
                 });
 
@@ -70,7 +71,7 @@ impl App {
                 if let Some(ref result) = self.gho_password_result {
                     // 显示文件路径
                     ui.horizontal(|ui| {
-                        ui.label("文件:");
+                        ui.label(tr!("文件:"));
                         ui.label(&result.file_path);
                     });
                     
@@ -78,9 +79,9 @@ impl App {
 
                     // 显示有效性状态
                     if result.is_valid {
-                        ui.colored_label(egui::Color32::from_rgb(0, 180, 0), "有效的GHO文件");
+                        ui.colored_label(egui::Color32::from_rgb(0, 180, 0), tr!("有效的GHO文件"));
                     } else {
-                        ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "无效的GHO文件");
+                        ui.colored_label(egui::Color32::from_rgb(255, 80, 80), tr!("无效的GHO文件"));
                     }
                     
                     ui.add_space(5.0);
@@ -88,17 +89,17 @@ impl App {
                     // 显示密码信息
                     if result.is_valid {
                         if result.has_password {
-                            ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "已设置密码保护");
-                            
+                            ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("已设置密码保护"));
+
                             ui.horizontal(|ui| {
-                                ui.label("密码长度:");
-                                ui.label(format!("{} 字符", result.password_length));
+                                ui.label(tr!("密码长度:"));
+                                ui.label(tr!("{} 字符", result.password_length));
                             });
 
                             if let Some(ref pwd) = result.password {
                                 ui.add_space(5.0);
                                 ui.horizontal(|ui| {
-                                    ui.label("密码:");
+                                    ui.label(tr!("密码:"));
                                     // 使用可选择的文本框显示密码，方便复制
                                     let mut pwd_display = pwd.clone();
                                     ui.add(
@@ -106,8 +107,8 @@ impl App {
                                             .desired_width(200.0)
                                             .interactive(true)
                                     );
-                                    
-                                    if ui.button("复制").clicked() {
+
+                                    if ui.button(tr!("复制")).clicked() {
                                         ui.ctx().copy_text(pwd.clone());
                                     }
                                 });
@@ -116,7 +117,7 @@ impl App {
                                 ui.colored_label(egui::Color32::YELLOW, format!("{}", result.message));
                             }
                         } else {
-                            ui.colored_label(egui::Color32::from_rgb(0, 180, 0), "未设置密码保护");
+                            ui.colored_label(egui::Color32::from_rgb(0, 180, 0), tr!("未设置密码保护"));
                         }
                     }
                     
@@ -131,7 +132,7 @@ impl App {
 
                 // 关闭按钮
                 ui.horizontal(|ui| {
-                    if ui.button("关闭").clicked() {
+                    if ui.button(tr!("关闭")).clicked() {
                         should_close = true;
                     }
                 });

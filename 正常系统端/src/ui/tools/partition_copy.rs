@@ -9,6 +9,8 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
+use crate::tr;
+
 #[cfg(windows)]
 use windows::{
     core::PCWSTR,
@@ -540,7 +542,7 @@ pub fn execute_partition_copy(
 
     // 发送初始进度
     let mut progress = CopyProgress::default();
-    progress.current_file = "正在收集文件列表...".to_string();
+    progress.current_file = tr!("正在收集文件列表...");
     let _ = progress_tx.send(progress.clone());
 
     // 收集所有文件
@@ -565,7 +567,7 @@ pub fn execute_partition_copy(
     // 写入初始标记文件
     if !is_resume {
         if let Err(e) = write_copy_marker(target_partition, &marker) {
-            progress.error = Some(format!("无法创建标记文件: {}", e));
+            progress.error = Some(tr!("无法创建标记文件: {}", e));
             progress.completed = true;
             let _ = progress_tx.send(progress);
             return;
@@ -616,24 +618,24 @@ pub fn execute_partition_copy(
 
     // 发送完成进度
     progress.completed = true;
-    progress.current_file = "复制完成".to_string();
+    progress.current_file = tr!("复制完成");
     let _ = progress_tx.send(progress);
 }
 
 /// 检查是否有足够的目标空间
 pub fn check_target_space(source_partition: &str, target_partition: &str) -> Result<(), String> {
     let source_info = get_partition_info(source_partition)
-        .ok_or_else(|| format!("无法获取源分区 {} 的信息", source_partition))?;
+        .ok_or_else(|| tr!("无法获取源分区 {} 的信息", source_partition))?;
 
     let target_info = get_partition_info(target_partition)
-        .ok_or_else(|| format!("无法获取目标分区 {} 的信息", target_partition))?;
+        .ok_or_else(|| tr!("无法获取目标分区 {} 的信息", target_partition))?;
 
     // 检查目标分区可用空间是否足够容纳源分区的已用空间
     if target_info.free_size_mb < source_info.used_size_mb {
-        return Err(format!(
-            "目标分区可用空间不足！\n源分区已用: {:.2} GB\n目标分区可用: {:.2} GB",
-            source_info.used_size_mb as f64 / 1024.0,
-            target_info.free_size_mb as f64 / 1024.0
+        return Err(tr!(
+            "目标分区可用空间不足！\n源分区已用: {} GB\n目标分区可用: {} GB",
+            format!("{:.2}", source_info.used_size_mb as f64 / 1024.0),
+            format!("{:.2}", target_info.free_size_mb as f64 / 1024.0)
         ));
     }
 

@@ -12,6 +12,7 @@
 //! - 所有密码和恢复密钥仅在内存中短暂存在
 //! - 使用RAII模式确保句柄正确释放
 
+use crate::tr;
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -452,7 +453,7 @@ impl BitLockerManager {
 
     #[cfg(not(windows))]
     pub fn get_recovery_key(&self, _drive: &str) -> Result<String, String> {
-        Err("仅支持Windows系统".to_string())
+        Err(tr!("仅支持Windows系统"))
     }
 
     /// 使用 manage-bde 获取恢复密钥
@@ -467,14 +468,14 @@ impl BitLockerManager {
             .output()
         {
             Ok(o) => o,
-            Err(e) => return Err(format!("执行命令失败: {}", e)),
+            Err(e) => return Err(tr!("执行命令失败: {}", e)),
         };
 
         let stdout = decode_windows_output(&output.stdout);
 
         // 解析输出寻找 48 位数字密码
         // 格式通常为：111111-222222-333333-444444-555555-666666-777777-888888
-        extract_recovery_key(&stdout).ok_or_else(|| "未找到恢复密钥".to_string())
+        extract_recovery_key(&stdout).ok_or_else(|| tr!("未找到恢复密钥"))
     }
 
     /// 检查指定驱动器是否需要解锁
@@ -489,15 +490,15 @@ impl BitLockerManager {
         let letter = format!("{}:", drive_letter);
 
         if password.is_empty() {
-            return UnlockResult::failure(&letter, "密码不能为空", None);
+            return UnlockResult::failure(&letter, &tr!("密码不能为空"), None);
         }
 
         let status = self.get_status(drive_letter);
         if status == VolumeStatus::NotEncrypted {
-            return UnlockResult::failure(&letter, "该驱动器未启用 BitLocker 加密", None);
+            return UnlockResult::failure(&letter, &tr!("该驱动器未启用 BitLocker 加密"), None);
         }
         if status == VolumeStatus::EncryptedUnlocked {
-            return UnlockResult::success(&letter, "驱动器已经是解锁状态");
+            return UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"));
         }
 
         let mut result = if self.use_fveapi {
@@ -525,7 +526,7 @@ impl BitLockerManager {
 
     #[cfg(not(windows))]
     pub fn unlock_with_password(&self, drive: &str, _password: &str) -> UnlockResult {
-        UnlockResult::failure(drive, "仅支持Windows系统", None)
+        UnlockResult::failure(drive, &tr!("仅支持Windows系统"), None)
     }
 
     /// 使用fveapi密码解锁
@@ -543,14 +544,14 @@ impl BitLockerManager {
             Ok(handle) => match handle.unlock_with_password(password) {
                 Ok(()) => {
                     log::info!("BitLocker 分区 {} 使用密码解锁成功 (fveapi)", letter);
-                    UnlockResult::success(&letter, "解锁成功")
+                    UnlockResult::success(&letter, &tr!("解锁成功"))
                 }
                 Err(FveError::BadPassword) => {
                     log::warn!("BitLocker 分区 {} 密码错误 (fveapi)", letter);
-                    UnlockResult::failure(&letter, "密码错误", Some(0x80310027))
+                    UnlockResult::failure(&letter, &tr!("密码错误"), Some(0x80310027))
                 }
                 Err(FveError::VolumeUnlocked) => {
-                    UnlockResult::success(&letter, "驱动器已经是解锁状态")
+                    UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"))
                 }
                 Err(e) => {
                     log::error!("BitLocker 分区 {} 解锁失败: {} (fveapi)", letter, e);
@@ -578,7 +579,7 @@ impl BitLockerManager {
             .output()
         {
             Ok(o) => o,
-            Err(e) => return UnlockResult::failure(&letter, &format!("执行命令失败: {}", e), None),
+            Err(e) => return UnlockResult::failure(&letter, &tr!("执行命令失败: {}", e), None),
         };
 
         let stdout = decode_windows_output(&output.stdout);
@@ -590,7 +591,7 @@ impl BitLockerManager {
             || stdout_lower.contains("解锁成功")
         {
             log::info!("BitLocker 分区 {} 使用密码解锁成功 (manage-bde)", letter);
-            UnlockResult::success(&letter, "解锁成功")
+            UnlockResult::success(&letter, &tr!("解锁成功"))
         } else if stdout_lower.contains("password failed")
             || stdout_lower.contains("密码失败")
             || stdout_lower.contains("incorrect password")
@@ -598,9 +599,9 @@ impl BitLockerManager {
             || stdout_lower.contains("the password is incorrect")
         {
             log::warn!("BitLocker 分区 {} 密码错误 (manage-bde)", letter);
-            UnlockResult::failure(&letter, "密码错误", Some(0x80310027))
+            UnlockResult::failure(&letter, &tr!("密码错误"), Some(0x80310027))
         } else if stdout_lower.contains("already unlocked") || stdout_lower.contains("已解锁") {
-            UnlockResult::success(&letter, "驱动器已经是解锁状态")
+            UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"))
         } else {
             log::error!(
                 "BitLocker 分区 {} 解锁失败: {} (manage-bde)",
@@ -608,7 +609,7 @@ impl BitLockerManager {
                 stdout
             );
             let error_msg = extract_error_message(&stdout)
-                .unwrap_or_else(|| "解锁失败，请检查密码是否正确".to_string());
+                .unwrap_or_else(|| tr!("解锁失败，请检查密码是否正确"));
             UnlockResult::failure(&letter, &error_msg, None)
         }
     }
@@ -620,7 +621,7 @@ impl BitLockerManager {
         let letter = format!("{}:", drive_letter);
 
         if recovery_key.is_empty() {
-            return UnlockResult::failure(&letter, "恢复密钥不能为空", None);
+            return UnlockResult::failure(&letter, &tr!("恢复密钥不能为空"), None);
         }
 
         // 格式化恢复密钥
@@ -631,10 +632,10 @@ impl BitLockerManager {
 
         let status = self.get_status(drive_letter);
         if status == VolumeStatus::NotEncrypted {
-            return UnlockResult::failure(&letter, "该驱动器未启用 BitLocker 加密", None);
+            return UnlockResult::failure(&letter, &tr!("该驱动器未启用 BitLocker 加密"), None);
         }
         if status == VolumeStatus::EncryptedUnlocked {
-            return UnlockResult::success(&letter, "驱动器已经是解锁状态");
+            return UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"));
         }
 
         let mut result = if self.use_fveapi {
@@ -665,7 +666,7 @@ impl BitLockerManager {
 
     #[cfg(not(windows))]
     pub fn unlock_with_recovery_key(&self, drive: &str, _recovery_key: &str) -> UnlockResult {
-        UnlockResult::failure(drive, "仅支持Windows系统", None)
+        UnlockResult::failure(drive, &tr!("仅支持Windows系统"), None)
     }
 
     /// 使用fveapi恢复密钥解锁
@@ -687,14 +688,14 @@ impl BitLockerManager {
             Ok(handle) => match handle.unlock_with_recovery_key(recovery_key) {
                 Ok(()) => {
                     log::info!("BitLocker 分区 {} 使用恢复密钥解锁成功 (fveapi)", letter);
-                    UnlockResult::success(&letter, "解锁成功")
+                    UnlockResult::success(&letter, &tr!("解锁成功"))
                 }
                 Err(FveError::BadRecoveryPassword) => {
                     log::warn!("BitLocker 分区 {} 恢复密钥错误 (fveapi)", letter);
-                    UnlockResult::failure(&letter, "恢复密钥错误", Some(0x80310028))
+                    UnlockResult::failure(&letter, &tr!("恢复密钥错误"), Some(0x80310028))
                 }
                 Err(FveError::VolumeUnlocked) => {
-                    UnlockResult::success(&letter, "驱动器已经是解锁状态")
+                    UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"))
                 }
                 Err(e) => {
                     log::error!("BitLocker 分区 {} 解锁失败: {} (fveapi)", letter, e);
@@ -726,7 +727,7 @@ impl BitLockerManager {
             .output()
         {
             Ok(o) => o,
-            Err(e) => return UnlockResult::failure(&letter, &format!("执行命令失败: {}", e), None),
+            Err(e) => return UnlockResult::failure(&letter, &tr!("执行命令失败: {}", e), None),
         };
 
         let stdout = decode_windows_output(&output.stdout);
@@ -741,7 +742,7 @@ impl BitLockerManager {
                 "BitLocker 分区 {} 使用恢复密钥解锁成功 (manage-bde)",
                 letter
             );
-            UnlockResult::success(&letter, "解锁成功")
+            UnlockResult::success(&letter, &tr!("解锁成功"))
         } else if stdout_lower.contains("recovery password failed")
             || stdout_lower.contains("恢复密码失败")
             || stdout_lower.contains("incorrect recovery password")
@@ -750,9 +751,9 @@ impl BitLockerManager {
             || stdout_lower.contains("the recovery password is incorrect")
         {
             log::warn!("BitLocker 分区 {} 恢复密钥错误 (manage-bde)", letter);
-            UnlockResult::failure(&letter, "恢复密钥错误", Some(0x80310028))
+            UnlockResult::failure(&letter, &tr!("恢复密钥错误"), Some(0x80310028))
         } else if stdout_lower.contains("already unlocked") || stdout_lower.contains("已解锁") {
-            UnlockResult::success(&letter, "驱动器已经是解锁状态")
+            UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"))
         } else {
             log::error!(
                 "BitLocker 分区 {} 解锁失败: {} (manage-bde)",
@@ -760,7 +761,7 @@ impl BitLockerManager {
                 stdout
             );
             let error_msg = extract_error_message(&stdout)
-                .unwrap_or_else(|| "解锁失败，请检查恢复密钥是否正确".to_string());
+                .unwrap_or_else(|| tr!("解锁失败，请检查恢复密钥是否正确"));
             UnlockResult::failure(&letter, &error_msg, None)
         }
     }
@@ -783,7 +784,7 @@ impl BitLockerManager {
             // 检查是否超时
             if start_time.elapsed() > timeout {
                 log::error!("BitLocker 分区 {} 解锁超时（5分钟）", letter);
-                return UnlockResult::failure(letter, "解锁超时，分区可能仍在后台处理中", None);
+                return UnlockResult::failure(letter, &tr!("解锁超时，分区可能仍在后台处理中"), None);
             }
 
             // 检查分区状态
@@ -799,7 +800,7 @@ impl BitLockerManager {
                             letter,
                             elapsed.as_secs_f64()
                         );
-                        return UnlockResult::success(letter, "解锁成功");
+                        return UnlockResult::success(letter, &tr!("解锁成功"));
                     } else {
                         log::debug!(
                             "BitLocker 分区 {} 状态为已解锁，但文件系统尚未就绪，继续等待...",
@@ -810,12 +811,12 @@ impl BitLockerManager {
                 VolumeStatus::NotEncrypted => {
                     // 已完全解密
                     log::info!("BitLocker 分区 {} 已完全解密", letter);
-                    return UnlockResult::success(letter, "解锁成功");
+                    return UnlockResult::success(letter, &tr!("解锁成功"));
                 }
                 VolumeStatus::EncryptedLocked => {
                     // 仍然锁定，可能解锁失败
                     log::warn!("BitLocker 分区 {} 仍处于锁定状态", letter);
-                    return UnlockResult::failure(letter, "解锁失败，分区仍处于锁定状态", None);
+                    return UnlockResult::failure(letter, &tr!("解锁失败，分区仍处于锁定状态"), None);
                 }
                 _ => {
                     log::debug!(
@@ -863,17 +864,17 @@ impl BitLockerManager {
 
         match status {
             VolumeStatus::NotEncrypted => {
-                return DecryptResult::success(&letter, "分区已经是未加密状态");
+                return DecryptResult::success(&letter, &tr!("分区已经是未加密状态"));
             }
             VolumeStatus::EncryptedLocked => {
                 return DecryptResult::failure(
                     &letter,
-                    "分区处于锁定状态，请先解锁后再进行彻底解密",
+                    &tr!("分区处于锁定状态，请先解锁后再进行彻底解密"),
                     Some(0x80310001),
                 );
             }
             VolumeStatus::Decrypting => {
-                return DecryptResult::success(&letter, "分区正在解密中，请等待完成");
+                return DecryptResult::success(&letter, &tr!("分区正在解密中，请等待完成"));
             }
             _ => {}
         }
@@ -893,7 +894,7 @@ impl BitLockerManager {
 
     #[cfg(not(windows))]
     pub fn decrypt(&self, drive: &str) -> DecryptResult {
-        DecryptResult::failure(drive, "仅支持Windows系统", None)
+        DecryptResult::failure(drive, &tr!("仅支持Windows系统"), None)
     }
 
     /// 使用fveapi解密（对齐 a1ive/fvetool 的可靠实现）
@@ -918,9 +919,9 @@ impl BitLockerManager {
         match api.decrypt_unlocked_volume_blocking(&volume_path, 1000, 0) {
             Ok(_) => {
                 log::info!("BitLocker 分区 {} 开始解密 (fveapi)", letter);
-                DecryptResult::success(&letter, "已开始解密，此过程可能需要较长时间，请勿中断")
+                DecryptResult::success(&letter, &tr!("已开始解密，此过程可能需要较长时间，请勿中断"))
             }
-            Err(FveError::NotEncrypted) => DecryptResult::success(&letter, "分区已经是未加密状态"),
+            Err(FveError::NotEncrypted) => DecryptResult::success(&letter, &tr!("分区已经是未加密状态")),
             Err(e) => {
                 log::error!("BitLocker 分区 {} 解密失败: {} (fveapi)", letter, e);
                 DecryptResult::failure(&letter, &e.to_string(), Some(e.code()))
@@ -947,7 +948,7 @@ impl BitLockerManager {
         } {
             Ok(o) => o,
             Err(e) => {
-                return DecryptResult::failure(&letter, &format!("执行命令失败: {}", e), None)
+                return DecryptResult::failure(&letter, &tr!("执行命令失败: {}", e), None)
             }
         };
 
@@ -961,13 +962,13 @@ impl BitLockerManager {
             || stdout_lower.contains("解密正在进行")
         {
             log::info!("BitLocker 分区 {} 开始解密 (manage-bde)", letter);
-            DecryptResult::success(&letter, "已开始解密，此过程可能需要较长时间，请勿中断")
+            DecryptResult::success(&letter, &tr!("已开始解密，此过程可能需要较长时间，请勿中断"))
         } else if stdout_lower.contains("already decrypted")
             || stdout_lower.contains("已解密")
             || stdout_lower.contains("not enabled")
             || stdout_lower.contains("未启用")
         {
-            DecryptResult::success(&letter, "分区已经是未加密状态")
+            DecryptResult::success(&letter, &tr!("分区已经是未加密状态"))
         } else {
             log::error!(
                 "BitLocker 分区 {} 解密失败: {} (manage-bde)",
@@ -975,7 +976,7 @@ impl BitLockerManager {
                 stdout
             );
             let error_msg =
-                extract_error_message(&stdout).unwrap_or_else(|| "解密操作失败".to_string());
+                extract_error_message(&stdout).unwrap_or_else(|| tr!("解密操作失败"));
             DecryptResult::failure(&letter, &error_msg, None)
         }
     }
@@ -992,13 +993,13 @@ impl BitLockerManager {
     /// 卷仍解密可读，但密钥以明文存放；重启后仍挂起，直到手动恢复。常用于换 BIOS/固件前。
     #[cfg(windows)]
     pub fn suspend_protection(&self, drive: &str) -> Result<String, String> {
-        self.run_protectors_cmd(drive, "-disable", "已挂起 BitLocker 保护（重启后仍挂起，直到手动恢复）")
+        self.run_protectors_cmd(drive, "-disable", &tr!("已挂起 BitLocker 保护（重启后仍挂起，直到手动恢复）"))
     }
 
     /// 恢复 BitLocker 保护（manage-bde -protectors -enable）。
     #[cfg(windows)]
     pub fn resume_protection(&self, drive: &str) -> Result<String, String> {
-        self.run_protectors_cmd(drive, "-enable", "已恢复 BitLocker 保护")
+        self.run_protectors_cmd(drive, "-enable", &tr!("已恢复 BitLocker 保护"))
     }
 
     #[cfg(windows)]
@@ -1010,7 +1011,7 @@ impl BitLockerManager {
             .args(["-protectors", action, &d])
             .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output()
-            .map_err(|e| format!("执行 manage-bde 失败: {}", e))?;
+            .map_err(|e| tr!("执行 manage-bde 失败: {}", e))?;
         if output.status.success() {
             log::info!("BitLocker {} {} 成功", action, d);
             Ok(format!("{} {}", d, ok_msg))
@@ -1021,18 +1022,18 @@ impl BitLockerManager {
                 msg.push_str(&err);
             }
             Err(extract_error_message(&msg)
-                .unwrap_or_else(|| format!("操作失败: {}", msg.trim())))
+                .unwrap_or_else(|| tr!("操作失败: {}", msg.trim())))
         }
     }
 
     #[cfg(not(windows))]
     pub fn suspend_protection(&self, _drive: &str) -> Result<String, String> {
-        Err("仅支持Windows系统".to_string())
+        Err(tr!("仅支持Windows系统"))
     }
 
     #[cfg(not(windows))]
     pub fn resume_protection(&self, _drive: &str) -> Result<String, String> {
-        Err("仅支持Windows系统".to_string())
+        Err(tr!("仅支持Windows系统"))
     }
 
     /// 获取所有BitLocker加密的卷

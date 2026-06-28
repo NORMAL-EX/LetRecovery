@@ -25,6 +25,7 @@ use windows::{
 #[cfg(windows)]
 const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x00560000;
 
+use crate::tr;
 use crate::utils::cmd::create_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
@@ -75,13 +76,13 @@ impl PhysicalDisk {
     /// 获取显示名称
     pub fn display_name(&self) -> String {
         if self.model.is_empty() {
-            format!("磁盘 {} ({:.1} GB)", self.disk_number, self.size_gb())
+            tr!("磁盘 {} ({} GB)", self.disk_number, format!("{:.1}", self.size_gb()))
         } else {
-            format!(
-                "磁盘 {} - {} ({:.1} GB)",
+            tr!(
+                "磁盘 {} - {} ({} GB)",
                 self.disk_number,
                 self.model,
-                self.size_gb()
+                format!("{:.1}", self.size_gb())
             )
         }
     }
@@ -114,6 +115,8 @@ pub struct DiskPartitionInfo {
     pub used_bytes: u64,
     /// 空闲空间（字节）
     pub free_bytes: u64,
+    /// 是否为活动分区（MBR BootIndicator=0x80；权威来源，直接读 MBR 引导字节，GPT 恒为 false）
+    pub is_active: bool,
 }
 
 impl DiskPartitionInfo {
@@ -145,9 +148,9 @@ impl DiskPartitionInfo {
         } else if self.is_msr {
             "MSR".to_string()
         } else if self.is_recovery {
-            "恢复分区".to_string()
+            tr!("恢复分区")
         } else {
-            format!("分区 {}", self.partition_number)
+            tr!("分区 {}", self.partition_number)
         }
     }
 }
@@ -337,6 +340,25 @@ pub fn get_physical_disks() -> Vec<PhysicalDisk> {
     Vec::new()
 }
 
+/// 返回指定磁盘上活动（引导）分区的分区号（MBR BootIndicator=0x80）。
+///
+/// 权威来源：经 IOCTL_DISK_GET_DRIVE_LAYOUT_EX 直接读 MBR 引导字节，不依赖 diskpart 文本输出
+/// （新版 Windows 的 `detail partition` 可能不显示"活动"字段，`list partition` 的 `*` 只是焦点标记）。
+/// 无活动分区或非 MBR 盘返回 None。
+#[cfg(windows)]
+pub fn get_active_partition_number(disk_number: u32) -> Option<u32> {
+    let disk = get_disk_info(disk_number)?;
+    disk.partitions
+        .iter()
+        .find(|p| p.is_active)
+        .map(|p| p.partition_number)
+}
+
+#[cfg(not(windows))]
+pub fn get_active_partition_number(_disk_number: u32) -> Option<u32> {
+    None
+}
+
 /// 获取单个磁盘的详细信息
 #[cfg(windows)]
 fn get_disk_info(disk_number: u32) -> Option<PhysicalDisk> {
@@ -417,7 +439,7 @@ fn get_disk_info(disk_number: u32) -> Option<PhysicalDisk> {
             let is_init = style != PartitionStyle::Unknown;
 
             // 解析分区信息
-            let partitions = parse_partition_layout(&buffer, header, style);
+            let partitions = parse_partition_layout(&buffer, header, style, disk_number);
 
             (style, is_init, partitions)
         } else {
@@ -449,23 +471,21 @@ fn parse_partition_layout(
     buffer: &[u8],
     header: &DriveLayoutInfoExHeader,
     style: PartitionStyle,
+    disk_number: u32,
 ) -> Vec<DiskPartitionInfo> {
     let mut partitions = Vec::new();
 
     // PARTITION_INFORMATION_EX 结构大小固定为 144 字节
     let partition_entry_size = 144;
 
-    // DRIVE_LAYOUT_INFORMATION_EX 头部大小:
-    // - PartitionStyle: 4 bytes
-    // - PartitionCount: 4 bytes
-    // - Union (GPT: 40 bytes, MBR: 8 bytes，但由于对齐，GPT 可能需要更多)
-    // 实际上，Windows 中 GPT 的 union 部分是 40 字节，MBR 是 8 字节
-    // 但分区数组需要对齐，所以我们使用正确的偏移
-    let header_size = if style == PartitionStyle::GPT {
-        8 + 40 // DriveLayoutInfoExHeader(8) + DRIVE_LAYOUT_INFORMATION_GPT(40) = 48
-    } else {
-        8 + 8 // DriveLayoutInfoExHeader(8) + DRIVE_LAYOUT_INFORMATION_MBR(8) = 16
-    };
+    // DRIVE_LAYOUT_INFORMATION_EX 头部大小 = FIELD_OFFSET(_, PartitionEntry)：
+    //   PartitionStyle(4) + PartitionCount(4) + union{Mbr,Gpt}(40) = 48。
+    // 关键：那个 union 是【定长】的——大小取最大成员 max(MBR=8, GPT=40)=40、按 8 对齐，
+    // 与磁盘实际是 MBR 还是 GPT 无关。所以分区数组对 MBR 和 GPT 都从偏移 48 起。
+    // （旧代码对 MBR 用 16 是把 union 当成只占 8 字节，导致 MBR 盘每个分区项整体前移 32 字节、
+    //   字段全部错位——partition_length 落进 union 区读成 ~0 被跳过，MBR 盘解析出 0 个分区，
+    //   进而 is_active/盘符匹配全失效，Legacy 引导回退、开机 0x7B。GPT 一直用 48 故正常。）
+    let header_size = 8 + 40; // = 48，MBR/GPT 一致
 
     for i in 0..header.partition_count {
         let offset = header_size + (i as usize * partition_entry_size);
@@ -531,8 +551,13 @@ fn parse_partition_layout(
             (false, false, false, type_str)
         };
 
-        // 获取盘符
-        let drive_letter = get_drive_letter_for_partition(starting_offset as u64);
+        // 活动分区标志（仅 MBR 有意义）：BootIndicator(union 偏移 1 -> partition_data[33]) 高位置位即活动分区。
+        // 直接读 MBR 引导字节，是判断活动分区的权威来源——diskpart `detail partition` 在新版 Windows
+        // 上可能根本不显示"活动"字段，`list partition` 的 `*` 又只表示焦点而非活动，都不可靠。
+        let is_active = style == PartitionStyle::MBR && (partition_data[33] & 0x80) != 0;
+
+        // 获取盘符（按【磁盘号 + 偏移】匹配，避免多盘机器上两盘同偏移分区被错配同一盘符）
+        let drive_letter = get_drive_letter_for_partition(disk_number, starting_offset as u64);
 
         // 获取卷标、文件系统和空间使用信息
         let (label, file_system, used_bytes, free_bytes) = if let Some(letter) = drive_letter {
@@ -554,6 +579,7 @@ fn parse_partition_layout(
             partition_type,
             used_bytes,
             free_bytes,
+            is_active,
         });
     }
 
@@ -563,9 +589,11 @@ fn parse_partition_layout(
     partitions
 }
 
-/// 根据分区偏移量获取对应的盘符
+/// 根据【磁盘号 + 分区偏移量】获取对应的盘符。
+/// 必须同时比对磁盘号：多盘机器上两块盘的首分区往往都在 1MiB，仅比偏移会把一块盘的分区
+/// 错配成另一块盘上同偏移卷的盘符，进而让上层（引导分区定位）在错误的磁盘上写引导/设活动。
 #[cfg(windows)]
-fn get_drive_letter_for_partition(offset: u64) -> Option<char> {
+fn get_drive_letter_for_partition(disk_number: u32, offset: u64) -> Option<char> {
     for letter in b'C'..=b'Z' {
         let c = letter as char;
         let path = format!("{}:\\", c);
@@ -573,10 +601,11 @@ fn get_drive_letter_for_partition(offset: u64) -> Option<char> {
             continue;
         }
 
-        // 检查这个卷的偏移量是否匹配
-        if let Some(vol_offset) = get_volume_offset(c) {
-            // 允许一些误差（1MB以内）
-            if (vol_offset as i64 - offset as i64).unsigned_abs() < 1024 * 1024 {
+        // 检查这个卷的磁盘号与偏移量是否都匹配
+        if let Some((vol_disk, vol_offset)) = get_volume_offset(c) {
+            if vol_disk == disk_number
+                && (vol_offset as i64 - offset as i64).unsigned_abs() < 1024 * 1024
+            {
                 return Some(c);
             }
         }
@@ -584,9 +613,10 @@ fn get_drive_letter_for_partition(offset: u64) -> Option<char> {
     None
 }
 
-/// 获取卷的偏移量
+/// 获取卷所在的【磁盘号 + 起始偏移量】（DISK_EXTENT.DiskNumber / StartingOffset）。
+/// DiskNumber 即 \\.\PhysicalDriveN 的 N，与 get_disk_info 用的磁盘号同义。
 #[cfg(windows)]
-fn get_volume_offset(letter: char) -> Option<u64> {
+fn get_volume_offset(letter: char) -> Option<(u32, u64)> {
     unsafe {
         let volume_path = format!("\\\\.\\{}:", letter);
         let wide_path: Vec<u16> = volume_path.encode_utf16().chain(std::iter::once(0)).collect();
@@ -643,7 +673,8 @@ fn get_volume_offset(letter: char) -> Option<u64> {
         if result.is_ok() {
             let extents = &*(buffer.as_ptr() as *const VolumeDiskExtents);
             if extents.number_of_disk_extents > 0 {
-                return Some(extents.extents[0].starting_offset as u64);
+                let e = &extents.extents[0];
+                return Some((e.disk_number, e.starting_offset as u64));
             }
         }
 
@@ -793,7 +824,7 @@ pub fn execute_quick_partition(
         _ => {
             return QuickPartitionResult {
                 success: false,
-                message: "无效的分区表类型".to_string(),
+                message: tr!("无效的分区表类型"),
                 created_partitions: Vec::new(),
             };
         }
@@ -840,7 +871,7 @@ pub fn execute_quick_partition(
                 created_partitions.push(format!("{}:", letter));
             } else {
                 script.push_str("assign\n");
-                created_partitions.push(format!("分区 {}", i + 1));
+                created_partitions.push(tr!("分区 {}", i + 1));
             }
         }
     }
@@ -857,20 +888,20 @@ pub fn execute_quick_partition(
             {
                 QuickPartitionResult {
                     success: false,
-                    message: format!("分区操作失败: {}", output),
+                    message: tr!("分区操作失败: {}", output),
                     created_partitions: Vec::new(),
                 }
             } else {
                 QuickPartitionResult {
                     success: true,
-                    message: "分区操作完成".to_string(),
+                    message: tr!("分区操作完成"),
                     created_partitions,
                 }
             }
         }
         Err(e) => QuickPartitionResult {
             success: false,
-            message: format!("执行 diskpart 失败: {}", e),
+            message: tr!("执行 diskpart 失败: {}", e),
             created_partitions: Vec::new(),
         },
     }
@@ -886,7 +917,7 @@ fn execute_diskpart_script(script: &str) -> Result<String> {
     std::fs::write(&script_path, script)?;
 
     let output = create_command(&get_diskpart_path())
-        .args(["/s", script_path.to_str().unwrap()])
+        .args(["/s", script_path.to_str().ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?])
         .output()?;
 
     let _ = std::fs::remove_file(&script_path);
@@ -920,7 +951,7 @@ pub fn can_safely_partition(disk: &PhysicalDisk) -> (bool, String) {
             if letter == system_drive {
                 return (
                     false,
-                    format!(
+                    tr!(
                         "磁盘 {} 包含当前系统盘 {}:，无法进行一键分区",
                         disk.disk_number, system_drive
                     ),
@@ -936,7 +967,7 @@ pub fn can_safely_partition(disk: &PhysicalDisk) -> (bool, String) {
             if Path::new(&windows_path).exists() {
                 return (
                     false,
-                    format!(
+                    tr!(
                         "磁盘 {} 上的分区 {}: 包含 Windows 系统，请先备份数据",
                         disk.disk_number, letter
                     ),
@@ -1108,7 +1139,7 @@ pub fn resize_existing_partition(
     if new_size_mb < min_size_mb {
         return ResizePartitionResult {
             success: false,
-            message: format!(
+            message: tr!(
                 "目标大小 {} MB 必须大于已使用空间 {} MB (最小 {} MB)",
                 new_size_mb, used_mb, min_size_mb
             ),
@@ -1120,7 +1151,7 @@ pub fn resize_existing_partition(
     if new_size_mb == 0 {
         return ResizePartitionResult {
             success: false,
-            message: "目标大小不能为0".to_string(),
+            message: tr!("目标大小不能为0"),
             new_size_mb: current_size_mb,
         };
     }
@@ -1129,7 +1160,7 @@ pub fn resize_existing_partition(
     if new_size_mb == current_size_mb {
         return ResizePartitionResult {
             success: true,
-            message: "分区大小未改变".to_string(),
+            message: tr!("分区大小未改变"),
             new_size_mb: current_size_mb,
         };
     }
@@ -1170,20 +1201,20 @@ pub fn resize_existing_partition(
                 {
                     ResizePartitionResult {
                         success: false,
-                        message: format!("缩小分区失败: {}", output.trim()),
+                        message: tr!("缩小分区失败: {}", output.trim()),
                         new_size_mb: current_size_mb,
                     }
                 } else {
                     ResizePartitionResult {
                         success: true,
-                        message: format!("分区已成功缩小 {} MB", shrink_amount_mb),
+                        message: tr!("分区已成功缩小 {} MB", shrink_amount_mb),
                         new_size_mb,
                     }
                 }
             }
             Err(e) => ResizePartitionResult {
                 success: false,
-                message: format!("执行 diskpart 失败: {}", e),
+                message: tr!("执行 diskpart 失败: {}", e),
                 new_size_mb: current_size_mb,
             },
         }
@@ -1221,20 +1252,20 @@ pub fn resize_existing_partition(
                 {
                     ResizePartitionResult {
                         success: false,
-                        message: format!("扩展分区失败: {}", output.trim()),
+                        message: tr!("扩展分区失败: {}", output.trim()),
                         new_size_mb: current_size_mb,
                     }
                 } else {
                     ResizePartitionResult {
                         success: true,
-                        message: format!("分区已成功扩展 {} MB", extend_amount_mb),
+                        message: tr!("分区已成功扩展 {} MB", extend_amount_mb),
                         new_size_mb,
                     }
                 }
             }
             Err(e) => ResizePartitionResult {
                 success: false,
-                message: format!("执行 diskpart 失败: {}", e),
+                message: tr!("执行 diskpart 失败: {}", e),
                 new_size_mb: current_size_mb,
             },
         }
@@ -1339,18 +1370,18 @@ pub fn get_unallocated_space_after_partition(disk_number: u32, partition_number:
 pub fn can_resize_partition(partition: &DiskPartitionInfo, disk: &PhysicalDisk) -> (bool, String, u64, u64) {
     // 检查是否是特殊分区
     if partition.is_esp {
-        return (false, "ESP分区不支持调整大小".to_string(), 0, 0);
+        return (false, tr!("ESP分区不支持调整大小"), 0, 0);
     }
     if partition.is_msr {
-        return (false, "MSR分区不支持调整大小".to_string(), 0, 0);
+        return (false, tr!("MSR分区不支持调整大小"), 0, 0);
     }
     if partition.is_recovery {
-        return (false, "恢复分区不支持调整大小".to_string(), 0, 0);
+        return (false, tr!("恢复分区不支持调整大小"), 0, 0);
     }
 
     // 检查是否有盘符（没有盘符的分区可能无法正常操作）
     if partition.drive_letter.is_none() {
-        return (false, "分区没有盘符，无法调整大小".to_string(), 0, 0);
+        return (false, tr!("分区没有盘符，无法调整大小"), 0, 0);
     }
 
     let drive_letter = partition.drive_letter.unwrap();
@@ -1363,7 +1394,7 @@ pub fn can_resize_partition(partition: &DiskPartitionInfo, disk: &PhysicalDisk) 
         .unwrap_or('C');
 
     if drive_letter == system_drive {
-        return (false, "无法调整当前系统分区大小".to_string(), 0, 0);
+        return (false, tr!("无法调整当前系统分区大小"), 0, 0);
     }
 
     // 计算最小大小（已使用空间 + 100MB 余量）
@@ -1382,7 +1413,7 @@ pub fn can_resize_partition(partition: &DiskPartitionInfo, disk: &PhysicalDisk) 
     if min_size_mb >= max_size_mb {
         return (
             false,
-            format!(
+            tr!(
                 "分区无法调整大小，已用空间 {} MB 接近分区大小 {} MB",
                 used_mb, current_size_mb
             ),
@@ -1393,7 +1424,7 @@ pub fn can_resize_partition(partition: &DiskPartitionInfo, disk: &PhysicalDisk) 
 
     (
         true,
-        format!(
+        tr!(
             "可调整范围: {} MB - {} MB (已用: {} MB)",
             min_size_mb, max_size_mb, used_mb
         ),

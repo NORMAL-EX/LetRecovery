@@ -2,6 +2,7 @@
 //!
 //! 提供网络信息获取和网络重置等功能
 
+use crate::tr;
 use crate::utils::cmd::create_command;
 
 /// 使用 Windows API 获取详细的网络信息
@@ -210,23 +211,23 @@ pub fn get_detailed_network_info() -> Vec<crate::core::hardware_info::NetworkAda
 
                 // 获取适配器类型
                 let adapter_type = match adapter.IfType {
-                    6 => "以太网".to_string(),
-                    71 => "无线网络".to_string(),
-                    24 => "回环".to_string(),
-                    131 => "隧道".to_string(),
-                    _ => format!("类型 {}", adapter.IfType),
+                    6 => tr!("以太网"),
+                    71 => tr!("无线网络"),
+                    24 => tr!("回环"),
+                    131 => tr!("隧道"),
+                    _ => tr!("类型 {}", adapter.IfType),
                 };
 
                 // 获取状态
                 let status = match adapter.OperStatus {
-                    1 => "已连接".to_string(),
-                    2 => "已断开".to_string(),
-                    3 => "测试中".to_string(),
-                    4 => "未知".to_string(),
-                    5 => "休眠".to_string(),
-                    6 => "未启用".to_string(),
-                    7 => "下层关闭".to_string(),
-                    _ => "未知".to_string(),
+                    1 => tr!("已连接"),
+                    2 => tr!("已断开"),
+                    3 => tr!("测试中"),
+                    4 => tr!("未知"),
+                    5 => tr!("休眠"),
+                    6 => tr!("未启用"),
+                    7 => tr!("下层关闭"),
+                    _ => tr!("未知"),
                 };
 
                 // 过滤掉回环适配器和空描述的适配器

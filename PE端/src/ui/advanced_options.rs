@@ -7,6 +7,44 @@ use std::path::{Path, PathBuf};
 /// 脚本目录名称（统一路径，与正常系统端保持一致）
 const SCRIPTS_DIR: &str = "LetRecovery_Scripts";
 
+/// 注入数据分区上 `user_drivers/<版本>` 的用户驱动（重装当前系统盘的 ViaPE 路径）。
+/// 由正常端 start_pe_install_thread 把 `bin/drivers/<版本>` 复制到
+/// `{data_dir}\user_drivers\<版本>`。win7/8/10/11 走 DISM 离线注入；
+/// XP 由本文件的 XP 注入处理。目录不存在或无驱动则静默跳过、不打断安装。
+pub fn inject_user_drivers_from_data(target_partition: &str, data_dir: &str) {
+    let version = match detect_user_driver_version(target_partition) {
+        Some(v) => v,
+        None => return,
+    };
+    let dir = format!("{}\\user_drivers\\{}", data_dir, version);
+    if !Path::new(&dir).exists() {
+        return;
+    }
+    log::info!("[USER DRV] 注入 user_drivers/{} 到 {} ...", version, target_partition);
+    let dism = Dism::new();
+    let image_path = format!("{}\\", target_partition);
+    match dism.add_drivers_offline(&image_path, &dir) {
+        Ok(_) => log::info!("[USER DRV] user_drivers/{} 注入成功", version),
+        Err(e) => log::warn!("[USER DRV] user_drivers/{} 注入失败: {}（继续安装）", version, e),
+    }
+}
+
+/// 按目标系统 `\Windows\System32\ntdll.dll` 版本识别用户驱动文件夹名。
+/// 6.1=win7，6.2/6.3=win8/8.1，10.0 且 build<22000=win10，build>=22000=win11。
+fn detect_user_driver_version(target_partition: &str) -> Option<&'static str> {
+    let ntdll = Path::new(target_partition)
+        .join("Windows")
+        .join("System32")
+        .join("ntdll.dll");
+    let (major, minor, build, _) = crate::core::system_utils::get_file_version(&ntdll)?;
+    match (major, minor) {
+        (6, 1) => Some("win7"),
+        (6, 2) | (6, 3) => Some("win8"),
+        (10, _) => Some(if build >= 22000 { "win11" } else { "win10" }),
+        _ => None,
+    }
+}
+
 /// 应用高级选项到目标系统
 /// 
 /// 此函数在PE环境中执行，负责将用户选择的高级选项应用到目标系统。
@@ -566,6 +604,49 @@ pub fn apply_advanced_options(target_partition: &str, config: &InstallConfig) ->
         );
         
         log::info!("[ADVANCED] Win7 存储控制器蓝屏修复设置完成");
+    }
+
+    // ============ Windows XP 专用：离线注入存储/USB3 驱动 ============
+    // XP(NT 5.x) 不能用 DISM 离线注入；这里走「拷贝 .sys/.inf + 在已加载的 SYSTEM
+    // 配置单元(pc-sys)登记 boot-start 服务 + 写 CriticalDeviceDatabase」。
+    // AHCI 始终注入；NVMe/USB3 按勾选。因为直接写已加载的 pc-sys（reg.exe），
+    // 不需要 Win7 那套 DISM 前的卸载/重载。
+    // XP 判定：配置标记 或 释放后系统缺少 \Windows\Boot（仅 Vista+ 才有），与引导步骤一致，
+    // 使 CLI 安装（config.is_xp 可能为 false）也能触发注入。
+    let xp_target = config.is_xp
+        || !std::path::Path::new(&format!("{}\\Windows\\Boot", target_partition)).exists();
+    if xp_target {
+        // 驱动根目录：优先 exe\drivers\xp（与 Win7 PE 注入同源），回退 bin\drivers\xp
+        let mut xp_dir = path::get_exe_dir().join("drivers").join("xp");
+        if !xp_dir.is_dir() {
+            let alt = path::get_bin_dir().join("drivers").join("xp");
+            if alt.is_dir() {
+                xp_dir = alt;
+            }
+        }
+        if xp_dir.is_dir() {
+            log::info!(
+                "[ADVANCED] XP: 离线注入驱动 (AHCI 始终, NVMe={}, USB3={}) 源: {}",
+                config.xp_inject_nvme_driver,
+                config.xp_inject_usb3_driver,
+                xp_dir.display()
+            );
+            match lr_core::xp::inject_xp_drivers(
+                target_partition,
+                &xp_dir,
+                "pc-sys",
+                config.xp_inject_nvme_driver,
+                config.xp_inject_usb3_driver,
+            ) {
+                Ok(out) => log::info!("[ADVANCED] XP 驱动注入完成:\n{}", out),
+                Err(e) => log::warn!("[ADVANCED] XP 驱动注入失败: {} (继续执行)", e),
+            }
+        } else {
+            log::warn!(
+                "[ADVANCED] XP 驱动目录不存在: {} (跳过注入；NVMe/AHCI/USB3 将不可用)",
+                xp_dir.display()
+            );
+        }
     }
 
     // 卸载注册表（确保正确卸载）

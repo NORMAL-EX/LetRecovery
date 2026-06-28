@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use super::types::InstalledSoftware;
+use crate::tr;
 
 /// 获取已安装软件列表
 pub fn get_installed_software() -> Vec<InstalledSoftware> {
@@ -77,7 +78,7 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
 /// 保存软件列表到文件
 pub fn save_software_list_to_file(path: &std::path::Path, software_list: &[InstalledSoftware]) {
     let mut content = String::new();
-    content.push_str(&format!(
+    content.push_str(&tr!(
         "已安装软件列表 - 导出时间: {}\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
     ));
@@ -85,7 +86,7 @@ pub fn save_software_list_to_file(path: &std::path::Path, software_list: &[Insta
     content.push('\n');
     content.push_str(&format!(
         "{:<50} {:<20} {:<30}\n",
-        "软件名称", "版本", "发布者"
+        tr!("软件名称"), tr!("版本"), tr!("发布者")
     ));
     content.push_str(&"-".repeat(100));
     content.push('\n');
@@ -101,7 +102,7 @@ pub fn save_software_list_to_file(path: &std::path::Path, software_list: &[Insta
 
     content.push_str(&"=".repeat(100));
     content.push('\n');
-    content.push_str(&format!("共 {} 个软件\n", software_list.len()));
+    content.push_str(&tr!("共 {} 个软件\n", software_list.len()));
 
     if let Err(e) = std::fs::write(path, &content) {
         log::error!("保存软件列表失败: {}", e);

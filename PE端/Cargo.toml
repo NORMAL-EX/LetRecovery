@@ -12,12 +12,18 @@ egui = "0.31"
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 多语言（i18n）运行时的全局翻译表读写锁
+parking_lot = "0.12"
 
 # Windows API
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
     "Win32_System_SystemInformation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Shutdown",

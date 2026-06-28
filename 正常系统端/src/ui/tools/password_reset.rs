@@ -10,6 +10,7 @@
 use egui;
 use std::sync::mpsc;
 
+use crate::tr;
 use crate::app::App;
 
 /// 目标系统下拉框里代表“当前运行系统（在线）”的特殊值。
@@ -33,15 +34,15 @@ impl App {
         // 非 PE 环境才提供“当前系统（在线）”；PE 下没有正在运行的目标系统。
         let show_selector = !is_pe || !windows_partitions.is_empty();
 
-        egui::Window::new("密码重置")
+        egui::Window::new(tr!("密码重置"))
             .resizable(true)
             .default_width(560.0)
             .default_height(380.0)
             .show(ui.ctx(), |ui| {
-                ui.label("清除 Windows 本地账户的密码（等效空密码），并启用被禁用的账户。");
+                ui.label(tr!("清除 Windows 本地账户的密码（等效空密码），并启用被禁用的账户。"));
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 165, 0),
-                    "仅用于自己的系统/已授权场景。离线系统会修改其 SAM（操作前自动备份）；当前系统走 net 命令。",
+                    tr!("仅用于自己的系统/已授权场景。离线系统会修改其 SAM（操作前自动备份）；当前系统走 net 命令。"),
                 );
                 ui.add_space(10.0);
 
@@ -49,14 +50,14 @@ impl App {
                 if is_loading_partitions {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("正在检测 Windows 分区...");
+                        ui.label(tr!("正在检测 Windows 分区..."));
                     });
                 } else if show_selector {
                     ui.horizontal(|ui| {
-                        ui.label("目标系统:");
+                        ui.label(tr!("目标系统:"));
 
                         let current_text = match self.password_reset_target.as_deref() {
-                            Some(ONLINE_TARGET) => "当前系统（在线）".to_string(),
+                            Some(ONLINE_TARGET) => tr!("当前系统（在线）"),
                             Some(letter) => windows_partitions
                                 .iter()
                                 .find(|p| p.letter == letter)
@@ -67,7 +68,7 @@ impl App {
                                     )
                                 })
                                 .unwrap_or_else(|| letter.to_string()),
-                            None => "请选择".to_string(),
+                            None => tr!("请选择"),
                         };
 
                         egui::ComboBox::from_id_salt("password_reset_partition")
@@ -78,7 +79,7 @@ impl App {
                                     ui.selectable_value(
                                         &mut self.password_reset_target,
                                         Some(ONLINE_TARGET.to_string()),
-                                        "当前系统（在线）",
+                                        tr!("当前系统（在线）"),
                                     );
                                     if !windows_partitions.is_empty() {
                                         ui.separator();
@@ -100,14 +101,14 @@ impl App {
                                 }
                             });
 
-                        if ui.button("刷新").clicked() {
+                        if ui.button(tr!("刷新")).clicked() {
                             self.refresh_windows_partitions_cache();
                         }
                     });
                 } else {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 165, 0),
-                        "未检测到可用的离线 Windows 系统。",
+                        tr!("未检测到可用的离线 Windows 系统。"),
                     );
                 }
 
@@ -117,12 +118,12 @@ impl App {
                 if self.password_reset_users_loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("正在读取账户列表...");
+                        ui.label(tr!("正在读取账户列表..."));
                     });
                 } else if self.password_reset_target.is_some()
                     && !self.password_reset_users.is_empty()
                 {
-                    ui.label("选择要重置密码的账户:");
+                    ui.label(tr!("选择要重置密码的账户:"));
                     ui.add_space(2.0);
                     egui::ScrollArea::vertical()
                         .max_height(160.0)
@@ -133,7 +134,7 @@ impl App {
                                 let selected = self.password_reset_selected_user.as_deref()
                                     == Some(acc.username.as_str());
                                 let label = if acc.disabled {
-                                    format!("{}（已禁用）", acc.username)
+                                    tr!("{}（已禁用）", acc.username)
                                 } else {
                                     acc.username.clone()
                                 };
@@ -143,7 +144,7 @@ impl App {
                             }
                         });
                 } else if self.password_reset_target.is_some() {
-                    ui.colored_label(egui::Color32::GRAY, "该系统中未找到本地账户。");
+                    ui.colored_label(egui::Color32::GRAY, tr!("该系统中未找到本地账户。"));
                 }
 
                 ui.add_space(12.0);
@@ -152,7 +153,7 @@ impl App {
                         && self.password_reset_target.is_some()
                         && self.password_reset_selected_user.is_some();
                     if ui
-                        .add_enabled(can_reset, egui::Button::new("重置所选账户密码"))
+                        .add_enabled(can_reset, egui::Button::new(tr!("重置所选账户密码")))
                         .clicked()
                     {
                         do_reset = true;
@@ -160,7 +161,7 @@ impl App {
                     if self.password_reset_loading {
                         ui.add_space(10.0);
                         ui.spinner();
-                        ui.label("正在处理...");
+                        ui.label(tr!("正在处理..."));
                     }
                 });
 
@@ -181,7 +182,7 @@ impl App {
 
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
-                    if ui.button("关闭").clicked() {
+                    if ui.button(tr!("关闭")).clicked() {
                         should_close = true;
                     }
                 });
@@ -244,7 +245,7 @@ impl App {
                     }
                     Err(e) => {
                         self.password_reset_users.clear();
-                        self.password_reset_message = format!("读取账户列表失败：{}", e);
+                        self.password_reset_message = tr!("读取账户列表失败：{}", e);
                     }
                 }
             }
@@ -270,7 +271,7 @@ impl App {
         let username = match self.password_reset_selected_user.clone() {
             Some(u) if !u.trim().is_empty() => u.trim().to_string(),
             _ => {
-                self.password_reset_message = "请先在列表中选择一个账户".to_string();
+                self.password_reset_message = tr!("请先在列表中选择一个账户");
                 return;
             }
         };
@@ -284,13 +285,13 @@ impl App {
                     let sam = format!("{}\\Windows\\System32\\config\\SAM", p);
                     if !std::path::Path::new(&sam).exists() {
                         self.password_reset_message =
-                            format!("未在 {} 找到 Windows（缺少 {}）", p, sam);
+                            tr!("未在 {} 找到 Windows（缺少 {}）", p, sam);
                         return;
                     }
                     Some(p)
                 }
                 None => {
-                    self.password_reset_message = "请先选择目标系统".to_string();
+                    self.password_reset_message = tr!("请先选择目标系统");
                     return;
                 }
             }
@@ -298,7 +299,7 @@ impl App {
 
         self.password_reset_loading = true;
         self.password_reset_username = username.clone();
-        self.password_reset_message = format!("正在重置账户 [{}] 的密码...", username);
+        self.password_reset_message = tr!("正在重置账户 [{}] 的密码...", username);
 
         let (tx, rx) = mpsc::channel::<Result<bool, String>>();
         self.password_reset_rx = Some(rx);
@@ -323,12 +324,12 @@ impl App {
                 let reload = matches!(result, Ok(true));
                 self.password_reset_message = match result {
                     Ok(true) => {
-                        "已重置该账户密码（可空密码登录），并已启用账户".to_string()
+                        tr!("已重置该账户密码（可空密码登录），并已启用账户")
                     }
                     Ok(false) => {
-                        "未找到匹配的账户（请核对用户名），SAM 未改动".to_string()
+                        tr!("未找到匹配的账户（请核对用户名），SAM 未改动")
                     }
-                    Err(e) => format!("失败：{}", e),
+                    Err(e) => tr!("失败：{}", e),
                 };
                 // 成功后刷新账户列表（更新“已禁用”标记），但保留成功提示
                 if reload {
@@ -350,7 +351,7 @@ fn online_list_accounts() -> Result<Vec<lr_core::sam::SamAccount>, String> {
             "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-LocalUser | ForEach-Object { \"$($_.Name)|$($_.Enabled)\" }",
         ])
         .output()
-        .map_err(|e| format!("执行 Get-LocalUser 失败：{}", e))?;
+        .map_err(|e| tr!("执行 Get-LocalUser 失败：{}", e))?;
     if !out.status.success() {
         return Err(lr_core::encoding::gbk_to_utf8(&out.stderr));
     }
@@ -382,7 +383,7 @@ fn online_clear_password(username: &str) -> Result<bool, String> {
     let out = lr_core::command::new_command("net")
         .args(["user", username, ""])
         .output()
-        .map_err(|e| format!("执行 net user 失败：{}", e))?;
+        .map_err(|e| tr!("执行 net user 失败：{}", e))?;
     if !out.status.success() {
         let err = lr_core::encoding::gbk_to_utf8(&out.stderr);
         let so = lr_core::encoding::gbk_to_utf8(&out.stdout);

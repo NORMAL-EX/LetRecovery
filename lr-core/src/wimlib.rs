@@ -1003,6 +1003,35 @@ impl WimlibManager {
         self.image_contains_path(image_file, index, "\\Windows\\System32\\ntdll.dll")
     }
 
+    /// 一次打开、批量判断镜像某卷是否包含其中任意一条路径（任一命中即 true）。
+    /// 仅读元数据资源、不挂载，适合廉价探测内置应答文件等，避免多次开关 WIM。
+    pub fn image_contains_any_path(
+        &self,
+        image_file: &str,
+        index: u32,
+        paths: &[&str],
+    ) -> Result<bool, String> {
+        let wim = self.open(image_file)?;
+        let mut found = false;
+        for p in paths {
+            let wpath = to_wide(p);
+            let rc = unsafe {
+                (self.iterate_dir_tree)(wim, index as c_int, wpath.as_ptr(), 0, noop_iterate_cb, null_mut())
+            };
+            if rc == WIMLIB_ERR_SUCCESS {
+                found = true;
+                break;
+            } else if rc == WIMLIB_ERR_PATH_DOES_NOT_EXIST {
+                continue;
+            } else {
+                unsafe { (self.free_wim)(wim) };
+                return Err(self.error_message(rc));
+            }
+        }
+        unsafe { (self.free_wim)(wim) };
+        Ok(found)
+    }
+
     /// 从镜像中仅提取若干路径到目标目录（用于离线读取 ntdll.dll 版本等）
     pub fn extract_paths(
         &self,

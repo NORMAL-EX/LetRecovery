@@ -1,6 +1,24 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
+use crate::tr;
+
+/// 递归复制目录（用于把 diskpart 脚本暂存到数据分区）。
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// 系统安装配置（用于PE环境内安装）
 #[derive(Debug, Clone, Default)]
 pub struct InstallConfig {
@@ -63,6 +81,21 @@ pub struct InstallConfig {
     pub win7_fix_acpi_bsod: bool,
     /// Win7 修复存储控制器蓝屏
     pub win7_fix_storage_bsod: bool,
+
+    /// WIM 镜像引擎：0=libwim（默认），1=wimgapi。随重启传给 PE 端，使其使用相同引擎。
+    pub wim_engine: u8,
+
+    /// 目标镜像是否为 XP/2003（NT 5.x）。为真时 PE 端写 XP 引导（ntldr/boot.ini 或 UEFI/GPT）而非 bcdboot。
+    pub is_xp: bool,
+
+    // XP 专用选项（仅 is_xp 为真时生效；AHCI 始终注入，无开关）
+    /// XP 注入 USB3(xHCI) 驱动（检测到 XP 时默认勾选）
+    pub xp_inject_usb3_driver: bool,
+    /// XP 注入 NVMe 驱动（检测到 XP 时默认勾选）
+    pub xp_inject_nvme_driver: bool,
+
+    /// 是否在释放镜像前运行 diskpart 脚本（程序目录\diskpart\ 下所有脚本）。
+    pub run_diskpart_scripts: bool,
 }
 
 impl InstallConfig {
@@ -115,6 +148,19 @@ pub struct BackupConfig {
     pub format: u8,
     /// SWM分卷大小（MB）
     pub swm_split_size: u32,
+    /// WIM 镜像引擎：0=libwim（默认），1=wimgapi。随重启传给 PE 端。
+    pub wim_engine: u8,
+}
+
+/// 无损扩容配置：进 PE 后无损扩大目标分区（通常为当前系统盘 C:）。
+#[derive(Debug, Clone, Default)]
+pub struct ExpandConfig {
+    /// 要扩大的目标分区（如 "C:"）。
+    pub target_partition: String,
+    /// 期望的最终总大小（MB）；0 表示尽可能扩到最大。
+    pub target_size_mb: u64,
+    /// WIM 引擎选择（随重启传给 PE，保持与其它流程一致）：0=libwim，1=wimgapi。
+    pub wim_engine: u8,
 }
 
 /// 配置文件管理器
@@ -125,9 +171,12 @@ impl ConfigFileManager {
     const INSTALL_MARKER: &'static str = "LetRecovery_Install.marker";
     const BACKUP_MARKER: &'static str = "LetRecovery_Backup.marker";
     
+    const EXPAND_MARKER: &'static str = "LetRecovery_Expand.marker";
+
     /// 配置文件名
     const INSTALL_CONFIG: &'static str = "LetRecovery_Install.ini";
     const BACKUP_CONFIG: &'static str = "LetRecovery_Backup.ini";
+    const EXPAND_CONFIG: &'static str = "LetRecovery_Expand.ini";
     
     /// PE文件目录名
     const PE_DIR: &'static str = "LetRecovery_PE";
@@ -184,12 +233,12 @@ impl ConfigFileManager {
         // 创建数据目录
         let data_dir = format!("{}\\{}", data_partition, Self::DATA_DIR);
         std::fs::create_dir_all(&data_dir)
-            .context("创建数据目录失败")?;
+            .context(tr!("创建数据目录失败"))?;
 
         // 写入标记文件到目标分区
         let marker_path = format!("{}\\{}", target_partition, Self::INSTALL_MARKER);
         std::fs::write(&marker_path, "LetRecovery Install Marker")
-            .context("写入安装标记文件失败")?;
+            .context(tr!("写入安装标记文件失败"))?;
 
         // 处理自定义无人值守文件：把用户选择的 XML 复制到数据目录，INI 里只存相对文件名
         let mut config = config.clone();
@@ -197,20 +246,61 @@ impl ConfigFileManager {
             const CUSTOM_UNATTEND_NAME: &str = "custom_unattend.xml";
             let dst = format!("{}\\{}", data_dir, CUSTOM_UNATTEND_NAME);
             std::fs::copy(&config.custom_unattend_path, &dst)
-                .with_context(|| format!("复制自定义无人值守文件失败: {}", config.custom_unattend_path))?;
+                .with_context(|| tr!("复制自定义无人值守文件失败: {}", config.custom_unattend_path))?;
             config.custom_unattend_path = CUSTOM_UNATTEND_NAME.to_string();
-            println!("[CONFIG] 已复制自定义无人值守文件 -> {}", dst);
+            log::info!("[CONFIG] 已复制自定义无人值守文件 -> {}", dst);
+        }
+
+        // 暂存 diskpart 脚本到数据目录，供重启进 PE 后执行（程序目录\bin\diskpart\ -> 数据目录\diskpart\）
+        if config.run_diskpart_scripts {
+            let src = crate::utils::path::get_diskpart_scripts_dir();
+            let dst = format!("{}\\diskpart", data_dir);
+            if src.exists() {
+                if let Err(e) = copy_dir_recursive(&src, std::path::Path::new(&dst)) {
+                    log::warn!("[CONFIG] 暂存 diskpart 脚本失败: {}", e);
+                } else {
+                    log::info!("[CONFIG] 已暂存 diskpart 脚本 -> {}", dst);
+                }
+            } else {
+                log::info!("[CONFIG] 程序目录无 diskpart 文件夹，跳过暂存: {}", src.display());
+            }
         }
 
         // 写入配置文件
         let config_path = format!("{}\\{}", data_dir, Self::INSTALL_CONFIG);
         let content = Self::serialize_install_config(&config);
         std::fs::write(&config_path, &content)
-            .context("写入安装配置文件失败")?;
+            .context(tr!("写入安装配置文件失败"))?;
 
-        println!("[CONFIG] 安装配置已写入: {}", config_path);
-        println!("[CONFIG] 安装标记已写入: {}", marker_path);
+        log::info!("[CONFIG] 安装配置已写入: {}", config_path);
+        log::info!("[CONFIG] 安装标记已写入: {}", marker_path);
 
+        Ok(())
+    }
+
+    /// 写入无损扩容配置：在目标分区写 marker，在数据分区的数据目录写 ini。
+    /// 扩容不格式化目标分区，故 data_partition 可直接用目标分区本身（如 "C:"）。
+    pub fn write_expand_config(
+        target_partition: &str,
+        data_partition: &str,
+        config: &ExpandConfig,
+    ) -> Result<()> {
+        let data_dir = format!("{}\\{}", data_partition, Self::DATA_DIR);
+        std::fs::create_dir_all(&data_dir).context(tr!("创建数据目录失败"))?;
+
+        let marker_path = format!("{}\\{}", target_partition, Self::EXPAND_MARKER);
+        std::fs::write(&marker_path, "LetRecovery Expand Marker")
+            .context(tr!("写入扩容标记文件失败"))?;
+
+        let config_path = format!("{}\\{}", data_dir, Self::EXPAND_CONFIG);
+        let content = format!(
+            "[Expand]\r\nTargetPartition={}\r\nTargetSizeMb={}\r\nWimEngine={}\r\nLanguage={}\r\n",
+            config.target_partition, config.target_size_mb, config.wim_engine, crate::utils::i18n::current_language()
+        );
+        std::fs::write(&config_path, &content).context(tr!("写入扩容配置文件失败"))?;
+
+        log::info!("[CONFIG] 扩容配置已写入: {}", config_path);
+        log::info!("[CONFIG] 扩容标记已写入: {}", marker_path);
         Ok(())
     }
 
@@ -223,21 +313,21 @@ impl ConfigFileManager {
         // 创建数据目录
         let data_dir = format!("{}\\{}", data_partition, Self::DATA_DIR);
         std::fs::create_dir_all(&data_dir)
-            .context("创建数据目录失败")?;
+            .context(tr!("创建数据目录失败"))?;
 
         // 写入标记文件到源分区
         let marker_path = format!("{}\\{}", source_partition, Self::BACKUP_MARKER);
         std::fs::write(&marker_path, "LetRecovery Backup Marker")
-            .context("写入备份标记文件失败")?;
+            .context(tr!("写入备份标记文件失败"))?;
 
         // 写入配置文件
         let config_path = format!("{}\\{}", data_dir, Self::BACKUP_CONFIG);
         let content = Self::serialize_backup_config(config);
         std::fs::write(&config_path, &content)
-            .context("写入备份配置文件失败")?;
+            .context(tr!("写入备份配置文件失败"))?;
 
-        println!("[CONFIG] 备份配置已写入: {}", config_path);
-        println!("[CONFIG] 备份标记已写入: {}", marker_path);
+        log::info!("[CONFIG] 备份配置已写入: {}", config_path);
+        log::info!("[CONFIG] 备份标记已写入: {}", marker_path);
 
         Ok(())
     }
@@ -246,7 +336,7 @@ impl ConfigFileManager {
     pub fn read_install_config(data_partition: &str) -> Result<InstallConfig> {
         let config_path = format!("{}\\{}\\{}", data_partition, Self::DATA_DIR, Self::INSTALL_CONFIG);
         let content = std::fs::read_to_string(&config_path)
-            .context("读取安装配置文件失败")?;
+            .context(tr!("读取安装配置文件失败"))?;
         Self::deserialize_install_config(&content)
     }
 
@@ -254,7 +344,7 @@ impl ConfigFileManager {
     pub fn read_backup_config(data_partition: &str) -> Result<BackupConfig> {
         let config_path = format!("{}\\{}\\{}", data_partition, Self::DATA_DIR, Self::BACKUP_CONFIG);
         let content = std::fs::read_to_string(&config_path)
-            .context("读取备份配置文件失败")?;
+            .context(tr!("读取备份配置文件失败"))?;
         Self::deserialize_backup_config(&content)
     }
 
@@ -284,14 +374,14 @@ impl ConfigFileManager {
             let marker_path = format!("{}:\\{}", c, Self::AUTO_CREATED_PARTITION_MARKER);
             
             if Path::new(&marker_path).exists() {
-                println!("[CONFIG] 发现自动创建的分区: {}:", c);
+                log::info!("[CONFIG] 发现自动创建的分区: {}:", c);
                 
                 // 尝试删除分区
                 if let Ok(_) = crate::core::disk::DiskManager::delete_auto_created_partition(c) {
                     cleaned.push(c);
-                    println!("[CONFIG] 已清理自动创建的分区: {}:", c);
+                    log::info!("[CONFIG] 已清理自动创建的分区: {}:", c);
                 } else {
-                    println!("[CONFIG] 清理自动创建的分区失败: {}:", c);
+                    log::warn!("[CONFIG] 清理自动创建的分区失败: {}:", c);
                 }
             }
         }
@@ -329,6 +419,10 @@ VolumeIndex={}
 TargetPartition={}
 ImagePath={}
 IsGho={}
+WimEngine={}
+IsXp={}
+RunDiskpartScripts={}
+Language={}
 
 [Advanced]
 RemoveShortcutArrow={}
@@ -351,6 +445,10 @@ Win7InjectUsb3Driver={}
 Win7InjectNvmeDriver={}
 Win7FixAcpiBsod={}
 Win7FixStorageBsod={}
+
+[Xp]
+XpInjectUsb3Driver={}
+XpInjectNvmeDriver={}
 "#,
             config.unattended,
             config.restore_drivers,
@@ -361,6 +459,10 @@ Win7FixStorageBsod={}
             config.target_partition,
             config.image_path,
             config.is_gho,
+            config.wim_engine,
+            config.is_xp,
+            config.run_diskpart_scripts,
+            crate::utils::i18n::current_language(),
             config.remove_shortcut_arrow,
             config.restore_classic_context_menu,
             config.bypass_nro,
@@ -379,6 +481,8 @@ Win7FixStorageBsod={}
             config.win7_inject_nvme_driver,
             config.win7_fix_acpi_bsod,
             config.win7_fix_storage_bsod,
+            config.xp_inject_usb3_driver,
+            config.xp_inject_nvme_driver,
         )
     }
 
@@ -393,6 +497,8 @@ SourcePartition={}
 Incremental={}
 Format={}
 SwmSplitSize={}
+WimEngine={}
+Language={}
 "#,
             config.save_path,
             config.name,
@@ -401,6 +507,8 @@ SwmSplitSize={}
             config.incremental,
             config.format,
             config.swm_split_size,
+            config.wim_engine,
+            crate::utils::i18n::current_language(),
         )
     }
 
@@ -428,6 +536,9 @@ SwmSplitSize={}
                     "TargetPartition" => config.target_partition = value.to_string(),
                     "ImagePath" => config.image_path = value.to_string(),
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
+                    "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
+                    "IsXp" => config.is_xp = value.parse().unwrap_or(false),
+                    "RunDiskpartScripts" => config.run_diskpart_scripts = value.parse().unwrap_or(false),
                     "RemoveShortcutArrow" => config.remove_shortcut_arrow = value.parse().unwrap_or(false),
                     "RestoreClassicContextMenu" => config.restore_classic_context_menu = value.parse().unwrap_or(false),
                     "BypassNRO" => config.bypass_nro = value.parse().unwrap_or(false),
@@ -446,6 +557,8 @@ SwmSplitSize={}
                     "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
                     "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
                     "Win7FixStorageBsod" => config.win7_fix_storage_bsod = value.parse().unwrap_or(false),
+                    "XpInjectUsb3Driver" => config.xp_inject_usb3_driver = value.parse().unwrap_or(false),
+                    "XpInjectNvmeDriver" => config.xp_inject_nvme_driver = value.parse().unwrap_or(false),
                     _ => {}
                 }
             }
@@ -476,6 +589,7 @@ SwmSplitSize={}
                     "Incremental" => config.incremental = value.parse().unwrap_or(false),
                     "Format" => config.format = value.parse().unwrap_or(0),
                     "SwmSplitSize" => config.swm_split_size = value.parse().unwrap_or(4096),
+                    "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     _ => {}
                 }
             }
@@ -493,21 +607,43 @@ SwmSplitSize={}
 pub fn validate_unattend_xml(xml: &str) -> Result<(), String> {
     let s = xml.trim_start_matches('\u{feff}');
     if s.trim().is_empty() {
-        return Err("文件内容为空".to_string());
+        return Err(tr!("文件内容为空"));
     }
 
     // 完整 XML 解析：标签未闭合/未配对、引号未闭合、非法嵌套等都会在此报错。
-    let doc = roxmltree::Document::parse(s).map_err(|e| format!("XML 语法错误：{}", e))?;
+    let doc = roxmltree::Document::parse(s).map_err(|e| tr!("XML 语法错误：{}", e))?;
 
     // 根元素必须是 <unattend>
     let root = doc.root_element();
     let root_name = root.tag_name().name();
     if root_name != "unattend" {
-        return Err(format!(
+        return Err(tr!(
             "不是有效的无人值守文件（根元素应为 <unattend>，实际为 <{}>）",
             if root_name.is_empty() { "?" } else { root_name }
         ));
     }
 
+    Ok(())
+}
+
+/// XP/2003 的 winnt.sif 应答轻校验。
+///
+/// winnt.sif 是 INI 风格(不是 XML),只做基本健全性检查:非空、且至少含一个
+/// XP 应答常见节(`[Unattended]` / `[Data]` / `[GuiUnattended]` / `[UserData]`)。
+/// 返回 Ok(()) 表示看起来是有效的 winnt.sif；Err(msg) 给出可展示的原因。
+pub fn validate_winnt_sif(content: &str) -> Result<(), String> {
+    let s = content.trim_start_matches('\u{feff}');
+    if s.trim().is_empty() {
+        return Err(tr!("文件内容为空"));
+    }
+    let lower = s.to_ascii_lowercase();
+    let has_section = ["[unattended]", "[data]", "[guiunattended]", "[userdata]"]
+        .iter()
+        .any(|sec| lower.contains(sec));
+    if !has_section {
+        return Err(
+            tr!("不像有效的 winnt.sif(缺少 [Unattended]/[Data]/[GuiUnattended] 等节)。XP/2003 应答文件为 INI 格式的 winnt.sif,不是 XML。")
+        );
+    }
     Ok(())
 }
