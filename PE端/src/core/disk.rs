@@ -416,9 +416,32 @@ impl DiskManager {
         false
     }
 
+    fn read_auto_marker_source(letter: char) -> Option<char> {
+        let marker_path = format!("{}:\\{}", letter, AUTO_CREATED_PARTITION_MARKER);
+        let content = std::fs::read_to_string(marker_path).ok()?;
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some(value) = line.strip_prefix("Source:") {
+                return value
+                    .trim()
+                    .chars()
+                    .find(|c| c.is_ascii_alphabetic())
+                    .map(|c| c.to_ascii_uppercase());
+            }
+            if let Some(value) = line.strip_prefix("Source=") {
+                return value
+                    .trim()
+                    .chars()
+                    .find(|c| c.is_ascii_alphabetic())
+                    .map(|c| c.to_ascii_uppercase());
+            }
+        }
+        None
+    }
+
     /// 查找自动创建的分区（通过标志文件）
-    /// 返回 (盘符, 磁盘号Option) 如果找到的话
-    pub fn find_auto_created_partition() -> Option<(char, Option<u32>)> {
+    /// 返回 (盘符, 磁盘号Option, 来源盘符Option) 如果找到的话
+    pub fn find_auto_created_partition() -> Option<(char, Option<u32>, Option<char>)> {
         for letter in b'A'..=b'Z' {
             let c = letter as char;
             // 跳过 X 盘（PE系统盘）
@@ -432,7 +455,7 @@ impl DiskManager {
                 
                 // 获取该分区所在的磁盘号
                 let detail = Self::get_partition_style(&format!("{}:", c));
-                return Some((c, detail.disk_number));
+                return Some((c, detail.disk_number, Self::read_auto_marker_source(c)));
             }
         }
         None
@@ -461,7 +484,7 @@ impl DiskManager {
         log::info!("[CLEANUP] ========================================");
 
         // 查找自动创建的分区
-        let (auto_letter, auto_disk_num_opt) = match Self::find_auto_created_partition() {
+        let (auto_letter, auto_disk_num_opt, marker_source) = match Self::find_auto_created_partition() {
             Some(info) => info,
             None => {
                 log::info!("[CLEANUP] 未找到自动创建的分区，无需清理");
@@ -474,8 +497,10 @@ impl DiskManager {
         let auto_disk_num = match auto_disk_num_opt.or(auto_detail.disk_number) {
             Some(num) => num,
             None => {
-                log::warn!("[CLEANUP] 无法获取自动创建分区 {} 的磁盘号，只删除不扩展", auto_letter);
-                return Self::delete_partition_by_letter(auto_letter);
+                anyhow::bail!(
+                    "[CLEANUP] 无法获取自动创建分区 {} 的磁盘号，已取消删除",
+                    auto_letter
+                );
             }
         };
         let auto_part_num = auto_detail.partition_number;
@@ -490,8 +515,10 @@ impl DiskManager {
         let target_disk_num = match target_detail.disk_number {
             Some(num) => num,
             None => {
-                log::warn!("[CLEANUP] 无法获取目标分区 {} 的磁盘号，只删除分区不扩展", target_letter);
-                return Self::delete_partition_by_letter(auto_letter);
+                anyhow::bail!(
+                    "[CLEANUP] 无法获取目标分区 {} 的磁盘号，已取消删除自动创建分区",
+                    target_letter
+                );
             }
         };
         let target_part_num = target_detail.partition_number;
@@ -501,39 +528,47 @@ impl DiskManager {
             target_letter, target_disk_num, target_part_num
         );
 
+        let source_letter = marker_source.ok_or_else(|| {
+            anyhow::anyhow!(
+                "[CLEANUP] 自动创建分区 {} 的标记缺少 Source，无法确认归属，已取消删除",
+                auto_letter
+            )
+        })?;
+        if source_letter != target_letter {
+            anyhow::bail!(
+                "[CLEANUP] 自动创建分区 {} 的 Source 为 {}:，与目标分区 {}: 不一致，已取消删除",
+                auto_letter,
+                source_letter,
+                target_letter
+            );
+        }
+
         // 检查是否在同一磁盘
         if auto_disk_num != target_disk_num {
-            log::warn!(
-                "[CLEANUP] 自动创建的分区 (磁盘{}) 和目标分区 (磁盘{}) 不在同一磁盘，只删除分区不扩展",
-                auto_disk_num, target_disk_num
+            anyhow::bail!(
+                "[CLEANUP] 自动创建的分区 (磁盘{}) 和目标分区 (磁盘{}) 不在同一磁盘，已取消删除",
+                auto_disk_num,
+                target_disk_num
             );
-            return Self::delete_partition_by_letter(auto_letter);
         }
 
         // 检查分区相邻性：临时分区应该在目标分区之后
         // diskpart extend 只能向后扩展到相邻的未分配空间
-        if let (Some(target_pn), Some(auto_pn)) = (target_part_num, auto_part_num) {
-            if auto_pn <= target_pn {
-                log::warn!(
-                    "[CLEANUP] 临时分区 (分区号{}) 在目标分区 (分区号{}) 之前或相同位置",
-                    auto_pn, target_pn
-                );
-                log::warn!("[CLEANUP] extend 命令只能向后扩展，删除后的空间可能无法自动合并");
-                log::warn!("[CLEANUP] 将只删除分区，用户可在安装完成后使用磁盘管理工具手动合并");
-                return Self::delete_partition_by_letter(auto_letter);
-            }
-            
-            // 检查是否相邻（分区号相差1）
-            if auto_pn != target_pn + 1 {
-                log::warn!(
-                    "[CLEANUP] 临时分区 (分区号{}) 与目标分区 (分区号{}) 不相邻",
-                    auto_pn, target_pn
-                );
-                log::warn!("[CLEANUP] 它们之间可能有其他分区，extend 可能无法成功");
-            } else {
-                log::info!("[CLEANUP] 分区相邻性检查通过：目标分区{} -> 临时分区{}", target_pn, auto_pn);
-            }
+        let target_pn = target_part_num.ok_or_else(|| {
+            anyhow::anyhow!("[CLEANUP] 无法获取目标分区号，已取消删除自动创建分区")
+        })?;
+        let auto_pn = auto_part_num.ok_or_else(|| {
+            anyhow::anyhow!("[CLEANUP] 无法获取自动创建分区号，已取消删除")
+        })?;
+
+        if auto_pn != target_pn + 1 {
+            anyhow::bail!(
+                "[CLEANUP] 自动创建分区 (分区号{}) 不是目标分区 (分区号{}) 的紧邻后方分区，已取消删除",
+                auto_pn,
+                target_pn
+            );
         }
+        log::info!("[CLEANUP] 分区相邻性检查通过：目标分区{} -> 临时分区{}", target_pn, auto_pn);
 
         // 删除自动创建分区并扩展目标分区
         log::info!("[CLEANUP] 开始删除分区 {} 并扩展目标分区 {}...", auto_letter, target_letter);
@@ -713,7 +748,7 @@ impl DiskManager {
         log::warn!("[CLEANUP] 数据分区已删除，但空间未能自动合并。");
         log::warn!("[CLEANUP] 用户可在系统安装完成后使用磁盘管理工具手动扩展分区。");
         log::warn!("[CLEANUP] ========================================");
-        Ok(())
+        anyhow::bail!("数据分区已删除，但扩展目标分区失败: {}", last_error)
     }
 
     /// 运行 diskpart rescan 命令刷新磁盘信息

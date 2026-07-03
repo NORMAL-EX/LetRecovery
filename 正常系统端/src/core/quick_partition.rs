@@ -804,6 +804,25 @@ pub fn execute_quick_partition(
         layouts.len()
     );
 
+    let disks = get_physical_disks();
+
+    let Some(disk) = disks.iter().find(|d| d.disk_number == disk_number) else {
+        return QuickPartitionResult {
+            success: false,
+            message: tr!("磁盘 {} 不存在，已取消一键分区", disk_number),
+            created_partitions: Vec::new(),
+        };
+    };
+
+    let (safe, reason) = can_safely_partition(disk);
+    if !safe {
+        return QuickPartitionResult {
+            success: false,
+            message: reason,
+            created_partitions: Vec::new(),
+        };
+    }
+
     // 构建 diskpart 脚本
     let mut script = String::new();
 

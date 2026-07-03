@@ -482,7 +482,11 @@ impl App {
                 
                 if !ghost.is_available() {
                     log::error!("[INSTALL STEP 3] 错误: Ghost 可执行文件不存在");
-                    send_step(&progress_tx, 3, &tr!("释放系统镜像"), 100);
+                    let _ = progress_tx.send(DismProgress {
+                        percentage: 0,
+                        status: tr!("ERROR:Ghost工具不可用"),
+                    });
+                    return;
                 } else {
                     let ghost_tx = progress_tx.clone();
                     let (inner_tx, inner_rx) = mpsc::channel::<DismProgress>();
@@ -495,7 +499,14 @@ impl App {
                     
                     match ghost.restore_image_to_letter(&image_path, &target_partition, &partitions, Some(inner_tx)) {
                         Ok(_) => log::info!("[INSTALL STEP 3] Ghost 镜像恢复成功"),
-                        Err(e) => log::error!("[INSTALL STEP 3] Ghost 镜像恢复失败: {}", e),
+                        Err(e) => {
+                            log::error!("[INSTALL STEP 3] Ghost 镜像恢复失败: {}", e);
+                            let _ = progress_tx.send(DismProgress {
+                                percentage: 0,
+                                status: tr!("ERROR:释放系统镜像失败: {}", e),
+                            });
+                            return;
+                        }
                     }
                 }
                 
@@ -519,7 +530,14 @@ impl App {
                 
                 match dism.apply_image(&image_path, &apply_dir, volume_index, Some(inner_tx)) {
                     Ok(_) => log::info!("[INSTALL STEP 3] DISM 镜像释放成功"),
-                    Err(e) => log::error!("[INSTALL STEP 3] DISM 镜像释放失败: {}", e),
+                    Err(e) => {
+                        log::error!("[INSTALL STEP 3] DISM 镜像释放失败: {}", e);
+                        let _ = progress_tx.send(DismProgress {
+                            percentage: 0,
+                            status: tr!("ERROR:释放系统镜像失败: {}", e),
+                        });
+                        return;
+                    }
                 }
                 send_step(&progress_tx, 3, &tr!("释放系统镜像"), 100);
             }
@@ -911,6 +929,7 @@ impl App {
                 || image_path.to_lowercase().ends_with(".ghs");
             
             let install_config = InstallConfig {
+                session_id: String::new(),
                 unattended: options.unattended_install,
                 restore_drivers: options.export_drivers,
                 driver_action_mode: InstallConfig::driver_action_to_mode(options.driver_action),
@@ -955,7 +974,14 @@ impl App {
             
             match ConfigFileManager::write_install_config(&target_partition, &data_partition, &install_config) {
                 Ok(_) => log::info!("[INSTALL PE STEP 5] 配置文件写入成功"),
-                Err(e) => log::error!("[INSTALL PE STEP 5] 配置文件写入失败: {}", e),
+                Err(e) => {
+                    log::error!("[INSTALL PE STEP 5] 配置文件写入失败: {}", e);
+                    let _ = progress_tx.send(DismProgress {
+                        percentage: 0,
+                        status: tr!("ERROR:写入安装配置失败: {}", e),
+                    });
+                    return;
+                }
             }
             
             send_step(&progress_tx, 5, &tr!("写入配置文件"), 100);

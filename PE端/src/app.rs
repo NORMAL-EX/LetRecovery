@@ -235,11 +235,11 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     log::info!("========== 开始PE安装流程 ==========");
     // 注：BitLocker 透传解锁已在 main() 最前面统一执行（早于操作类型检测），这里不再重复。
 
-    // 查找配置文件所在分区
-    let data_partition = match ConfigFileManager::find_data_partition() {
-        Some(p) => p,
-        None => {
-            let _ = tx.send(WorkerMessage::Failed(tr!("未找到安装配置文件")));
+    // 查找并校验本次安装任务（marker 与配置需匹配）。
+    let (data_partition, target_partition, config) = match ConfigFileManager::find_install_task() {
+        Ok(task) => task,
+        Err(e) => {
+            let _ = tx.send(WorkerMessage::Failed(tr!("读取安装任务失败: {}", e)));
             return;
         }
     };
@@ -247,24 +247,11 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     log::info!("数据分区: {}", data_partition);
     let _ = tx.send(WorkerMessage::SetStatus(tr!("数据分区: {}", data_partition)));
 
-    // 读取安装配置
-    let config = match ConfigFileManager::read_install_config(&data_partition) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(WorkerMessage::Failed(tr!("读取配置失败: {}", e)));
-            return;
-        }
-    };
-
     // 切换到正常系统端选定的镜像引擎（随重启传入），使 PE 端使用相同引擎
     lr_core::set_active_engine(lr_core::WimEngine::from_u8(config.wim_engine));
 
     log::info!("目标分区: {}", config.target_partition);
     log::info!("镜像文件: {}", config.image_path);
-
-    // 查找安装标记分区
-    let target_partition = ConfigFileManager::find_install_marker_partition()
-        .unwrap_or_else(|| config.target_partition.clone());
 
     // 构建完整镜像路径
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);

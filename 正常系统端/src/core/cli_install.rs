@@ -152,6 +152,7 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
 
     // 6) 构造 InstallConfig：基础项 + 高级选项子集（映射与 install_progress.rs 的 PE 路径一致）
     let install_config = InstallConfig {
+        session_id: String::new(),
         unattended: spec.unattended,
         restore_drivers: false, // 由 driver_action_mode 主导
         driver_action_mode: spec.driver_action_mode,

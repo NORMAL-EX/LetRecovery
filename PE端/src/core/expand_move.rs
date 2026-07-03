@@ -239,9 +239,10 @@ unsafe fn read_disk_layout(disk_number: u32) -> Option<(PartitionStyle, u64, Vec
         PartitionStyle::Unknown
     };
 
-    // PARTITION_INFORMATION_EX 固定 144 字节；头部 GPT=48 / MBR=16。
+    // PARTITION_INFORMATION_EX 固定 144 字节；分区数组偏移对 MBR/GPT 都是 48。
+    // DRIVE_LAYOUT_INFORMATION_EX 里的 union 按最大 GPT 成员占 40 字节，不随实际分区表类型缩短。
     let entry_size = 144usize;
-    let header_size = if style == PartitionStyle::GPT { 48 } else { 16 };
+    let header_size = 48usize;
 
     let mut parts = Vec::new();
     for i in 0..header.partition_count {

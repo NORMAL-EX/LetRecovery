@@ -383,36 +383,22 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         // 注：BitLocker 透传解锁已在 main() 最前面统一执行，这里不再重复。
 
         // 查找配置文件所在分区
-        let data_partition = match ConfigFileManager::find_data_partition() {
-            Some(p) => p,
-            None => {
-                log::error!("[PE INSTALL] 错误: 未找到安装配置文件");
-                show_error_message(&tr!("未找到安装配置文件，无法继续安装。"));
+        let (data_partition, target_partition, config) = match ConfigFileManager::find_install_task() {
+            Ok(task) => task,
+            Err(e) => {
+                log::error!("[PE INSTALL] 错误: 读取安装任务失败: {}", e);
+                show_error_message(&tr!("读取安装任务失败: {}", e));
                 return Ok(());
             }
         };
 
         log::info!("[PE INSTALL] 数据分区: {}", data_partition);
 
-        // 读取安装配置
-        let config = match ConfigFileManager::read_install_config(&data_partition) {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("[PE INSTALL] 错误: 读取配置失败: {}", e);
-                show_error_message(&tr!("读取安装配置失败: {}", e));
-                return Ok(());
-            }
-        };
-
         // 切换到正常系统端选定的镜像引擎（随重启传入）
         lr_core::set_active_engine(lr_core::WimEngine::from_u8(config.wim_engine));
 
         log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
         log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
-
-        // 查找安装标记分区
-        let target_partition = ConfigFileManager::find_install_marker_partition()
-            .unwrap_or_else(|| config.target_partition.clone());
 
         // 构建完整镜像路径
         let data_dir = ConfigFileManager::get_data_dir(&data_partition);

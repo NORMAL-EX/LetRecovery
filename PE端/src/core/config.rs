@@ -37,6 +37,8 @@ impl DriverActionMode {
 /// 系统安装配置（用于PE环境内安装）
 #[derive(Debug, Clone, Default)]
 pub struct InstallConfig {
+    /// 本次安装任务会话ID，用于绑定 marker 与配置。
+    pub session_id: String,
     /// 无人值守安装
     pub unattended: bool,
     /// 驱动还原（兼容旧版本）
@@ -186,6 +188,12 @@ pub struct BackupConfig {
 /// 配置文件管理器
 pub struct ConfigFileManager;
 
+#[derive(Debug, Clone)]
+struct InstallMarker {
+    partition: String,
+    session_id: String,
+}
+
 impl ConfigFileManager {
     /// 标记文件名
     const INSTALL_MARKER: &'static str = "LetRecovery_Install.marker";
@@ -202,6 +210,144 @@ impl ConfigFileManager {
 
     /// 临时数据目录名
     const DATA_DIR: &'static str = "LetRecovery_Data";
+
+    fn scan_letters() -> &'static [char] {
+        &['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']
+    }
+
+    fn normalize_partition(partition: &str) -> String {
+        let letter = partition
+            .chars()
+            .find(|c| c.is_ascii_alphabetic())
+            .unwrap_or(' ')
+            .to_ascii_uppercase();
+        if letter == ' ' {
+            String::new()
+        } else {
+            format!("{}:", letter)
+        }
+    }
+
+    fn read_ini_value(content: &str, key: &str) -> String {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('[') || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim().eq_ignore_ascii_case(key) {
+                    return v.trim().to_string();
+                }
+            }
+        }
+        String::new()
+    }
+
+    fn read_install_marker(partition: &str) -> InstallMarker {
+        let marker_path = format!("{}\\{}", partition, Self::INSTALL_MARKER);
+        let session_id = std::fs::read_to_string(&marker_path)
+            .map(|content| Self::read_ini_value(&content, "SessionId"))
+            .unwrap_or_default();
+        InstallMarker {
+            partition: Self::normalize_partition(partition),
+            session_id,
+        }
+    }
+
+    fn collect_install_markers() -> Vec<InstallMarker> {
+        let mut markers = Vec::new();
+        for letter in Self::scan_letters() {
+            let partition = format!("{}:", letter);
+            let marker_path = format!("{}\\{}", partition, Self::INSTALL_MARKER);
+            if Path::new(&marker_path).exists() {
+                log::info!("找到安装标记分区: {}", partition);
+                markers.push(Self::read_install_marker(&partition));
+            }
+        }
+        markers
+    }
+
+    fn collect_install_configs() -> Result<Vec<(String, InstallConfig)>> {
+        let mut configs = Vec::new();
+        for letter in Self::scan_letters() {
+            let partition = format!("{}:", letter);
+            let config_path = format!("{}\\{}\\{}", partition, Self::DATA_DIR, Self::INSTALL_CONFIG);
+            if Path::new(&config_path).exists() {
+                log::info!("找到安装配置分区: {}", partition);
+                let config = Self::read_install_config(&partition)?;
+                configs.push((partition, config));
+            }
+        }
+        Ok(configs)
+    }
+
+    /// 查找并校验本次安装任务，返回 (数据分区, 目标分区, 配置)。
+    pub fn find_install_task() -> Result<(String, String, InstallConfig)> {
+        let markers = Self::collect_install_markers();
+        if markers.is_empty() {
+            anyhow::bail!("未找到安装标记文件");
+        }
+
+        let configs = Self::collect_install_configs()?;
+        if configs.is_empty() {
+            anyhow::bail!("未找到安装配置文件");
+        }
+
+        let mut exact_matches: Vec<(String, String, InstallConfig)> = Vec::new();
+        for marker in &markers {
+            if marker.session_id.is_empty() {
+                continue;
+            }
+            for (data_partition, config) in &configs {
+                if !config.session_id.is_empty() && config.session_id == marker.session_id {
+                    exact_matches.push((
+                        data_partition.clone(),
+                        marker.partition.clone(),
+                        config.clone(),
+                    ));
+                }
+            }
+        }
+
+        if exact_matches.len() == 1 {
+            let (data_partition, target_partition, config) = exact_matches.remove(0);
+            let config_target = Self::normalize_partition(&config.target_partition);
+            if !config_target.is_empty() && config_target != target_partition {
+                anyhow::bail!(
+                    "安装配置目标分区({})与标记分区({})不一致，已中止",
+                    config_target,
+                    target_partition
+                );
+            }
+            return Ok((data_partition, target_partition, config));
+        } else if exact_matches.len() > 1 {
+            anyhow::bail!("发现多个相同 SessionId 的安装任务，已中止");
+        }
+
+        if markers.len() == 1 && configs.len() == 1 {
+            let marker = markers[0].clone();
+            let (data_partition, config) = configs.into_iter().next().unwrap();
+            if !marker.session_id.is_empty()
+                && !config.session_id.is_empty()
+                && marker.session_id != config.session_id
+            {
+                anyhow::bail!(
+                    "安装标记 SessionId 与配置 SessionId 不一致，已中止"
+                );
+            }
+            let config_target = Self::normalize_partition(&config.target_partition);
+            if !config_target.is_empty() && config_target != marker.partition {
+                anyhow::bail!(
+                    "安装配置目标分区({})与标记分区({})不一致，已中止",
+                    config_target,
+                    marker.partition
+                );
+            }
+            return Ok((data_partition, marker.partition, config));
+        }
+
+        anyhow::bail!("发现多个安装标记或配置文件，无法确认本次任务，已中止")
+    }
 
     /// 查找包含安装标记文件的分区
     pub fn find_install_marker_partition() -> Option<String> {
@@ -266,18 +412,8 @@ impl ConfigFileManager {
     /// 检测操作类型 (安装或备份)
     pub fn detect_operation_type() -> Option<OperationType> {
         // 先检查安装标记
-        if Self::find_install_marker_partition().is_some() {
-            if let Some(data_part) = Self::find_data_partition() {
-                let install_config_path = format!(
-                    "{}\\{}\\{}",
-                    data_part,
-                    Self::DATA_DIR,
-                    Self::INSTALL_CONFIG
-                );
-                if Path::new(&install_config_path).exists() {
-                    return Some(OperationType::Install);
-                }
-            }
+        if Self::find_install_task().is_ok() {
+            return Some(OperationType::Install);
         }
 
         // 再检查备份标记
@@ -448,6 +584,7 @@ impl ConfigFileManager {
                 let value = value.trim();
 
                 match key {
+                    "SessionId" => config.session_id = value.to_string(),
                     "Unattended" => config.unattended = value.parse().unwrap_or(false),
                     "RestoreDrivers" => config.restore_drivers = value.parse().unwrap_or(false),
                     "DriverActionMode" => {

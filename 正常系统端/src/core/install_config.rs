@@ -22,6 +22,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// 系统安装配置（用于PE环境内安装）
 #[derive(Debug, Clone, Default)]
 pub struct InstallConfig {
+    /// 本次安装任务会话ID，用于 PE 端绑定 marker 与配置。
+    pub session_id: String,
     /// 无人值守安装
     pub unattended: bool,
     /// 驱动还原（兼容旧版本）
@@ -187,6 +189,14 @@ impl ConfigFileManager {
     /// 自动创建分区的标志文件名（与 disk.rs 中的常量保持一致）
     const AUTO_CREATED_PARTITION_MARKER: &'static str = "LetRecovery_AutoCreated.marker";
 
+    fn new_session_id() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        format!("LR{:x}{:x}", nanos, std::process::id())
+    }
+
     /// 查找包含安装标记文件的分区
     pub fn find_install_marker_partition() -> Option<String> {
         for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
@@ -230,6 +240,11 @@ impl ConfigFileManager {
         data_partition: &str,
         config: &InstallConfig,
     ) -> Result<()> {
+        let mut config = config.clone();
+        if config.session_id.trim().is_empty() {
+            config.session_id = Self::new_session_id();
+        }
+
         // 创建数据目录
         let data_dir = format!("{}\\{}", data_partition, Self::DATA_DIR);
         std::fs::create_dir_all(&data_dir)
@@ -237,11 +252,15 @@ impl ConfigFileManager {
 
         // 写入标记文件到目标分区
         let marker_path = format!("{}\\{}", target_partition, Self::INSTALL_MARKER);
-        std::fs::write(&marker_path, "LetRecovery Install Marker")
-            .context(tr!("写入安装标记文件失败"))?;
+        let marker_content = format!(
+            "LetRecovery Install Marker\r\nSessionId={}\r\nTargetPartition={}\r\nDataPartition={}\r\n",
+            config.session_id,
+            target_partition,
+            data_partition
+        );
+        std::fs::write(&marker_path, marker_content).context(tr!("写入安装标记文件失败"))?;
 
         // 处理自定义无人值守文件：把用户选择的 XML 复制到数据目录，INI 里只存相对文件名
-        let mut config = config.clone();
         if !config.custom_unattend_path.is_empty() {
             const CUSTOM_UNATTEND_NAME: &str = "custom_unattend.xml";
             let dst = format!("{}\\{}", data_dir, CUSTOM_UNATTEND_NAME);
@@ -410,6 +429,7 @@ impl ConfigFileManager {
     fn serialize_install_config(config: &InstallConfig) -> String {
         format!(
             r#"[Install]
+SessionId={}
 Unattended={}
 RestoreDrivers={}
 DriverActionMode={}
@@ -450,6 +470,7 @@ Win7FixStorageBsod={}
 XpInjectUsb3Driver={}
 XpInjectNvmeDriver={}
 "#,
+            config.session_id,
             config.unattended,
             config.restore_drivers,
             config.driver_action_mode,
@@ -527,6 +548,7 @@ Language={}
                 let value = value.trim();
                 
                 match key {
+                    "SessionId" => config.session_id = value.to_string(),
                     "Unattended" => config.unattended = value.parse().unwrap_or(false),
                     "RestoreDrivers" => config.restore_drivers = value.parse().unwrap_or(false),
                     "DriverActionMode" => config.driver_action_mode = value.parse().unwrap_or(0),

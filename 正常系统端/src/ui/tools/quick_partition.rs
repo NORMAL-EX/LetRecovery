@@ -8,7 +8,7 @@ use crate::tr;
 use crate::app::App;
 use crate::core::disk::PartitionStyle;
 use crate::core::quick_partition::{
-    execute_quick_partition, get_next_available_drive_letter, get_physical_disks,
+    can_safely_partition, execute_quick_partition, get_next_available_drive_letter, get_physical_disks,
     get_recommended_partition_style, get_unallocated_space_after_partition_with_disk,
     get_used_drive_letters, resize_existing_partition, PartitionLayout, PhysicalDisk,
     ResizePartitionResult,
@@ -535,6 +535,13 @@ impl App {
                 return;
             }
         };
+
+        let (safe, reason) = can_safely_partition(&disk);
+        if !safe {
+            self.quick_partition_state.message = reason;
+            self.quick_partition_state.show_confirm_dialog = false;
+            return;
+        }
 
         // 只获取新规划的分区（排除已有分区）
         let new_partitions: Vec<&EditablePartition> = state
