@@ -126,7 +126,11 @@ fn main() -> eframe::Result<()> {
     install_panic_hook();
 
     log::info!("==================== LetRecovery PE 启动 ====================");
-    log::info!("版本: {} | 日志文件: {}", env!("CARGO_PKG_VERSION"), log_file_path().display());
+    log::info!(
+        "版本: {} | 日志文件: {}",
+        env!("CARGO_PKG_VERSION"),
+        log_file_path().display()
+    );
 
     // 检查命令行参数
     let args: Vec<String> = std::env::args().collect();
@@ -147,7 +151,11 @@ fn main() -> eframe::Result<()> {
     utils::i18n::init(&ui_language);
     log::info!(
         "界面语言: {}",
-        if ui_language.is_empty() { "zh-CN (默认)" } else { ui_language.as_str() }
+        if ui_language.is_empty() {
+            "zh-CN (默认)"
+        } else {
+            ui_language.as_str()
+        }
     );
 
     // 命令行模式（无GUI）
@@ -179,7 +187,9 @@ fn main() -> eframe::Result<()> {
             }
             None => {
                 log::warn!("未检测到配置文件，启动默认界面...");
-                show_error_message(&tr!("未检测到安装或备份配置文件。\n\n请确保已正确准备配置文件后重试。"));
+                show_error_message(&tr!(
+                    "未检测到安装或备份配置文件。\n\n请确保已正确准备配置文件后重试。"
+                ));
                 return Ok(());
             }
         }
@@ -232,7 +242,7 @@ fn load_icon() -> egui::IconData {
     egui::IconData::default()
 }
 
-/// 【实验性】BitLocker 密钥透传解锁。
+/// BitLocker 密钥透传解锁。
 ///
 /// 若正常系统端在注入引导时把恢复密钥文件打包进了 boot.wim，则 PE 启动后该文件位于
 /// `X:\LR_BitLockerKeys.txt`。读取其中的恢复密钥，对 A–Z 各盘逐一尝试解锁。
@@ -245,20 +255,30 @@ fn unlock_bitlocker_passthrough() {
     let content = match std::fs::read_to_string(&keys_path) {
         Ok(c) => c,
         Err(_) => {
-            log::info!("[实验] 未发现密钥透传文件 {}，跳过解锁（未启用透传/无加密卷）", keys_path);
+            log::info!(
+                "[实验] 未发现密钥透传文件 {}，跳过解锁（未启用透传/无加密卷）",
+                keys_path
+            );
             return;
         }
     };
     let keys = lr_core::bl_passthrough::parse_keys(&content);
     if keys.is_empty() {
-        log::warn!("[实验] 密钥透传文件存在但未解析出任何恢复密钥: {}", keys_path);
+        log::warn!(
+            "[实验] 密钥透传文件存在但未解析出任何恢复密钥: {}",
+            keys_path
+        );
         return;
     }
     let fveapi_ok = lr_core::fveapi::FveApi::instance().is_ok();
     log::info!(
         "[实验] BitLocker 密钥透传：解析到 {} 个恢复密钥，fveapi.dll={}，开始逐盘尝试解锁…",
         keys.len(),
-        if fveapi_ok { "可用(优先)" } else { "不可用(仅用 manage-bde)" }
+        if fveapi_ok {
+            "可用(优先)"
+        } else {
+            "不可用(仅用 manage-bde)"
+        }
     );
 
     let mut any_unlocked = false;
@@ -270,12 +290,20 @@ fn unlock_bitlocker_passthrough() {
         let drive = format!("{}:", letter);
         for (i, key) in keys.iter().enumerate() {
             if try_unlock_fveapi(letter, key) {
-                log::info!("[实验] {} 经 fveapi 用第 {} 个恢复密钥解锁成功", drive, i + 1);
+                log::info!(
+                    "[实验] {} 经 fveapi 用第 {} 个恢复密钥解锁成功",
+                    drive,
+                    i + 1
+                );
                 any_unlocked = true;
                 break;
             }
             if try_unlock_manage_bde(&drive, key) {
-                log::info!("[实验] {} 经 manage-bde 用第 {} 个恢复密钥解锁成功", drive, i + 1);
+                log::info!(
+                    "[实验] {} 经 manage-bde 用第 {} 个恢复密钥解锁成功",
+                    drive,
+                    i + 1
+                );
                 any_unlocked = true;
                 break;
             }
@@ -350,8 +378,8 @@ fn try_unlock_manage_bde(drive: &str, recovery_key: &str) -> bool {
 fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
     use core::bcdedit::BootManager;
     use core::config::ConfigFileManager;
-    use core::dism::Dism;
     use core::disk::DiskManager;
+    use core::dism::Dism;
     use core::ghost::Ghost;
     use ui::advanced_options::apply_advanced_options;
 
@@ -383,14 +411,15 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         // 注：BitLocker 透传解锁已在 main() 最前面统一执行，这里不再重复。
 
         // 查找配置文件所在分区
-        let (data_partition, target_partition, config) = match ConfigFileManager::find_install_task() {
-            Ok(task) => task,
-            Err(e) => {
-                log::error!("[PE INSTALL] 错误: 读取安装任务失败: {}", e);
-                show_error_message(&tr!("读取安装任务失败: {}", e));
-                return Ok(());
-            }
-        };
+        let (data_partition, target_partition, config) =
+            match ConfigFileManager::find_install_task() {
+                Ok(task) => task,
+                Err(e) => {
+                    log::error!("[PE INSTALL] 错误: 读取安装任务失败: {}", e);
+                    show_error_message(&tr!("读取安装任务失败: {}", e));
+                    return Ok(());
+                }
+            };
 
         log::info!("[PE INSTALL] 数据分区: {}", data_partition);
 
@@ -464,7 +493,7 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         log::info!("[PE INSTALL] Step 3: 导入驱动");
         let driver_path = format!("{}\\drivers", data_dir);
         let driver_path_exists = std::path::Path::new(&driver_path).exists();
-        
+
         if config.should_import_drivers() && driver_path_exists {
             let dism = Dism::new();
             match dism.add_drivers_offline_with_progress(&apply_dir, &driver_path, None) {
@@ -474,17 +503,27 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
                     log::warn!("驱动导入失败: {}", e);
                 }
             }
-            
+
             // 同时检查驱动目录中是否有 CAB 文件并安装
             let cab_files = find_cab_files_in_dir(&driver_path);
             if !cab_files.is_empty() {
-                log::info!("[PE INSTALL] 在驱动目录中发现 {} 个 CAB 文件，一并安装", cab_files.len());
+                log::info!(
+                    "[PE INSTALL] 在驱动目录中发现 {} 个 CAB 文件，一并安装",
+                    cab_files.len()
+                );
                 match dism.add_packages_offline_from_dir(&apply_dir, &driver_path, None) {
                     Ok((success, fail)) => {
-                        log::info!("[PE INSTALL] 驱动目录中的CAB安装完成: {} 成功, {} 失败", success, fail);
+                        log::info!(
+                            "[PE INSTALL] 驱动目录中的CAB安装完成: {} 成功, {} 失败",
+                            success,
+                            fail
+                        );
                     }
                     Err(e) => {
-                        log::warn!("[PE INSTALL] 警告: 驱动目录中的CAB安装失败: {} (继续安装)", e);
+                        log::warn!(
+                            "[PE INSTALL] 警告: 驱动目录中的CAB安装失败: {} (继续安装)",
+                            e
+                        );
                         log::warn!("驱动目录中的CAB安装失败: {}", e);
                     }
                 }
@@ -503,7 +542,11 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
                 let dism = Dism::new();
                 match dism.add_packages_offline_from_dir(&apply_dir, &cab_path, None) {
                     Ok((success, fail)) => {
-                        log::info!("[PE INSTALL] CAB更新包安装完成: {} 成功, {} 失败", success, fail);
+                        log::info!(
+                            "[PE INSTALL] CAB更新包安装完成: {} 成功, {} 失败",
+                            success,
+                            fail
+                        );
                     }
                     Err(e) => {
                         log::warn!("[PE INSTALL] 警告: CAB更新包安装失败: {} (继续安装)", e);
@@ -555,7 +598,10 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
                 Ok(_) => log::info!("[PE INSTALL] UefiSeven 补丁应用成功"),
                 Err(e) => {
                     // UefiSeven 补丁失败不中断安装，只记录警告
-                    log::warn!("[PE INSTALL] 警告: UefiSeven 补丁应用失败: {} (继续安装)", e);
+                    log::warn!(
+                        "[PE INSTALL] 警告: UefiSeven 补丁应用失败: {} (继续安装)",
+                        e
+                    );
                     log::warn!("UefiSeven 补丁应用失败: {}", e);
                 }
             }
@@ -582,7 +628,8 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
                         let sysprep_dir =
                             format!("{}\\Windows\\System32\\Sysprep", target_partition);
                         if std::path::Path::new(&sysprep_dir).exists() {
-                            let _ = std::fs::write(format!("{}\\unattend.xml", sysprep_dir), &content);
+                            let _ =
+                                std::fs::write(format!("{}\\unattend.xml", sysprep_dir), &content);
                         }
                         log::info!("[PE INSTALL] 已应用自定义无人值守文件: {}", src);
                     }
@@ -622,7 +669,13 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         if config.auto_reboot {
             log::info!("[PE INSTALL] 即将重启...");
             let _ = utils::command::new_command("shutdown")
-                .args(["/r", "/t", "10", "/c", "LetRecovery 系统安装完成，即将重启..."])
+                .args([
+                    "/r",
+                    "/t",
+                    "10",
+                    "/c",
+                    "LetRecovery 系统安装完成，即将重启...",
+                ])
                 .spawn();
         } else {
             show_success_message(&tr!("系统安装完成！请手动重启计算机。"));
@@ -681,19 +734,48 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             }
             BackupFormat::Esd => {
                 if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                    dism.append_image_esd(&config.save_path, &capture_dir, &config.name, &config.description, None)
+                    dism.append_image_esd(
+                        &config.save_path,
+                        &capture_dir,
+                        &config.name,
+                        &config.description,
+                        None,
+                    )
                 } else {
-                    dism.capture_image_esd(&config.save_path, &capture_dir, &config.name, &config.description, None)
+                    dism.capture_image_esd(
+                        &config.save_path,
+                        &capture_dir,
+                        &config.name,
+                        &config.description,
+                        None,
+                    )
                 }
             }
-            BackupFormat::Swm => {
-                dism.capture_image_swm(&config.save_path, &capture_dir, &config.name, &config.description, config.swm_split_size, None)
-            }
+            BackupFormat::Swm => dism.capture_image_swm(
+                &config.save_path,
+                &capture_dir,
+                &config.name,
+                &config.description,
+                config.swm_split_size,
+                None,
+            ),
             BackupFormat::Wim => {
                 if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                    dism.append_image(&config.save_path, &capture_dir, &config.name, &config.description, None)
+                    dism.append_image(
+                        &config.save_path,
+                        &capture_dir,
+                        &config.name,
+                        &config.description,
+                        None,
+                    )
                 } else {
-                    dism.capture_image(&config.save_path, &capture_dir, &config.name, &config.description, None)
+                    dism.capture_image(
+                        &config.save_path,
+                        &capture_dir,
+                        &config.name,
+                        &config.description,
+                        None,
+                    )
                 }
             }
         };
@@ -714,10 +796,7 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         ConfigFileManager::cleanup_pe_dir(&data_partition);
 
         log::info!("[PE BACKUP] 备份完成!");
-        show_success_message(&tr!(
-            "系统备份完成！\n保存位置: {}",
-            config.save_path
-        ));
+        show_success_message(&tr!("系统备份完成！\n保存位置: {}", config.save_path));
 
         // 自动重启
         let _ = utils::command::new_command("shutdown")
@@ -736,7 +815,11 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
 /// 生成无人值守XML
 fn generate_unattend_xml(target_partition: &str, username: &str) -> anyhow::Result<()> {
-    let username = if username.is_empty() { "User" } else { username };
+    let username = if username.is_empty() {
+        "User"
+    } else {
+        username
+    };
 
     let xml_content = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -825,12 +908,8 @@ fn show_error_message(message: &str) {
                     utype: u32,
                 ) -> i32;
             }
-            MessageBoxW(
-                null_mut(),
-                wide_message.as_ptr(),
-                wide_title.as_ptr(),
-                0x10,
-            ); // MB_ICONERROR
+            MessageBoxW(null_mut(), wide_message.as_ptr(), wide_title.as_ptr(), 0x10);
+            // MB_ICONERROR
         }
     }
 
@@ -867,12 +946,8 @@ fn show_success_message(message: &str) {
                     utype: u32,
                 ) -> i32;
             }
-            MessageBoxW(
-                null_mut(),
-                wide_message.as_ptr(),
-                wide_title.as_ptr(),
-                0x40,
-            ); // MB_ICONINFORMATION
+            MessageBoxW(null_mut(), wide_message.as_ptr(), wide_title.as_ptr(), 0x40);
+            // MB_ICONINFORMATION
         }
     }
 

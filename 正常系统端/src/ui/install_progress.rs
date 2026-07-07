@@ -1320,7 +1320,88 @@ fn format_partition(partition: &str, volume_label: Option<&str>) -> anyhow::Resu
     } else {
         reason
     };
-    anyhow::bail!("格式化失败（diskpart）: {}", reason);
+    match format_partition_with_format_command(letter, volume_label) {
+        Ok(_) => {
+            log::info!("[FORMAT] DiskPart 失败后 fallback format 成功");
+            return Ok(());
+        }
+        Err(format_reason) => {
+            log::warn!("[FORMAT] fallback format 也失败: {}", format_reason);
+            anyhow::bail!(
+                "格式化失败（diskpart）。\n{}\n\nDiskPart 输出:\n{}\n\nformat 输出:\n{}",
+                format_failure_hint(),
+                reason,
+                format_reason
+            );
+        }
+    }
+}
+
+fn format_failure_hint() -> String {
+    tr!("可能原因:\n- 目标盘质量较差或已损坏（坏盘/扩容盘/掉盘）\n- 磁盘存在坏道、I/O 错误或 CRC 错误\n- 数据线、USB 口、硬盘盒或供电不稳定\n- 分区被占用、写保护或分区表异常")
+}
+
+fn format_output_is_success(stdout: &str) -> bool {
+    let lower = stdout.to_lowercase();
+    stdout.contains("格式化完成")
+        || stdout.contains("格式化已完成")
+        || lower.contains("format complete")
+        || lower.contains("formatting is complete")
+        || lower.contains("successfully formatted")
+}
+
+fn format_output_has_error(status_success: bool, stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{}\n{}", stdout, stderr);
+    let lower = combined.to_lowercase();
+    !status_success
+        || combined.contains("无法")
+        || combined.contains("错误")
+        || combined.contains("失败")
+        || combined.contains("拒绝")
+        || lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("denied")
+        || lower.contains("i/o device error")
+        || lower.contains("cyclic redundancy check")
+}
+
+fn format_partition_with_format_command(
+    letter: &str,
+    volume_label: Option<&str>,
+) -> Result<(), String> {
+    let drive = format!("{}:", letter);
+    let label = volume_label
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or("本地磁盘")
+        .replace('"', "'");
+    let label_arg = format!("/v:{}", label);
+
+    log::warn!("[FORMAT] DiskPart 失败，尝试 fallback: format {}", drive);
+
+    let output = crate::utils::cmd::create_command("cmd")
+        .args(["/c", "format", drive.as_str(), "/fs:ntfs", "/q", "/x", "/y", label_arg.as_str()])
+        .output()
+        .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
+
+    let stdout = crate::utils::encoding::gbk_to_utf8(&output.stdout);
+    let stderr = crate::utils::encoding::gbk_to_utf8(&output.stderr);
+    let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
+
+    log::info!("[FORMAT] fallback format stdout:\n{}", stdout);
+    if !stderr.is_empty() {
+        log::warn!("[FORMAT] fallback format stderr:\n{}", stderr);
+    }
+
+    if format_output_is_success(&stdout)
+        && !format_output_has_error(output.status.success(), &stdout, &stderr)
+    {
+        log::info!("[FORMAT] fallback format {} 成功", drive);
+        Ok(())
+    } else if !combined.trim().is_empty() {
+        Err(combined.trim().to_string())
+    } else {
+        Err(tr!("format 命令无输出，格式化失败。"))
+    }
 }
 
 /// 把目标分区所在【同一物理盘】上其他分区的活动标志清掉，确保目标成为唯一活动分区。

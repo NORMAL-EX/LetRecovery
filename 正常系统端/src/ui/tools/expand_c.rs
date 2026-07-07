@@ -6,10 +6,10 @@
 use egui;
 use std::sync::mpsc;
 
-use crate::tr;
 use crate::app::App;
 use crate::core::install_config::{ConfigFileManager, ExpandConfig};
 use crate::core::quick_partition::{get_physical_disks, query_shrink_max};
+use crate::tr;
 
 /// 异步加载 C 盘信息的结果
 #[derive(Debug, Clone)]
@@ -324,7 +324,7 @@ impl App {
                         ui.colored_label(
                             egui::Color32::from_rgb(231, 76, 60),
                             tr!(
-                                "⚠ 超过 {} GB 的部分需要移动 C 盘后方分区的数据来腾挪空间：\n· 该过程会搬移后方分区(如 D:)的数据，耗时较长；\n· 进行中切勿断电/强制关机，否则可能损坏后方分区；\n· 此为实验性功能，建议先在测试机/虚拟机验证。\n若只想要稳妥的纯扩展，请把目标控制在 {} GB 以内。",
+                                "⚠ 超过 {} GB 的部分需要移动 C 盘后方分区的数据来腾挪空间：\n· 该过程会搬移后方分区(如 D:)的数据，耗时较长；\n· 进行中切勿断电/强制关机，否则可能损坏后方分区；\n若只想要稳妥的纯扩展，请把目标控制在 {} GB 以内。",
                                 format!("{:.1}", no_move_max as f64 / 1024.0),
                                 format!("{:.1}", no_move_max as f64 / 1024.0),
                             ),
@@ -371,7 +371,10 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.add_space(10.0);
                         let target_gb = self.expand_c_state.target_size_mb as f64 / 1024.0;
-                        ui.label(tr!("确定要将 C 盘扩容到 {} GB 吗？", format!("{:.1}", target_gb)));
+                        ui.label(tr!(
+                            "确定要将 C 盘扩容到 {} GB 吗？",
+                            format!("{:.1}", target_gb)
+                        ));
                         ui.label(tr!("电脑将重启进入 WinPE 完成无损扩容。"));
                         ui.add_space(20.0);
                         ui.horizontal(|ui| {
@@ -423,7 +426,9 @@ impl App {
 
         // 获取选中的 PE 信息
         let pe_info = self.selected_pe_for_install.and_then(|idx| {
-            self.config.as_ref().and_then(|c| c.pe_list.get(idx).cloned())
+            self.config
+                .as_ref()
+                .and_then(|c| c.pe_list.get(idx).cloned())
         });
 
         if let Some(pe) = pe_info {
@@ -434,7 +439,9 @@ impl App {
                 self.pending_download_url = Some(pe.download_url.clone());
                 self.pending_download_filename = Some(pe.filename.clone());
                 self.pending_pe_md5 = pe.md5.clone();
-                let pe_dir = crate::utils::path::get_pe_dir().to_string_lossy().to_string();
+                let pe_dir = crate::utils::path::get_pe_dir()
+                    .to_string_lossy()
+                    .to_string();
                 self.download_save_path = pe_dir;
                 self.pe_download_then_action = Some(crate::app::PeDownloadThenAction::Expand);
                 self.show_expand_c_dialog = false;
@@ -459,17 +466,19 @@ impl App {
         self.expand_c_state.executing = true;
         self.expand_c_state.message = tr!("正在准备扩容环境...");
 
-        let target_size_mb = if self.expand_c_state.target_size_mb >= self.expand_c_state.max_size_mb
-        {
-            // 用户选择了最大值，则写 0 表示扩容到最大可用
-            0
-        } else {
-            self.expand_c_state.target_size_mb
-        };
+        let target_size_mb =
+            if self.expand_c_state.target_size_mb >= self.expand_c_state.max_size_mb {
+                // 用户选择了最大值，则写 0 表示扩容到最大可用
+                0
+            } else {
+                self.expand_c_state.target_size_mb
+            };
 
         // 获取选中的 PE 信息
         let pe_info = self.selected_pe_for_install.and_then(|idx| {
-            self.config.as_ref().and_then(|c| c.pe_list.get(idx).cloned())
+            self.config
+                .as_ref()
+                .and_then(|c| c.pe_list.get(idx).cloned())
         });
 
         let pe_info = match pe_info {
@@ -499,7 +508,8 @@ impl App {
 
         log::info!(
             "[EXPAND PE] 写入扩容配置: target=C:, target_size_mb={}, wim_engine={}",
-            cfg.target_size_mb, cfg.wim_engine
+            cfg.target_size_mb,
+            cfg.wim_engine
         );
 
         match ConfigFileManager::write_expand_config("C:", &data_partition, &cfg) {
@@ -614,7 +624,11 @@ fn compute_expand_c_info() -> ExpandCLoadResult {
             if let Some(letter) = next.drive_letter {
                 if let Ok(mb) = query_shrink_max(letter) {
                     next_shrinkable_mb = mb;
-                    log::info!("[EXPAND] 后方分区 {}: 可让出 {} MB（需移动数据，Case 2）", letter, mb);
+                    log::info!(
+                        "[EXPAND] 后方分区 {}: 可让出 {} MB（需移动数据，Case 2）",
+                        letter,
+                        mb
+                    );
                 }
             }
         }
@@ -639,7 +653,8 @@ fn compute_expand_c_info() -> ExpandCLoadResult {
         }
     } else {
         result.can_expand = false;
-        result.reason = tr!("C 盘后方没有可用于扩容的空间。可先用「一键分区」在 C 盘后方腾出未分配空间。");
+        result.reason =
+            tr!("C 盘后方没有可用于扩容的空间。可先用「一键分区」在 C 盘后方腾出未分配空间。");
     }
 
     result

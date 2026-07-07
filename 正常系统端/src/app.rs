@@ -1655,18 +1655,19 @@ impl eframe::App for App {
             });
         });
 
+        // 操作进行中时隐藏导航栏，让进度/操作页面占满窗口。
+        let is_busy = self.is_installing || self.is_backing_up || self.current_download.is_some();
+
         // 左侧导航栏
-        egui::SidePanel::left("nav_panel")
-            .min_width(150.0)
-            .show(ctx, |ui| {
+        if !is_busy {
+            egui::SidePanel::left("nav_panel")
+                .min_width(150.0)
+                .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.heading("LetRecovery");
                 });
 
                 ui.add_space(20.0);
-
-                // 检查是否有操作正在进行
-                let is_busy = self.is_installing || self.is_backing_up || self.current_download.is_some();
                 
                 // 检查是否启用小白模式（PE环境下强制禁用）
                 let is_pe = self.system_info.as_ref()
@@ -1747,6 +1748,7 @@ impl eframe::App for App {
                     self.current_panel = Panel::About;
                 }
             });
+        }
 
         // 主面板
         // 检查是否启用小白模式（PE环境下强制禁用）

@@ -18,7 +18,7 @@ After opening it, enter the target size, and the program will calculate two "cei
 | Method | Description | Risk |
 | --- | --- | --- |
 | **Method 1: Pure extend** | Target = current size + the **unallocated space immediately after** the C: drive. No data is moved. | Low (recommended) |
-| **Method 2: Experimental** | Building on Method 1, it further **shrinks / moves** the data partition behind it (e.g. D:) to free up space. This moves data on that partition. | High, slower |
+| **Method 2: Move following partition** | Building on Method 1, it further **shrinks / moves** the data partition behind it (e.g. D:) to free up space. This moves data on that partition. | High, slower |
 
 When the target size you enter exceeds the "Method 1" ceiling, the interface displays a prominent warning, indicating that this will trigger data movement.
 

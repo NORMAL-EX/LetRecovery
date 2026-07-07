@@ -1,7 +1,7 @@
-use anyhow::Result;
-use std::path::Path;
 use crate::tr;
 use crate::utils::cmd::create_command;
+use anyhow::Result;
+use std::path::Path;
 
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::{get_bin_dir, get_exe_dir};
@@ -72,7 +72,7 @@ impl PeManager {
         log::info!("[PE] 显示名称: {}", display_name);
 
         let pe_path_lower = pe_path.to_lowercase();
-        
+
         if pe_path_lower.ends_with(".iso") {
             self.boot_from_iso(pe_path, display_name)
         } else if pe_path_lower.ends_with(".wim") {
@@ -85,7 +85,7 @@ impl PeManager {
     /// 从ISO启动PE
     fn boot_from_iso(&self, iso_path: &str, display_name: &str) -> Result<()> {
         log::info!("[PE] 从ISO启动PE");
-        
+
         // 1. 挂载ISO
         crate::core::iso::IsoMounter::mount_iso(iso_path)?;
         let mount_point = crate::core::iso::IsoMounter::find_iso_drive()
@@ -108,7 +108,8 @@ impl PeManager {
             }
         }
 
-        let wim_path = wim_path.ok_or_else(|| anyhow::anyhow!("{}", tr!("ISO中未找到 boot.wim")))?;
+        let wim_path =
+            wim_path.ok_or_else(|| anyhow::anyhow!("{}", tr!("ISO中未找到 boot.wim")))?;
         log::info!("[PE] 找到WIM: {}", wim_path);
 
         // 3. 查找boot.sdi
@@ -169,7 +170,7 @@ impl PeManager {
         log::info!("[PE] 复制 WIM 到 {}", target_wim);
         std::fs::copy(wim_path, &target_wim)?;
 
-        // 1.5 【实验性】BitLocker 密钥透传：把各加密卷的恢复密钥打包进刚拷好的 boot.wim
+        // 1.5 BitLocker 密钥透传：把各加密卷的恢复密钥打包进刚拷好的 boot.wim
         Self::maybe_inject_bitlocker_keys(&target_wim);
 
         // 1.6 Secure Boot：PE 自带的 winload.efi 仅 2011 链签名，在已吊销 2011(CVE-2023-24932 DBX)
@@ -249,7 +250,10 @@ impl PeManager {
                 "[PE][实验] 已把 {} 个卷的恢复密钥注入 boot.wim",
                 entries.len()
             ),
-            Err(e) => log::info!("[PE][实验] 注入 boot.wim 失败: {}（PE 端将无法自动解锁）", e),
+            Err(e) => log::info!(
+                "[PE][实验] 注入 boot.wim 失败: {}（PE 端将无法自动解锁）",
+                e
+            ),
         }
     }
 
@@ -279,7 +283,10 @@ impl PeManager {
         let bytes = match std::fs::read(&host_winload) {
             Ok(b) => b,
             Err(e) => {
-                log::info!("[PE][SB] 读取当前系统 winload.efi 失败: {}，保留 PE 原 winload", e);
+                log::info!(
+                    "[PE][SB] 读取当前系统 winload.efi 失败: {}，保留 PE 原 winload",
+                    e
+                );
                 return;
             }
         };
@@ -360,7 +367,7 @@ impl PeManager {
     /// 创建默认的boot.sdi文件
     fn create_default_sdi(&self, target_dir: &str) -> Result<String> {
         let sdi_path = format!("{}\\boot.sdi", target_dir);
-        
+
         // 尝试从Windows系统复制
         let system_sdi_paths = [
             "C:\\Windows\\Boot\\DVD\\PCAT\\boot.sdi",
@@ -398,9 +405,14 @@ impl PeManager {
     }
 
     /// 创建PE引导项
-    fn create_pe_boot_entry(&self, display_name: &str, wim_path: &str, sdi_path: &str) -> Result<()> {
+    fn create_pe_boot_entry(
+        &self,
+        display_name: &str,
+        wim_path: &str,
+        sdi_path: &str,
+    ) -> Result<()> {
         log::info!("[PE] 创建BCD引导项");
-        
+
         let is_uefi = Self::is_uefi_boot();
         log::info!("[PE] 引导模式: {}", if is_uefi { "UEFI" } else { "Legacy" });
 
@@ -416,7 +428,7 @@ impl PeManager {
         let output = create_command(&self.bcdedit_path)
             .args(["/create", "/d", &format!("{} RAM", display_name), "/device"])
             .output()?;
-        
+
         let stdout = gbk_to_utf8(&output.stdout);
         log::info!("[PE] bcdedit output: {}", stdout);
         let ramdisk_guid = Self::extract_guid(&stdout)?;
@@ -452,7 +464,7 @@ impl PeManager {
         };
 
         let device_str = format!("ramdisk=[C:]{},{}", wim_bcd_path, ramdisk_guid);
-        
+
         let cmds = [
             vec!["/set", &loader_guid, "device", &device_str],
             vec!["/set", &loader_guid, "path", winload],
@@ -499,7 +511,7 @@ impl PeManager {
             if lines.len() >= 2 {
                 let loader_guid = lines[1];
                 log::info!("[PE] 设置下次启动: {}", loader_guid);
-                
+
                 let output = create_command(&self.bcdedit_path)
                     .args(["/bootsequence", loader_guid])
                     .output()?;
@@ -528,7 +540,7 @@ impl PeManager {
     /// 清理PE文件和引导项
     pub fn cleanup_pe(&self) -> Result<()> {
         log::info!("[PE] 清理PE");
-        
+
         // 清理BCD引导项
         self.cleanup_old_pe_entries()?;
 
@@ -565,7 +577,7 @@ impl PeManager {
                 }
             }
         }
-        
+
         // 尝试用正则匹配
         for line in output.lines() {
             if let Some(start) = line.find('{') {
@@ -577,7 +589,7 @@ impl PeManager {
                 }
             }
         }
-        
+
         anyhow::bail!("{}", tr!("无法从bcdedit输出中提取GUID: {}", output))
     }
 }

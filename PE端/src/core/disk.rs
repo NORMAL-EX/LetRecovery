@@ -70,6 +70,69 @@ pub struct DiskManager;
 
 impl DiskManager {
 
+    fn format_failure_hint() -> String {
+        tr!(
+            "可能原因:\n- 目标盘质量较差或已损坏（坏盘/扩容盘/掉盘）\n- 磁盘存在坏道、I/O 错误或 CRC 错误\n- 数据线、USB 口、硬盘盒或供电不稳定\n- 分区被占用、写保护或分区表异常"
+        )
+    }
+
+    fn format_output_is_success(stdout: &str) -> bool {
+        let lower = stdout.to_lowercase();
+        stdout.contains("格式化完成")
+            || stdout.contains("格式化已完成")
+            || lower.contains("format complete")
+            || lower.contains("formatting is complete")
+            || lower.contains("successfully formatted")
+    }
+
+    fn format_output_has_error(status_success: bool, stdout: &str, stderr: &str) -> bool {
+        let combined = format!("{}\n{}", stdout, stderr);
+        let lower = combined.to_lowercase();
+        !status_success
+            || combined.contains("无法")
+            || combined.contains("错误")
+            || combined.contains("失败")
+            || combined.contains("拒绝")
+            || lower.contains("error")
+            || lower.contains("failed")
+            || lower.contains("denied")
+            || lower.contains("i/o device error")
+            || lower.contains("cyclic redundancy check")
+    }
+
+    fn format_partition_with_format_command(
+        drive: &str,
+        volume_label: &str,
+    ) -> std::result::Result<String, String> {
+        let label_arg = format!("/v:{}", volume_label.replace('"', "'"));
+        log::warn!("[FORMAT] DiskPart 失败，尝试 fallback: format {}", drive);
+
+        let output = new_command("cmd")
+            .args(["/c", "format", drive, "/fs:ntfs", "/q", "/x", "/y", &label_arg])
+            .output()
+            .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
+
+        let stdout = gbk_to_utf8(&output.stdout);
+        let stderr = gbk_to_utf8(&output.stderr);
+        let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
+
+        log::info!("[FORMAT] fallback format stdout:\n{}", stdout);
+        if !stderr.is_empty() {
+            log::warn!("[FORMAT] fallback format stderr:\n{}", stderr);
+        }
+
+        if Self::format_output_is_success(&stdout)
+            && !Self::format_output_has_error(output.status.success(), &stdout, &stderr)
+        {
+            log::info!("[FORMAT] fallback format {} 成功", drive);
+            Ok(stdout)
+        } else if !combined.trim().is_empty() {
+            Err(combined.trim().to_string())
+        } else {
+            Err(tr!("format 命令无输出，格式化失败。"))
+        }
+    }
+
     /// 选择一个可靠的临时目录并确保它存在。
     /// WinPE 下 std::env::temp_dir() 可能指向不存在的路径，
     /// 直接写 diskpart 脚本会触发 "系统找不到指定的路径 (os error 3)"。
@@ -363,31 +426,71 @@ impl DiskManager {
             log::warn!("format 错误输出:\n{}", stderr);
         }
 
-        // 检查执行结果
+        // DiskPart 会输出格式化进度，例如“0 百分比已完成”/“0 percent completed”。
+        // 这些进度行不能作为成功依据；只接受明确的成功句。
         let stdout_lower = stdout.to_lowercase();
-        let success_indicators = ["格式化完成", "format complete", "已完成", "complete"];
-        let has_success_indicator = success_indicators
-            .iter()
-            .any(|s| stdout_lower.contains(&s.to_lowercase()));
-        let has_success_indicator = has_success_indicator
-            || stdout.contains("\u{6210}\u{529f}\u{683c}\u{5f0f}\u{5316}")
+        let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
+        let combined_lower = combined.to_lowercase();
+        let has_success_indicator = stdout.contains("\u{6210}\u{529f}\u{683c}\u{5f0f}\u{5316}")
             || stdout_lower.contains("successfully formatted");
-        
-        if has_success_indicator {
+        let has_error_indicator = !output.status.success()
+            || stdout.contains("无法")
+            || stdout.contains("错误")
+            || stdout.contains("失败")
+            || stdout.contains("拒绝")
+            || stderr.contains("无法")
+            || stderr.contains("错误")
+            || stderr.contains("失败")
+            || stderr.contains("拒绝")
+            || combined_lower.contains("diskpart has encountered an error")
+            || combined_lower.contains("error")
+            || combined_lower.contains("failed")
+            || combined_lower.contains("denied")
+            || combined_lower.contains("i/o device error")
+            || combined_lower.contains("cyclic redundancy check");
+
+        if has_success_indicator && !has_error_indicator {
             log::info!("分区 {} 格式化成功", drive);
             Ok(stdout)
         } else {
-            let error_msg = if !stderr.is_empty() {
-                stderr.trim().to_string()
-            } else if stdout.contains("无法") || stdout.contains("错误") || stdout.contains("失败") 
-                || stdout.contains("denied") || stdout.contains("error") || stdout.contains("拒绝") {
-                stdout.trim().to_string()
+            let diskpart_detail = if !combined.trim().is_empty() {
+                combined.trim().to_string()
             } else {
-                tr!("格式化失败: {}", stdout.trim())
+                tr!("diskpart 无输出，格式化失败。请确认该分区未被占用后重试。")
             };
+            match Self::format_partition_with_format_command(&drive, vol_label) {
+                Ok(format_stdout) => {
+                    log::info!("[FORMAT] DiskPart 失败后 fallback format 成功");
+                    return Ok(format!("{}\n{}", stdout.trim(), format_stdout.trim()));
+                }
+                Err(format_detail) => {
+                    log::warn!("[FORMAT] fallback format 也失败: {}", format_detail);
+                    let hint = Self::format_failure_hint();
+                    let error_msg = if output.status.success() {
+                        tr!(
+                            "格式化失败。\n{}\n\nDiskPart 输出:\n{}\n\nformat 输出:\n{}",
+                            hint,
+                            diskpart_detail,
+                            format_detail
+                        )
+                    } else {
+                        tr!(
+                            "格式化失败，diskpart 退出码 {}。\n{}\n\nDiskPart 输出:\n{}\n\nformat 输出:\n{}",
+                            output
+                                .status
+                                .code()
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| tr!("未知")),
+                            hint,
+                            diskpart_detail,
+                            format_detail
+                        )
+                    };
 
-            log::error!("格式化失败: {}", error_msg);
-            anyhow::bail!("{}", error_msg);
+                    log::error!("格式化失败: {}", error_msg);
+                    anyhow::bail!("{}", error_msg);
+                }
+            }
         }
     }
 

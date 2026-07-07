@@ -1,4 +1,4 @@
-//! 实验性 BitLocker 密钥透传。
+//! BitLocker 密钥透传。
 //!
 //! 正常系统端在"写 PE 引导"阶段，把各 BitLocker 加密卷的恢复密钥写成一个文本文件，
 //! 用 [`crate::wimlib::WimlibManager::add_file_to_image`] 打包进 PE 的 boot.wim；PE 启动后
@@ -16,7 +16,7 @@ pub const KEYS_FILE_NAME: &str = "LR_BitLockerKeys.txt";
 
 /// 把若干 `(标签, 恢复密钥)` 组装成密钥文件文本。
 pub fn serialize_keys(entries: &[(String, String)]) -> String {
-    let mut s = String::from("# LetRecovery BitLocker passthrough (experimental)\r\n");
+    let mut s = String::from("# LetRecovery BitLocker passthrough\r\n");
     for (label, key) in entries {
         let key = key.trim();
         if key.is_empty() {
