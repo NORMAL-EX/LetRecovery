@@ -160,6 +160,10 @@ impl App {
 
     /// 绘制系统选择卡片（新版本，正确处理交互）
     /// 返回 (卡片被点击, 安装按钮被点击)
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "egui card renderer receives explicit frame-local layout inputs"
+    )]
     fn draw_system_card_v2(
         &mut self,
         ui: &mut egui::Ui,

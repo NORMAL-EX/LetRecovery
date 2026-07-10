@@ -193,7 +193,7 @@ impl AppConfig {
 
     /// 设置日志保留天数并保存
     pub fn set_log_retention_days(&mut self, days: u32) {
-        self.log_retention_days = days.max(1).min(365); // 限制范围：1-365天
+        self.log_retention_days = days.clamp(1, 365); // 限制范围：1-365天
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }

@@ -15,7 +15,11 @@ use crate::tr;
 // =============================================================================
 
 /// Windows 版本信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[allow(
+    dead_code,
+    reason = "retained for custom PE diagnostics and compatibility tooling"
+)]
 pub struct WindowsVersion {
     /// 主版本号 (如 Windows 10 = 10)
     pub major: u32,
@@ -29,18 +33,10 @@ pub struct WindowsVersion {
     pub product_name: String,
 }
 
-impl Default for WindowsVersion {
-    fn default() -> Self {
-        Self {
-            major: 0,
-            minor: 0,
-            build: 0,
-            version_string: String::new(),
-            product_name: String::new(),
-        }
-    }
-}
-
+#[allow(
+    dead_code,
+    reason = "retained for custom PE diagnostics and compatibility tooling"
+)]
 impl WindowsVersion {
     /// 是否为 Windows 7
     pub fn is_win7(&self) -> bool {
@@ -92,6 +88,7 @@ impl WindowsVersion {
 
 /// 获取当前系统的 Windows 版本
 #[cfg(windows)]
+#[allow(dead_code, reason = "retained for custom PE diagnostics")]
 pub fn get_windows_version() -> WindowsVersion {
     use windows::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOEXW};
 
@@ -133,6 +130,7 @@ pub fn get_windows_version() -> WindowsVersion {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code, reason = "retained for cross-platform unit compilation")]
 pub fn get_windows_version() -> WindowsVersion {
     WindowsVersion::default()
 }
@@ -141,6 +139,7 @@ pub fn get_windows_version() -> WindowsVersion {
 ///
 /// # 参数
 /// - `system_root`: 系统根目录 (如 "D:\\")
+#[allow(dead_code, reason = "retained for custom offline-system diagnostics")]
 pub fn get_offline_windows_version(system_root: &Path) -> Option<WindowsVersion> {
     // 通过读取 ntoskrnl.exe 的版本信息来检测
     let kernel_path = system_root
@@ -519,6 +518,10 @@ fn find_version_in_subdir(
 }
 
 /// 从 JSON 行中提取数字值
+#[allow(
+    dead_code,
+    reason = "parser helper retained with legacy Windows version detection"
+)]
 fn extract_json_number(line: &str) -> Option<u32> {
     line.split(':')
         .nth(1)?
@@ -529,6 +532,10 @@ fn extract_json_number(line: &str) -> Option<u32> {
 }
 
 /// 从 JSON 行中提取字符串值
+#[allow(
+    dead_code,
+    reason = "parser helper retained with legacy Windows version detection"
+)]
 fn extract_json_string(line: &str) -> Option<String> {
     let value = line.split(':').nth(1)?.trim();
     let value = value.trim_start_matches('"').trim_end_matches('"');
@@ -552,6 +559,7 @@ pub enum SystemArchitecture {
 
 impl SystemArchitecture {
     /// 获取架构名称
+    #[allow(dead_code, reason = "retained for custom PE diagnostics")]
     pub fn name(&self) -> &'static str {
         match self {
             SystemArchitecture::X86 => "x86",
@@ -580,6 +588,10 @@ impl SystemArchitecture {
 }
 
 /// 获取当前系统架构
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "exercised by endpoint unit tests")
+)]
 pub fn get_system_architecture() -> SystemArchitecture {
     #[cfg(target_arch = "x86_64")]
     {
@@ -645,7 +657,7 @@ pub fn get_offline_system_architecture(system_root: &Path) -> SystemArchitecture
 }
 
 /// 检查是否在 WoW64 下运行
-#[cfg(windows)]
+#[cfg(all(windows, target_arch = "x86"))]
 fn is_wow64() -> bool {
     use windows::Win32::Foundation::BOOL;
     use windows::Win32::System::Threading::GetCurrentProcess;
@@ -666,7 +678,7 @@ fn is_wow64() -> bool {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), target_arch = "x86"))]
 fn is_wow64() -> bool {
     false
 }
@@ -676,6 +688,7 @@ fn is_wow64() -> bool {
 // =============================================================================
 
 /// 检测当前是否在 PE 环境中运行
+#[allow(dead_code, reason = "retained for custom PE diagnostics")]
 pub fn is_pe_environment() -> bool {
     // 检查 X: 盘是否存在（PE 环境的典型特征）
     if Path::new("X:\\Windows\\System32").exists() {
@@ -755,6 +768,7 @@ pub fn get_temp_directory() -> PathBuf {
 }
 
 /// 创建唯一的临时目录
+#[allow(dead_code, reason = "retained for custom PE integrations")]
 pub fn create_temp_directory(prefix: &str) -> std::io::Result<PathBuf> {
     let base = get_temp_directory();
     let unique_name = format!(
@@ -775,6 +789,7 @@ pub fn create_temp_directory(prefix: &str) -> std::io::Result<PathBuf> {
 /// 确保临时目录存在
 ///
 /// 用于确保 DISM 等工具的 scratchdir 可用。
+#[allow(dead_code, reason = "retained for custom DISM integrations")]
 pub fn ensure_scratch_directory() -> PathBuf {
     let scratch = get_temp_directory();
     let _ = std::fs::create_dir_all(&scratch);
@@ -786,6 +801,10 @@ pub fn ensure_scratch_directory() -> PathBuf {
 // =============================================================================
 
 /// 格式化文件大小
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "exercised by endpoint unit tests")
+)]
 pub fn format_file_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -806,6 +825,10 @@ pub fn format_file_size(bytes: u64) -> String {
 }
 
 /// 格式化持续时间
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "exercised by endpoint unit tests")
+)]
 pub fn format_duration(seconds: u64) -> String {
     if seconds < 60 {
         tr!("{}秒", seconds)
@@ -821,6 +844,7 @@ pub fn format_duration(seconds: u64) -> String {
 }
 
 /// 检查路径是否存在且可访问
+#[allow(dead_code, reason = "retained for custom PE diagnostics")]
 pub fn path_accessible(path: &Path) -> bool {
     if !path.exists() {
         return false;

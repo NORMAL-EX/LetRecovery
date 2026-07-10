@@ -205,10 +205,12 @@ impl Aria2Manager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("aria2 client not connected"))?;
 
-        let mut options = aria2_ws::TaskOptions::default();
-        options.dir = Some(save_dir.to_string());
-        options.split = Some(32);
-        options.max_connection_per_server = Some(16);
+        let mut options = aria2_ws::TaskOptions {
+            dir: Some(save_dir.to_string()),
+            split: Some(32),
+            max_connection_per_server: Some(16),
+            ..aria2_ws::TaskOptions::default()
+        };
 
         if let Some(name) = filename {
             options.out = Some(name.to_string());

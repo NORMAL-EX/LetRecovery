@@ -51,7 +51,7 @@ jobs:
           set -euo pipefail
           cargo fmt --all --check
           cargo check --workspace --all-targets --locked
-          cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D clippy::correctness -D clippy::suspicious -D clippy::perf -D unused_must_use
+          cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings
           cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
           cargo test -p lr-core --locked
           cargo test -p letrecovery-pe --locked --features non-elevated-tests

@@ -226,14 +226,12 @@ impl App {
                                 } else {
                                     partition.letter.clone()
                                 }
+                            } else if partition.is_system_partition {
+                                tr!("{} (当前系统)", partition.letter)
+                            } else if partition.has_windows {
+                                tr!("{} (有系统)", partition.letter)
                             } else {
-                                if partition.is_system_partition {
-                                    tr!("{} (当前系统)", partition.letter)
-                                } else if partition.has_windows {
-                                    tr!("{} (有系统)", partition.letter)
-                                } else {
-                                    partition.letter.clone()
-                                }
+                                partition.letter.clone()
                             };
 
                             if ui
@@ -1759,8 +1757,7 @@ impl App {
                         break;
                     } else {
                         // 将加密百分比转换为解密进度（100% - 加密百分比）
-                        let decryption_progress =
-                            (100.0 - max_percentage).max(0.0).min(100.0) as u8;
+                        let decryption_progress = (100.0 - max_percentage).clamp(0.0, 100.0) as u8;
 
                         let _ = tx.send(crate::core::dism::DismProgress {
                             percentage: decryption_progress,

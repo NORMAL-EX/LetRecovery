@@ -53,6 +53,8 @@ pub struct InstallProgress {
 
 /// 引导模式选择
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+// Keep the established variant because it is serialized and displayed as "UEFI".
+#[allow(clippy::upper_case_acronyms)]
 pub enum BootModeSelection {
     #[default]
     Auto,
@@ -139,7 +141,7 @@ impl BackupFormat {
     }
 
     /// 转换为配置文件中的数值
-    pub fn to_config_value(&self) -> u8 {
+    pub fn to_config_value(self) -> u8 {
         match self {
             BackupFormat::Wim => 0,
             BackupFormat::Esd => 1,
@@ -1379,8 +1381,10 @@ impl App {
                     if !available_pe_list.is_empty() {
                         log::info!("从本地缓存加载了 {} 个可用PE配置", available_pe_list.len());
 
-                        let mut config = ConfigManager::default();
-                        config.pe_list = available_pe_list;
+                        let config = ConfigManager {
+                            pe_list: available_pe_list,
+                            ..ConfigManager::default()
+                        };
                         self.config = Some(config);
 
                         // 自动选择第一个PE
@@ -1551,8 +1555,10 @@ impl App {
                         if !available_pe_list.is_empty() {
                             log::info!("从本地缓存加载了 {} 个可用PE配置", available_pe_list.len());
 
-                            let mut config = ConfigManager::default();
-                            config.pe_list = available_pe_list;
+                            let config = ConfigManager {
+                                pe_list: available_pe_list,
+                                ..ConfigManager::default()
+                            };
                             self.config = Some(config);
 
                             // 自动选择第一个PE
@@ -1758,7 +1764,7 @@ impl eframe::App for App {
                     if is_busy {
                         ui.colored_label(
                             egui::Color32::from_rgb(255, 165, 0),
-                            format!("{}", tr!("操作进行中...")),
+                            tr!("操作进行中...").to_string(),
                         );
                         ui.add_space(5.0);
                     }

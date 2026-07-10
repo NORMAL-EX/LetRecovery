@@ -47,6 +47,8 @@ fn diskpart_reports_no_space(output: &str) -> bool {
 
 /// 分区表类型
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+// Keep the established names because they are shown verbatim throughout both endpoints.
+#[allow(clippy::upper_case_acronyms)]
 pub enum PartitionStyle {
     GPT,
     MBR,
@@ -161,9 +163,13 @@ impl DiskManager {
     }
 
     fn execute_diskpart_checked(prefix: &str, script: &str) -> Result<String> {
-        let output = Self::execute_diskpart(prefix, script)?;
-        lr_core::diskpart::validated_stdout(&output)
-            .map_err(|detail| anyhow::anyhow!("DiskPart 脚本执行失败: {detail}"))
+        lr_core::diskpart::execute_script_checked(
+            &Self::reliable_temp_dir(),
+            prefix,
+            get_diskpart_path(),
+            script,
+        )
+        .map_err(Into::into)
     }
 
     /// 获取所有固定磁盘分区列表
@@ -448,7 +454,7 @@ impl DiskManager {
             match Self::format_partition_with_format_command(&drive, vol_label) {
                 Ok(format_stdout) => {
                     log::info!("[FORMAT] DiskPart 失败后 fallback format 成功");
-                    return Ok(format!("{}\n{}", stdout.trim(), format_stdout.trim()));
+                    Ok(format!("{}\n{}", stdout.trim(), format_stdout.trim()))
                 }
                 Err(format_detail) => {
                     log::warn!("[FORMAT] fallback format 也失败: {}", format_detail);
@@ -721,6 +727,10 @@ impl DiskManager {
     }
 
     /// 删除指定盘符的分区
+    #[allow(
+        dead_code,
+        reason = "retained as a compatibility fallback for PE cleanup flows"
+    )]
     fn delete_partition_by_letter(letter: char) -> Result<()> {
         log::info!("[CLEANUP] 删除分区 {}:", letter);
 

@@ -8,8 +8,11 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 
-use crate::command::{CommandExecutor, CommandOutcome, CommandRequest, SystemCommandExecutor};
+use crate::command::{
+    execute_request, CommandExecutor, CommandOutcome, CommandRequest, SystemCommandExecutor,
+};
 use crate::encoding::gbk_to_utf8;
+use crate::operation::OperationError;
 use crate::scoped_temp_file::ScopedTempFile;
 
 /// Execute one DiskPart script with the production command executor.
@@ -44,13 +47,59 @@ where
     E: CommandExecutor + ?Sized,
     S: AsRef<OsStr>,
 {
+    let (_script_file, request) =
+        prepare_script_request(directory, prefix, diskpart_program, script)?;
+
+    executor.execute(&request)
+}
+
+/// Execute and validate a DiskPart script using the shared typed command
+/// boundary. This keeps command-start, I/O, and tool-reported failures distinct.
+pub fn execute_script_checked<S: AsRef<OsStr>>(
+    directory: &Path,
+    prefix: &str,
+    diskpart_program: S,
+    script: &str,
+) -> Result<String, OperationError> {
+    execute_script_checked_with(
+        &SystemCommandExecutor,
+        directory,
+        prefix,
+        diskpart_program,
+        script,
+    )
+}
+
+pub fn execute_script_checked_with<E, S>(
+    executor: &E,
+    directory: &Path,
+    prefix: &str,
+    diskpart_program: S,
+    script: &str,
+) -> Result<String, OperationError>
+where
+    E: CommandExecutor + ?Sized,
+    S: AsRef<OsStr>,
+{
+    let (_script_file, request) =
+        prepare_script_request(directory, prefix, diskpart_program, script)
+            .map_err(|error| OperationError::io("prepare DiskPart script", &error))?;
+    let outcome = execute_request(executor, &request)?;
+    validated_stdout_typed(&outcome)
+}
+
+fn prepare_script_request<S: AsRef<OsStr>>(
+    directory: &Path,
+    prefix: &str,
+    diskpart_program: S,
+    script: &str,
+) -> io::Result<(ScopedTempFile, CommandRequest)> {
     std::fs::create_dir_all(directory)?;
     let script_file = ScopedTempFile::create_in(directory, prefix, "txt", script.as_bytes())?;
     let request = CommandRequest::new(diskpart_program)
         .arg("/s")
         .arg(script_file.path().as_os_str());
-
-    executor.execute(&request)
+    Ok((script_file, request))
 }
 
 /// DiskPart is known to report some failures in text while returning exit code
@@ -105,6 +154,17 @@ pub fn output_indicates_error(status_success: bool, stdout: &str, stderr: &str) 
 /// The error text includes both streams when available because localized
 /// DiskPart builds do not consistently choose stdout or stderr for failures.
 pub fn validated_stdout(outcome: &CommandOutcome) -> Result<String, String> {
+    validated_stdout_typed(outcome).map_err(|error| {
+        error
+            .message
+            .strip_prefix("DiskPart failed: ")
+            .unwrap_or(&error.message)
+            .to_string()
+    })
+}
+
+/// Typed counterpart of [`validated_stdout`] for new command paths.
+pub fn validated_stdout_typed(outcome: &CommandOutcome) -> Result<String, OperationError> {
     let stdout = gbk_to_utf8(outcome.stdout());
     let stderr = gbk_to_utf8(outcome.stderr());
     if !output_indicates_error(outcome.succeeded(), &stdout, &stderr) {
@@ -122,7 +182,11 @@ pub fn validated_stdout(outcome: &CommandOutcome) -> Result<String, String> {
             outcome.exit_code()
         ),
     };
-    Err(detail)
+    Err(OperationError::command_exit(
+        "DiskPart",
+        outcome.exit_code(),
+        detail,
+    ))
 }
 
 /// Run supported scripts in a directory with the production executor.
@@ -377,6 +441,32 @@ mod tests {
         assert_eq!(request.program(), OsStr::new("diskpart"));
         assert_eq!(request.arguments()[0], OsStr::new("/s"));
         std::fs::remove_file(directory.join("01-prepare.txt")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn checked_execution_classifies_zero_exit_text_failure() {
+        let directory = test_directory();
+        let executor = DryRunCommandExecutor::new(CommandOutcome::new(
+            Some(0),
+            b"DiskPart has encountered an error: Access is denied.".to_vec(),
+            Vec::new(),
+        ));
+
+        let error = execute_script_checked_with(
+            &executor,
+            &directory,
+            "typed",
+            "diskpart.exe",
+            "list disk\n",
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind,
+            crate::operation::OperationErrorKind::CommandExit
+        );
+        assert!(error.message.contains("Access is denied"));
         std::fs::remove_dir(directory).unwrap();
     }
 }

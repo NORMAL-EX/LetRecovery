@@ -167,7 +167,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 80, 80),
-                    format!("{}", result.status_text),
+                    result.status_text.to_string(),
                 );
             });
         }

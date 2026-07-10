@@ -359,6 +359,10 @@ impl ConfigFileManager {
     }
 
     /// 查找包含安装标记文件的分区
+    #[allow(
+        dead_code,
+        reason = "legacy marker lookup retained for custom PE integrations"
+    )]
     pub fn find_install_marker_partition() -> Option<String> {
         for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
             let marker_path = format!("{}:\\{}", letter, Self::INSTALL_MARKER);
@@ -576,8 +580,10 @@ impl ConfigFileManager {
 
     /// 反序列化安装配置
     fn deserialize_install_config(content: &str) -> Result<InstallConfig> {
-        let mut config = InstallConfig::default();
-        config.volume_index = 1; // 默认值
+        let mut config = InstallConfig {
+            volume_index: 1,
+            ..InstallConfig::default()
+        };
 
         for line in content.lines() {
             let line = line.trim();
@@ -668,8 +674,10 @@ impl ConfigFileManager {
 
     /// 反序列化备份配置
     fn deserialize_backup_config(content: &str) -> Result<BackupConfig> {
-        let mut config = BackupConfig::default();
-        config.swm_split_size = 4096; // 默认4GB
+        let mut config = BackupConfig {
+            swm_split_size: 4096,
+            ..BackupConfig::default()
+        };
 
         for line in content.lines() {
             let line = line.trim();

@@ -309,7 +309,7 @@ impl Ghost {
 
         // 估算备份时间（基于分区大小）
         let estimated_size = partition.total_size_mb * 1024 * 1024;
-        let estimated_seconds = (estimated_size / (100 * 1024 * 1024)).max(60) as u64;
+        let estimated_seconds = (estimated_size / (100 * 1024 * 1024)).max(60);
 
         if let Some(ref tx) = progress_tx {
             let _ = tx.send(DismProgress {
@@ -369,8 +369,8 @@ impl Ghost {
         let stderr_content = Arc::new(std::sync::Mutex::new(String::new()));
         let stderr_content_clone = Arc::clone(&stderr_content);
 
-        let stderr_handle = if let Some(stderr) = stderr {
-            Some(std::thread::spawn(move || {
+        let stderr_handle = stderr.map(|stderr| {
+            std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
                     let line_utf8 = gbk_to_utf8(line.as_bytes());
@@ -380,10 +380,8 @@ impl Ghost {
                         content.push('\n');
                     }
                 }
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
         let start_time = std::time::Instant::now();
         let estimated_duration = Duration::from_secs(estimated_seconds);
@@ -494,8 +492,8 @@ impl Ghost {
         let stderr_content = Arc::new(std::sync::Mutex::new(String::new()));
         let stderr_content_clone = Arc::clone(&stderr_content);
 
-        let stderr_handle = if let Some(stderr) = stderr {
-            Some(std::thread::spawn(move || {
+        let stderr_handle = stderr.map(|stderr| {
+            std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
                     let line_utf8 = gbk_to_utf8(line.as_bytes());
@@ -505,15 +503,13 @@ impl Ghost {
                         content.push('\n');
                     }
                 }
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
         let start_time = std::time::Instant::now();
 
         let estimated_seconds = if estimated_size > 0 {
-            (estimated_size / (100 * 1024 * 1024)).max(60) as u64
+            (estimated_size / (100 * 1024 * 1024)).max(60)
         } else {
             300
         };

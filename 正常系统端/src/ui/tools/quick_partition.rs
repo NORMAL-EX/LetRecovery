@@ -726,11 +726,9 @@ impl App {
 
                                 if disk.is_initialized {
                                     ui.label(tr!("(当前: {})", disk.partition_style));
-                                } else {
-                                    if let Some(info) = &self.system_info {
-                                        let recommended = get_recommended_partition_style(&info.boot_mode);
-                                        ui.label(tr!("(推荐: {}，基于{}启动模式)", recommended, info.boot_mode));
-                                    }
+                                } else if let Some(info) = &self.system_info {
+                                    let recommended = get_recommended_partition_style(&info.boot_mode);
+                                    ui.label(tr!("(推荐: {}，基于{}启动模式)", recommended, info.boot_mode));
                                 }
                             });
 
@@ -740,7 +738,7 @@ impl App {
 
                             // 工具栏
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(&disk.display_name()).strong());
+                                ui.label(egui::RichText::new(disk.display_name()).strong());
                                 ui.add_space(20.0);
 
                                 if ui.button(tr!("添加分区")).clicked() {
@@ -807,14 +805,12 @@ impl App {
                                         } else {
                                             existing_color
                                         }
+                                    } else if partition.is_esp {
+                                        new_esp_color
                                     } else {
-                                        if partition.is_esp {
-                                            new_esp_color
-                                        } else {
-                                            let c = new_colors[new_partition_idx % new_colors.len()];
-                                            new_partition_idx += 1;
-                                            c
-                                        }
+                                        let c = new_colors[new_partition_idx % new_colors.len()];
+                                        new_partition_idx += 1;
+                                        c
                                     };
 
                                     let display_name = partition.display_name();
@@ -935,7 +931,7 @@ impl App {
                                         ui.painter().text(
                                             egui::pos2(rect.center().x, rect.bottom() - 15.0),
                                             egui::Align2::CENTER_CENTER,
-                                            &format!("{:.1}GB", unallocated_size),
+                                            format!("{:.1}GB", unallocated_size),
                                             egui::FontId::proportional(12.0),
                                             egui::Color32::from_gray(120),
                                         );
@@ -969,7 +965,7 @@ impl App {
                                             ui.end_row();
 
                                             let layouts_clone = self.quick_partition_state.editor.partition_layouts.clone();
-                                            for (_idx, partition) in layouts_clone.iter().enumerate() {
+                                            for partition in layouts_clone.iter() {
                                                 // 状态
                                                 if partition.is_existing {
                                                     ui.colored_label(egui::Color32::GRAY, tr!("已有"));

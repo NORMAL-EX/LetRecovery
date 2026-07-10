@@ -169,12 +169,10 @@ impl App {
                     });
                 }
             }
-        } else {
-            if ui.button(tr!("取消安装")).clicked() {
-                log::info!("[INSTALL] 用户取消安装");
-                self.is_installing = false;
-                self.current_panel = crate::app::Panel::SystemInstall;
-            }
+        } else if ui.button(tr!("取消安装")).clicked() {
+            log::info!("[INSTALL] 用户取消安装");
+            self.is_installing = false;
+            self.current_panel = crate::app::Panel::SystemInstall;
         }
 
         // 启动安装线程
@@ -1417,7 +1415,7 @@ fn format_partition(partition: &str, volume_label: Option<&str>) -> anyhow::Resu
     match format_partition_with_format_command(letter, volume_label) {
         Ok(_) => {
             log::info!("[FORMAT] DiskPart 失败后 fallback format 成功");
-            return Ok(());
+            Ok(())
         }
         Err(format_reason) => {
             log::warn!("[FORMAT] fallback format 也失败: {}", format_reason);

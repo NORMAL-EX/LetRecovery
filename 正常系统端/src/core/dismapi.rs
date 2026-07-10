@@ -198,7 +198,7 @@ impl DismApi {
             Some(root) => {
                 // 规范成带尾部反斜杠的根路径，DISM 对离线映像根更稳
                 let s = root.to_string_lossy();
-                let s = s.trim_end_matches(|c| c == '\\' || c == '/');
+                let s = s.trim_end_matches(['\\', '/']);
                 to_wide(&format!("{}\\", s))
             }
             None => to_wide(DISM_ONLINE_IMAGE),

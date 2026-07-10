@@ -30,10 +30,12 @@ pub struct LanguageFile {
 #[derive(Debug, Clone)]
 pub struct LanguageInfo {
     /// 语言代码（如 "en-US"，来自文件名）
+    #[allow(dead_code, reason = "kept in the shared language metadata model")]
     pub code: String,
     /// 语言显示名称
     pub display_name: String,
     /// 翻译作者
+    #[allow(dead_code, reason = "kept in the shared language metadata model")]
     pub author: String,
 }
 
@@ -69,7 +71,7 @@ pub fn get_lang_dir() -> PathBuf {
 ///
 /// # Arguments
 /// * `language_code` - 要加载的语言代码（如 "zh-CN", "en-US"）
-///                     如果为 "zh-CN" 或空，则使用内置的简体中文
+///   如果为 "zh-CN" 或空，则使用内置的简体中文
 pub fn init(language_code: &str) {
     let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
     let mut guard = manager.write();
@@ -140,6 +142,7 @@ fn load_language_internal(manager: &mut I18nManager, language_code: &str) {
 ///
 /// # Arguments
 /// * `language_code` - 目标语言代码
+#[allow(dead_code, reason = "retained for custom PE language selectors")]
 pub fn switch_language(language_code: &str) {
     let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
     let mut guard = manager.write();
@@ -147,6 +150,7 @@ pub fn switch_language(language_code: &str) {
 }
 
 /// 获取当前语言代码
+#[allow(dead_code, reason = "retained for custom PE language selectors")]
 pub fn current_language() -> String {
     let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
     let guard = manager.read();
@@ -255,6 +259,7 @@ pub fn scan_available_languages() -> Vec<LanguageInfo> {
 /// 获取可用语言列表
 ///
 /// 返回缓存的语言列表，如果需要刷新请调用 `refresh_available_languages()`
+#[allow(dead_code, reason = "retained for custom PE language selectors")]
 pub fn get_available_languages() -> Vec<LanguageInfo> {
     let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
     let guard = manager.read();
@@ -262,6 +267,7 @@ pub fn get_available_languages() -> Vec<LanguageInfo> {
 }
 
 /// 刷新可用语言列表
+#[allow(dead_code, reason = "retained for custom PE language selectors")]
 pub fn refresh_available_languages() {
     let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
     let mut guard = manager.write();

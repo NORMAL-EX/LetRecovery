@@ -950,7 +950,7 @@ impl BitLockerManager {
         let letter = format!("{}:", drive_letter);
         let drive = format!("{}:", drive_letter);
 
-        let output = match {
+        let command_result = {
             let mut cmd = Command::new("manage-bde");
             cmd.args(["-off", &drive]);
 
@@ -958,7 +958,8 @@ impl BitLockerManager {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
             cmd.output()
-        } {
+        };
+        let output = match command_result {
             Ok(o) => o,
             Err(e) => return DecryptResult::failure(&letter, &tr!("执行命令失败: {}", e), None),
         };
@@ -1177,7 +1178,7 @@ impl BitLockerManager {
                     FveVolumeStatus::FullyDecrypted => Some(0),
                     _ => {
                         if info.encryption_percentage > 0 && info.encryption_percentage <= 100 {
-                            Some(info.encryption_percentage as u8)
+                            Some(info.encryption_percentage)
                         } else {
                             None
                         }
@@ -1202,7 +1203,7 @@ impl BitLockerManager {
         use std::process::Command;
 
         let drive = format!("{}:", drive_letter);
-        let output = match {
+        let command_result = {
             let mut cmd = Command::new("manage-bde");
             cmd.args(["-status", &drive]);
 
@@ -1210,7 +1211,8 @@ impl BitLockerManager {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
             cmd.output()
-        } {
+        };
+        let output = match command_result {
             Ok(o) => o,
             Err(_) => return ("密码/恢复密钥".to_string(), None),
         };
@@ -1389,17 +1391,16 @@ fn determine_volume_status(output: &str) -> VolumeStatus {
     }
 
     // 检查部分加密状态
-    if output_lower.contains("conversion status") || output_lower.contains("转换状态") {
-        if output_lower.contains("used space only encrypted")
+    if (output_lower.contains("conversion status") || output_lower.contains("转换状态"))
+        && (output_lower.contains("used space only encrypted")
             || output_lower.contains("仅已使用的空间已加密")
             || output_lower.contains("percentage encrypted")
-            || output_lower.contains("加密百分比")
-        {
-            if is_locked {
-                return VolumeStatus::EncryptedLocked;
-            } else {
-                return VolumeStatus::EncryptedUnlocked;
-            }
+            || output_lower.contains("加密百分比"))
+    {
+        if is_locked {
+            return VolumeStatus::EncryptedLocked;
+        } else {
+            return VolumeStatus::EncryptedUnlocked;
         }
     }
 
@@ -1471,10 +1472,8 @@ fn extract_error_message(output: &str) -> Option<String> {
     for line in output.lines() {
         let line = line.trim();
         let line_lower = line.to_lowercase();
-        if line_lower.contains("error") || line.contains("错误") {
-            if line.len() > 10 {
-                return Some(line.to_string());
-            }
+        if (line_lower.contains("error") || line.contains("错误")) && line.len() > 10 {
+            return Some(line.to_string());
         }
     }
     None

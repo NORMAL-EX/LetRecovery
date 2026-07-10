@@ -416,7 +416,7 @@ impl ConfigFileManager {
                 log::info!("[CONFIG] 发现自动创建的分区: {}:", c);
 
                 // 尝试删除分区
-                if let Ok(_) = crate::core::disk::DiskManager::delete_auto_created_partition(c) {
+                if crate::core::disk::DiskManager::delete_auto_created_partition(c).is_ok() {
                     cleaned.push(c);
                     log::info!("[CONFIG] 已清理自动创建的分区: {}:", c);
                 } else {
@@ -740,9 +740,11 @@ mod tests {
 
     #[test]
     fn install_config_round_trips_boot_selection() {
-        let mut source = InstallConfig::default();
-        source.boot_mode = 1;
-        source.boot_pca_mode = BootPcaMode::Pca2023;
+        let source = InstallConfig {
+            boot_mode: 1,
+            boot_pca_mode: BootPcaMode::Pca2023,
+            ..InstallConfig::default()
+        };
 
         let serialized = ConfigFileManager::serialize_install_config(&source);
         let parsed = ConfigFileManager::deserialize_install_config(&serialized).unwrap();

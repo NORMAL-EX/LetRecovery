@@ -308,7 +308,7 @@ fn is_invalid_display_name(name: &str) -> bool {
                 let ratio = consonants as f32 / vowels as f32;
                 // 正常英文单词的辅音/元音比例通常在1.5-2.5之间
                 // 如果比例异常且名称看起来不像正常单词，标记为无效
-                if ratio > 4.0 || ratio < 0.3 {
+                if !(0.3..=4.0).contains(&ratio) {
                     return true;
                 }
             }
@@ -424,14 +424,14 @@ fn remove_appx_packages_offline(target_partition: &str, packages: &[String]) -> 
             for priv_name in &priv_names {
                 let mut luid = windows::Win32::Foundation::LUID::default();
                 if LookupPrivilegeValueW(PCWSTR::null(), *priv_name, &mut luid).is_ok() {
-                    let mut tp = TOKEN_PRIVILEGES {
+                    let tp = TOKEN_PRIVILEGES {
                         PrivilegeCount: 1,
                         Privileges: [windows::Win32::Security::LUID_AND_ATTRIBUTES {
                             Luid: luid,
                             Attributes: SE_PRIVILEGE_ENABLED,
                         }],
                     };
-                    let _ = AdjustTokenPrivileges(token, false, Some(&mut tp), 0, None, None);
+                    let _ = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
                 }
             }
             let _ = windows::Win32::Foundation::CloseHandle(token);

@@ -124,10 +124,7 @@ impl App {
                                 });
                             } else if !result.message.is_empty() {
                                 ui.add_space(5.0);
-                                ui.colored_label(
-                                    egui::Color32::YELLOW,
-                                    format!("{}", result.message),
-                                );
+                                ui.colored_label(egui::Color32::YELLOW, result.message.to_string());
                             }
                         } else {
                             ui.colored_label(

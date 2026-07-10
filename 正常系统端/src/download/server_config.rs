@@ -8,6 +8,14 @@ use serde::Deserialize;
 /// 全局服务器地址
 pub const SERVER_BASE_URL: &str = "https://letrecovery.cloud-pe.cn/v2/";
 
+type RemoteConfigContents = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// 服务器配置响应
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfigResponse {
@@ -82,13 +90,7 @@ impl RemoteConfig {
     }
 
     /// 获取服务器配置
-    fn fetch_config() -> Result<(
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> {
+    fn fetch_config() -> Result<RemoteConfigContents> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()

@@ -704,7 +704,7 @@ fn install_win7_nvme_drivers(nvme_dir: &Path, target_partition: &str) -> anyhow:
                             e
                         );
                         // 尝试备用方法：解压并手动复制驱动文件
-                        if let Ok(_) = install_cab_as_driver_fallback(cab_path, target_partition) {
+                        if install_cab_as_driver_fallback(cab_path, target_partition).is_ok() {
                             log::info!("[NVME] 备用方法安装成功");
                             success_count += 1;
                         } else {
@@ -815,7 +815,7 @@ fn detect_cab_type(cab_path: &Path) -> CabType {
     let temp_dir =
         std::env::temp_dir().join(format!("LetRecovery_CabDetect_{}", std::process::id()));
 
-    if let Err(_) = std::fs::create_dir_all(&temp_dir) {
+    if std::fs::create_dir_all(&temp_dir).is_err() {
         return CabType::Unknown;
     }
 
@@ -911,7 +911,7 @@ fn process_nested_cabs_for_drivers(dir: &Path) -> anyhow::Result<()> {
 
     for cab in nested_cabs {
         let extract_dir = cab.with_extension("extracted");
-        if let Ok(_) = extractor.extract(&cab, &extract_dir) {
+        if extractor.extract(&cab, &extract_dir).is_ok() {
             // 递归处理
             let _ = process_nested_cabs_for_drivers(&extract_dir);
         }

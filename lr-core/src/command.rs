@@ -5,6 +5,8 @@ use std::io;
 use std::process::{Command, Output};
 use std::sync::Mutex;
 
+use crate::operation::OperationError;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -128,6 +130,22 @@ pub trait CommandExecutor: Send + Sync {
     fn execute(&self, request: &CommandRequest) -> io::Result<CommandOutcome>;
 }
 
+/// Execute a request while preserving command-start failures as a shared,
+/// serializable operation error. Exit and tool-specific text validation remain
+/// the caller's responsibility because utilities such as DiskPart can report
+/// failure despite a zero exit code.
+pub fn execute_request<E>(
+    executor: &E,
+    request: &CommandRequest,
+) -> Result<CommandOutcome, OperationError>
+where
+    E: CommandExecutor + ?Sized,
+{
+    executor.execute(request).map_err(|error| {
+        OperationError::command_start(&request.program().to_string_lossy(), &error)
+    })
+}
+
 /// Production executor. It preserves the shared `CREATE_NO_WINDOW` behavior.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemCommandExecutor;
@@ -234,5 +252,29 @@ mod tests {
         assert_eq!(outcome.exit_code(), Some(5));
         assert_eq!(outcome.stdout(), b"partial output");
         assert_eq!(outcome.stderr(), b"access denied");
+    }
+
+    struct StartFailureExecutor;
+
+    impl CommandExecutor for StartFailureExecutor {
+        fn execute(&self, _request: &CommandRequest) -> io::Result<CommandOutcome> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "modeled access denied",
+            ))
+        }
+    }
+
+    #[test]
+    fn typed_execution_distinguishes_command_start_failure() {
+        let error = execute_request(&StartFailureExecutor, &CommandRequest::new("diskpart.exe"))
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind,
+            crate::operation::OperationErrorKind::CommandStart
+        );
+        assert_eq!(error.code.as_deref(), Some("diskpart.exe"));
+        assert!(!error.retryable);
     }
 }

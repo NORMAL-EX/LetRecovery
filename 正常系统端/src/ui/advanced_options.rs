@@ -899,6 +899,7 @@ log=0
     }
 
     /// 18. Win7 注入 USB3 驱动（固定读取程序运行目录下的 drivers\\usb3）
+    ///
     /// 支持 .cab 更新包文件和普通驱动文件夹
     fn apply_win7_inject_usb3_driver(
         &self,
@@ -967,6 +968,7 @@ log=0
     }
 
     /// 19. Win7 注入 NVMe 驱动（固定读取程序运行目录下的 drivers\\nvme）
+    ///
     /// 支持 .cab 更新包文件（如 KB2990941, KB3087873）和普通驱动文件夹
     fn apply_win7_inject_nvme_driver(
         &self,
@@ -1074,6 +1076,7 @@ log=0
     }
 
     /// 21. Win7 修复 INACCESSIBLE_BOOT_DEVICE (0x7B) 蓝屏
+    ///
     /// 这是Win7在现代硬件上最常见的蓝屏问题，原因是存储控制器驱动未启用
     fn apply_win7_fix_storage_bsod(&self) {
         log::info!("[ADVANCED] Win7: 修复存储控制器蓝屏问题 (0x7B)");

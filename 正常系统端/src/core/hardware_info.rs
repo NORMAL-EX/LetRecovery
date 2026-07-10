@@ -1472,8 +1472,10 @@ impl HardwareInfo {
                 if (device.StateFlags & DISPLAY_DEVICE_ACTIVE_FLAG) != 0 {
                     let device_string = wchar_to_string(&device.DeviceString);
                     if !device_string.contains("Remote") && !device_string.is_empty() {
-                        let mut gpu = GpuInfo::default();
-                        gpu.name = device_string.trim().to_string();
+                        let mut gpu = GpuInfo {
+                            name: device_string.trim().to_string(),
+                            ..GpuInfo::default()
+                        };
                         if let Some((resolution, refresh)) = get_display_mode(&device.DeviceName) {
                             gpu.current_resolution = resolution;
                             gpu.refresh_rate = refresh;
@@ -1657,14 +1659,16 @@ impl HardwareInfo {
                 return None;
             }
 
-            let mut battery = BatteryInfo::default();
-            battery.charge_percent = if power_status.BatteryLifePercent <= 100 {
-                power_status.BatteryLifePercent
-            } else {
-                0
+            let mut battery = BatteryInfo {
+                charge_percent: if power_status.BatteryLifePercent <= 100 {
+                    power_status.BatteryLifePercent
+                } else {
+                    0
+                },
+                is_ac_connected: power_status.ACLineStatus == 1,
+                is_charging: (power_status.BatteryFlag & 8) != 0,
+                ..BatteryInfo::default()
             };
-            battery.is_ac_connected = power_status.ACLineStatus == 1;
-            battery.is_charging = (power_status.BatteryFlag & 8) != 0;
 
             // 使用 WMI 获取电池详细信息
             let (design_capacity, full_charge_capacity, name) = get_battery_wmi_info();
@@ -1818,6 +1822,8 @@ fn get_disk_partition_styles() -> HashMap<u32, String> {
 
 /// 磁盘类型检测结果
 #[derive(Debug, Clone, Copy, PartialEq)]
+// Preserve the user-facing industry abbreviations.
+#[allow(clippy::upper_case_acronyms)]
 pub enum DiskMediaType {
     /// 固态硬盘
     SSD,

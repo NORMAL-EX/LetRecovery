@@ -380,11 +380,9 @@ impl App {
                                             self.current_panel = crate::app::Panel::OnlineDownload;
                                         }
                                     }
-                                } else {
-                                    if ui.button(tr!("返回")).clicked() {
-                                        self.cleanup_download();
-                                        self.current_panel = crate::app::Panel::OnlineDownload;
-                                    }
+                                } else if ui.button(tr!("返回")).clicked() {
+                                    self.cleanup_download();
+                                    self.current_panel = crate::app::Panel::OnlineDownload;
                                 }
                             }
                             IntegrityVerifyState::Failed {
@@ -447,11 +445,10 @@ impl App {
                     _ => {}
                 }
 
-                if !is_complete && !is_error {
-                    if ui.button(tr!("取消")).clicked() {
+                if !is_complete && !is_error
+                    && ui.button(tr!("取消")).clicked() {
                         self.cancel_current_download();
                     }
-                }
             });
         } else {
             // 显示等待状态或无任务

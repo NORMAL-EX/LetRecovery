@@ -27,7 +27,7 @@ const DRIVE_CDROM: u32 = 5;
 
 #[cfg(windows)]
 const VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT: windows::core::GUID =
-    windows::core::GUID::from_u128(0xEC984AEC_A0F9_47e9_901F_71415A66345B);
+    windows::core::GUID::from_u128(0xEC984AEC_A0F9_47E9_901F_71415A66345B);
 
 pub struct IsoMounter {
     #[cfg(windows)]
@@ -378,11 +378,11 @@ impl IsoMounter {
                 Ok(letter) => {
                     let drive = format!("{}:", letter);
                     log::info!("[ISO] 挂载成功，盘符: {}", drive);
-                    return Ok(drive);
+                    Ok(drive)
                 }
                 Err(e) => {
                     log::error!("[ISO] Windows API 挂载失败: {}", e);
-                    return Err(e);
+                    Err(e)
                 }
             }
         }

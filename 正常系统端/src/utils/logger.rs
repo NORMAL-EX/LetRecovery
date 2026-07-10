@@ -6,10 +6,11 @@
 //! - 可在运行时动态开关日志
 //! - 日志状态持久化到配置文件
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
+use lr_core::operation::{unix_time_millis, OperationError, SupportBundleBuilder};
 use parking_lot::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::SubscriberExt;
@@ -143,6 +144,70 @@ impl LogManager {
         let log_dir = Self::get_log_dir();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         log_dir.join(format!("LetRecovery.{}.log", today))
+    }
+
+    /// Export a self-contained, sanitized support bundle without collecting
+    /// configuration files or credentials. Unreadable log files are skipped so
+    /// a partially damaged log directory does not prevent diagnostics export.
+    pub fn export_support_bundle(destination: &Path) -> Result<(), OperationError> {
+        Self::flush();
+
+        let mut builder = SupportBundleBuilder::new(
+            "LetRecovery",
+            env!("BUILD_VERSION"),
+            "desktop",
+            unix_time_millis(),
+        )?;
+        builder.add_environment("os", std::env::consts::OS)?;
+        builder.add_environment("architecture", std::env::consts::ARCH)?;
+        builder.add_environment("logging_enabled", Self::is_enabled().to_string())?;
+        builder.add_environment(
+            "build_profile",
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+        )?;
+
+        let mut attached = 0usize;
+        for (index, log_path) in Self::latest_log_files(3).into_iter().enumerate() {
+            match builder.add_text_file(format!("runtime_log_{}", index + 1), &log_path) {
+                Ok(()) => attached += 1,
+                Err(error) => {
+                    log::warn!("跳过无法读取的支持包日志附件: {}", error);
+                }
+            }
+        }
+        builder.add_environment("log_attachment_count", attached.to_string())?;
+        builder.build().write_json(destination)
+    }
+
+    fn latest_log_files(limit: usize) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(Self::get_log_dir()) else {
+            return Vec::new();
+        };
+        let mut files: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let is_log = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("log"));
+                if !is_log {
+                    return None;
+                }
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((path, modified))
+            })
+            .collect();
+        files.sort_by(|left, right| right.1.cmp(&left.1));
+        files
+            .into_iter()
+            .take(limit)
+            .map(|(path, _)| path)
+            .collect()
     }
 
     /// 清理旧日志文件

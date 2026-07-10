@@ -151,7 +151,7 @@ impl App {
                             .width(120.0)
                             .show_ui(ui, |ui| {
                                 for partition in &partitions_clone {
-                                    let display = format!("{}", partition.letter);
+                                    let display = partition.letter.to_string();
                                     ui.selectable_value(
                                         &mut self.partition_copy_source,
                                         Some(partition.letter.clone()),
@@ -246,7 +246,7 @@ impl App {
                             .width(120.0)
                             .show_ui(ui, |ui| {
                                 for partition in &partitions_clone {
-                                    let display = format!("{}", partition.letter);
+                                    let display = partition.letter.to_string();
                                     ui.selectable_value(
                                         &mut self.partition_copy_target,
                                         Some(partition.letter.clone()),

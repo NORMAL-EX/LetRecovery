@@ -271,6 +271,10 @@ impl CabinetExtractor {
     }
 
     /// 检查文件是否为 .cab 文件
+    #[allow(
+        dead_code,
+        reason = "retained for PE extension and custom driver workflows"
+    )]
     pub fn is_cab_file(path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
@@ -291,6 +295,10 @@ impl CabinetExtractor {
 ///
 /// # 返回
 /// - 成功解压的文件列表
+#[allow(
+    dead_code,
+    reason = "retained for PE extension and custom driver workflows"
+)]
 pub fn extract_cab(cab_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
     let extractor = CabinetExtractor::new()?;
     extractor.extract(cab_path, dest_dir)
@@ -304,6 +312,10 @@ pub fn extract_cab(cab_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
 ///
 /// # 返回
 /// - 成功解压的 cab 文件数量
+#[allow(
+    dead_code,
+    reason = "retained for PE extension and custom driver workflows"
+)]
 pub fn extract_all_cabs(source_dir: &Path, dest_dir: &Path) -> Result<usize> {
     let extractor = CabinetExtractor::new()?;
     let mut count = 0;
@@ -340,6 +352,10 @@ pub fn extract_all_cabs(source_dir: &Path, dest_dir: &Path) -> Result<usize> {
 }
 
 /// 查找目录中的所有 .cab 文件
+#[allow(
+    dead_code,
+    reason = "retained for PE extension and custom driver workflows"
+)]
 pub fn find_cab_files(dir: &Path) -> Vec<PathBuf> {
     let mut cab_files = Vec::new();
 

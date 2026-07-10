@@ -10,6 +10,7 @@ use crate::core::dism::DismProgress;
 use crate::tr;
 use crate::ui::progress::{BackupStep, InstallStep, ProgressState, ProgressUI};
 use crate::utils::reboot_pe;
+use crate::workflow_journal::PeWorkflowJournal;
 
 /// 递归查找目录中的所有 CAB 文件
 fn find_cab_files_in_directory(dir: &str) -> Vec<PathBuf> {
@@ -38,7 +39,7 @@ fn find_cab_files_recursive(dir: &Path, cab_files: &mut Vec<PathBuf>) {
 
 /// 工作线程消息
 #[derive(Debug, Clone)]
-pub enum WorkerMessage {
+pub(crate) enum WorkerMessage {
     /// 更新安装步骤
     SetInstallStep(InstallStep),
     /// 更新备份步骤
@@ -62,6 +63,9 @@ pub struct App {
     started: bool,
     /// 操作类型
     operation_type: Option<OperationType>,
+    /// Durable observer for crash diagnostics. Recording failures never block
+    /// the existing install, backup, or expand workflow.
+    workflow_journal: Option<PeWorkflowJournal>,
 }
 
 impl App {
@@ -71,6 +75,15 @@ impl App {
 
         // 检测操作类型
         let operation_type = ConfigFileManager::detect_operation_type();
+        let workflow_journal = operation_type.and_then(|operation_type| {
+            match PeWorkflowJournal::create(operation_type) {
+                Ok(journal) => journal,
+                Err(error) => {
+                    log::warn!("[CHECKPOINT] 无法创建工作流检查点，将继续原流程: {}", error);
+                    None
+                }
+            }
+        });
 
         let progress_state = Arc::new(Mutex::new(match operation_type {
             Some(OperationType::Install) => ProgressState::new_install(),
@@ -84,6 +97,7 @@ impl App {
             message_rx: None,
             started: false,
             operation_type,
+            workflow_journal,
         }
     }
 
@@ -175,10 +189,10 @@ impl App {
                 execute_install_workflow(tx);
             }
             Some(OperationType::Backup) => {
-                execute_backup_workflow(tx);
+                crate::workflows::execute_backup_workflow(tx);
             }
             Some(OperationType::Expand) => {
-                execute_expand_workflow(tx);
+                crate::workflows::execute_expand_workflow(tx);
             }
             None => {
                 let _ = tx.send(WorkerMessage::Failed(tr!("未检测到安装或备份配置")));
@@ -190,6 +204,18 @@ impl App {
     fn process_messages(&mut self) {
         if let Some(ref rx) = self.message_rx {
             while let Ok(msg) = rx.try_recv() {
+                if let Some(journal) = self.workflow_journal.as_mut() {
+                    let result = match &msg {
+                        WorkerMessage::SetInstallStep(step) => journal.observe_install_step(*step),
+                        WorkerMessage::SetBackupStep(step) => journal.observe_backup_step(*step),
+                        WorkerMessage::Completed => journal.complete(),
+                        WorkerMessage::Failed(error) => journal.fail(error),
+                        WorkerMessage::SetProgress(_) | WorkerMessage::SetStatus(_) => Ok(()),
+                    };
+                    if let Err(error) = result {
+                        log::warn!("[CHECKPOINT] 记录工作流状态失败，将继续原流程: {}", error);
+                    }
+                }
                 if let Ok(mut state) = self.progress_state.lock() {
                     match msg {
                         WorkerMessage::SetInstallStep(step) => {
@@ -691,288 +717,6 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     reboot_pe();
 }
 
-/// 执行无损扩容工作流（无损扩大系统盘，目前仅并入相邻未分配空间）。
-fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
-    use crate::core::bcdedit::BootManager;
-    use crate::core::config::ConfigFileManager;
-
-    log::info!("========== 开始PE扩容流程 ==========");
-
-    // 找配置分区 + 读扩容配置
-    let data_partition = match ConfigFileManager::find_data_partition() {
-        Some(p) => p,
-        None => {
-            let _ = tx.send(WorkerMessage::Failed(tr!("未找到扩容配置文件")));
-            return;
-        }
-    };
-    let config = match ConfigFileManager::read_expand_config(&data_partition) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(WorkerMessage::Failed(tr!("读取扩容配置失败: {}", e)));
-            return;
-        }
-    };
-
-    // 用扩容标记定位目标分区（盘符在 PE 下可能与正常系统不同，不能直接用配置里的盘符）。
-    let target_partition = ConfigFileManager::find_expand_marker_partition()
-        .unwrap_or_else(|| config.target_partition.clone());
-    let letter = target_partition
-        .trim_end_matches(':')
-        .chars()
-        .next()
-        .unwrap_or('C');
-
-    let _ = tx.send(WorkerMessage::SetStatus(tr!(
-        "正在无损扩大分区 {}: （目标 {} MB，0=最大）...",
-        letter,
-        config.target_size_mb
-    )));
-    let _ = tx.send(WorkerMessage::SetProgress(30));
-    log::info!(
-        "[EXPAND] 目标分区: {}:，目标大小: {} MB",
-        letter,
-        config.target_size_mb
-    );
-
-    // 优先 Case 1（并入相邻未分配空间）；不足时 Case 2（移动后方基础数据分区）。
-    match crate::core::expand_move::expand_c_drive(letter, config.target_size_mb, &data_partition) {
-        Ok(msg) => {
-            log::info!("[EXPAND] {}", msg);
-            let _ = tx.send(WorkerMessage::SetStatus(msg));
-            let _ = tx.send(WorkerMessage::SetProgress(90));
-        }
-        Err(e) => {
-            log::error!("[EXPAND] 扩容失败: {}", e);
-            let _ = tx.send(WorkerMessage::Failed(tr!("扩容失败: {}", e)));
-            // 失败也要清理标记/引导，避免下次重启又进 PE 反复尝试。
-            ConfigFileManager::cleanup_partition_markers(&target_partition);
-            ConfigFileManager::cleanup_data_dir(&data_partition);
-            let bm = BootManager::new();
-            let _ = bm.delete_current_boot_entry();
-            ConfigFileManager::cleanup_pe_dir(&data_partition);
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            reboot_pe();
-            return;
-        }
-    }
-
-    // 清理：标记 + 配置 + PE 引导项 + PE 文件，避免下次重启再次进入扩容。
-    let _ = tx.send(WorkerMessage::SetStatus(tr!("正在清理临时文件...")));
-    ConfigFileManager::cleanup_partition_markers(&target_partition);
-    ConfigFileManager::cleanup_data_dir(&data_partition);
-    let bm = BootManager::new();
-    if let Err(e) = bm.delete_current_boot_entry() {
-        log::warn!("[EXPAND] 删除 PE 引导项失败（不影响结果）: {}", e);
-    }
-    ConfigFileManager::cleanup_pe_dir(&data_partition);
-
-    let _ = tx.send(WorkerMessage::SetProgress(100));
-    let _ = tx.send(WorkerMessage::Completed);
-    log::info!("========== PE扩容流程完成 ==========");
-
-    log::info!("即将重启...");
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    reboot_pe();
-}
-
-/// 执行备份工作流
-fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
-    use crate::core::bcdedit::BootManager;
-    use crate::core::config::BackupFormat;
-    use crate::core::dism::Dism;
-    use crate::core::ghost::Ghost;
-
-    log::info!("========== 开始PE备份流程 ==========");
-
-    // 查找配置文件所在分区
-    let data_partition = match ConfigFileManager::find_data_partition() {
-        Some(p) => p,
-        None => {
-            let _ = tx.send(WorkerMessage::Failed(tr!("未找到备份配置文件")));
-            return;
-        }
-    };
-
-    log::info!("数据分区: {}", data_partition);
-
-    // Step 1: 读取配置
-    let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::ReadConfig));
-    let _ = tx.send(WorkerMessage::SetStatus(tr!("正在读取备份配置...")));
-
-    let config = match ConfigFileManager::read_backup_config(&data_partition) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(WorkerMessage::Failed(tr!("读取配置失败: {}", e)));
-            return;
-        }
-    };
-
-    // 切换到正常系统端选定的镜像引擎（随重启传入），使 PE 端使用相同引擎
-    lr_core::set_active_engine(lr_core::WimEngine::from_u8(config.wim_engine));
-
-    log::info!("源分区: {}", config.source_partition);
-    log::info!("保存路径: {}", config.save_path);
-    log::info!("备份格式: {:?}", config.format);
-    if config.format == BackupFormat::Swm {
-        log::info!("SWM分卷大小: {} MB", config.swm_split_size);
-    }
-    let _ = tx.send(WorkerMessage::SetProgress(100));
-
-    // 查找备份标记分区
-    let source_partition = ConfigFileManager::find_backup_marker_partition()
-        .unwrap_or_else(|| config.source_partition.clone());
-
-    // Step 2: 执行备份
-    let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::CaptureImage));
-
-    let capture_dir = format!("{}\\", source_partition);
-
-    // 创建进度通道
-    let (progress_tx, progress_rx) = channel::<DismProgress>();
-    let tx_clone = tx.clone();
-
-    let progress_handle = thread::spawn(move || {
-        while let Ok(progress) = progress_rx.recv() {
-            let _ = tx_clone.send(WorkerMessage::SetProgress(progress.percentage));
-        }
-    });
-
-    let backup_result = match config.format {
-        BackupFormat::Gho => {
-            // GHO格式使用Ghost
-            let _ = tx.send(WorkerMessage::SetStatus(tr!("正在使用Ghost备份系统...")));
-            let ghost = Ghost::new();
-            if !ghost.is_available() {
-                drop(progress_handle);
-                let _ = tx.send(WorkerMessage::Failed(tr!("Ghost工具不可用")));
-                return;
-            }
-
-            // Ghost备份
-            ghost.create_image_from_letter(&source_partition, &config.save_path, Some(progress_tx))
-        }
-        BackupFormat::Esd => {
-            // ESD格式使用DISM高压缩
-            let _ = tx.send(WorkerMessage::SetStatus(tr!(
-                "正在备份系统（ESD高压缩）..."
-            )));
-            let dism = Dism::new();
-            if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                dism.append_image_esd(
-                    &config.save_path,
-                    &capture_dir,
-                    &config.name,
-                    &config.description,
-                    Some(progress_tx),
-                )
-            } else {
-                dism.capture_image_esd(
-                    &config.save_path,
-                    &capture_dir,
-                    &config.name,
-                    &config.description,
-                    Some(progress_tx),
-                )
-            }
-        }
-        BackupFormat::Swm => {
-            // SWM分卷格式
-            let _ = tx.send(WorkerMessage::SetStatus(tr!(
-                "正在备份系统（SWM分卷，每卷{}MB）...",
-                config.swm_split_size
-            )));
-            let dism = Dism::new();
-            dism.capture_image_swm(
-                &config.save_path,
-                &capture_dir,
-                &config.name,
-                &config.description,
-                config.swm_split_size,
-                Some(progress_tx),
-            )
-        }
-        BackupFormat::Wim => {
-            // 标准WIM格式
-            let _ = tx.send(WorkerMessage::SetStatus(tr!("正在执行系统备份...")));
-            let dism = Dism::new();
-            if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                dism.append_image(
-                    &config.save_path,
-                    &capture_dir,
-                    &config.name,
-                    &config.description,
-                    Some(progress_tx),
-                )
-            } else {
-                dism.capture_image(
-                    &config.save_path,
-                    &capture_dir,
-                    &config.name,
-                    &config.description,
-                    Some(progress_tx),
-                )
-            }
-        }
-    };
-
-    // 等待进度监控线程结束
-    let _ = progress_handle.join();
-
-    if let Err(e) = backup_result {
-        let _ = tx.send(WorkerMessage::Failed(tr!("备份失败: {}", e)));
-        return;
-    }
-    let _ = tx.send(WorkerMessage::SetProgress(100));
-
-    // Step 3: 验证备份文件
-    let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::VerifyBackup));
-    let _ = tx.send(WorkerMessage::SetStatus(tr!("正在验证备份文件...")));
-
-    // 对于SWM格式，检查第一个分卷文件
-    let verify_path = if config.format == BackupFormat::Swm {
-        // SWM的第一个文件可能是 xxx.swm 或 xxx.swm
-        config.save_path.clone()
-    } else {
-        config.save_path.clone()
-    };
-
-    if !std::path::Path::new(&verify_path).exists() {
-        let _ = tx.send(WorkerMessage::Failed(tr!("备份文件验证失败")));
-        return;
-    }
-    let _ = tx.send(WorkerMessage::SetProgress(100));
-
-    // Step 4: 恢复引导
-    let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::RepairBoot));
-    let _ = tx.send(WorkerMessage::SetStatus(tr!("正在恢复引导...")));
-
-    let boot_manager = BootManager::new();
-    // 删除当前PE引导项
-    let _ = boot_manager.delete_current_boot_entry();
-    let _ = tx.send(WorkerMessage::SetProgress(100));
-
-    // Step 5: 清理
-    let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::Cleanup));
-    let _ = tx.send(WorkerMessage::SetStatus(tr!("正在清理临时文件...")));
-
-    ConfigFileManager::cleanup_partition_markers(&source_partition);
-    ConfigFileManager::cleanup_data_dir(&data_partition);
-    ConfigFileManager::cleanup_pe_dir(&data_partition);
-    let _ = tx.send(WorkerMessage::SetProgress(100));
-
-    // 完成
-    let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::Complete));
-    let _ = tx.send(WorkerMessage::Completed);
-
-    log::info!("========== PE备份流程完成 ==========");
-
-    // 自动重启
-    log::info!("即将重启...");
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    reboot_pe();
-}
-
 /// 生成无人值守XML
 ///
 /// 包含完整的无人值守配置，并根据目标系统版本自动适配：
@@ -985,6 +729,7 @@ fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
 /// - windowsPE pass: 基本设置
 /// - specialize pass: 部署脚本执行
 /// - oobeSystem pass: OOBE设置、用户账户、首次登录命令
+///
 /// 应用用户自定义的无人值守文件：复制到目标系统的 Panther 与 Sysprep 目录
 fn apply_custom_unattend(target_partition: &str, src: &str) -> anyhow::Result<()> {
     let content = std::fs::read(src)
@@ -1089,14 +834,14 @@ fn generate_unattend_xml(
     let xml_content = if is_win7 {
         // Windows 7 专用无人值守配置
         // Win7 不支持: HideOnlineAccountScreens, HideWirelessSetupInOOBE, SkipMachineOOBE, SkipUserOOBE, HideLocalAccountScreen, HideOEMRegistrationScreen(家庭版)
-        generate_win7_unattend_xml(&username, &scripts_dir, &first_logon_commands, arch_str)
+        generate_win7_unattend_xml(&username, scripts_dir, &first_logon_commands, arch_str)
     } else if is_win8 {
         // Windows 8/8.1 无人值守配置
         // Win8 支持部分 Win10 的选项，但不支持所有
-        generate_win8_unattend_xml(&username, &scripts_dir, &first_logon_commands, arch_str)
+        generate_win8_unattend_xml(&username, scripts_dir, &first_logon_commands, arch_str)
     } else {
         // Windows 10/11 无人值守配置（默认）
-        generate_win10_unattend_xml(&username, &scripts_dir, &first_logon_commands, arch_str)
+        generate_win10_unattend_xml(&username, scripts_dir, &first_logon_commands, arch_str)
     };
 
     let panther_dir = format!("{}\\Windows\\Panther", target_partition);

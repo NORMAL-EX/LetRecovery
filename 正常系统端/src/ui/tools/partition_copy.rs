@@ -63,7 +63,7 @@ pub struct CopyMarker {
 }
 
 /// 对拷进度信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CopyProgress {
     /// 当前正在复制的文件
     pub current_file: String,
@@ -81,21 +81,6 @@ pub struct CopyProgress {
     pub failed_count: usize,
     /// 失败的文件列表
     pub failed_files: Vec<String>,
-}
-
-impl Default for CopyProgress {
-    fn default() -> Self {
-        Self {
-            current_file: String::new(),
-            copied_count: 0,
-            total_count: 0,
-            completed: false,
-            error: None,
-            skipped_count: 0,
-            failed_count: 0,
-            failed_files: Vec::new(),
-        }
-    }
 }
 
 /// 获取驱动器类型
@@ -246,12 +231,10 @@ pub fn read_copy_marker(target_partition: &str) -> Option<CopyMarker> {
 
     // 其余行：已复制的文件
     let mut copied_files = HashSet::new();
-    for line in lines {
-        if let Ok(file_path) = line {
-            let trimmed = file_path.trim();
-            if !trimmed.is_empty() {
-                copied_files.insert(trimmed.to_string());
-            }
+    for file_path in lines.map_while(Result::ok) {
+        let trimmed = file_path.trim();
+        if !trimmed.is_empty() {
+            copied_files.insert(trimmed.to_string());
         }
     }
 
@@ -552,8 +535,10 @@ pub fn execute_partition_copy(
     let target_root = format!("{}\\", target_partition);
 
     // 发送初始进度
-    let mut progress = CopyProgress::default();
-    progress.current_file = tr!("正在收集文件列表...");
+    let mut progress = CopyProgress {
+        current_file: tr!("正在收集文件列表..."),
+        ..CopyProgress::default()
+    };
     let _ = progress_tx.send(progress.clone());
 
     // 收集所有文件
@@ -608,7 +593,7 @@ pub fn execute_partition_copy(
             Ok(_) => {
                 // 记录到标记文件
                 marker.copied_files.insert(relative_path.clone());
-                if let Err(_) = append_to_marker(target_partition, &relative_path) {
+                if append_to_marker(target_partition, &relative_path).is_err() {
                     // 忽略写入标记失败
                 }
                 actual_copied += 1;

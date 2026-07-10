@@ -31,9 +31,7 @@ impl WindowsVersionInfo {
         if let Some(ref build) = self.current_build {
             if let Some(version_from_build) = build_to_version(build) {
                 // 判断是Win10还是Win11
-                let win_version = if is_windows_11_build(build) {
-                    "Windows 11"
-                } else if base_version.contains("11") {
+                let win_version = if is_windows_11_build(build) || base_version.contains("11") {
                     "Windows 11"
                 } else if base_version.contains("10") {
                     "Windows 10"

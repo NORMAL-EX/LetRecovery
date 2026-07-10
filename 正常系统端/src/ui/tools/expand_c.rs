@@ -13,7 +13,7 @@ use crate::tr;
 use crate::ui::pe_preparation::{require_verified_cached_pe, PePreparationOutcome};
 
 /// 异步加载 C 盘信息的结果
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExpandCLoadResult {
     /// 是否找到了系统 C 盘
     pub found: bool,
@@ -34,23 +34,8 @@ pub struct ExpandCLoadResult {
     pub reason: String,
 }
 
-impl Default for ExpandCLoadResult {
-    fn default() -> Self {
-        Self {
-            found: false,
-            current_size_mb: 0,
-            used_mb: 0,
-            free_mb: 0,
-            max_size_mb: 0,
-            no_move_max_mb: 0,
-            can_expand: false,
-            reason: String::new(),
-        }
-    }
-}
-
 /// 无损扩大C盘对话框状态
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExpandCDialogState {
     /// 是否正在加载磁盘/C盘信息
     pub loading: bool,
@@ -78,26 +63,6 @@ pub struct ExpandCDialogState {
     pub target_size_mb: u64,
     /// 是否显示确认对话框
     pub show_confirm_dialog: bool,
-}
-
-impl Default for ExpandCDialogState {
-    fn default() -> Self {
-        Self {
-            loading: false,
-            executing: false,
-            message: String::new(),
-            current_size_mb: 0,
-            used_mb: 0,
-            free_mb: 0,
-            max_size_mb: 0,
-            no_move_max_mb: 0,
-            can_expand: false,
-            reason: String::new(),
-            target_size_text: String::new(),
-            target_size_mb: 0,
-            show_confirm_dialog: false,
-        }
-    }
 }
 
 impl ExpandCDialogState {

@@ -218,13 +218,9 @@ impl ConfigManager {
     /// * `dl_content` - 系统镜像列表内容
     /// * `pe_content` - PE 列表内容
     pub fn load_from_content(dl_content: Option<&str>, pe_content: Option<&str>) -> Self {
-        let systems = dl_content
-            .map(|c| Self::parse_system_list(c))
-            .unwrap_or_default();
+        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
 
-        let pe_list = pe_content
-            .map(|c| Self::parse_pe_list(c))
-            .unwrap_or_default();
+        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
 
         Self {
             systems,
@@ -246,16 +242,12 @@ impl ConfigManager {
         pe_content: Option<&str>,
         soft_content: Option<&str>,
     ) -> Self {
-        let systems = dl_content
-            .map(|c| Self::parse_system_list(c))
-            .unwrap_or_default();
+        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
 
-        let pe_list = pe_content
-            .map(|c| Self::parse_pe_list(c))
-            .unwrap_or_default();
+        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
 
         let software_list = soft_content
-            .map(|c| Self::parse_software_list(c))
+            .map(Self::parse_software_list)
             .unwrap_or_default();
 
         Self {
@@ -280,19 +272,15 @@ impl ConfigManager {
         soft_content: Option<&str>,
         easy_content: Option<&str>,
     ) -> Self {
-        let systems = dl_content
-            .map(|c| Self::parse_system_list(c))
-            .unwrap_or_default();
+        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
 
-        let pe_list = pe_content
-            .map(|c| Self::parse_pe_list(c))
-            .unwrap_or_default();
+        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
 
         let software_list = soft_content
-            .map(|c| Self::parse_software_list(c))
+            .map(Self::parse_software_list)
             .unwrap_or_default();
 
-        let easy_mode_config = easy_content.and_then(|c| EasyModeConfig::parse(c));
+        let easy_mode_config = easy_content.and_then(EasyModeConfig::parse);
 
         Self {
             systems,
@@ -318,22 +306,18 @@ impl ConfigManager {
         easy_content: Option<&str>,
         gpu_content: Option<&str>,
     ) -> Self {
-        let systems = dl_content
-            .map(|c| Self::parse_system_list(c))
-            .unwrap_or_default();
+        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
 
-        let pe_list = pe_content
-            .map(|c| Self::parse_pe_list(c))
-            .unwrap_or_default();
+        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
 
         let software_list = soft_content
-            .map(|c| Self::parse_software_list(c))
+            .map(Self::parse_software_list)
             .unwrap_or_default();
 
-        let easy_mode_config = easy_content.and_then(|c| EasyModeConfig::parse(c));
+        let easy_mode_config = easy_content.and_then(EasyModeConfig::parse);
 
         let gpu_driver_list = gpu_content
-            .map(|c| Self::parse_gpu_driver_list(c))
+            .map(Self::parse_gpu_driver_list)
             .unwrap_or_default();
 
         Self {

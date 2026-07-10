@@ -435,7 +435,7 @@ impl PeManager {
             header[7] = 0x00;
             header
         };
-        std::fs::write(&sdi_path, &sdi_header)?;
+        std::fs::write(&sdi_path, sdi_header)?;
 
         Ok(sdi_path)
     }

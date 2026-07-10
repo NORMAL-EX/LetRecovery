@@ -74,7 +74,7 @@ pub fn get_lang_dir() -> PathBuf {
 ///
 /// # Arguments
 /// * `language_code` - 要加载的语言代码（如 "zh-CN", "en-US"）
-///                     如果为 "zh-CN" 或空，则使用内置的简体中文
+///   如果为 "zh-CN" 或空，则使用内置的简体中文
 pub fn init(language_code: &str) {
     let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
     let mut guard = manager.write();

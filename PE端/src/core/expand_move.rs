@@ -403,7 +403,7 @@ unsafe fn write_exact(handle: HANDLE, buf: &[u8]) -> Result<()> {
 }
 
 fn aligned(v: u64) -> bool {
-    v % MIB == 0
+    v.is_multiple_of(MIB)
 }
 
 /// 扫描 C..Z，找出位于指定磁盘且起始偏移匹配的卷盘符。

@@ -109,7 +109,7 @@ impl std::fmt::Display for VerifyStatus {
 }
 
 /// 校验进度信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VerifyProgress {
     /// 进度百分比 (0-100)
     pub percentage: u8,
@@ -117,16 +117,6 @@ pub struct VerifyProgress {
     pub status: String,
     /// 当前正在校验的项目
     pub current_item: String,
-}
-
-impl Default for VerifyProgress {
-    fn default() -> Self {
-        Self {
-            percentage: 0,
-            status: String::new(),
-            current_item: String::new(),
-        }
-    }
 }
 
 impl VerifyProgress {
@@ -419,8 +409,10 @@ impl ImageVerifier {
             );
         }
 
-        let mut result = VerifyResult::default();
-        result.image_count = image_count as u32;
+        let mut result = VerifyResult {
+            image_count: image_count as u32,
+            ..VerifyResult::default()
+        };
 
         reporter.report(
             3,
@@ -530,8 +522,10 @@ impl ImageVerifier {
             return VerifyResult::error(file_path, ImageType::Swm, tr!("未找到分卷文件"));
         }
 
-        let mut result = VerifyResult::default();
-        result.part_count = swm_files.len() as u16;
+        let mut result = VerifyResult {
+            part_count: swm_files.len() as u16,
+            ..VerifyResult::default()
+        };
         result
             .details
             .push(tr!("找到 {} 个分卷文件", swm_files.len()));

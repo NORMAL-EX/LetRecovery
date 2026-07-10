@@ -4,6 +4,8 @@ mod app;
 mod core;
 mod ui;
 mod utils;
+mod workflow_journal;
+mod workflows;
 
 use eframe::egui;
 

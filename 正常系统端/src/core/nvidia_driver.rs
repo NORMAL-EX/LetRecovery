@@ -217,7 +217,7 @@ pub fn enumerate_gpu_devices() -> Result<Vec<GpuDeviceInfo>> {
             // 使用 is_err() 替代 !.as_bool()
             if SetupDiEnumDeviceInfo(dev_info, index, &mut dev_info_data).is_err() {
                 let err = GetLastError();
-                if err.0 == ERROR_NO_MORE_ITEMS.0 as u32 {
+                if err.0 == ERROR_NO_MORE_ITEMS.0 {
                     break;
                 }
                 index += 1;
@@ -472,7 +472,7 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
             // 使用 is_err() 替代 !.as_bool()
             if SetupDiEnumDeviceInfo(dev_info, index, &mut dev_info_data).is_err() {
                 let err = GetLastError();
-                if err.0 == ERROR_NO_MORE_ITEMS.0 as u32 {
+                if err.0 == ERROR_NO_MORE_ITEMS.0 {
                     break;
                 }
                 index += 1;

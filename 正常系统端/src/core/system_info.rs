@@ -21,6 +21,8 @@ pub struct SystemInfo {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// Keep the established user-facing abbreviation.
+#[allow(clippy::upper_case_acronyms)]
 pub enum BootMode {
     UEFI,
     Legacy,

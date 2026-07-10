@@ -81,13 +81,11 @@ impl App {
                     if self.import_storage_driver_loading {
                         ui.spinner();
                         ui.label(tr!("正在导入驱动..."));
-                    } else {
-                        if ui
-                            .add_enabled(can_import, egui::Button::new(tr!("导入驱动")))
-                            .clicked()
-                        {
-                            self.start_import_storage_driver();
-                        }
+                    } else if ui
+                        .add_enabled(can_import, egui::Button::new(tr!("导入驱动")))
+                        .clicked()
+                    {
+                        self.start_import_storage_driver();
                     }
 
                     if ui.button(tr!("关闭")).clicked() {

@@ -161,12 +161,12 @@ impl CabinetExtractor {
     /// 扫描目标目录获取所有文件
     fn scan_extracted_files(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        self.scan_dir_recursive(dir, &mut files)?;
+        Self::scan_dir_recursive(dir, &mut files)?;
         Ok(files)
     }
 
     /// 递归扫描目录
-    fn scan_dir_recursive(&self, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    fn scan_dir_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         if !dir.is_dir() {
             return Ok(());
         }
@@ -178,7 +178,7 @@ impl CabinetExtractor {
             if path.is_file() {
                 files.push(path);
             } else if path.is_dir() {
-                self.scan_dir_recursive(&path, files)?;
+                Self::scan_dir_recursive(&path, files)?;
             }
         }
 

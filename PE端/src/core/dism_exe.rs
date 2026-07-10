@@ -218,27 +218,25 @@ impl DismExe {
             let reader = BufReader::new(stdout);
             let mut output = String::new();
 
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    // 转换编码（Windows 可能使用 GBK）
-                    let decoded_line = if line.is_ascii() {
-                        line
-                    } else {
-                        gbk_to_utf8(line.as_bytes())
-                    };
+            for line in reader.lines().map_while(Result::ok) {
+                // 转换编码（Windows 可能使用 GBK）
+                let decoded_line = if line.is_ascii() {
+                    line
+                } else {
+                    gbk_to_utf8(line.as_bytes())
+                };
 
-                    output.push_str(&decoded_line);
-                    output.push('\n');
+                output.push_str(&decoded_line);
+                output.push('\n');
 
-                    // 解析进度信息
-                    if let Some(ref tx) = progress_tx_clone {
-                        if let Some(progress) = Self::parse_progress_line(&decoded_line) {
-                            let _ = tx.send(progress);
-                        }
+                // 解析进度信息
+                if let Some(ref tx) = progress_tx_clone {
+                    if let Some(progress) = Self::parse_progress_line(&decoded_line) {
+                        let _ = tx.send(progress);
                     }
-
-                    log::trace!("[DISM.EXE STDOUT] {}", decoded_line);
                 }
+
+                log::trace!("[DISM.EXE STDOUT] {}", decoded_line);
             }
 
             output
@@ -249,19 +247,17 @@ impl DismExe {
             let reader = BufReader::new(stderr);
             let mut error_output = String::new();
 
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    let decoded_line = if line.is_ascii() {
-                        line
-                    } else {
-                        gbk_to_utf8(line.as_bytes())
-                    };
+            for line in reader.lines().map_while(Result::ok) {
+                let decoded_line = if line.is_ascii() {
+                    line
+                } else {
+                    gbk_to_utf8(line.as_bytes())
+                };
 
-                    error_output.push_str(&decoded_line);
-                    error_output.push('\n');
+                error_output.push_str(&decoded_line);
+                error_output.push('\n');
 
-                    log::trace!("[DISM.EXE STDERR] {}", decoded_line);
-                }
+                log::trace!("[DISM.EXE STDERR] {}", decoded_line);
             }
 
             error_output

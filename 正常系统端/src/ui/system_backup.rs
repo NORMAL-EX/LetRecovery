@@ -61,14 +61,12 @@ impl App {
                                         } else {
                                             partition.letter.clone()
                                         }
+                                    } else if partition.is_system_partition {
+                                        tr!("{} (当前系统)", partition.letter)
+                                    } else if partition.has_windows {
+                                        tr!("{} (有系统)", partition.letter)
                                     } else {
-                                        if partition.is_system_partition {
-                                            tr!("{} (当前系统)", partition.letter)
-                                        } else if partition.has_windows {
-                                            tr!("{} (有系统)", partition.letter)
-                                        } else {
-                                            partition.letter.clone()
-                                        }
+                                        partition.letter.clone()
                                     };
 
                                     if ui
@@ -352,7 +350,7 @@ impl App {
                 // 显示备份错误
                 if let Some(ref error) = self.backup_error {
                     ui.add_space(10.0);
-                    ui.colored_label(egui::Color32::RED, format!("{}", error));
+                    ui.colored_label(egui::Color32::RED, error.to_string());
                 }
 
                 // 状态提示
@@ -748,7 +746,7 @@ impl App {
                 source_partition: source_letter.clone(),
                 incremental: is_incremental,
                 format: backup_format,
-                swm_split_size: swm_split_size,
+                swm_split_size,
                 wim_engine: lr_core::active_engine().as_u8(),
             };
 
@@ -882,12 +880,10 @@ impl App {
                     });
                 }
             }
-        } else if self.is_backing_up {
-            if ui.button(tr!("取消备份")).clicked() {
-                log::info!("[BACKUP] 用户取消备份");
-                self.is_backing_up = false;
-                self.current_panel = Panel::SystemBackup;
-            }
+        } else if self.is_backing_up && ui.button(tr!("取消备份")).clicked() {
+            log::info!("[BACKUP] 用户取消备份");
+            self.is_backing_up = false;
+            self.current_panel = Panel::SystemBackup;
         }
     }
 }

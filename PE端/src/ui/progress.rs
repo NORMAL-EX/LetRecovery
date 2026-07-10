@@ -288,9 +288,10 @@ impl ProgressUI {
                 ui.horizontal(|ui| {
                     ui.label(tr!("步骤进度:"));
                     let progress = state.step_progress as f32 / 100.0;
+                    let available_width = ui.available_width();
                     ui.add(
                         egui::ProgressBar::new(progress)
-                            .desired_width(400.0)
+                            .desired_width(available_width)
                             .show_percentage(),
                     );
                 });
@@ -302,9 +303,10 @@ impl ProgressUI {
             ui.horizontal(|ui| {
                 ui.label(tr!("总体进度:"));
                 let progress = state.overall_progress as f32 / 100.0;
+                let available_width = ui.available_width();
                 ui.add(
                     egui::ProgressBar::new(progress)
-                        .desired_width(400.0)
+                        .desired_width(available_width)
                         .show_percentage(),
                 );
             });

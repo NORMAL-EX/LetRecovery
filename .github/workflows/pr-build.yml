@@ -41,8 +41,8 @@ jobs:
       - name: Cargo check (workspace and all targets)
         run: cargo check --workspace --all-targets --locked
 
-      - name: Cargo clippy safety gate
-        run: cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D clippy::correctness -D clippy::suspicious -D clippy::perf -D unused_must_use
+      - name: Cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings
 
       # 编译所有测试目标（含 #[cfg(test)]），把“测试代码编不过”也变成阻塞失败。
       # 测试专用 feature 只让测试二进制以 asInvoker 启动；release 构建会主动拒绝该 feature。

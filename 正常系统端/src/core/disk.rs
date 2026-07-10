@@ -45,9 +45,8 @@ fn get_diskpart_path() -> String {
 }
 
 fn execute_diskpart_checked(program: &str, prefix: &str, script: &str) -> Result<String> {
-    let output = lr_core::diskpart::execute_script(&std::env::temp_dir(), prefix, program, script)?;
-    lr_core::diskpart::validated_stdout(&output)
-        .map_err(|detail| anyhow::anyhow!("DiskPart 脚本执行失败: {detail}"))
+    lr_core::diskpart::execute_script_checked(&std::env::temp_dir(), prefix, program, script)
+        .map_err(Into::into)
 }
 
 /// 自动创建分区的标志文件名
@@ -55,6 +54,8 @@ pub const AUTO_CREATED_PARTITION_MARKER: &str = "LetRecovery_AutoCreated.marker"
 
 /// 分区表类型
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+// Keep the established names because they are shown verbatim throughout both endpoints.
+#[allow(clippy::upper_case_acronyms)]
 pub enum PartitionStyle {
     GPT,
     MBR,
@@ -1132,12 +1133,12 @@ impl DiskManager {
 
         // 计算新分区大小
         // 理想大小 = 镜像大小 + 10GB，向上取整到整数 GB
-        let required_size_mb = (required_size_bytes + 1024 * 1024 - 1) / (1024 * 1024); // 向上取整到 MB
+        let required_size_mb = required_size_bytes.div_ceil(1024 * 1024); // 向上取整到 MB
         let ten_gb_mb: u64 = 10 * 1024; // 10GB in MB
         let ideal_size_mb = required_size_mb + ten_gb_mb;
 
         // 向上取整到整数 GB
-        let ideal_size_gb = (ideal_size_mb + 1023) / 1024;
+        let ideal_size_gb = ideal_size_mb.div_ceil(1024);
         let ideal_size_mb_rounded = ideal_size_gb * 1024;
 
         let actual_size_mb: u64;
@@ -1153,7 +1154,7 @@ impl DiskManager {
         } else {
             // 可缩小空间不足以达到理想大小
             // 确保至少能容纳镜像文件，向上取整到整数 GB
-            let min_size_gb = (required_size_mb + 1023) / 1024; // 向上取整
+            let min_size_gb = required_size_mb.div_ceil(1024); // 向上取整
             let available_size_gb = max_shrink_mb / 1024; // 可用的整数 GB
 
             if available_size_gb >= min_size_gb {

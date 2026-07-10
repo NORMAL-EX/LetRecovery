@@ -172,11 +172,9 @@ impl DismCmd {
 
             // 尝试创建目录（可能盘符存在但目录不存在）
             if let Some(parent) = path.parent() {
-                if parent.exists() {
-                    if std::fs::create_dir_all(path).is_ok() {
-                        log::info!("[DismCmd] 创建 PE 临时目录: {}", dir);
-                        return dir.to_string();
-                    }
+                if parent.exists() && std::fs::create_dir_all(path).is_ok() {
+                    log::info!("[DismCmd] 创建 PE 临时目录: {}", dir);
+                    return dir.to_string();
                 }
             }
         }
@@ -721,40 +719,38 @@ impl DismCmd {
         // 处理 stdout
         if let Some(stdout) = stdout {
             let reader = BufReader::new(stdout);
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    // 尝试转换编码
-                    let decoded_line = if line.is_ascii() {
-                        line
-                    } else {
-                        gbk_to_utf8(line.as_bytes())
-                    };
+            for line in reader.lines().map_while(Result::ok) {
+                // 尝试转换编码
+                let decoded_line = if line.is_ascii() {
+                    line
+                } else {
+                    gbk_to_utf8(line.as_bytes())
+                };
 
-                    // 解析进度
-                    if let Some(pct) = Self::parse_progress_line(&decoded_line) {
-                        if pct != last_progress {
-                            last_progress = pct;
-                            Self::send_progress(
-                                progress_tx,
-                                pct,
-                                &tr!("{}中... {}%", operation_name, pct),
-                            );
-                        }
+                // 解析进度
+                if let Some(pct) = Self::parse_progress_line(&decoded_line) {
+                    if pct != last_progress {
+                        last_progress = pct;
+                        Self::send_progress(
+                            progress_tx,
+                            pct,
+                            &tr!("{}中... {}%", operation_name, pct),
+                        );
                     }
+                }
 
-                    // 检测错误信息
-                    if decoded_line.contains("Error")
-                        || decoded_line.contains("错误")
-                        || decoded_line.contains("失败")
-                    {
-                        error_output.push_str(&decoded_line);
-                        error_output.push('\n');
-                    }
+                // 检测错误信息
+                if decoded_line.contains("Error")
+                    || decoded_line.contains("错误")
+                    || decoded_line.contains("失败")
+                {
+                    error_output.push_str(&decoded_line);
+                    error_output.push('\n');
+                }
 
-                    // 打印日志
-                    if !decoded_line.trim().is_empty() {
-                        log::trace!("[DISM] {}", decoded_line);
-                    }
+                // 打印日志
+                if !decoded_line.trim().is_empty() {
+                    log::trace!("[DISM] {}", decoded_line);
                 }
             }
         }
@@ -762,19 +758,17 @@ impl DismCmd {
         // 处理 stderr
         if let Some(stderr) = stderr {
             let reader = BufReader::new(stderr);
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    let decoded_line = if line.is_ascii() {
-                        line
-                    } else {
-                        gbk_to_utf8(line.as_bytes())
-                    };
+            for line in reader.lines().map_while(Result::ok) {
+                let decoded_line = if line.is_ascii() {
+                    line
+                } else {
+                    gbk_to_utf8(line.as_bytes())
+                };
 
-                    if !decoded_line.trim().is_empty() {
-                        error_output.push_str(&decoded_line);
-                        error_output.push('\n');
-                        log::trace!("[DISM ERR] {}", decoded_line);
-                    }
+                if !decoded_line.trim().is_empty() {
+                    error_output.push_str(&decoded_line);
+                    error_output.push('\n');
+                    log::trace!("[DISM ERR] {}", decoded_line);
                 }
             }
         }

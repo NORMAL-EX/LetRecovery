@@ -617,21 +617,23 @@ fn execute_pe_install(
 
     log::info!("[PE INSTALL] Step 5: 应用高级选项");
     // 应用高级选项
-    let mut advanced_options = ui::advanced_options::AdvancedOptions::default();
-    advanced_options.remove_shortcut_arrow = config.remove_shortcut_arrow;
-    advanced_options.restore_classic_context_menu = config.restore_classic_context_menu;
-    advanced_options.bypass_nro = config.bypass_nro;
-    advanced_options.disable_windows_update = config.disable_windows_update;
-    advanced_options.disable_windows_defender = config.disable_windows_defender;
-    advanced_options.disable_reserved_storage = config.disable_reserved_storage;
-    advanced_options.disable_uac = config.disable_uac;
-    advanced_options.disable_device_encryption = config.disable_device_encryption;
-    advanced_options.remove_uwp_apps = config.remove_uwp_apps;
-    advanced_options.import_storage_controller_drivers = config.import_storage_controller_drivers;
-    advanced_options.custom_username = !config.custom_username.is_empty();
-    advanced_options.username = config.custom_username.clone();
-    advanced_options.xp_inject_usb3_driver = config.xp_inject_usb3_driver;
-    advanced_options.xp_inject_nvme_driver = config.xp_inject_nvme_driver;
+    let advanced_options = ui::advanced_options::AdvancedOptions {
+        remove_shortcut_arrow: config.remove_shortcut_arrow,
+        restore_classic_context_menu: config.restore_classic_context_menu,
+        bypass_nro: config.bypass_nro,
+        disable_windows_update: config.disable_windows_update,
+        disable_windows_defender: config.disable_windows_defender,
+        disable_reserved_storage: config.disable_reserved_storage,
+        disable_uac: config.disable_uac,
+        disable_device_encryption: config.disable_device_encryption,
+        remove_uwp_apps: config.remove_uwp_apps,
+        import_storage_controller_drivers: config.import_storage_controller_drivers,
+        custom_username: !config.custom_username.is_empty(),
+        username: config.custom_username.clone(),
+        xp_inject_usb3_driver: config.xp_inject_usb3_driver,
+        xp_inject_nvme_driver: config.xp_inject_nvme_driver,
+        ..ui::advanced_options::AdvancedOptions::default()
+    };
 
     let _ = advanced_options.apply_to_system(target_partition, is_xp);
 
@@ -765,7 +767,7 @@ fn detect_uefi_mode() -> bool {
                 }
             }
             // 其他情况都认为是 UEFI
-            return true;
+            true
         }
     }
 

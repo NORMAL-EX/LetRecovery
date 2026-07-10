@@ -20,6 +20,7 @@ pub mod format_command;
 pub mod fveapi;
 pub mod hash;
 pub mod image_meta;
+pub mod operation;
 pub mod reboot;
 pub mod registry;
 pub mod sam;

@@ -384,12 +384,10 @@ impl App {
                                             } else {
                                                 partition.letter.clone()
                                             }
+                                        } else if partition.is_system_partition {
+                                            tr!("{} (系统)", partition.letter)
                                         } else {
-                                            if partition.is_system_partition {
-                                                tr!("{} (系统)", partition.letter)
-                                            } else {
-                                                partition.letter.clone()
-                                            }
+                                            partition.letter.clone()
                                         };
 
                                         ui.label(label);

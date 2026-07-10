@@ -144,7 +144,7 @@ impl App {
 
         if let Some(ref err) = result.error {
             ui.add_space(8.0);
-            ui.colored_label(egui::Color32::from_rgb(255, 80, 80), format!("{}", err));
+            ui.colored_label(egui::Color32::from_rgb(255, 80, 80), err.to_string());
             return;
         }
 

@@ -51,8 +51,8 @@ impl App {
                         .show_ui(ui, |ui| {
                             for lang in &available_languages {
                                 let is_selected = lang.code == current_language;
-                                if ui.selectable_label(is_selected, &lang.display_name).clicked() {
-                                    if lang.code != current_language {
+                                if ui.selectable_label(is_selected, &lang.display_name).clicked()
+                                    && lang.code != current_language {
                                         self.app_config.set_language(&lang.code);
                                         // 备份名/描述在启动时按当时语言生成并缓存，切换语言后需重新生成，
                                         // 否则会停留在旧语言（其余界面文本每帧用 tr! 渲染会自动刷新）。
@@ -72,7 +72,6 @@ impl App {
                                         // 立即重绘，使整个界面即时应用新语言（否则需下一次交互才刷新）
                                         ui.ctx().request_repaint();
                                     }
-                                }
                             }
                         });
 
@@ -164,20 +163,56 @@ impl App {
                     );
                 });
 
-                // 提供一个入口便于用户找到并发送日志
-                if self.app_config.log_enabled {
-                    ui.add_space(8.0);
-                    let log_dir = LogManager::get_log_dir();
-                    if ui.button(format!("{}", tr!("打开日志目录"))).clicked() {
-                        if log_dir.exists() {
-                            #[cfg(windows)]
-                            {
-                                let _ = std::process::Command::new("explorer")
-                                    .arg(&log_dir)
-                                    .spawn();
-                            }
+                // 提供日志目录和脱敏支持包两个诊断入口。
+                ui.add_space(8.0);
+                let log_dir = LogManager::get_log_dir();
+                ui.horizontal(|ui| {
+                    if self.app_config.log_enabled
+                        && ui.button(tr!("打开日志目录")).clicked()
+                        && log_dir.exists()
+                    {
+                        #[cfg(windows)]
+                        {
+                            let _ = std::process::Command::new("explorer")
+                                .arg(&log_dir)
+                                .spawn();
                         }
                     }
+
+                    if ui.button(tr!("导出支持包")).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("JSON", &["json"])
+                            .set_file_name("LetRecovery-support.json")
+                            .save_file()
+                        {
+                            let path = if path.extension().is_none() {
+                                path.with_extension("json")
+                            } else {
+                                path
+                            };
+                            let status = match LogManager::export_support_bundle(&path) {
+                                Ok(()) => (true, tr!("支持包已保存到：{}", path.display())),
+                                Err(error) => (false, tr!("导出支持包失败：{}", error)),
+                            };
+                            ui.ctx().data_mut(|data| {
+                                data.insert_temp(
+                                    egui::Id::new("support_export_status"),
+                                    status,
+                                );
+                            });
+                        }
+                    }
+                });
+
+                if let Some((success, message)) = ui.ctx().data(|data| {
+                    data.get_temp::<(bool, String)>(egui::Id::new("support_export_status"))
+                }) {
+                    let color = if success {
+                        egui::Color32::from_rgb(80, 190, 120)
+                    } else {
+                        egui::Color32::from_rgb(230, 90, 80)
+                    };
+                    ui.colored_label(color, message);
                 }
 
                 ui.add_space(10.0);
