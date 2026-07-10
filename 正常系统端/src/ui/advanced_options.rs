@@ -53,11 +53,11 @@ pub struct AdvancedOptions {
     // 用户设置
     pub custom_username: bool,
     pub username: String,
-    
+
     // 系统盘设置
     pub custom_volume_label: bool,
     pub volume_label: String,
-    
+
     // Win7 专用选项
     pub win7_inject_usb3_driver: bool,
     pub win7_usb3_driver_path: String,
@@ -66,7 +66,7 @@ pub struct AdvancedOptions {
     pub win7_fix_acpi_bsod: bool,
     /// 修复0x7B蓝屏（INACCESSIBLE_BOOT_DEVICE）- 启用存储控制器驱动
     pub win7_fix_storage_bsod: bool,
-    
+
     // Win7 UEFI 修补选项（仅在Win7 + UEFI模式下显示）
     pub win7_uefi_patch: bool,
 
@@ -106,7 +106,9 @@ impl AdvancedOptions {
     /// 获取 XP 驱动目录（bin\drivers\xp\{usb3|nvme|ahci}）
     fn get_xp_driver_dirs() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
         let base = Self::get_program_dir();
-        let root = base.as_ref().map(|b| b.join("bin").join("drivers").join("xp"));
+        let root = base
+            .as_ref()
+            .map(|b| b.join("bin").join("drivers").join("xp"));
         let usb3 = root.as_ref().map(|b| b.join("usb3"));
         let nvme = root.as_ref().map(|b| b.join("nvme"));
         let ahci = root.as_ref().map(|b| b.join("ahci"));
@@ -139,7 +141,7 @@ impl AdvancedOptions {
     fn get_uefiseven_dir() -> Option<PathBuf> {
         Self::get_program_dir().map(|b| b.join("bin").join("uefiseven"))
     }
-    
+
     /// 显示依赖无人值守的复选框
     /// 如果无人值守被禁用，该复选框也会被禁用并显示提示
     fn show_unattend_dependent_checkbox(
@@ -162,10 +164,10 @@ impl AdvancedOptions {
 
     /// 应用 UefiSeven 补丁到目标系统
     /// 此方法应在引导修复之后调用
-    /// 
+    ///
     /// UefiSeven 是一个 EFI 加载器，用于模拟 Int10h 中断，使 Windows 7 能够在 UEFI Class 3 系统上启动。
     /// 它通过在 Windows 启动前安装一个最小的 Int10h 处理程序来工作。
-    /// 
+    ///
     /// 参考: https://github.com/manatails/uefiseven
     pub fn apply_uefiseven_patch(&self, target_partition: &str) -> anyhow::Result<()> {
         if !self.win7_uefi_patch {
@@ -187,39 +189,41 @@ impl AdvancedOptions {
                 return Err(anyhow::anyhow!("无法获取程序运行目录"));
             }
         };
-        
+
         // 检查 UefiSeven 文件
         let uefiseven_efi = uefiseven_dir.join("bootx64.efi");
         let uefiseven_ini = uefiseven_dir.join("UefiSeven.ini");
-        
+
         if !uefiseven_efi.exists() {
-            log::error!("[UEFISEVEN] UefiSeven bootx64.efi 不存在: {}", uefiseven_efi.display());
+            log::error!(
+                "[UEFISEVEN] UefiSeven bootx64.efi 不存在: {}",
+                uefiseven_efi.display()
+            );
             return Err(anyhow::anyhow!("UefiSeven bootx64.efi 不存在"));
         }
-        
+
         // UefiSeven 必须跟随目标 Windows 所在磁盘，不能改写其它硬盘的 ESP。
         let boot_manager = crate::core::bcdedit::BootManager::new();
         let efi_mount_point = boot_manager
             .find_esp_on_same_disk(target_partition)
             .map_err(|error| anyhow::anyhow!("查找目标磁盘 EFI 分区失败: {}", error))?;
-        let _esp_mount_guard =
-            lr_core::boot_pca::TemporaryEspMountGuard::new(&efi_mount_point)
-                .map_err(anyhow::Error::msg)?;
+        let _esp_mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&efi_mount_point)
+            .map_err(anyhow::Error::msg)?;
         log::info!("[UEFISEVEN] EFI 分区挂载点: {}", efi_mount_point);
-        
+
         // Microsoft Boot 目录
         let ms_boot_dir = format!("{}\\EFI\\Microsoft\\Boot", efi_mount_point);
         let bootmgfw_path = format!("{}\\bootmgfw.efi", ms_boot_dir);
         let bootmgfw_original = format!("{}\\bootmgfw.original.efi", ms_boot_dir);
         let uefiseven_target = format!("{}\\bootmgfw.efi", ms_boot_dir);
         let uefiseven_ini_target = format!("{}\\UefiSeven.ini", ms_boot_dir);
-        
+
         // 检查原始 bootmgfw.efi 是否存在
         if !std::path::Path::new(&bootmgfw_path).exists() {
             log::error!("[UEFISEVEN] bootmgfw.efi 不存在: {}", bootmgfw_path);
             return Err(anyhow::anyhow!("bootmgfw.efi 不存在，请确保引导修复已完成"));
         }
-        
+
         // 备份原始 bootmgfw.efi（如果尚未备份）
         if !std::path::Path::new(&bootmgfw_original).exists() {
             log::info!("[UEFISEVEN] 备份原始 bootmgfw.efi 到 bootmgfw.original.efi");
@@ -227,11 +231,11 @@ impl AdvancedOptions {
         } else {
             log::info!("[UEFISEVEN] bootmgfw.original.efi 已存在，跳过备份");
         }
-        
+
         // 复制 UefiSeven 到 bootmgfw.efi（替换原来的）
         log::info!("[UEFISEVEN] 部署 UefiSeven bootx64.efi -> bootmgfw.efi");
         std::fs::copy(&uefiseven_efi, &uefiseven_target)?;
-        
+
         // 复制配置文件（如果存在）
         if uefiseven_ini.exists() {
             log::info!("[UEFISEVEN] 部署 UefiSeven.ini 配置文件");
@@ -249,13 +253,13 @@ log=0
 "#;
             std::fs::write(&uefiseven_ini_target, default_config)?;
         }
-        
+
         log::info!("[UEFISEVEN] UefiSeven 补丁应用成功");
         log::info!("[UEFISEVEN] 启动流程: UEFI -> UefiSeven -> bootmgfw.original.efi -> Windows 7");
-        
+
         Ok(())
     }
-    
+
     /// 应用选项到目标系统
     /// 抓取当前连接的 WiFi（SSID + 含明文密钥的 profile XML），存入瞬态字段。
     /// 在勾选「迁移 WiFi」时调用（须在有 WiFi 连接的正常系统中）。
@@ -380,7 +384,11 @@ log=0
     }
 
     pub fn apply_to_system(&self, target_partition: &str, is_xp: bool) -> anyhow::Result<()> {
-        log::info!("[ADVANCED] 开始应用高级选项到: {} (is_xp={})", target_partition, is_xp);
+        log::info!(
+            "[ADVANCED] 开始应用高级选项到: {} (is_xp={})",
+            target_partition,
+            is_xp
+        );
 
         let windows_path = format!("{}\\Windows", target_partition);
         let software_hive = format!("{}\\System32\\config\\SOFTWARE", windows_path);
@@ -469,12 +477,22 @@ log=0
 
         // 12. 导入自定义驱动 - 使用 DISM 实际安装
         if self.import_custom_drivers && !self.custom_drivers_path.is_empty() {
-            self.apply_import_custom_drivers(target_partition, default_loaded, &software_hive, &system_hive);
+            self.apply_import_custom_drivers(
+                target_partition,
+                default_loaded,
+                &software_hive,
+                &system_hive,
+            );
         }
 
         // 13. 导入磁盘控制器驱动（Win10/Win11 x64）
         if self.import_storage_controller_drivers {
-            self.apply_import_storage_controller_drivers(target_partition, default_loaded, &software_hive, &system_hive);
+            self.apply_import_storage_controller_drivers(
+                target_partition,
+                default_loaded,
+                &software_hive,
+                &system_hive,
+            );
         }
 
         // 14. 导入注册表文件 - 实际导入到离线注册表
@@ -502,13 +520,23 @@ log=0
         // 18. Win7 注入 USB3 驱动（固定读取程序运行目录下的 drivers\\usb3）
         // 支持 .cab 更新包文件和普通驱动文件夹
         if self.win7_inject_usb3_driver {
-            self.apply_win7_inject_usb3_driver(target_partition, default_loaded, &software_hive, &system_hive)?;
+            self.apply_win7_inject_usb3_driver(
+                target_partition,
+                default_loaded,
+                &software_hive,
+                &system_hive,
+            )?;
         }
 
         // 19. Win7 注入 NVMe 驱动（固定读取程序运行目录下的 drivers\\nvme）
         // 支持 .cab 更新包文件（如 KB2990941, KB3087873）和普通驱动文件夹
         if self.win7_inject_nvme_driver {
-            self.apply_win7_inject_nvme_driver(target_partition, default_loaded, &software_hive, &system_hive)?;
+            self.apply_win7_inject_nvme_driver(
+                target_partition,
+                default_loaded,
+                &software_hive,
+                &system_hive,
+            )?;
         }
 
         // 20. Win7 修复 ACPI_BIOS_ERROR (0xA5) 蓝屏
@@ -570,7 +598,7 @@ log=0
         }
         // 同时在 SOFTWARE 中设置（系统级）
         let _ = OfflineRegistry::create_key(
-            "HKLM\\pc-soft\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32"
+            "HKLM\\pc-soft\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
         );
         let _ = OfflineRegistry::set_string(
             "HKLM\\pc-soft\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
@@ -676,11 +704,8 @@ log=0
             1,
         );
         // 禁用 MBAM (Microsoft BitLocker Administration and Monitoring)
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\FVE",
-            "OSRecovery",
-            0,
-        );
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-soft\\Policies\\Microsoft\\FVE", "OSRecovery", 0);
         // 禁用设备加密
         let _ = OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\BDESVC",
@@ -712,8 +737,7 @@ log=0
                 } else {
                     use std::io::Write;
                     // 追加，避免覆盖可能已存在的 SetupComplete.cmd
-                    let line =
-                        "netsh wlan add profile filename=\"%~dp0LR_WiFi.xml\" user=all\r\n";
+                    let line = "netsh wlan add profile filename=\"%~dp0LR_WiFi.xml\" user=all\r\n";
                     let res = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -742,7 +766,10 @@ log=0
 
     /// 11. 首次登录运行脚本
     fn apply_run_script_first_login(&self, scripts_dir: &str) -> anyhow::Result<()> {
-        log::info!("[ADVANCED] 复制首次登录脚本: {}", self.first_login_script_path);
+        log::info!(
+            "[ADVANCED] 复制首次登录脚本: {}",
+            self.first_login_script_path
+        );
         let target_path = format!("{}\\firstlogon.bat", scripts_dir);
         std::fs::copy(&self.first_login_script_path, &target_path)?;
         log::info!("[ADVANCED] 首次登录脚本已复制到: {}", target_path);
@@ -787,8 +814,7 @@ log=0
         software_hive: &str,
         system_hive: &str,
     ) {
-        let storage_drivers_dir = crate::utils::path::get_drivers_dir()
-            .join("storage_controller");
+        let storage_drivers_dir = crate::utils::path::get_drivers_dir().join("storage_controller");
         if storage_drivers_dir.is_dir() {
             log::info!(
                 "[ADVANCED] 导入磁盘控制器驱动: {}",
@@ -891,7 +917,10 @@ log=0
         let usb3_path = match usb3_path {
             Some(p) if p.exists() => p,
             Some(p) => {
-                log::warn!("[ADVANCED] Win7 USB3驱动目录不存在，跳过: {}", p.to_string_lossy());
+                log::warn!(
+                    "[ADVANCED] Win7 USB3驱动目录不存在，跳过: {}",
+                    p.to_string_lossy()
+                );
                 PathBuf::new()
             }
             None => {
@@ -903,7 +932,10 @@ log=0
         if usb3_path.as_os_str().is_empty() {
             // 目录不可用，直接跳过
         } else {
-            log::info!("[ADVANCED] Win7: 处理USB3驱动目录: {}", usb3_path.to_string_lossy());
+            log::info!(
+                "[ADVANCED] Win7: 处理USB3驱动目录: {}",
+                usb3_path.to_string_lossy()
+            );
 
             // 先卸载注册表
             let _ = OfflineRegistry::unload_hive("pc-soft");
@@ -953,7 +985,10 @@ log=0
         let nvme_path = match nvme_path {
             Some(p) if p.exists() => p,
             Some(p) => {
-                log::warn!("[ADVANCED] Win7 NVMe驱动目录不存在，跳过: {}", p.to_string_lossy());
+                log::warn!(
+                    "[ADVANCED] Win7 NVMe驱动目录不存在，跳过: {}",
+                    p.to_string_lossy()
+                );
                 PathBuf::new()
             }
             None => {
@@ -965,7 +1000,10 @@ log=0
         if nvme_path.as_os_str().is_empty() {
             // 目录不可用，直接跳过
         } else {
-            log::info!("[ADVANCED] Win7: 处理NVMe驱动目录: {}", nvme_path.to_string_lossy());
+            log::info!(
+                "[ADVANCED] Win7: 处理NVMe驱动目录: {}",
+                nvme_path.to_string_lossy()
+            );
 
             // 先卸载注册表
             let _ = OfflineRegistry::unload_hive("pc-soft");
@@ -1008,11 +1046,8 @@ log=0
         );
 
         // 禁用 amdppm 服务 (AMD 电源管理)
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\amdppm",
-            "Start",
-            4,
-        );
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\amdppm", "Start", 4);
 
         // 禁用 Processor 服务
         let _ = OfflineRegistry::set_dword(
@@ -1027,11 +1062,8 @@ log=0
             "Start",
             4,
         );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\amdppm",
-            "Start",
-            4,
-        );
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\amdppm", "Start", 4);
         let _ = OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\Processor",
             "Start",
@@ -1054,11 +1086,8 @@ log=0
             0, // 0 = Boot (启动时加载)
         );
         // 同时设置 ControlSet002
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\msahci",
-            "Start",
-            0,
-        );
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\msahci", "Start", 0);
 
         // StorAHCI - 新版 AHCI 驱动 (Win8+)
         let _ = OfflineRegistry::set_dword(
@@ -1074,16 +1103,10 @@ log=0
 
         // ========== IDE 相关驱动 ==========
         // pciide - 标准 PCI IDE 控制器
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\pciide",
-            "Start",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\pciide",
-            "Start",
-            0,
-        );
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\pciide", "Start", 0);
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\pciide", "Start", 0);
 
         // intelide - Intel IDE 控制器
         let _ = OfflineRegistry::set_dword(
@@ -1098,16 +1121,10 @@ log=0
         );
 
         // atapi - ATAPI/PATA 驱动
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\atapi",
-            "Start",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\atapi",
-            "Start",
-            0,
-        );
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\atapi", "Start", 0);
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\atapi", "Start", 0);
 
         // ========== Intel 存储驱动 ==========
         // iaStorV - Intel 快速存储技术 (RST)
@@ -1135,16 +1152,10 @@ log=0
         );
 
         // iaStor - 旧版 Intel 存储驱动
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\iaStor",
-            "Start",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\iaStor",
-            "Start",
-            0,
-        );
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\iaStor", "Start", 0);
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\iaStor", "Start", 0);
 
         // ========== NVMe 驱动 ==========
         // stornvme - Microsoft NVMe 驱动 (需要注入驱动文件才能生效)
@@ -1247,16 +1258,10 @@ log=0
 
         // ========== 通用 SCSI 驱动 ==========
         // vhdmp - VHD Mini-Port 驱动
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\vhdmp",
-            "Start",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\vhdmp",
-            "Start",
-            0,
-        );
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\vhdmp", "Start", 0);
+        let _ =
+            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\vhdmp", "Start", 0);
 
         log::info!("[ADVANCED] Win7 存储控制器蓝屏修复设置完成");
         log::info!("[ADVANCED] 已启用: msahci, storahci, pciide, intelide, atapi, iaStorV, iaStorAV, iaStor, stornvme, amd_sata, amd_xata, amdsata, LSI_SAS, LSI_SAS2, LSI_SCSI, megasas, vhdmp");
@@ -1265,8 +1270,7 @@ log=0
     /// Windows XP 专用：离线注入存储/USB3 驱动
     /// 直接写已加载的 SYSTEM 配置单元(pc-sys)，不走 DISM。AHCI 始终注入；NVMe/USB3 按勾选。
     fn apply_xp_inject_drivers(&self, target_partition: &str) {
-        let xp_dir = Self::get_program_dir()
-            .map(|b| b.join("bin").join("drivers").join("xp"));
+        let xp_dir = Self::get_program_dir().map(|b| b.join("bin").join("drivers").join("xp"));
         match xp_dir {
             Some(dir) if dir.is_dir() => {
                 log::info!(
@@ -1353,7 +1357,10 @@ Write-Host "UWP应用清理完成"
     /// 转换 .reg 文件内容以适配离线注册表
     fn convert_reg_file_for_offline(content: &str) -> String {
         content
-            .replace("HKEY_LOCAL_MACHINE\\SOFTWARE", "HKEY_LOCAL_MACHINE\\pc-soft")
+            .replace(
+                "HKEY_LOCAL_MACHINE\\SOFTWARE",
+                "HKEY_LOCAL_MACHINE\\pc-soft",
+            )
             .replace("HKEY_LOCAL_MACHINE\\SYSTEM", "HKEY_LOCAL_MACHINE\\pc-sys")
             .replace("HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE\\pc-default")
             .replace("[HKLM\\SOFTWARE", "[HKLM\\pc-soft")
@@ -1378,31 +1385,31 @@ Write-Host "UWP应用清理完成"
     }
 
     /// 准备 Win7 驱动目录
-    /// 
+    ///
     /// 此函数处理驱动目录，支持以下文件类型：
     /// - .cab 文件（Windows 更新包，如 KB2990941, KB3087873）
     /// - 普通驱动文件夹（包含 .inf 文件）
-    /// 
+    ///
     /// 如果目录中存在 .cab 文件，会将它们解压到临时目录，
     /// 并将普通驱动文件也复制到该目录，返回合并后的路径。
-    /// 
+    ///
     /// # 参数
     /// - `driver_dir`: 原始驱动目录
-    /// 
+    ///
     /// # 返回
     /// - 处理后的驱动目录路径（可能是原目录或临时目录）
     fn prepare_win7_drivers(driver_dir: &PathBuf) -> anyhow::Result<PathBuf> {
         use crate::core::cabinet::CabinetExtractor;
-        
+
         // 检查目录中是否有 .cab 文件
         let mut cab_files: Vec<PathBuf> = Vec::new();
         let mut has_inf_files = false;
         let mut has_subdirs = false;
-        
+
         for entry in std::fs::read_dir(driver_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     let ext_lower = ext.to_lowercase();
@@ -1416,15 +1423,15 @@ Write-Host "UWP应用清理完成"
                 has_subdirs = true;
             }
         }
-        
+
         // 如果没有 .cab 文件，直接返回原目录
         if cab_files.is_empty() {
             log::info!("[ADVANCED] 目录中没有 .cab 文件，直接使用原目录");
             return Ok(driver_dir.clone());
         }
-        
+
         log::info!("[ADVANCED] 发现 {} 个 .cab 文件，开始解压", cab_files.len());
-        
+
         // 尝试创建 Cabinet 解压器
         let extractor = match CabinetExtractor::new() {
             Ok(e) => e,
@@ -1433,26 +1440,29 @@ Write-Host "UWP应用清理完成"
                 return Ok(driver_dir.clone());
             }
         };
-        
+
         // 创建临时目录
-        let temp_dir = std::env::temp_dir()
-            .join(format!("LetRecovery_Win7Drivers_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("LetRecovery_Win7Drivers_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir)?;
-        
+
         // 解压所有 .cab 文件
         let mut extract_success_count = 0;
-        
+
         for cab_path in &cab_files {
             let cab_name = cab_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown");
-            
+
             let extract_dir = temp_dir.join(cab_name);
-            
-            log::info!("[ADVANCED] 解压: {} -> {}",
-                cab_path.display(), extract_dir.display());
-            
+
+            log::info!(
+                "[ADVANCED] 解压: {} -> {}",
+                cab_path.display(),
+                extract_dir.display()
+            );
+
             match extractor.extract(cab_path, &extract_dir) {
                 Ok(files) => {
                     log::info!("[ADVANCED] 成功解压 {} 个文件", files.len());
@@ -1463,23 +1473,23 @@ Write-Host "UWP应用清理完成"
                 }
             }
         }
-        
+
         // 如果所有 cab 文件都解压失败，清理临时目录并返回原目录
         if extract_success_count == 0 {
             log::warn!("[ADVANCED] 所有 .cab 文件解压失败，使用原目录");
             let _ = std::fs::remove_dir_all(&temp_dir);
             return Ok(driver_dir.clone());
         }
-        
+
         // 如果原目录有普通驱动文件或子目录，也复制到临时目录
         if has_inf_files || has_subdirs {
             log::info!("[ADVANCED] 复制原目录中的其他驱动文件");
-            
+
             for entry in std::fs::read_dir(driver_dir)? {
                 let entry = entry?;
                 let path = entry.path();
                 let file_name = entry.file_name();
-                
+
                 // 跳过 .cab 文件（已处理）
                 if path.is_file() {
                     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -1488,9 +1498,9 @@ Write-Host "UWP应用清理完成"
                         }
                     }
                 }
-                
+
                 let dest = temp_dir.join(&file_name);
-                
+
                 if path.is_dir() {
                     // 递归复制子目录
                     Self::copy_dir_recursive(&path, &dest)?;
@@ -1500,39 +1510,47 @@ Write-Host "UWP应用清理完成"
                 }
             }
         }
-        
+
         log::info!("[ADVANCED] Win7 驱动准备完成: {}", temp_dir.display());
-        
+
         Ok(temp_dir)
     }
-    
+
     /// 递归复制目录
     fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> anyhow::Result<()> {
         std::fs::create_dir_all(dst)?;
-        
+
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
             let path = entry.path();
             let dest = dst.join(entry.file_name());
-            
+
             if path.is_dir() {
                 Self::copy_dir_recursive(&path, &dest)?;
             } else {
                 std::fs::copy(&path, &dest)?;
             }
         }
-        
+
         Ok(())
     }
 
     /// 显示高级选项界面
-    /// 
+    ///
     /// # 参数
     /// - `unattend_disabled`: 无人值守选项是否被禁用（由于目标分区已存在配置文件）
     /// - `is_win7`: 当前选择的镜像是否为 Windows 7
     /// - `is_xp`: 当前选择的镜像是否为 Windows XP/2003
     /// - `is_uefi_mode`: 当前安装模式是否为 UEFI
-    pub fn show_ui(&mut self, ui: &mut egui::Ui, hardware_info: Option<&HardwareInfo>, unattend_disabled: bool, is_win7: bool, is_xp: bool, is_uefi_mode: bool) {
+    pub fn show_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        hardware_info: Option<&HardwareInfo>,
+        unattend_disabled: bool,
+        is_win7: bool,
+        is_xp: bool,
+        is_uefi_mode: bool,
+    ) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             // ============ Win7 专用选项（仅当选择Win7镜像时显示）============
             if is_win7 {
@@ -1544,7 +1562,7 @@ Write-Host "UWP应用清理完成"
                     tr!("以下选项仅适用于 Windows 7 x64 安装"),
                 );
                 ui.add_space(5.0);
-                
+
                 let (usb3_dir, nvme_dir) = Self::get_win7_driver_dirs();
 
                 // USB3 驱动注入（固定读取程序运行目录下的 drivers\usb3）
@@ -1575,7 +1593,7 @@ Write-Host "UWP应用清理完成"
                             .color(egui::Color32::GRAY),
                     );
                 }
-                
+
                 // NVMe 驱动注入（固定读取程序运行目录下的 drivers\nvme）
                 ui.vertical(|ui| {
                     ui.checkbox(&mut self.win7_inject_nvme_driver, tr!("注入NVMe驱动"));
@@ -1604,7 +1622,7 @@ Write-Host "UWP应用清理完成"
                             .color(egui::Color32::GRAY),
                     );
                 }
-                
+
                 // A5 蓝屏修复
                 ui.checkbox(&mut self.win7_fix_acpi_bsod, tr!("修复ACPI_BIOS_ERROR蓝屏(0xA5)"));
                 if self.win7_fix_acpi_bsod {
@@ -1626,13 +1644,13 @@ Write-Host "UWP应用清理完成"
                             .color(egui::Color32::GRAY),
                     );
                 }
-                
+
                 // Win7 UEFI 修补选项（仅在UEFI模式下显示）
                 if is_uefi_mode {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(5.0);
-                    
+
                     ui.colored_label(
                         egui::Color32::from_rgb(100, 181, 246),
                         tr!("UEFI 启动修补 (UefiSeven)"),
@@ -1648,7 +1666,7 @@ Write-Host "UWP应用清理完成"
                         .small()
                         .color(egui::Color32::GRAY),
                     );
-                    
+
                     // 检查 UefiSeven 文件是否存在
                     let uefiseven_dir = Self::get_uefiseven_dir();
                     if let Some(dir) = &uefiseven_dir {
@@ -1661,7 +1679,7 @@ Write-Host "UWP应用清理完成"
                         }
                     }
                 }
-                
+
                 ui.add_space(15.0);
             }
 
@@ -1770,22 +1788,22 @@ Write-Host "UWP应用清理完成"
 
             ui.checkbox(&mut self.remove_shortcut_arrow, tr!("移除快捷方式小箭头"));
             ui.checkbox(&mut self.restore_classic_context_menu, tr!("Win11恢复经典右键菜单"));
-            
+
             // OOBE绕过强制联网 - 依赖无人值守
             Self::show_unattend_dependent_checkbox(
-                ui, 
-                &mut self.bypass_nro, 
+                ui,
+                &mut self.bypass_nro,
                 "OOBE绕过强制联网",
                 unattend_disabled,
                 "此选项依赖无人值守配置，由于目标分区已存在配置文件而被禁用"
             );
-            
+
             ui.checkbox(&mut self.disable_windows_update, tr!("禁用Windows自动更新"));
             ui.checkbox(&mut self.disable_windows_defender, tr!("禁用Windows安全中心"));
             ui.checkbox(&mut self.disable_reserved_storage, tr!("禁用系统保留空间"));
             ui.checkbox(&mut self.disable_uac, tr!("禁用用户账户控制(UAC)"));
             ui.checkbox(&mut self.disable_device_encryption, tr!("禁用自动设备加密"));
-            
+
             // 删除预装UWP应用 - 依赖无人值守
             Self::show_unattend_dependent_checkbox(
                 ui,
@@ -1925,7 +1943,7 @@ Write-Host "UWP应用清理完成"
                     unattend_disabled,
                     "此选项依赖无人值守配置，由于目标分区已存在配置文件而被禁用"
                 );
-                
+
                 // 只有在启用且非禁用状态时才显示输入框
                 if self.custom_username && !unattend_disabled {
                     ui.text_edit_singleline(&mut self.username);
@@ -1940,7 +1958,7 @@ Write-Host "UWP应用清理完成"
                         }
                     }
                 }
-                
+
                 // 如果因禁用而取消勾选，重置状态
                 if was_enabled && unattend_disabled {
                     self.custom_username = false;
@@ -1993,9 +2011,7 @@ fn extract_primary_token(value: &str) -> Option<String> {
         return None;
     }
     let token = trimmed
-        .split(|c: char| {
-            c.is_whitespace() || matches!(c, '_' | '-' | ',' | ';' | '/' | '\\')
-        })
+        .split(|c: char| c.is_whitespace() || matches!(c, '_' | '-' | ',' | ';' | '/' | '\\'))
         .find(|part| !part.is_empty())?;
     let token = token.trim_matches(|c: char| c.is_ascii_punctuation());
     if token.is_empty() {

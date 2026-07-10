@@ -30,8 +30,8 @@ use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
     IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, PARTITION_STYLE_GPT,
@@ -115,7 +115,8 @@ fn run_diskpart(script: &str) -> Result<String> {
 fn diskpart_ok(text: &str) -> bool {
     let l = text.to_lowercase();
     let ok = l.contains("成功") || l.contains("successfully");
-    let err = l.contains("error") || l.contains("错误") || l.contains("失败") || l.contains("failed");
+    let err =
+        l.contains("error") || l.contains("错误") || l.contains("失败") || l.contains("failed");
     ok && !err
 }
 
@@ -295,13 +296,32 @@ unsafe fn lock_dismount_volume(letter: char) -> Result<HANDLE> {
         bail!("{}", tr!("打开卷 {}: 得到无效句柄", letter));
     }
     let mut returned: u32 = 0;
-    if DeviceIoControl(handle, FSCTL_LOCK_VOLUME, None, 0, None, 0, Some(&mut returned), None).is_err()
+    if DeviceIoControl(
+        handle,
+        FSCTL_LOCK_VOLUME,
+        None,
+        0,
+        None,
+        0,
+        Some(&mut returned),
+        None,
+    )
+    .is_err()
     {
         let _ = CloseHandle(handle);
         bail!("{}", tr!("锁定卷 {}: 失败（可能有句柄占用）", letter));
     }
-    if DeviceIoControl(handle, FSCTL_DISMOUNT_VOLUME, None, 0, None, 0, Some(&mut returned), None)
-        .is_err()
+    if DeviceIoControl(
+        handle,
+        FSCTL_DISMOUNT_VOLUME,
+        None,
+        0,
+        None,
+        0,
+        Some(&mut returned),
+        None,
+    )
+    .is_err()
     {
         let _ = CloseHandle(handle);
         bail!("{}", tr!("卸载卷 {}: 失败", letter));
@@ -414,7 +434,11 @@ fn journal(data_partition: &str, line: &str) {
     let _ = std::fs::create_dir_all(&dir);
     let path = format!("{}\\expand_move.journal", dir);
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{}", line);
     }
 }
@@ -437,15 +461,18 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     }
     let delta = target_bytes - c_len;
 
-    let (style, disk_size, parts) =
-        unsafe { read_disk_layout(disk) }.ok_or_else(|| anyhow!("{}", tr!("读取磁盘 {} 布局失败", disk)))?;
+    let (style, disk_size, parts) = unsafe { read_disk_layout(disk) }
+        .ok_or_else(|| anyhow!("{}", tr!("读取磁盘 {} 布局失败", disk)))?;
     if style == PartitionStyle::Unknown {
         bail!("{}", tr!("磁盘 {} 分区表类型未知，拒绝操作", disk));
     }
 
     // 找到 C 之后紧邻的分区 N（offset 最小且 > c_off）。
     let c_end = c_off + c_len;
-    let next = parts.iter().filter(|p| p.offset >= c_end).min_by_key(|p| p.offset);
+    let next = parts
+        .iter()
+        .filter(|p| p.offset >= c_end)
+        .min_by_key(|p| p.offset);
     let adj_unalloc = match next {
         Some(n) => n.offset.saturating_sub(c_end),
         None => disk_size.saturating_sub(c_end),
@@ -453,17 +480,27 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
 
     // 相邻未分配空间已够 → Case 1。
     if delta <= adj_unalloc {
-        return DiskManager::expand_partition_lossless(letter, target_size_mb).map_err(|e| anyhow!(e));
+        return DiskManager::expand_partition_lossless(letter, target_size_mb)
+            .map_err(|e| anyhow!(e));
     }
 
     // 否则需要移动后方分区（Case 2）。
     let n = next.ok_or_else(|| {
-        anyhow!("{}", tr!("C 盘后方空间不足且无可移动分区（相邻未分配仅 {} MiB）", adj_unalloc / MIB))
+        anyhow!(
+            "{}",
+            tr!(
+                "C 盘后方空间不足且无可移动分区（相邻未分配仅 {} MiB）",
+                adj_unalloc / MIB
+            )
+        )
     })?;
 
     // ===== 防呆校验（任一不满足，安全失败，不触碰磁盘）=====
     if n.is_special {
-        bail!("{}", tr!("C 盘后方分区是系统/ESP/MSR/恢复等特殊分区，为安全起见拒绝移动"));
+        bail!(
+            "{}",
+            tr!("C 盘后方分区是系统/ESP/MSR/恢复等特殊分区，为安全起见拒绝移动")
+        );
     }
     // N 必须紧贴 C（中间最多只有已计入的 adj_unalloc）。
     if n.offset != c_end + adj_unalloc {
@@ -500,7 +537,14 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
         ("N 尾部空闲", free_after_n),
     ] {
         if !aligned(v) {
-            bail!("{}", tr!("几何未按 1 MiB 对齐（{}={} 字节），为保证精确重建拒绝移动", name, v));
+            bail!(
+                "{}",
+                tr!(
+                    "几何未按 1 MiB 对齐（{}={} 字节），为保证精确重建拒绝移动",
+                    name,
+                    v
+                )
+            );
         }
     }
 
@@ -514,28 +558,49 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     );
     log::warn!(
         "[EXPAND-MOVE] 计划：磁盘{} 移动分区#{}({}:) 右移 {} MiB（必要时先 shrink {} MiB），再扩 C",
-        disk, n.number, n_letter, shift / MIB, shrink_by / MIB
+        disk,
+        n.number,
+        n_letter,
+        shift / MIB,
+        shrink_by / MIB
     );
 
     // ===== Step A：必要时 shrink N 文件系统 =====
     let mut n_len_now = n.length;
     if shrink_by > 0 {
-        journal(data_partition, &format!("SHRINK {}: by {} MiB", n_letter, shrink_by / MIB));
-        let script = format!("select volume {}\r\nshrink desired={}\r\n", n_letter, shrink_by / MIB);
+        journal(
+            data_partition,
+            &format!("SHRINK {}: by {} MiB", n_letter, shrink_by / MIB),
+        );
+        let script = format!(
+            "select volume {}\r\nshrink desired={}\r\n",
+            n_letter,
+            shrink_by / MIB
+        );
         let out = run_diskpart(&script)?;
         log::info!("[EXPAND-MOVE] shrink 输出: {}", out);
         if !diskpart_ok(&out) {
-            bail!("{}", tr!("收缩后方分区 {}: 失败，未做任何移动。输出：{}", n_letter, out));
+            bail!(
+                "{}",
+                tr!(
+                    "收缩后方分区 {}: 失败，未做任何移动。输出：{}",
+                    n_letter,
+                    out
+                )
+            );
         }
         // 重新读取布局，确认 N 偏移未变、长度已减小且仍 1 MiB 对齐。
-        let (_s2, _ds2, parts2) =
-            unsafe { read_disk_layout(disk) }.ok_or_else(|| anyhow!("{}", tr!("shrink 后重读磁盘布局失败")))?;
+        let (_s2, _ds2, parts2) = unsafe { read_disk_layout(disk) }
+            .ok_or_else(|| anyhow!("{}", tr!("shrink 后重读磁盘布局失败")))?;
         let n2 = parts2
             .iter()
             .find(|p| p.number == n.number && p.offset == n.offset)
             .ok_or_else(|| anyhow!("{}", tr!("shrink 后未找到原分区，已中止（未移动数据）")))?;
         if !aligned(n2.length) {
-            bail!("{}", tr!("shrink 后分区长度非 1 MiB 对齐，已中止（未移动数据）"));
+            bail!(
+                "{}",
+                tr!("shrink 后分区长度非 1 MiB 对齐，已中止（未移动数据）")
+            );
         }
         n_len_now = n2.length;
         // 再次确认右移后能放下：n.offset+shift+n_len_now <= after_n
@@ -545,7 +610,13 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     }
 
     // ===== Step B：锁定/卸载 N，倒序重叠安全搬移 =====
-    journal(data_partition, &format!("MOVE start n_off={} len={} shift={}", n.offset, n_len_now, shift));
+    journal(
+        data_partition,
+        &format!(
+            "MOVE start n_off={} len={} shift={}",
+            n.offset, n_len_now, shift
+        ),
+    );
     let vol_handle = unsafe { lock_dismount_volume(n_letter) }?;
     let move_res = unsafe { raw_move_right(disk, n.offset, n_len_now, shift) };
     unsafe {
@@ -553,7 +624,14 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     }
     move_res.map_err(|e| {
         journal(data_partition, &format!("MOVE FAILED: {}", e));
-        anyhow!("{}", tr!("搬移分区数据失败（分区 {} 可能已损坏，请用 journal 诊断）：{}", n_letter, e))
+        anyhow!(
+            "{}",
+            tr!(
+                "搬移分区数据失败（分区 {} 可能已损坏，请用 journal 诊断）：{}",
+                n_letter,
+                e
+            )
+        )
     })?;
     journal(data_partition, "MOVE done");
 
@@ -570,7 +648,13 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
         recreate.push_str("set id=07\r\n"); // NTFS/IFS
     }
     recreate.push_str(&format!("assign letter={}\r\n", n_letter));
-    journal(data_partition, &format!("RECREATE off={} size={} letter={}", new_off, n_len_now, n_letter));
+    journal(
+        data_partition,
+        &format!(
+            "RECREATE off={} size={} letter={}",
+            new_off, n_len_now, n_letter
+        ),
+    );
     let out = run_diskpart(&recreate)?;
     log::info!("[EXPAND-MOVE] recreate 输出: {}", out);
     if !diskpart_ok(&out) {
@@ -584,7 +668,13 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     // ===== Step D：把 C extend 到目标 =====
     journal(data_partition, "EXTEND C");
     let msg = DiskManager::expand_partition_lossless(letter, target_size_mb).map_err(|e| {
-        anyhow!("{}", tr!("分区已成功移动，但最后扩展 C 失败：{}（可重试一键扩容，此时已是相邻未分配空间）", e))
+        anyhow!(
+            "{}",
+            tr!(
+                "分区已成功移动，但最后扩展 C 失败：{}（可重试一键扩容，此时已是相邻未分配空间）",
+                e
+            )
+        )
     })?;
     journal(data_partition, "DONE");
     Ok(tr!("已移动后方分区 {} 并{}", n_letter, msg))

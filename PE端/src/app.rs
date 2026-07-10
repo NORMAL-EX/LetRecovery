@@ -8,7 +8,7 @@ use eframe::egui;
 use crate::core::config::{ConfigFileManager, OperationType};
 use crate::core::dism::DismProgress;
 use crate::tr;
-use crate::ui::progress::{InstallStep, BackupStep, ProgressState, ProgressUI};
+use crate::ui::progress::{BackupStep, InstallStep, ProgressState, ProgressUI};
 use crate::utils::reboot_pe;
 
 /// 递归查找目录中的所有 CAB 文件
@@ -99,16 +99,33 @@ impl App {
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
 
         if let Ok(system_root) = std::env::var("SystemRoot") {
-            candidates.push(std::path::Path::new(&system_root).join("Fonts").join("msyh.ttc"));
-            candidates.push(std::path::Path::new(&system_root).join("Fonts").join("msyh.ttf"));
+            candidates.push(
+                std::path::Path::new(&system_root)
+                    .join("Fonts")
+                    .join("msyh.ttc"),
+            );
+            candidates.push(
+                std::path::Path::new(&system_root)
+                    .join("Fonts")
+                    .join("msyh.ttf"),
+            );
         }
         if let Some(drive) = crate::core::system_utils::get_pe_system_drive() {
-            candidates.push(std::path::PathBuf::from(format!("{}\\Windows\\Fonts\\msyh.ttc", drive)));
-            candidates.push(std::path::PathBuf::from(format!("{}\\Windows\\Fonts\\msyh.ttf", drive)));
+            candidates.push(std::path::PathBuf::from(format!(
+                "{}\\Windows\\Fonts\\msyh.ttc",
+                drive
+            )));
+            candidates.push(std::path::PathBuf::from(format!(
+                "{}\\Windows\\Fonts\\msyh.ttf",
+                drive
+            )));
         }
         // 最后兜底：常见 PE/系统盘符
         for d in ["X", "Y", "Z", "W", "C"] {
-            candidates.push(std::path::PathBuf::from(format!("{}:\\Windows\\Fonts\\msyh.ttc", d)));
+            candidates.push(std::path::PathBuf::from(format!(
+                "{}:\\Windows\\Fonts\\msyh.ttc",
+                d
+            )));
         }
 
         let mut loaded = false;
@@ -153,20 +170,18 @@ impl App {
 
         let operation_type = self.operation_type;
 
-        thread::spawn(move || {
-            match operation_type {
-                Some(OperationType::Install) => {
-                    execute_install_workflow(tx);
-                }
-                Some(OperationType::Backup) => {
-                    execute_backup_workflow(tx);
-                }
-                Some(OperationType::Expand) => {
-                    execute_expand_workflow(tx);
-                }
-                None => {
-                    let _ = tx.send(WorkerMessage::Failed(tr!("未检测到安装或备份配置")));
-                }
+        thread::spawn(move || match operation_type {
+            Some(OperationType::Install) => {
+                execute_install_workflow(tx);
+            }
+            Some(OperationType::Backup) => {
+                execute_backup_workflow(tx);
+            }
+            Some(OperationType::Expand) => {
+                execute_expand_workflow(tx);
+            }
+            None => {
+                let _ = tx.send(WorkerMessage::Failed(tr!("未检测到安装或备份配置")));
             }
         });
     }
@@ -227,8 +242,8 @@ impl eframe::App for App {
 /// 执行安装工作流
 fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     use crate::core::bcdedit::BootManager;
-    use crate::core::dism::Dism;
     use crate::core::disk::DiskManager;
+    use crate::core::dism::Dism;
     use crate::core::ghost::Ghost;
     use crate::ui::advanced_options::apply_advanced_options;
 
@@ -245,7 +260,10 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     };
 
     log::info!("数据分区: {}", data_partition);
-    let _ = tx.send(WorkerMessage::SetStatus(tr!("数据分区: {}", data_partition)));
+    let _ = tx.send(WorkerMessage::SetStatus(tr!(
+        "数据分区: {}",
+        data_partition
+    )));
 
     // 切换到正常系统端选定的镜像引擎（随重启传入），使 PE 端使用相同引擎
     lr_core::set_active_engine(lr_core::WimEngine::from_u8(config.wim_engine));
@@ -269,9 +287,9 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     // GHO 不是 WIM，跳过 wimlib 校验。
     if !config.is_gho {
         let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::VerifyImage));
-        let _ = tx.send(WorkerMessage::SetStatus(
-            tr!("正在校验系统镜像完整性（可能需要几分钟）..."),
-        ));
+        let _ = tx.send(WorkerMessage::SetStatus(tr!(
+            "正在校验系统镜像完整性（可能需要几分钟）..."
+        )));
         log::info!("[PE安装] 开始校验镜像: {}", image_path);
 
         let (verify_tx, verify_rx) = channel::<DismProgress>();
@@ -325,7 +343,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     } else {
         Some(config.volume_label.as_str())
     };
-    
+
     match DiskManager::format_partition_with_label(&target_partition, volume_label) {
         Ok(_) => {
             log::info!("分区格式化成功");
@@ -345,7 +363,10 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let apply_dir = format!("{}\\", target_partition);
     log::info!(
         "[PE安装] 开始释放镜像: 文件={} 卷索引={} is_gho={} -> 目标={}",
-        image_path, config.volume_index, config.is_gho, apply_dir
+        image_path,
+        config.volume_index,
+        config.is_gho,
+        apply_dir
     );
 
     // 创建进度通道
@@ -368,11 +389,21 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         }
 
         let partitions = DiskManager::get_partitions().unwrap_or_default();
-        ghost.restore_image_to_letter(&image_path, &target_partition, &partitions, Some(progress_tx))
+        ghost.restore_image_to_letter(
+            &image_path,
+            &target_partition,
+            &partitions,
+            Some(progress_tx),
+        )
     } else {
         // WIM/ESD使用DISM
         let dism = Dism::new();
-        dism.apply_image(&image_path, &apply_dir, config.volume_index, Some(progress_tx))
+        dism.apply_image(
+            &image_path,
+            &apply_dir,
+            config.volume_index,
+            Some(progress_tx),
+        )
     };
 
     // 等待进度监控线程结束
@@ -393,24 +424,31 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     // 0 = 无, 1 = 仅保存（不导入）, 2 = 自动导入
     let driver_path = format!("{}\\drivers", data_dir);
     let driver_path_exists = std::path::Path::new(&driver_path).exists();
-    
+
     if config.should_import_drivers() && driver_path_exists {
         let _ = tx.send(WorkerMessage::SetStatus(tr!("正在导入驱动...")));
 
         // 创建进度通道
         let (driver_progress_tx, driver_progress_rx) = channel::<DismProgress>();
         let tx_driver = tx.clone();
-        
+
         // 启动进度监控线程
         let driver_progress_handle = thread::spawn(move || {
             while let Ok(progress) = driver_progress_rx.recv() {
                 let _ = tx_driver.send(WorkerMessage::SetProgress(progress.percentage));
-                let _ = tx_driver.send(WorkerMessage::SetStatus(tr!("导入驱动: {}", progress.status)));
+                let _ = tx_driver.send(WorkerMessage::SetStatus(tr!(
+                    "导入驱动: {}",
+                    progress.status
+                )));
             }
         });
-        
+
         let dism = Dism::new();
-        match dism.add_drivers_offline_with_progress(&apply_dir, &driver_path, Some(driver_progress_tx)) {
+        match dism.add_drivers_offline_with_progress(
+            &apply_dir,
+            &driver_path,
+            Some(driver_progress_tx),
+        ) {
             Ok(_) => {
                 log::info!("驱动导入成功");
             }
@@ -419,33 +457,43 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
                 // 不中断安装流程，继续执行
             }
         }
-        
+
         // 等待进度监控线程结束
         let _ = driver_progress_handle.join();
-        
+
         // 同时检查驱动目录中是否有 CAB 文件并安装
         let cab_files_in_driver_dir = find_cab_files_in_directory(&driver_path);
         if !cab_files_in_driver_dir.is_empty() {
-            log::info!("在驱动目录中发现 {} 个 CAB 文件，将一并安装", cab_files_in_driver_dir.len());
+            log::info!(
+                "在驱动目录中发现 {} 个 CAB 文件，将一并安装",
+                cab_files_in_driver_dir.len()
+            );
             let _ = tx.send(WorkerMessage::SetStatus(tr!(
                 "正在安装驱动目录中的 {} 个 CAB 更新包...",
                 cab_files_in_driver_dir.len()
             )));
-            
+
             // 创建进度通道
             let (cab_progress_tx, cab_progress_rx) = channel::<DismProgress>();
             let tx_cab = tx.clone();
-            
+
             // 启动进度监控线程
             let cab_progress_handle = thread::spawn(move || {
                 while let Ok(progress) = cab_progress_rx.recv() {
                     let _ = tx_cab.send(WorkerMessage::SetProgress(progress.percentage));
-                    let _ = tx_cab.send(WorkerMessage::SetStatus(tr!("安装CAB: {}", progress.status)));
+                    let _ = tx_cab.send(WorkerMessage::SetStatus(tr!(
+                        "安装CAB: {}",
+                        progress.status
+                    )));
                 }
             });
-            
+
             let dism = Dism::new();
-            match dism.add_packages_offline_from_dir(&apply_dir, &driver_path, Some(cab_progress_tx)) {
+            match dism.add_packages_offline_from_dir(
+                &apply_dir,
+                &driver_path,
+                Some(cab_progress_tx),
+            ) {
                 Ok((success, fail)) => {
                     log::info!("驱动目录中的CAB安装完成: {} 成功, {} 失败", success, fail);
                 }
@@ -453,7 +501,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
                     log::warn!("驱动目录中的CAB安装失败: {}", e);
                 }
             }
-            
+
             let _ = cab_progress_handle.join();
         }
     } else if config.should_import_drivers() && !driver_path_exists {
@@ -470,44 +518,53 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     // Step 4: 安装CAB更新包
-    let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::InstallCabPackages));
+    let _ = tx.send(WorkerMessage::SetInstallStep(
+        InstallStep::InstallCabPackages,
+    ));
 
     if config.install_cab_packages {
         let cab_path = format!("{}\\updates", data_dir);
         if std::path::Path::new(&cab_path).exists() {
             let _ = tx.send(WorkerMessage::SetStatus(tr!("正在安装更新包...")));
-            
+
             // 创建进度通道
             let (cab_progress_tx, cab_progress_rx) = channel::<DismProgress>();
             let tx_cab = tx.clone();
-            
+
             // 启动进度监控线程
             let cab_progress_handle = thread::spawn(move || {
                 while let Ok(progress) = cab_progress_rx.recv() {
                     let _ = tx_cab.send(WorkerMessage::SetProgress(progress.percentage));
-                    let _ = tx_cab.send(WorkerMessage::SetStatus(tr!("安装更新: {}", progress.status)));
+                    let _ = tx_cab.send(WorkerMessage::SetStatus(tr!(
+                        "安装更新: {}",
+                        progress.status
+                    )));
                 }
             });
-            
+
             let dism = Dism::new();
             match dism.add_packages_offline_from_dir(&apply_dir, &cab_path, Some(cab_progress_tx)) {
                 Ok((success, fail)) => {
                     log::info!("CAB更新包安装完成: {} 成功, {} 失败", success, fail);
-                    let _ = tx.send(WorkerMessage::SetStatus(
-                        tr!("更新包安装完成: {} 成功, {} 失败", success, fail)
-                    ));
+                    let _ = tx.send(WorkerMessage::SetStatus(tr!(
+                        "更新包安装完成: {} 成功, {} 失败",
+                        success,
+                        fail
+                    )));
                 }
                 Err(e) => {
                     log::warn!("CAB更新包安装失败: {}", e);
                     // 不中断安装流程，继续执行
                 }
             }
-            
+
             // 等待进度监控线程结束
             let _ = cab_progress_handle.join();
         } else {
             log::info!("更新包目录不存在，跳过CAB安装: {}", cab_path);
-            let _ = tx.send(WorkerMessage::SetStatus(tr!("跳过更新包安装（目录不存在）")));
+            let _ = tx.send(WorkerMessage::SetStatus(tr!(
+                "跳过更新包安装（目录不存在）"
+            )));
         }
     } else {
         let _ = tx.send(WorkerMessage::SetStatus(tr!("跳过更新包安装")));
@@ -520,8 +577,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在修复引导...")));
 
     let boot_manager = BootManager::new();
-    let use_uefi =
-        DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition);
+    let use_uefi = DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition);
 
     // XP/2003 写 ntldr 引导；其余走 bcdboot。
     // XP 判定：配置已标记 或 释放后的系统缺少 \Windows\Boot（该目录仅 Vista+ 才有）。
@@ -536,9 +592,9 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     log::warn!("[PE安装] XP UEFI 引导失败({})，回退 Legacy(ntldr)", e);
-                    let _ = tx.send(WorkerMessage::SetStatus(
-                        tr!("XP UEFI 引导不可用，回退 Legacy 引导..."),
-                    ));
+                    let _ = tx.send(WorkerMessage::SetStatus(tr!(
+                        "XP UEFI 引导不可用，回退 Legacy 引导..."
+                    )));
                     boot_manager.write_xp_boot(&target_partition)
                 }
             }
@@ -556,7 +612,9 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     // Step 6: 应用高级选项
-    let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::ApplyAdvancedOptions));
+    let _ = tx.send(WorkerMessage::SetInstallStep(
+        InstallStep::ApplyAdvancedOptions,
+    ));
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在应用高级选项...")));
 
     if let Err(e) = apply_advanced_options(&target_partition, &config) {
@@ -572,7 +630,9 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     if config.unattended {
         if !config.custom_unattend_file.is_empty() {
             // 用户提供了自定义无人值守文件：直接复制到目标系统（不再内置生成）
-            let _ = tx.send(WorkerMessage::SetStatus(tr!("正在应用自定义无人值守配置...")));
+            let _ = tx.send(WorkerMessage::SetStatus(tr!(
+                "正在应用自定义无人值守配置..."
+            )));
             let src = format!("{}\\{}", data_dir, config.custom_unattend_file);
             match apply_custom_unattend(&target_partition, &src) {
                 Ok(_) => log::info!("[UNATTEND] 已应用自定义无人值守文件: {}", src),
@@ -590,7 +650,9 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     // 离线登录兜底：放开空密码登录策略 +（已知用户名时）配置空密码自动登录。
     // 解决整盘备份/未 sysprep 镜像下 unattend 不生效、登录界面退化为"其他用户"的问题。
-    if let Err(e) = crate::core::account_fix::ensure_offline_login(&target_partition, &config.custom_username) {
+    if let Err(e) =
+        crate::core::account_fix::ensure_offline_login(&target_partition, &config.custom_username)
+    {
         log::warn!("离线登录兜底设置失败（不影响安装）: {}", e);
     } else {
         log::info!("[LOGIN] 已应用离线登录兜底设置");
@@ -655,14 +717,23 @@ fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
     // 用扩容标记定位目标分区（盘符在 PE 下可能与正常系统不同，不能直接用配置里的盘符）。
     let target_partition = ConfigFileManager::find_expand_marker_partition()
         .unwrap_or_else(|| config.target_partition.clone());
-    let letter = target_partition.trim_end_matches(':').chars().next().unwrap_or('C');
+    let letter = target_partition
+        .trim_end_matches(':')
+        .chars()
+        .next()
+        .unwrap_or('C');
 
     let _ = tx.send(WorkerMessage::SetStatus(tr!(
         "正在无损扩大分区 {}: （目标 {} MB，0=最大）...",
-        letter, config.target_size_mb
+        letter,
+        config.target_size_mb
     )));
     let _ = tx.send(WorkerMessage::SetProgress(30));
-    log::info!("[EXPAND] 目标分区: {}:，目标大小: {} MB", letter, config.target_size_mb);
+    log::info!(
+        "[EXPAND] 目标分区: {}:，目标大小: {} MB",
+        letter,
+        config.target_size_mb
+    );
 
     // 优先 Case 1（并入相邻未分配空间）；不足时 Case 2（移动后方基础数据分区）。
     match crate::core::expand_move::expand_c_drive(letter, config.target_size_mb, &data_partition) {
@@ -754,7 +825,7 @@ fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
 
     // Step 2: 执行备份
     let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::CaptureImage));
-    
+
     let capture_dir = format!("{}\\", source_partition);
 
     // 创建进度通道
@@ -777,13 +848,15 @@ fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
                 let _ = tx.send(WorkerMessage::Failed(tr!("Ghost工具不可用")));
                 return;
             }
-            
+
             // Ghost备份
             ghost.create_image_from_letter(&source_partition, &config.save_path, Some(progress_tx))
         }
         BackupFormat::Esd => {
             // ESD格式使用DISM高压缩
-            let _ = tx.send(WorkerMessage::SetStatus(tr!("正在备份系统（ESD高压缩）...")));
+            let _ = tx.send(WorkerMessage::SetStatus(tr!(
+                "正在备份系统（ESD高压缩）..."
+            )));
             let dism = Dism::new();
             if config.incremental && std::path::Path::new(&config.save_path).exists() {
                 dism.append_image_esd(
@@ -805,7 +878,10 @@ fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
         }
         BackupFormat::Swm => {
             // SWM分卷格式
-            let _ = tx.send(WorkerMessage::SetStatus(tr!("正在备份系统（SWM分卷，每卷{}MB）...", config.swm_split_size)));
+            let _ = tx.send(WorkerMessage::SetStatus(tr!(
+                "正在备份系统（SWM分卷，每卷{}MB）...",
+                config.swm_split_size
+            )));
             let dism = Dism::new();
             dism.capture_image_swm(
                 &config.save_path,
@@ -860,7 +936,7 @@ fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
     } else {
         config.save_path.clone()
     };
-    
+
     if !std::path::Path::new(&verify_path).exists() {
         let _ = tx.send(WorkerMessage::Failed(tr!("备份文件验证失败")));
         return;
@@ -898,13 +974,13 @@ fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
 }
 
 /// 生成无人值守XML
-/// 
+///
 /// 包含完整的无人值守配置，并根据目标系统版本自动适配：
 /// - Windows 10/11: 完整的 OOBE 跳过设置
 /// - Windows 7/8/8.1: 兼容的简化配置
-/// 
+///
 /// 同时自动检测目标系统架构（x86/amd64/arm64）
-/// 
+///
 /// 配置内容包括：
 /// - windowsPE pass: 基本设置
 /// - specialize pass: 部署脚本执行
@@ -925,15 +1001,18 @@ fn apply_custom_unattend(target_partition: &str, src: &str) -> anyhow::Result<()
     Ok(())
 }
 
-fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::InstallConfig) -> anyhow::Result<()> {
-    use crate::ui::advanced_options::get_scripts_dir_name;
+fn generate_unattend_xml(
+    target_partition: &str,
+    config: &crate::core::config::InstallConfig,
+) -> anyhow::Result<()> {
     use crate::core::system_utils::{get_file_version, get_offline_system_architecture};
+    use crate::ui::advanced_options::get_scripts_dir_name;
     use std::path::Path;
-    
-    let username = if config.custom_username.is_empty() { 
-        "User".to_string() 
-    } else { 
-        config.custom_username.clone() 
+
+    let username = if config.custom_username.is_empty() {
+        "User".to_string()
+    } else {
+        config.custom_username.clone()
     };
 
     let scripts_dir = get_scripts_dir_name();
@@ -945,17 +1024,28 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
 
     // 通过 ntdll.dll 文件版本检测目标系统版本
     // Windows 7: 6.1.x, Windows 8: 6.2.x, Windows 8.1: 6.3.x, Windows 10/11: 10.0.x
-    let ntdll_path = Path::new(target_partition).join("Windows").join("System32").join("ntdll.dll");
+    let ntdll_path = Path::new(target_partition)
+        .join("Windows")
+        .join("System32")
+        .join("ntdll.dll");
     let (is_win7, is_win8) = match get_file_version(&ntdll_path) {
         Some((major, minor, build, _)) => {
-            log::info!("[UNATTEND] 检测到目标系统版本 (ntdll.dll): {}.{}.{}", major, minor, build);
-            
+            log::info!(
+                "[UNATTEND] 检测到目标系统版本 (ntdll.dll): {}.{}.{}",
+                major,
+                minor,
+                build
+            );
+
             let is_win7 = major == 6 && minor == 1;
             let is_win8 = major == 6 && (minor == 2 || minor == 3);
             (is_win7, is_win8)
         }
         None => {
-            log::warn!("[UNATTEND] 无法读取 ntdll.dll 版本: {:?}, 默认使用 Win10/11 配置", ntdll_path);
+            log::warn!(
+                "[UNATTEND] 无法读取 ntdll.dll 版本: {:?}, 默认使用 Win10/11 配置",
+                ntdll_path
+            );
             (false, false)
         }
     };
@@ -985,12 +1075,15 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
     }
 
     // 清理脚本目录（最后执行）
-    first_logon_commands.push_str(&format!(r#"
+    first_logon_commands.push_str(&format!(
+        r#"
                 <SynchronousCommand wcm:action="add">
                     <Order>{}</Order>
                     <CommandLine>cmd /c rd /s /q %SystemDrive%\{}</CommandLine>
                     <Description>Cleanup scripts directory</Description>
-                </SynchronousCommand>"#, order, scripts_dir));
+                </SynchronousCommand>"#,
+        order, scripts_dir
+    ));
 
     // 根据系统版本生成不同的 XML 内容
     let xml_content = if is_win7 {
@@ -1011,8 +1104,17 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
 
     let unattend_path = format!("{}\\unattend.xml", panther_dir);
     std::fs::write(&unattend_path, &xml_content)?;
-    log::info!("[UNATTEND] 已写入: {} ({})", unattend_path, 
-        if is_win7 { "Win7配置" } else if is_win8 { "Win8配置" } else { "Win10/11配置" });
+    log::info!(
+        "[UNATTEND] 已写入: {} ({})",
+        unattend_path,
+        if is_win7 {
+            "Win7配置"
+        } else if is_win8 {
+            "Win8配置"
+        } else {
+            "Win10/11配置"
+        }
+    );
 
     // 同时写入到 Sysprep 目录
     let sysprep_dir = format!("{}\\Windows\\System32\\Sysprep", target_partition);
@@ -1026,17 +1128,23 @@ fn generate_unattend_xml(target_partition: &str, config: &crate::core::config::I
 }
 
 /// 生成 Windows 7 专用的无人值守配置
-/// 
+///
 /// Win7 的 OOBE 配置与 Win10/11 有显著差异：
 /// - 不支持 HideOnlineAccountScreens
-/// - 不支持 HideWirelessSetupInOOBE  
+/// - 不支持 HideWirelessSetupInOOBE
 /// - 不支持 SkipMachineOOBE / SkipUserOOBE
 /// - 不支持 HideLocalAccountScreen
 /// - 不支持 HideOEMRegistrationScreen（家庭版不支持）
 /// - 需要设置 NetworkLocation 来跳过网络位置选择
-fn generate_win7_unattend_xml(username: &str, scripts_dir: &str, first_logon_commands: &str, arch: &str) -> String {
+fn generate_win7_unattend_xml(
+    username: &str,
+    scripts_dir: &str,
+    first_logon_commands: &str,
+    arch: &str,
+) -> String {
     // Win7 使用最小化的OOBE配置以确保兼容所有版本（包括家庭版）
-    format!(r#"<?xml version="1.0" encoding="utf-8"?>
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
         <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -1096,18 +1204,29 @@ fn generate_win7_unattend_xml(username: &str, scripts_dir: &str, first_logon_com
             </FirstLogonCommands>
         </component>
     </settings>
-</unattend>"#, arch = arch, scripts_dir = scripts_dir, username = username, first_logon_commands = first_logon_commands)
+</unattend>"#,
+        arch = arch,
+        scripts_dir = scripts_dir,
+        username = username,
+        first_logon_commands = first_logon_commands
+    )
 }
 
 /// 生成 Windows 8/8.1 专用的无人值守配置
-/// 
+///
 /// Win8/8.1 支持部分 Win10 的选项：
 /// - 支持 HideLocalAccountScreen
 /// - 不支持 HideOnlineAccountScreens
 /// - 不支持 HideWirelessSetupInOOBE
 /// - 不支持 SkipMachineOOBE / SkipUserOOBE
-fn generate_win8_unattend_xml(username: &str, scripts_dir: &str, first_logon_commands: &str, arch: &str) -> String {
-    format!(r#"<?xml version="1.0" encoding="utf-8"?>
+fn generate_win8_unattend_xml(
+    username: &str,
+    scripts_dir: &str,
+    first_logon_commands: &str,
+    arch: &str,
+) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
         <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -1168,19 +1287,30 @@ fn generate_win8_unattend_xml(username: &str, scripts_dir: &str, first_logon_com
             </FirstLogonCommands>
         </component>
     </settings>
-</unattend>"#, arch = arch, scripts_dir = scripts_dir, username = username, first_logon_commands = first_logon_commands)
+</unattend>"#,
+        arch = arch,
+        scripts_dir = scripts_dir,
+        username = username,
+        first_logon_commands = first_logon_commands
+    )
 }
 
 /// 生成 Windows 10/11 无人值守配置
-/// 
+///
 /// 通过预置 LocalAccount + 以下 OOBE 选项跳过账户/隐私等屏幕：
 /// - HideLocalAccountScreen
 /// - HideOnlineAccountScreens
 /// - HideWirelessSetupInOOBE
 ///
 /// 注：SkipMachineOOBE / SkipUserOOBE 已被微软弃用且在 Win11 上不可靠，故不再使用。
-fn generate_win10_unattend_xml(username: &str, scripts_dir: &str, first_logon_commands: &str, arch: &str) -> String {
-    format!(r#"<?xml version="1.0" encoding="utf-8"?>
+fn generate_win10_unattend_xml(
+    username: &str,
+    scripts_dir: &str,
+    first_logon_commands: &str,
+    arch: &str,
+) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
         <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -1242,5 +1372,10 @@ fn generate_win10_unattend_xml(username: &str, scripts_dir: &str, first_logon_co
             </FirstLogonCommands>
         </component>
     </settings>
-</unattend>"#, arch = arch, scripts_dir = scripts_dir, username = username, first_logon_commands = first_logon_commands)
+</unattend>"#,
+        arch = arch,
+        scripts_dir = scripts_dir,
+        username = username,
+        first_logon_commands = first_logon_commands
+    )
 }

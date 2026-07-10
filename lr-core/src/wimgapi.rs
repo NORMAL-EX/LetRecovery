@@ -46,8 +46,13 @@ const WIM_MSG_SUCCESS: u32 = 0;
 /// WIMRegisterMessageCallback 失败返回值
 const INVALID_CALLBACK_VALUE: u32 = 0xFFFF_FFFF;
 
+// Keep the SDK spellings in this FFI adapter so signatures can be audited
+// directly against wimgapi.h.
+#[allow(clippy::upper_case_acronyms)]
 type HANDLE = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type DWORD = u32;
+#[allow(clippy::upper_case_acronyms)]
 type BOOL = i32;
 
 // 回调：DWORD WINAPI (DWORD msg, WPARAM, LPARAM, PVOID)
@@ -72,7 +77,10 @@ type FnWIMUnregisterMessageCallback =
     unsafe extern "system" fn(HANDLE, Option<WimMsgCallback>) -> DWORD;
 
 fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// 取最近一次 Win32 错误并拼成中文描述。
@@ -158,8 +166,11 @@ impl WimgapiManager {
         let get_image_count = load_sym!(lib, b"WIMGetImageCount\0", FnWIMGetImageCount);
         let set_image_information =
             load_sym!(lib, b"WIMSetImageInformation\0", FnWIMSetImageInformation);
-        let register_cb =
-            load_sym!(lib, b"WIMRegisterMessageCallback\0", FnWIMRegisterMessageCallback);
+        let register_cb = load_sym!(
+            lib,
+            b"WIMRegisterMessageCallback\0",
+            FnWIMRegisterMessageCallback
+        );
         let unregister_cb = load_sym!(
             lib,
             b"WIMUnregisterMessageCallback\0",
@@ -213,7 +224,7 @@ impl WimgapiManager {
             return Err(last_err("WIMCreateFile（读取）失败"));
         }
 
-        let result = (|| {
+        let result = {
             self.set_temp_to_env(h_wim);
 
             let mut ctx = Box::new(ProgressCtx {
@@ -249,7 +260,7 @@ impl WimgapiManager {
             }
             drop(ctx);
             res
-        })();
+        };
 
         unsafe { (self.close_handle)(h_wim) };
         result
@@ -288,7 +299,7 @@ impl WimgapiManager {
             return Err(last_err("WIMCreateFile（写入）失败"));
         }
 
-        let result = (|| {
+        let result = {
             self.set_temp_to_env(h_wim);
 
             let mut ctx = Box::new(ProgressCtx {
@@ -324,7 +335,7 @@ impl WimgapiManager {
             }
             drop(ctx);
             res
-        })();
+        };
 
         unsafe { (self.close_handle)(h_wim) };
         result
@@ -333,7 +344,9 @@ impl WimgapiManager {
     /// 通过 WIMSetImageInformation 写入镜像 NAME/DESCRIPTION（UTF-16 + BOM 的 XML）。
     fn set_image_info(&self, h_img: HANDLE, name: &str, description: &str) -> Result<(), String> {
         fn esc(s: &str) -> String {
-            s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
         }
         let xml = format!(
             "<IMAGE><NAME>{}</NAME><DESCRIPTION>{}</DESCRIPTION></IMAGE>",

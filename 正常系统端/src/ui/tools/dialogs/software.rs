@@ -1,7 +1,7 @@
-use egui;
-use crate::tr;
+use super::super::software::{get_installed_software, save_software_list_to_file, truncate_string};
 use crate::app::App;
-use super::super::software::{truncate_string, save_software_list_to_file, get_installed_software};
+use crate::tr;
+use egui;
 
 impl App {
     /// 渲染软件列表对话框
@@ -12,7 +12,7 @@ impl App {
 
         let mut should_close = false;
         let mut save_path: Option<std::path::PathBuf> = None;
-        
+
         // 克隆数据避免借用冲突
         let software_list_clone = self.software_list.clone();
         let is_loading = self.software_list_loading;

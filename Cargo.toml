@@ -2,6 +2,11 @@
 resolver = "2"
 members = ["lr-core", "PE端", "正常系统端"]
 
+[workspace.package]
+rust-version = "1.88"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/NORMAL-EX/LetRecovery"
+
 # 工作区统一的 release 配置（成员包内的 [profile.*] 在工作区中会被忽略）
 [profile.release]
 opt-level = "z"

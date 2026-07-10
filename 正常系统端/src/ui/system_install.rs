@@ -34,7 +34,7 @@ impl App {
             .show(ui, |ui| {
         let is_pe = self.is_pe_environment();
         self.update_boot_pca_detection();
-        
+
         // 显示小白模式提示（非PE环境下，且未关闭提示）
         if !is_pe && !self.app_config.easy_mode_tip_dismissed {
             ui.horizontal(|ui| {
@@ -50,16 +50,16 @@ impl App {
             });
             ui.add_space(10.0);
         }
-        
+
         // 判断是否需要通过PE安装
         let needs_pe = self.check_if_needs_pe_for_install();
-        
+
         // 检查PE配置是否可用（仅在需要PE时检查）
         let pe_available = self.is_pe_config_available();
-        
+
         // 在非PE环境且目标是系统分区时，需要显示PE选择
         let show_pe_selector = !is_pe && needs_pe;
-        
+
         // 安装按钮是否可用
         let install_blocked = show_pe_selector && !pe_available;
 
@@ -123,7 +123,7 @@ impl App {
                 .enumerate()
                 .filter(|(_, vol)| Self::is_installable_image(vol))
                 .collect();
-            
+
             // 如果过滤后没有可安装的版本，使用原始列表并选择最后一项
             let (volumes_to_show, use_original): (Vec<(usize, &ImageInfo)>, bool) = if installable_volumes.is_empty() {
                 // 过滤后无结果，显示原始列表
@@ -135,7 +135,7 @@ impl App {
             } else {
                 (installable_volumes, false)
             };
-            
+
             if volumes_to_show.is_empty() {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 165, 0),
@@ -150,7 +150,7 @@ impl App {
                     // 使用过滤列表时，默认选择第一项
                     volumes_to_show.first().map(|(i, _)| *i)
                 };
-                
+
                 // 如果显示的是原始列表，显示提示
                 if use_original {
                     ui.colored_label(
@@ -158,7 +158,7 @@ impl App {
                         tr!("未检测到标准系统镜像，显示所有分卷"),
                     );
                 }
-                
+
                 ui.horizontal(|ui| {
                     ui.label(tr!("系统版本:"));
                     egui::ComboBox::from_id_salt("volume_select")
@@ -178,18 +178,18 @@ impl App {
                             }
                         });
                 });
-                
+
                 // 如果当前没有选中有效项，或选中的不在显示列表中，自动选择默认项
                 let current_valid = self.selected_volume
                     .map(|idx| volumes_to_show.iter().any(|(i, _)| *i == idx))
                     .unwrap_or(false);
-                
+
                 if !current_valid {
                     self.selected_volume = default_index;
                 }
             }
         }
-        
+
         // 选择 Win10/11 镜像后，自动默认勾选磁盘控制器驱动
         self.update_storage_controller_driver_default();
 
@@ -246,12 +246,12 @@ impl App {
                             ui.label(Self::format_size(partition.free_size_mb));
                             ui.label(&partition.label);
                             ui.label(format!("{}", partition.partition_style));
-                            
+
                             // 显示 BitLocker 状态
                             let status_color = match partition.bitlocker_status {
                                 crate::core::bitlocker::VolumeStatus::EncryptedLocked => egui::Color32::RED,
                                 crate::core::bitlocker::VolumeStatus::EncryptedUnlocked => egui::Color32::from_rgb(102, 187, 106),
-                                crate::core::bitlocker::VolumeStatus::Encrypting | 
+                                crate::core::bitlocker::VolumeStatus::Encrypting |
                                 crate::core::bitlocker::VolumeStatus::Decrypting => egui::Color32::YELLOW,
                                 _ => ui.visuals().text_color(),
                             };
@@ -263,7 +263,7 @@ impl App {
                                 tr!("空闲")
                             };
                             ui.label(status);
-                            
+
                             ui.end_row();
                         }
                     });
@@ -276,7 +276,7 @@ impl App {
             // 触发无人值守检测
             self.start_unattend_check_for_partition(i);
         }
-        
+
         // 检查无人值守检测状态
         self.check_unattend_status();
 
@@ -287,7 +287,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.format_partition, tr!("格式化分区"));
             ui.checkbox(&mut self.repair_boot, tr!("添加引导"));
-            
+
             // 无人值守选项 - 根据检测结果处理
             // 如果勾选了格式化分区，则无人值守不受限制（因为格式化会清除现有配置）
             let unattend_disabled = self.partition_has_unattend && !self.format_partition;
@@ -298,12 +298,12 @@ impl App {
             } else {
                 tr!("启用无人值守安装")
             };
-            
+
             if unattend_disabled {
                 // 显示禁用状态的复选框
                 let response = ui.add_enabled(false, egui::Checkbox::new(&mut false, tr!("无人值守")))
                     .on_disabled_hover_text(unattend_tooltip);
-                
+
                 // 如果用户点击了禁用的复选框，显示提示对话框
                 if response.clicked() {
                     self.show_unattend_conflict_modal = true;
@@ -312,7 +312,7 @@ impl App {
                 ui.checkbox(&mut self.unattended_install, tr!("无人值守"))
                     .on_hover_text(unattend_tooltip);
             }
-            
+
             // 驱动操作下拉框
             ui.label(tr!("驱动:"));
             egui::ComboBox::from_id_salt("driver_action_select")
@@ -910,10 +910,9 @@ impl App {
             return None;
         }
         if let Some(error) = self.boot_pca_detection_error.as_ref() {
-            let diskpart_may_create_esp =
-                self.app_config.enable_advanced_options
-                    && self.run_diskpart_scripts
-                    && self.boot_pca_firmware.is_some();
+            let diskpart_may_create_esp = self.app_config.enable_advanced_options
+                && self.run_diskpart_scripts
+                && self.boot_pca_firmware.is_some();
             if !diskpart_may_create_esp {
                 return Some(tr!("目标系统所在磁盘没有可用的 ESP: {}", error));
             }
@@ -1821,6 +1820,7 @@ impl App {
                     self.pending_download_url = Some(pe.download_url.clone());
                     self.pending_download_filename = Some(pe.filename.clone());
                     self.pending_pe_md5 = pe.md5.clone();
+                    self.pending_pe_sha256 = pe.sha256.clone();
                     let pe_dir = crate::utils::path::get_pe_dir()
                         .to_string_lossy()
                         .to_string();

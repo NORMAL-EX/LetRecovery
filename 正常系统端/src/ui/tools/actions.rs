@@ -2,9 +2,9 @@
 //!
 //! 提供各种工具的启动和操作功能
 
-use std::process::Command;
-use crate::utils::path::{get_bin_dir, get_tools_dir};
 use crate::tr;
+use crate::utils::path::{get_bin_dir, get_tools_dir};
+use std::process::Command;
 
 /// 启动指定工具
 pub fn launch_tool(tool_name: &str) -> Result<(), String> {
@@ -60,21 +60,23 @@ pub fn launch_space_sniffer() -> Result<(), String> {
 /// 修复引导
 pub fn repair_boot(target_partition: &str) -> Result<(), String> {
     let boot_manager = crate::core::bcdedit::BootManager::new();
-    boot_manager.repair_boot(target_partition)
+    boot_manager
+        .repair_boot(target_partition)
         .map_err(|e| e.to_string())
 }
 
 /// 导出当前系统驱动
 pub fn export_drivers(export_dir: &str) -> Result<(), String> {
     let dism = crate::core::dism::Dism::new();
-    dism.export_drivers(export_dir)
-        .map_err(|e| e.to_string())
+    dism.export_drivers(export_dir).map_err(|e| e.to_string())
 }
 
 /// 从指定分区导出驱动
-pub fn export_drivers_from_partition(source_partition: &str, export_dir: &str) -> Result<(), String> {
+pub fn export_drivers_from_partition(
+    source_partition: &str,
+    export_dir: &str,
+) -> Result<(), String> {
     let dism = crate::core::dism::Dism::new();
     dism.export_drivers_from_system(source_partition, export_dir)
         .map_err(|e| e.to_string())
 }
-

@@ -120,13 +120,21 @@ fn load_language_internal(manager: &mut I18nManager, language_code: &str) {
                 );
             }
             Err(e) => {
-                log::warn!("解析语言文件失败: {} - {}，使用简体中文", lang_file.display(), e);
+                log::warn!(
+                    "解析语言文件失败: {} - {}，使用简体中文",
+                    lang_file.display(),
+                    e
+                );
                 manager.current_language = String::from("zh-CN");
                 manager.translations.clear();
             }
         },
         Err(e) => {
-            log::warn!("读取语言文件失败: {} - {}，使用简体中文", lang_file.display(), e);
+            log::warn!(
+                "读取语言文件失败: {} - {}，使用简体中文",
+                lang_file.display(),
+                e
+            );
             manager.current_language = String::from("zh-CN");
             manager.translations.clear();
         }
@@ -372,6 +380,9 @@ mod tests {
     fn test_tr_macro_with_args() {
         init("zh-CN");
         assert_eq!(tr!("欢迎使用 {}", "LetRecovery"), "欢迎使用 LetRecovery");
-        assert_eq!(tr!("已用 {} GB", format!("{:.1}", 12.34_f64)), "已用 12.3 GB");
+        assert_eq!(
+            tr!("已用 {} GB", format!("{:.1}", 12.34_f64)),
+            "已用 12.3 GB"
+        );
     }
 }

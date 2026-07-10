@@ -147,7 +147,11 @@ pub fn list_accounts(target_partition: &str) -> Result<Vec<SamAccount>> {
                 .and_then(|f| f.get(0x38..0x3a).map(|s| u16::from_le_bytes([s[0], s[1]])))
                 .map(|flags| flags & 0x0001 != 0)
                 .unwrap_or(false);
-            accounts.push(SamAccount { username: name, rid, disabled });
+            accounts.push(SamAccount {
+                username: name,
+                rid,
+                disabled,
+            });
         }
         Ok(accounts)
     })();
@@ -196,7 +200,17 @@ fn reg_read_binary(key: &str, value: &str) -> Result<Vec<u8>> {
 fn reg_write_binary(key: &str, value: &str, data: &[u8]) -> Result<()> {
     let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
     let out = new_command("reg.exe")
-        .args(["add", key, "/v", value, "/t", "REG_BINARY", "/d", &hex, "/f"])
+        .args([
+            "add",
+            key,
+            "/v",
+            value,
+            "/t",
+            "REG_BINARY",
+            "/d",
+            &hex,
+            "/f",
+        ])
         .output()?;
     if !out.status.success() {
         anyhow::bail!("reg add 失败: {}", gbk_to_utf8(&out.stderr));
@@ -206,7 +220,7 @@ fn reg_write_binary(key: &str, value: &str, data: &[u8]) -> Result<()> {
 
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
     let hex: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         anyhow::bail!("十六进制长度异常");
     }
     let val = |c: u8| (c as char).to_digit(16).unwrap() as u8;
@@ -283,7 +297,10 @@ mod tests {
 
     /// 合成一个最小可解析的 SAM "V" 结构。
     fn build_v(username: &str, uoff: u32, lm_len: u32, nt_len: u32) -> Vec<u8> {
-        let uname: Vec<u8> = username.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let uname: Vec<u8> = username
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
         let data_start = 0xcc + uoff as usize;
         let mut v = vec![0u8; data_start + uname.len()];
         v[0x0c..0x10].copy_from_slice(&uoff.to_le_bytes());
@@ -302,8 +319,14 @@ mod tests {
 
     #[test]
     fn hex_to_bytes_works() {
-        assert_eq!(hex_to_bytes("dEadBeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(hex_to_bytes("de ad\tbe ef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            hex_to_bytes("dEadBeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+        assert_eq!(
+            hex_to_bytes("de ad\tbe ef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
         assert!(hex_to_bytes("abc").is_err());
         assert_eq!(hex_to_bytes("").unwrap(), Vec::<u8>::new());
     }
@@ -321,7 +344,10 @@ mod tests {
             parse_v_username(&build_v("Administrator", 0, 16, 16)).as_deref(),
             Some("Administrator")
         );
-        assert_eq!(parse_v_username(&build_v("用户A", 8, 16, 16)).as_deref(), Some("用户A"));
+        assert_eq!(
+            parse_v_username(&build_v("用户A", 8, 16, 16)).as_deref(),
+            Some("用户A")
+        );
     }
 
     #[test]
@@ -346,7 +372,7 @@ mod tests {
     fn blank_v_password_noop_cases() {
         let mut v = build_v("u", 0, 0, 0);
         assert!(!blank_v_password(&mut v));
-        assert!(!blank_v_password(&mut vec![0u8; 0x80]));
+        assert!(!blank_v_password(&mut [0u8; 0x80]));
     }
 
     #[test]

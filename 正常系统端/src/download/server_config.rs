@@ -52,14 +52,14 @@ pub struct RemoteConfig {
 
 impl RemoteConfig {
     /// 从服务器加载配置
-    /// 
+    ///
     /// 流程：
     /// 1. 请求服务器获取配置文件 URL
     /// 2. 根据返回的 URL 获取 PE 和系统镜像列表的内容
     /// 3. 支持完整 URL 和相对路径两种格式
     pub fn load_from_server() -> Self {
         let mut config = RemoteConfig::default();
-        
+
         // 尝试加载配置
         match Self::fetch_config() {
             Ok((pe_content, dl_content, soft_content, easy_content, gpu_content)) => {
@@ -77,21 +77,27 @@ impl RemoteConfig {
                 log::warn!("远程配置加载失败: {}", e);
             }
         }
-        
+
         config
     }
-    
+
     /// 获取服务器配置
-    fn fetch_config() -> Result<(Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> {
+    fn fetch_config() -> Result<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .context(tr!("创建 HTTP 客户端失败"))?;
-        
+
         // 请求服务器配置
         let config_url = SERVER_BASE_URL;
         log::info!("请求服务器配置: {}", config_url);
-        
+
         let response = client
             .get(config_url)
             .send()
@@ -101,23 +107,22 @@ impl RemoteConfig {
             anyhow::bail!("{}", tr!("服务器返回错误状态码: {}", response.status()));
         }
 
-        let config_response: ServerConfigResponse = response
-            .json()
-            .context(tr!("解析服务器响应失败"))?;
+        let config_response: ServerConfigResponse =
+            response.json().context(tr!("解析服务器响应失败"))?;
 
         if config_response.code != 200 {
             anyhow::bail!("{}", tr!("服务器返回错误: {}", config_response.message));
         }
-        
+
         let data = config_response.data;
-        
+
         // 构建 PE 和 DL 的完整 URL
         let pe_url = Self::resolve_url(&data.pe);
         let dl_url = Self::resolve_url(&data.dl);
         let soft_url = data.soft.as_ref().map(|s| Self::resolve_url(s));
         let easy_url = data.easy.as_ref().map(|s| Self::resolve_url(s));
         let gpu_url = data.gpu.as_ref().map(|s| Self::resolve_url(s));
-        
+
         log::info!("PE 配置 URL: {}", pe_url);
         log::info!("DL 配置 URL: {}", dl_url);
         if let Some(ref url) = soft_url {
@@ -129,27 +134,33 @@ impl RemoteConfig {
         if let Some(ref url) = gpu_url {
             log::info!("GPU 配置 URL: {}", url);
         }
-        
+
         // 获取 PE 配置内容
         let pe_content = Self::fetch_text_content(&client, &pe_url).ok();
-        
+
         // 获取 DL 配置内容
         let dl_content = Self::fetch_text_content(&client, &dl_url).ok();
-        
+
         // 获取 Soft 配置内容
         let soft_content = soft_url.and_then(|url| Self::fetch_text_content(&client, &url).ok());
-        
+
         // 获取 Easy 配置内容
         let easy_content = easy_url.and_then(|url| Self::fetch_text_content(&client, &url).ok());
-        
+
         // 获取 GPU 配置内容
         let gpu_content = gpu_url.and_then(|url| Self::fetch_text_content(&client, &url).ok());
-        
-        Ok((pe_content, dl_content, soft_content, easy_content, gpu_content))
+
+        Ok((
+            pe_content,
+            dl_content,
+            soft_content,
+            easy_content,
+            gpu_content,
+        ))
     }
-    
+
     /// 解析 URL，支持完整 URL 和相对路径
-    /// 
+    ///
     /// 如果是相对路径，则拼接服务器基础地址
     /// 如果是完整 URL，则直接使用
     fn resolve_url(path: &str) -> String {
@@ -161,38 +172,44 @@ impl RemoteConfig {
             format!("{}{}", SERVER_BASE_URL, path.trim_start_matches('/'))
         }
     }
-    
+
     /// 获取文本内容
     fn fetch_text_content(client: &reqwest::blocking::Client, url: &str) -> Result<String> {
-        let response = client
-            .get(url)
-            .send()
-            .context(tr!("请求 {} 失败", url))?;
+        let response = client.get(url).send().context(tr!("请求 {} 失败", url))?;
 
         if !response.status().is_success() {
-            anyhow::bail!("{}", tr!("请求 {} 返回错误状态码: {}", url, response.status()));
+            anyhow::bail!(
+                "{}",
+                tr!("请求 {} 返回错误状态码: {}", url, response.status())
+            );
         }
 
         let content = response.text().context(tr!("读取响应内容失败"))?;
-        
+
         Ok(content)
     }
-    
+
     /// 检查 PE 配置是否可用
     pub fn is_pe_available(&self) -> bool {
-        self.pe_content.as_ref().map(|c| !c.trim().is_empty()).unwrap_or(false)
+        self.pe_content
+            .as_ref()
+            .map(|c| !c.trim().is_empty())
+            .unwrap_or(false)
     }
-    
+
     /// 检查系统镜像配置是否可用
     pub fn is_dl_available(&self) -> bool {
-        self.dl_content.as_ref().map(|c| !c.trim().is_empty()).unwrap_or(false)
+        self.dl_content
+            .as_ref()
+            .map(|c| !c.trim().is_empty())
+            .unwrap_or(false)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_resolve_url_relative() {
         assert_eq!(
@@ -200,7 +217,7 @@ mod tests {
             "https://letrecovery.cloud-pe.cn/v2/config/pe"
         );
     }
-    
+
     #[test]
     fn test_resolve_url_absolute() {
         assert_eq!(

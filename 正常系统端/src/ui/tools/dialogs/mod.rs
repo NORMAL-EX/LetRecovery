@@ -2,16 +2,16 @@
 //!
 //! 提供工具箱各种对话框的渲染功能
 
-mod common;
-mod network;
-mod storage_driver;
 mod appx;
-mod driver_backup;
-mod software;
-mod time_sync;
+mod backup_bitlocker;
 mod batch_format;
 mod bitlocker_manage;
-mod partition_copy;
+mod common;
+mod driver_backup;
 mod install_bitlocker;
-mod backup_bitlocker;
+mod network;
+mod partition_copy;
 mod repair_boot;
+mod software;
+mod storage_driver;
+mod time_sync;

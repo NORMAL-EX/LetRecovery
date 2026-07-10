@@ -28,13 +28,13 @@ fn main() {
         // 资源管理器“文件版本”读取的是 FIXEDFILEINFO，而 winres 默认用
         // CARGO_PKG_VERSION（Cargo.toml 的包版本）填充，导致文件版本一直停在旧日期。
         // 这里按编译日期覆盖，确保“文件版本/产品版本”都跟随编译日期。
-        let ver_u64: u64 =
-            ((y as u64 & 0xffff) << 48) | ((m as u64) << 32) | ((d as u64) << 16);
+        let ver_u64: u64 = ((y as u64 & 0xffff) << 48) | ((m as u64) << 32) | ((d as u64) << 16);
         res.set_version_info(winres::VersionInfo::FILEVERSION, ver_u64);
         res.set_version_info(winres::VersionInfo::PRODUCTVERSION, ver_u64);
 
         // 包含 Common Controls 6.0 和管理员权限
-        res.set_manifest(r#"
+        res.set_manifest(
+            r#"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -66,7 +66,8 @@ fn main() {
         </dependentAssembly>
     </dependency>
 </assembly>
-"#);
+"#,
+        );
 
         if let Err(e) = res.compile() {
             eprintln!("Warning: Failed to compile Windows resources: {}", e);
@@ -91,7 +92,7 @@ fn build_date() -> (i64, u32, u32) {
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as i64;
+    let doe = z - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

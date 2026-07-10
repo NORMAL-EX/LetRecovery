@@ -95,8 +95,22 @@ const SET_USB3: DriverSet = DriverSet {
     subdir: "usb3",
     label: "USB3(xHCI)",
     services: &[
-        SvcSpec { name: "amdxhc", sys: "amdxhc.sys", type_: 1, start: 3, error: 1, group: "Base" },
-        SvcSpec { name: "amdhub30", sys: "amdhub30.sys", type_: 1, start: 3, error: 1, group: "Base" },
+        SvcSpec {
+            name: "amdxhc",
+            sys: "amdxhc.sys",
+            type_: 1,
+            start: 3,
+            error: 1,
+            group: "Base",
+        },
+        SvcSpec {
+            name: "amdhub30",
+            sys: "amdhub30.sys",
+            type_: 1,
+            start: 3,
+            error: 1,
+            group: "Base",
+        },
     ],
     // 通用 xHCI 类代码 0C-03-30，绑定到 amdxhc
     cddb: &[("PCI#CC_0C0330", "amdxhc", CLASS_USB)],
@@ -146,7 +160,11 @@ pub fn inject_xp_drivers(
 
     for set in sets {
         let src_dir = drivers_xp_dir.join(set.subdir);
-        log.push_str(&format!("[XP-DRV] === {} === 源目录 {}\n", set.label, src_dir.display()));
+        log.push_str(&format!(
+            "[XP-DRV] === {} === 源目录 {}\n",
+            set.label,
+            src_dir.display()
+        ));
         if !src_dir.exists() {
             // AHCI 缺失也只警告：映像可能已自带；其它盘上若没该控制器则无影响。
             log.push_str(&format!(
@@ -158,7 +176,9 @@ pub fn inject_xp_drivers(
 
         // 1) 拷贝文件：所有 .sys -> system32\drivers（含 x64\ 子目录，扁平化）；所有 .inf -> WINDOWS\inf
         let mut copied_sys = 0usize;
-        if let Err(e) = copy_drivers_recursive(&src_dir, &drivers_dst, &inf_dst, &mut copied_sys, &mut log) {
+        if let Err(e) =
+            copy_drivers_recursive(&src_dir, &drivers_dst, &inf_dst, &mut copied_sys, &mut log)
+        {
             return Err(format!("拷贝 {} 驱动文件失败: {}", set.label, e));
         }
         if copied_sys == 0 {
@@ -186,7 +206,10 @@ pub fn inject_xp_drivers(
                     }
                     Err(e) => {
                         if must {
-                            log.push_str(&format!("[XP-DRV] 警告: 登记服务 {} 失败: {}\n", svc.name, e));
+                            log.push_str(&format!(
+                                "[XP-DRV] 警告: 登记服务 {} 失败: {}\n",
+                                svc.name, e
+                            ));
                         }
                     }
                 }
@@ -225,7 +248,11 @@ fn register_service(key: &str, svc: &SvcSpec) -> anyhow::Result<()> {
     OfflineRegistry::set_dword(key, "Start", svc.start)?;
     OfflineRegistry::set_dword(key, "ErrorControl", svc.error)?;
     // XP 标准：ImagePath 用相对 %SystemRoot% 的 REG_EXPAND_SZ
-    OfflineRegistry::set_expand_string(key, "ImagePath", &format!("System32\\DRIVERS\\{}", svc.sys))?;
+    OfflineRegistry::set_expand_string(
+        key,
+        "ImagePath",
+        &format!("System32\\DRIVERS\\{}", svc.sys),
+    )?;
     OfflineRegistry::set_string(key, "Group", svc.group)?;
     Ok(())
 }
@@ -318,7 +345,10 @@ pub fn write_xp_uefi_gpt_boot(
     let src_bootxp = format!("{}\\EFI\\Microsoft\\Boot\\bootxp64.efi", esp);
     match std::fs::copy(&src_bootxp, &fallback) {
         Ok(_) => log.push_str(&format!("[XP-UEFI] 已写入 UEFI 回退引导 {}\n", fallback)),
-        Err(e) => log.push_str(&format!("[XP-UEFI] 警告: 写回退引导失败 {}: {}\n", fallback, e)),
+        Err(e) => log.push_str(&format!(
+            "[XP-UEFI] 警告: 写回退引导失败 {}: {}\n",
+            fallback, e
+        )),
     }
 
     // 3) bcdedit /store BCC：修正各分区指向（GUID 来自映像作者预置的 BCC）
@@ -328,10 +358,26 @@ pub fn write_xp_uefi_gpt_boot(
         ("{bootmgr}", "device", format!("partition={}", esp)),
         ("{ntldr}", "device", format!("partition={}", win)),
         ("{ntldr}", "custom:21000001", format!("partition={}", win)),
-        ("{9eb8f329-85ae-4953-aba6-2c7d803aa4fe}", "device", format!("partition={}", win)),
-        ("{9eb8f329-85ae-4953-aba6-2c7d803aa4fe}", "custom:21000001", format!("partition={}", win)),
-        ("{0ef2423f-74c2-4688-b906-99c3dc77d8ba}", "device", format!("partition={}", win)),
-        ("{0ef2423f-74c2-4688-b906-99c3dc77d8ba}", "custom:21000001", format!("partition={}", win)),
+        (
+            "{9eb8f329-85ae-4953-aba6-2c7d803aa4fe}",
+            "device",
+            format!("partition={}", win),
+        ),
+        (
+            "{9eb8f329-85ae-4953-aba6-2c7d803aa4fe}",
+            "custom:21000001",
+            format!("partition={}", win),
+        ),
+        (
+            "{0ef2423f-74c2-4688-b906-99c3dc77d8ba}",
+            "device",
+            format!("partition={}", win),
+        ),
+        (
+            "{0ef2423f-74c2-4688-b906-99c3dc77d8ba}",
+            "custom:21000001",
+            format!("partition={}", win),
+        ),
     ];
     for (obj, elem, val) in cmds {
         let out = new_command(bcdedit_path)
@@ -340,11 +386,16 @@ pub fn write_xp_uefi_gpt_boot(
         match out {
             Ok(o) => {
                 if o.status.success() {
-                    log.push_str(&format!("[XP-UEFI] bcdedit /set {} {} {}\n", obj, elem, val));
+                    log.push_str(&format!(
+                        "[XP-UEFI] bcdedit /set {} {} {}\n",
+                        obj, elem, val
+                    ));
                 } else {
                     log.push_str(&format!(
                         "[XP-UEFI] 警告: bcdedit /set {} {} {} 返回非 0: {}\n",
-                        obj, elem, val,
+                        obj,
+                        elem,
+                        val,
                         gbk_to_utf8(&o.stdout).trim()
                     ));
                 }

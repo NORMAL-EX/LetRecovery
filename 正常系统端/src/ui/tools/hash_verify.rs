@@ -39,7 +39,9 @@ impl App {
             .default_width(600.0)
             .default_height(360.0)
             .show(ui.ctx(), |ui| {
-                ui.label(tr!("计算文件的 SHA-256，并可与期望值比对（核对下载完整性）。"));
+                ui.label(tr!(
+                    "计算文件的 SHA-256，并可与期望值比对（核对下载完整性）。"
+                ));
                 ui.add_space(10.0);
 
                 // 文件路径
@@ -51,9 +53,15 @@ impl App {
                             .desired_width(380.0),
                     );
                     let can_browse = !self.hash_verify_loading;
-                    if ui.add_enabled(can_browse, egui::Button::new(tr!("浏览..."))).clicked() {
+                    if ui
+                        .add_enabled(can_browse, egui::Button::new(tr!("浏览...")))
+                        .clicked()
+                    {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(tr!("系统镜像"), &["wim", "esd", "swm", "gho", "ghs", "iso"])
+                            .add_filter(
+                                tr!("系统镜像"),
+                                &["wim", "esd", "swm", "gho", "ghs", "iso"],
+                            )
                             .add_filter(tr!("所有文件"), &["*"])
                             .pick_file()
                         {
@@ -79,7 +87,10 @@ impl App {
                 ui.horizontal(|ui| {
                     let can_run =
                         !self.hash_verify_file_path.is_empty() && !self.hash_verify_loading;
-                    if ui.add_enabled(can_run, egui::Button::new(tr!("计算 SHA-256"))).clicked() {
+                    if ui
+                        .add_enabled(can_run, egui::Button::new(tr!("计算 SHA-256")))
+                        .clicked()
+                    {
                         self.start_hash_verify();
                     }
                     if self.hash_verify_loading {

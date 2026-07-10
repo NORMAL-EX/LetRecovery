@@ -225,7 +225,12 @@ struct ProgressReporter {
 
 impl ProgressReporter {
     fn new(tx: Option<Sender<VerifyProgress>>, progress: Arc<AtomicU8>) -> Self {
-        Self { tx, progress, base: 0, span: 100 }
+        Self {
+            tx,
+            progress,
+            base: 0,
+            span: 100,
+        }
     }
 
     /// 创建一个把内部 0-100 进度映射到 [base, base+span] 的子发送器（共用同一通道）。
@@ -235,7 +240,12 @@ impl ProgressReporter {
         base: u8,
         span: u8,
     ) -> Self {
-        Self { tx, progress, base, span }
+        Self {
+            tx,
+            progress,
+            base,
+            span,
+        }
     }
 
     /// 把内部 0-100 的百分比映射到实际进度条百分比。
@@ -308,7 +318,11 @@ impl ImageVerifier {
     }
 
     /// 校验镜像文件（主入口）
-    pub fn verify(&self, file_path: &str, progress_tx: Option<Sender<VerifyProgress>>) -> VerifyResult {
+    pub fn verify(
+        &self,
+        file_path: &str,
+        progress_tx: Option<Sender<VerifyProgress>>,
+    ) -> VerifyResult {
         self.reset_cancel();
         self.progress.store(0, Ordering::SeqCst);
 
@@ -366,7 +380,13 @@ impl ImageVerifier {
         // 加载 wimlib
         let wimlib = match Wimlib::new() {
             Ok(w) => w,
-            Err(e) => return VerifyResult::error(file_path, ImageType::Wim, tr!("无法加载 wimlib: {}", e)),
+            Err(e) => {
+                return VerifyResult::error(
+                    file_path,
+                    ImageType::Wim,
+                    tr!("无法加载 wimlib: {}", e),
+                )
+            }
         };
 
         reporter.report(1, tr!("正在打开镜像文件..."), file_path);
@@ -374,7 +394,13 @@ impl ImageVerifier {
         // 打开 WIM 文件
         let wim_handle = match wimlib.open_wim(file_path) {
             Ok(h) => h,
-            Err(e) => return VerifyResult::corrupted(file_path, ImageType::Wim, tr!("无法打开镜像: {}", e)),
+            Err(e) => {
+                return VerifyResult::corrupted(
+                    file_path,
+                    ImageType::Wim,
+                    tr!("无法打开镜像: {}", e),
+                )
+            }
         };
 
         reporter.report(2, tr!("正在读取镜像信息..."), file_path);
@@ -386,13 +412,21 @@ impl ImageVerifier {
         }
 
         if image_count == 0 {
-            return VerifyResult::corrupted(file_path, ImageType::Wim, tr!("镜像文件中没有有效的系统镜像"));
+            return VerifyResult::corrupted(
+                file_path,
+                ImageType::Wim,
+                tr!("镜像文件中没有有效的系统镜像"),
+            );
         }
 
         let mut result = VerifyResult::default();
         result.image_count = image_count as u32;
 
-        reporter.report(3, tr!("发现 {} 个镜像，正在获取详细信息...", image_count), file_path);
+        reporter.report(
+            3,
+            tr!("发现 {} 个镜像，正在获取详细信息...", image_count),
+            file_path,
+        );
 
         // 获取镜像详细信息
         for i in 1..=image_count {
@@ -427,7 +461,7 @@ impl ImageVerifier {
                 }
 
                 let current = Wimlib::get_global_progress(); // 0..100（实时）
-                // 准备阶段占内部 0-5%，数据校验映射到内部 5-99；再经区间映射并入整体进度条
+                                                             // 准备阶段占内部 0-5%，数据校验映射到内部 5-99；再经区间映射并入整体进度条
                 let inner = (5u32 + current as u32 * 94 / 100).min(99) as u8;
                 let mapped = (m_base as u32 + inner as u32 * m_span as u32 / 100).min(100) as u8;
                 if mapped > last_sent {
@@ -498,15 +532,27 @@ impl ImageVerifier {
 
         let mut result = VerifyResult::default();
         result.part_count = swm_files.len() as u16;
-        result.details.push(tr!("找到 {} 个分卷文件", swm_files.len()));
+        result
+            .details
+            .push(tr!("找到 {} 个分卷文件", swm_files.len()));
         let total_parts = swm_files.len();
 
-        reporter.report(1, tr!("找到 {} 个分卷，正在加载...", swm_files.len()), file_path);
+        reporter.report(
+            1,
+            tr!("找到 {} 个分卷，正在加载...", swm_files.len()),
+            file_path,
+        );
 
         // 加载 wimlib
         let wimlib = match Wimlib::new() {
             Ok(w) => w,
-            Err(e) => return VerifyResult::error(file_path, ImageType::Swm, tr!("无法加载 wimlib: {}", e)),
+            Err(e) => {
+                return VerifyResult::error(
+                    file_path,
+                    ImageType::Swm,
+                    tr!("无法加载 wimlib: {}", e),
+                )
+            }
         };
 
         reporter.report(2, tr!("正在打开主分卷..."), file_path);
@@ -514,7 +560,13 @@ impl ImageVerifier {
         // 打开主 SWM 文件
         let wim_handle = match wimlib.open_wim(&swm_files[0]) {
             Ok(h) => h,
-            Err(e) => return VerifyResult::corrupted(file_path, ImageType::Swm, tr!("无法打开主分卷: {}", e)),
+            Err(e) => {
+                return VerifyResult::corrupted(
+                    file_path,
+                    ImageType::Swm,
+                    tr!("无法打开主分卷: {}", e),
+                )
+            }
         };
 
         reporter.report(3, tr!("正在引入其余分卷..."), file_path);
@@ -534,7 +586,11 @@ impl ImageVerifier {
         // 获取镜像数量
         let image_count = wim_handle.get_image_count();
         if image_count <= 0 {
-            return VerifyResult::corrupted(file_path, ImageType::Swm, tr!("分卷镜像中没有有效的系统镜像"));
+            return VerifyResult::corrupted(
+                file_path,
+                ImageType::Swm,
+                tr!("分卷镜像中没有有效的系统镜像"),
+            );
         }
         result.image_count = image_count as u32;
 
@@ -592,8 +648,11 @@ impl ImageVerifier {
         match verify_result {
             Ok(_) => {
                 result.status = VerifyStatus::Valid;
-                result.message =
-                    tr!("校验通过，{} 个分卷，{} 个镜像全部有效", total_parts, image_count);
+                result.message = tr!(
+                    "校验通过，{} 个分卷，{} 个镜像全部有效",
+                    total_parts,
+                    image_count
+                );
             }
             Err(e) => {
                 result.status = VerifyStatus::Corrupted;
@@ -621,7 +680,10 @@ impl ImageVerifier {
     fn find_swm_parts(main_swm: &str) -> Result<Vec<String>, String> {
         let path = Path::new(main_swm);
         let parent = path.parent().ok_or_else(|| tr!("无法获取文件目录"))?;
-        let stem = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| tr!("无法获取文件名"))?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| tr!("无法获取文件名"))?;
 
         // 移除已有的数字后缀（如 install2 -> install）
         let base_name = stem.trim_end_matches(|c: char| c.is_ascii_digit());
@@ -665,11 +727,21 @@ impl ImageVerifier {
         // 检查文件大小
         let metadata = match std::fs::metadata(path) {
             Ok(m) => m,
-            Err(e) => return VerifyResult::error(file_path, ImageType::Gho, tr!("无法读取文件元数据: {}", e)),
+            Err(e) => {
+                return VerifyResult::error(
+                    file_path,
+                    ImageType::Gho,
+                    tr!("无法读取文件元数据: {}", e),
+                )
+            }
         };
 
         if metadata.len() < 512 {
-            return VerifyResult::corrupted(file_path, ImageType::Gho, tr!("文件太小，不是有效的 GHO 文件"));
+            return VerifyResult::corrupted(
+                file_path,
+                ImageType::Gho,
+                tr!("文件太小，不是有效的 GHO 文件"),
+            );
         }
 
         reporter.report(30, tr!("正在验证文件签名..."), file_path);
@@ -677,7 +749,9 @@ impl ImageVerifier {
         // 读取文件头
         let mut file = match File::open(path) {
             Ok(f) => f,
-            Err(e) => return VerifyResult::error(file_path, ImageType::Gho, tr!("无法打开文件: {}", e)),
+            Err(e) => {
+                return VerifyResult::error(file_path, ImageType::Gho, tr!("无法打开文件: {}", e))
+            }
         };
 
         let mut header = [0u8; 512];
@@ -693,14 +767,15 @@ impl ImageVerifier {
             (0xFE, 0xEF) |  // 标准 Ghost 签名
             (0x47, 0x46) |  // "GF" - Ghost 4.x 格式
             (0xEB, _) |      // 引导代码
-            (0xE9, _)        // 引导代码
+            (0xE9, _) // 引导代码
         );
 
         if !is_valid_signature {
             // 检查是否是 GHS 分卷文件
             if file_path.to_lowercase().ends_with(".ghs") {
                 reporter.report(70, tr!("检测到 GHS 分卷文件..."), file_path);
-                let mut result = VerifyResult::valid(file_path, ImageType::Gho, tr!("GHS 分卷文件结构正常"));
+                let mut result =
+                    VerifyResult::valid(file_path, ImageType::Gho, tr!("GHS 分卷文件结构正常"));
                 result.details.push(tr!("这是一个 Ghost 分卷文件"));
                 return result;
             }
@@ -729,7 +804,11 @@ impl ImageVerifier {
 
             let mut tail = [0u8; 512];
             if file.read_exact(&mut tail).is_err() {
-                return VerifyResult::corrupted(file_path, ImageType::Gho, tr!("文件末尾不完整，可能被截断"));
+                return VerifyResult::corrupted(
+                    file_path,
+                    ImageType::Gho,
+                    tr!("文件末尾不完整，可能被截断"),
+                );
             }
         }
 
@@ -738,7 +817,10 @@ impl ImageVerifier {
         // 构建结果
         let mut result = VerifyResult::valid(file_path, ImageType::Gho, tr!("GHO 文件结构完整"));
         result.image_count = 1;
-        result.details.push(tr!("文件大小: {} GB", format!("{:.2}", file_len as f64 / 1024.0 / 1024.0 / 1024.0)));
+        result.details.push(tr!(
+            "文件大小: {} GB",
+            format!("{:.2}", file_len as f64 / 1024.0 / 1024.0 / 1024.0)
+        ));
 
         // 检测格式类型
         match (header[0], header[1]) {
@@ -762,12 +844,22 @@ impl ImageVerifier {
         // 检查文件大小
         let metadata = match std::fs::metadata(path) {
             Ok(m) => m,
-            Err(e) => return VerifyResult::error(file_path, ImageType::Iso, tr!("无法读取文件元数据: {}", e)),
+            Err(e) => {
+                return VerifyResult::error(
+                    file_path,
+                    ImageType::Iso,
+                    tr!("无法读取文件元数据: {}", e),
+                )
+            }
         };
 
         // ISO 9660 主卷描述符位于 32768 字节偏移处
         if metadata.len() < 32768 + 2048 {
-            return VerifyResult::corrupted(file_path, ImageType::Iso, tr!("文件太小，不是有效的 ISO 文件"));
+            return VerifyResult::corrupted(
+                file_path,
+                ImageType::Iso,
+                tr!("文件太小，不是有效的 ISO 文件"),
+            );
         }
 
         reporter.report(3, tr!("正在验证 ISO 签名..."), file_path);
@@ -775,7 +867,9 @@ impl ImageVerifier {
         // 验证 ISO 9660 签名
         let mut file = match File::open(path) {
             Ok(f) => f,
-            Err(e) => return VerifyResult::error(file_path, ImageType::Iso, tr!("无法打开文件: {}", e)),
+            Err(e) => {
+                return VerifyResult::error(file_path, ImageType::Iso, tr!("无法打开文件: {}", e))
+            }
         };
 
         if let Err(e) = file.seek(SeekFrom::Start(32768)) {
@@ -843,7 +937,9 @@ impl ImageVerifier {
                         return result;
                     }
                 } else {
-                    result.details.push(tr!("未找到 install.wim/esd，可能不是 Windows 安装 ISO"));
+                    result
+                        .details
+                        .push(tr!("未找到 install.wim/esd，可能不是 Windows 安装 ISO"));
                 }
 
                 reporter.report(97, tr!("正在卸载 ISO..."), file_path);

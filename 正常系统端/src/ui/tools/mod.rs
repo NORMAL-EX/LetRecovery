@@ -2,38 +2,40 @@
 //!
 //! 提供各种系统维护和修复工具
 
-pub mod types;
-pub mod version_detect;
-pub mod network;
-pub mod driver;
-pub mod appx;
-pub mod software;
 pub mod actions;
-pub mod dialogs;
-pub mod time_sync;
+pub mod appx;
 pub mod batch_format;
 pub mod bitlocker;
+pub mod dialogs;
+pub mod driver;
+pub mod expand_c;
 pub mod gho_password;
+pub mod hash_verify;
+pub mod image_verify;
+pub mod network;
 pub mod nvidia_uninstall;
 pub mod partition_copy;
-pub mod quick_partition;
-pub mod expand_c;
-pub mod image_verify;
-pub mod hash_verify;
 pub mod password_reset;
+pub mod quick_partition;
+pub mod software;
+pub mod time_sync;
+pub mod types;
+pub mod version_detect;
 
 // 重新导出常用类型
-pub use types::{DriverBackupMode, AppxPackageInfo, InstalledSoftware, WindowsPartitionInfo, ImageVerifyResult};
 pub use batch_format::FormatablePartition;
 pub use bitlocker::BitLockerPartition;
-pub use partition_copy::{CopyablePartition, CopyProgress};
-pub use quick_partition::QuickPartitionDialogState;
 pub use expand_c::ExpandCDialogState;
+pub use partition_copy::{CopyProgress, CopyablePartition};
+pub use quick_partition::QuickPartitionDialogState;
+pub use types::{
+    AppxPackageInfo, DriverBackupMode, ImageVerifyResult, InstalledSoftware, WindowsPartitionInfo,
+};
 
 use egui;
 
-use crate::tr;
 use crate::app::App;
+use crate::tr;
 
 impl App {
     /// 显示工具箱页面
@@ -53,241 +55,236 @@ impl App {
         // 工具按钮自适应换行：英文标签比中文宽，固定 4 列会被窗口右侧裁切，
         // 改用 horizontal_wrapped，按钮按可用宽度自动换行（中英文都不溢出）。
         ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(15.0, 12.0);
-                let button_size = egui::vec2(130.0, 50.0);
+            ui.spacing_mut().item_spacing = egui::vec2(15.0, 12.0);
+            let button_size = egui::vec2(130.0, 50.0);
 
-                // ========== 第一行 ==========
+            // ========== 第一行 ==========
+            if ui
+                .add(egui::Button::new(tr!("英伟达显卡驱动卸载")).min_size(button_size))
+                .clicked()
+            {
+                self.show_nvidia_uninstall_dialog = true;
+                self.nvidia_uninstall_message.clear();
+                self.nvidia_uninstall_hardware_summary = None;
+                self.start_load_nvidia_hardware_summary();
+            }
+
+            if ui
+                .add(egui::Button::new(tr!("分区对拷")).min_size(button_size))
+                .clicked()
+            {
+                self.show_partition_copy_dialog = true;
+                self.partition_copy_message.clear();
+                self.partition_copy_log.clear();
+                self.partition_copy_source = None;
+                self.partition_copy_target = None;
+                self.start_load_copyable_partitions();
+            }
+
+            if ui
+                .add(egui::Button::new(tr!("批量格式化")).min_size(button_size))
+                .clicked()
+            {
+                self.show_batch_format_dialog = true;
+                self.batch_format_message.clear();
+                self.batch_format_partitions.clear();
+                self.batch_format_selected.clear();
+                self.start_load_formatable_partitions();
+            }
+
+            if ui
+                .add(egui::Button::new(tr!("导入存储驱动")).min_size(button_size))
+                .clicked()
+            {
+                self.show_import_storage_driver_dialog = true;
+                self.import_storage_driver_message.clear();
+            }
+
+            // ========== 第二行 ==========
+            if ui
+                .add(egui::Button::new(tr!("一键分区")).min_size(button_size))
+                .clicked()
+            {
+                self.init_quick_partition_dialog();
+            }
+
+            if ui
+                .add(egui::Button::new(tr!("移除APPX应用")).min_size(button_size))
+                .clicked()
+            {
+                self.show_remove_appx_dialog = true;
+                self.remove_appx_message.clear();
+                self.remove_appx_list.clear();
+                self.remove_appx_selected.clear();
+            }
+
+            if ui
+                .add(egui::Button::new(tr!("驱动备份还原")).min_size(button_size))
+                .clicked()
+            {
+                self.show_driver_backup_dialog = true;
+                self.driver_backup_message.clear();
+            }
+
+            if is_pe {
                 if ui
-                    .add(egui::Button::new(tr!("英伟达显卡驱动卸载")).min_size(button_size))
+                    .add(egui::Button::new(tr!("一键修复引导")).min_size(button_size))
                     .clicked()
                 {
-                    self.show_nvidia_uninstall_dialog = true;
-                    self.nvidia_uninstall_message.clear();
-                    self.nvidia_uninstall_hardware_summary = None;
-                    self.start_load_nvidia_hardware_summary();
-                }
-
-                if ui
-                    .add(egui::Button::new(tr!("分区对拷")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_partition_copy_dialog = true;
-                    self.partition_copy_message.clear();
-                    self.partition_copy_log.clear();
-                    self.partition_copy_source = None;
-                    self.partition_copy_target = None;
-                    self.start_load_copyable_partitions();
-                }
-
-                if ui
-                    .add(egui::Button::new(tr!("批量格式化")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_batch_format_dialog = true;
-                    self.batch_format_message.clear();
-                    self.batch_format_partitions.clear();
-                    self.batch_format_selected.clear();
-                    self.start_load_formatable_partitions();
-                }
-
-                if ui
-                    .add(egui::Button::new(tr!("导入存储驱动")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_import_storage_driver_dialog = true;
-                    self.import_storage_driver_message.clear();
-                }
-
-
-                // ========== 第二行 ==========
-                if ui
-                    .add(egui::Button::new(tr!("一键分区")).min_size(button_size))
-                    .clicked()
-                {
-                    self.init_quick_partition_dialog();
-                }
-
-                if ui
-                    .add(egui::Button::new(tr!("移除APPX应用")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_remove_appx_dialog = true;
-                    self.remove_appx_message.clear();
-                    self.remove_appx_list.clear();
-                    self.remove_appx_selected.clear();
-                }
-
-                if ui
-                    .add(egui::Button::new(tr!("驱动备份还原")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_driver_backup_dialog = true;
-                    self.driver_backup_message.clear();
-                }
-
-                if is_pe {
-                    if ui
-                        .add(egui::Button::new(tr!("一键修复引导")).min_size(button_size))
-                        .clicked()
-                    {
-                        // 打开一键修复引导对话框，让用户选择分区
-                        self.show_repair_boot_dialog = true;
-                        self.repair_boot_message.clear();
-                        self.repair_boot_selected_partition = None;
-                        // 确保Windows分区信息已加载
-                        if self.windows_partitions_cache.is_none() && !self.windows_partitions_loading {
-                            self.start_load_windows_partitions();
-                        }
+                    // 打开一键修复引导对话框，让用户选择分区
+                    self.show_repair_boot_dialog = true;
+                    self.repair_boot_message.clear();
+                    self.repair_boot_selected_partition = None;
+                    // 确保Windows分区信息已加载
+                    if self.windows_partitions_cache.is_none() && !self.windows_partitions_loading {
+                        self.start_load_windows_partitions();
                     }
-                } else {
-                    ui.add_enabled(
-                        false,
-                        egui::Button::new(tr!("一键修复引导")).min_size(button_size),
-                    );
                 }
+            } else {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(tr!("一键修复引导")).min_size(button_size),
+                );
+            }
 
+            // ========== 第三行 ==========
 
-                // ========== 第三行 ==========
+            if ui
+                .add(egui::Button::new(tr!("本机网络信息")).min_size(button_size))
+                .clicked()
+            {
+                self.init_network_info_dialog();
+            }
 
+            if !is_pe {
                 if ui
-                    .add(egui::Button::new(tr!("本机网络信息")).min_size(button_size))
+                    .add(egui::Button::new(tr!("软件列表")).min_size(button_size))
                     .clicked()
                 {
-                    self.init_network_info_dialog();
+                    self.init_software_list_dialog();
                 }
+            } else {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(tr!("软件列表")).min_size(button_size),
+                );
+            }
 
-                if !is_pe {
-                    if ui
-                        .add(egui::Button::new(tr!("软件列表")).min_size(button_size))
-                        .clicked()
-                    {
-                        self.init_software_list_dialog();
-                    }
-                } else {
-                    ui.add_enabled(
-                        false,
-                        egui::Button::new(tr!("软件列表")).min_size(button_size),
-                    );
-                }
+            if ui
+                .add(egui::Button::new(tr!("系统时间校准")).min_size(button_size))
+                .clicked()
+            {
+                self.show_time_sync_dialog = true;
+                self.time_sync_message.clear();
+            }
 
+            if ui
+                .add(egui::Button::new(tr!("手动运行Ghost")).min_size(button_size))
+                .clicked()
+            {
+                self.launch_ghost_tool();
+            }
+
+            // ========== 第四行 ==========
+
+            if ui
+                .add(egui::Button::new(tr!("查看GHO密码")).min_size(button_size))
+                .clicked()
+            {
+                self.show_gho_password_dialog = true;
+                self.gho_password_file_path.clear();
+                self.gho_password_result = None;
+            }
+
+            if !is_pe {
                 if ui
-                    .add(egui::Button::new(tr!("系统时间校准")).min_size(button_size))
+                    .add(egui::Button::new(tr!("重置网络设置")).min_size(button_size))
                     .clicked()
                 {
-                    self.show_time_sync_dialog = true;
-                    self.time_sync_message.clear();
+                    self.show_reset_network_confirm_dialog = true;
                 }
+            } else {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(tr!("重置网络设置")).min_size(button_size),
+                );
+            }
 
+            if ui
+                .add(egui::Button::new("SpaceSniffer").min_size(button_size))
+                .clicked()
+            {
+                self.launch_space_sniffer_tool();
+            }
+
+            // 镜像校验补到本行第 4 格（删除“万能驱动”后填平空缺）
+            if ui
+                .add(egui::Button::new(tr!("镜像校验")).min_size(button_size))
+                .clicked()
+            {
+                self.show_image_verify_dialog = true;
+                self.image_verify_file_path.clear();
+                self.image_verify_result = None;
+                self.image_verify_progress = None;
+            }
+
+            // ========== 第五行 ==========
+
+            if ui
+                .add(egui::Button::new(tr!("BitLocker管理")).min_size(button_size))
+                .clicked()
+            {
+                self.show_bitlocker_manage_dialog = true;
+                self.bitlocker_manage_message.clear();
+                self.bitlocker_manage_password.clear();
+                self.bitlocker_manage_recovery_key.clear();
+                self.bitlocker_manage_recovery_display = None;
+                self.bitlocker_manage_selected = None;
+                self.start_load_bitlocker_manage_partitions();
+            }
+
+            if ui
+                .add(egui::Button::new(tr!("文件哈希校验")).min_size(button_size))
+                .clicked()
+            {
+                self.show_hash_verify_dialog = true;
+                self.hash_verify_file_path.clear();
+                self.hash_verify_expected.clear();
+                self.hash_verify_result = None;
+                self.hash_verify_progress = None;
+                self.hash_verify_loading = false;
+            }
+
+            if ui
+                .add(egui::Button::new(tr!("密码重置")).min_size(button_size))
+                .clicked()
+            {
+                self.show_password_reset_dialog = true;
+                self.password_reset_partition.clear();
+                self.password_reset_username.clear();
+                self.password_reset_message.clear();
+                self.password_reset_loading = false;
+                self.password_reset_target = None;
+                self.password_reset_users.clear();
+                self.password_reset_selected_user = None;
+                self.password_reset_users_loading = false;
+            }
+
+            // 无损扩大C盘：在正常 Windows 环境中规划，重启进 PE 执行（PE 环境内不可用）
+            if !is_pe {
                 if ui
-                    .add(egui::Button::new(tr!("手动运行Ghost")).min_size(button_size))
+                    .add(egui::Button::new(tr!("无损扩大C盘")).min_size(button_size))
                     .clicked()
                 {
-                    self.launch_ghost_tool();
+                    self.init_expand_c_dialog();
                 }
-
-
-                // ========== 第四行 ==========
-
-                if ui
-                    .add(egui::Button::new(tr!("查看GHO密码")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_gho_password_dialog = true;
-                    self.gho_password_file_path.clear();
-                    self.gho_password_result = None;
-                }
-
-                if !is_pe {
-                    if ui
-                        .add(egui::Button::new(tr!("重置网络设置")).min_size(button_size))
-                        .clicked()
-                    {
-                        self.show_reset_network_confirm_dialog = true;
-                    }
-                } else {
-                    ui.add_enabled(
-                        false,
-                        egui::Button::new(tr!("重置网络设置")).min_size(button_size),
-                    );
-                }
-
-                if ui
-                    .add(egui::Button::new("SpaceSniffer").min_size(button_size))
-                    .clicked()
-                {
-                    self.launch_space_sniffer_tool();
-                }
-
-                // 镜像校验补到本行第 4 格（删除“万能驱动”后填平空缺）
-                if ui
-                    .add(egui::Button::new(tr!("镜像校验")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_image_verify_dialog = true;
-                    self.image_verify_file_path.clear();
-                    self.image_verify_result = None;
-                    self.image_verify_progress = None;
-                }
-
-
-                // ========== 第五行 ==========
-
-                if ui
-                    .add(egui::Button::new(tr!("BitLocker管理")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_bitlocker_manage_dialog = true;
-                    self.bitlocker_manage_message.clear();
-                    self.bitlocker_manage_password.clear();
-                    self.bitlocker_manage_recovery_key.clear();
-                    self.bitlocker_manage_recovery_display = None;
-                    self.bitlocker_manage_selected = None;
-                    self.start_load_bitlocker_manage_partitions();
-                }
-
-                if ui
-                    .add(egui::Button::new(tr!("文件哈希校验")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_hash_verify_dialog = true;
-                    self.hash_verify_file_path.clear();
-                    self.hash_verify_expected.clear();
-                    self.hash_verify_result = None;
-                    self.hash_verify_progress = None;
-                    self.hash_verify_loading = false;
-                }
-
-                if ui
-                    .add(egui::Button::new(tr!("密码重置")).min_size(button_size))
-                    .clicked()
-                {
-                    self.show_password_reset_dialog = true;
-                    self.password_reset_partition.clear();
-                    self.password_reset_username.clear();
-                    self.password_reset_message.clear();
-                    self.password_reset_loading = false;
-                    self.password_reset_target = None;
-                    self.password_reset_users.clear();
-                    self.password_reset_selected_user = None;
-                    self.password_reset_users_loading = false;
-                }
-
-                // 无损扩大C盘：在正常 Windows 环境中规划，重启进 PE 执行（PE 环境内不可用）
-                if !is_pe {
-                    if ui
-                        .add(egui::Button::new(tr!("无损扩大C盘")).min_size(button_size))
-                        .clicked()
-                    {
-                        self.init_expand_c_dialog();
-                    }
-                } else {
-                    ui.add_enabled(
-                        false,
-                        egui::Button::new(tr!("无损扩大C盘")).min_size(button_size),
-                    );
-                }
-
-            });
+            } else {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(tr!("无损扩大C盘")).min_size(button_size),
+                );
+            }
+        });
 
         // ========== 对话框渲染 ==========
         self.render_network_info_dialog(ui);
@@ -387,8 +384,7 @@ impl App {
 
             match actions::export_drivers_from_partition(&source_partition, &export_dir) {
                 Ok(_) => {
-                    self.tool_message =
-                        tr!("驱动导出成功: {} -> {}", source_partition, export_dir);
+                    self.tool_message = tr!("驱动导出成功: {} -> {}", source_partition, export_dir);
                 }
                 Err(e) => {
                     self.tool_message = tr!("驱动导出失败: {}", e);

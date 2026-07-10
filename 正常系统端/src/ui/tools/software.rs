@@ -2,9 +2,9 @@
 //!
 //! 提供获取已安装软件列表的功能
 
-use std::collections::HashSet;
 use super::types::InstalledSoftware;
 use crate::tr;
+use std::collections::HashSet;
 
 /// 获取已安装软件列表
 pub fn get_installed_software() -> Vec<InstalledSoftware> {
@@ -16,9 +16,18 @@ pub fn get_installed_software() -> Vec<InstalledSoftware> {
         use winreg::RegKey;
 
         let registry_paths = [
-            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-            (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
-            (HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (
+                HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            ),
+            (
+                HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            ),
+            (
+                HKEY_CURRENT_USER,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            ),
         ];
 
         let mut seen_names: HashSet<String> = HashSet::new();
@@ -43,7 +52,8 @@ pub fn get_installed_software() -> Vec<InstalledSoftware> {
                         }
                         seen_names.insert(name.clone());
 
-                        let version: String = subkey.get_value("DisplayVersion").unwrap_or_default();
+                        let version: String =
+                            subkey.get_value("DisplayVersion").unwrap_or_default();
                         let publisher: String = subkey.get_value("Publisher").unwrap_or_default();
                         let install_location: String =
                             subkey.get_value("InstallLocation").unwrap_or_default();
@@ -86,7 +96,9 @@ pub fn save_software_list_to_file(path: &std::path::Path, software_list: &[Insta
     content.push('\n');
     content.push_str(&format!(
         "{:<50} {:<20} {:<30}\n",
-        tr!("软件名称"), tr!("版本"), tr!("发布者")
+        tr!("软件名称"),
+        tr!("版本"),
+        tr!("发布者")
     ));
     content.push_str(&"-".repeat(100));
     content.push('\n');

@@ -5,10 +5,10 @@
 use egui;
 use std::sync::mpsc;
 
+use super::types::GhoPasswordResult;
 use crate::app::App;
 use crate::core::gho_password::read_gho_password;
 use crate::tr;
-use super::types::GhoPasswordResult;
 
 impl App {
     /// 渲染GHO密码查看对话框
@@ -51,9 +51,13 @@ impl App {
 
                 // 查看按钮
                 ui.horizontal(|ui| {
-                    let can_view = !self.gho_password_file_path.is_empty() && !self.gho_password_loading;
-                    
-                    if ui.add_enabled(can_view, egui::Button::new(tr!("查看密码"))).clicked() {
+                    let can_view =
+                        !self.gho_password_file_path.is_empty() && !self.gho_password_loading;
+
+                    if ui
+                        .add_enabled(can_view, egui::Button::new(tr!("查看密码")))
+                        .clicked()
+                    {
                         self.start_read_gho_password();
                     }
 
@@ -74,22 +78,28 @@ impl App {
                         ui.label(tr!("文件:"));
                         ui.label(&result.file_path);
                     });
-                    
+
                     ui.add_space(5.0);
 
                     // 显示有效性状态
                     if result.is_valid {
                         ui.colored_label(egui::Color32::from_rgb(0, 180, 0), tr!("有效的GHO文件"));
                     } else {
-                        ui.colored_label(egui::Color32::from_rgb(255, 80, 80), tr!("无效的GHO文件"));
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 80, 80),
+                            tr!("无效的GHO文件"),
+                        );
                     }
-                    
+
                     ui.add_space(5.0);
 
                     // 显示密码信息
                     if result.is_valid {
                         if result.has_password {
-                            ui.colored_label(egui::Color32::from_rgb(255, 165, 0), tr!("已设置密码保护"));
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 165, 0),
+                                tr!("已设置密码保护"),
+                            );
 
                             ui.horizontal(|ui| {
                                 ui.label(tr!("密码长度:"));
@@ -105,7 +115,7 @@ impl App {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut pwd_display)
                                             .desired_width(200.0)
-                                            .interactive(true)
+                                            .interactive(true),
                                     );
 
                                     if ui.button(tr!("复制")).clicked() {
@@ -114,13 +124,19 @@ impl App {
                                 });
                             } else if !result.message.is_empty() {
                                 ui.add_space(5.0);
-                                ui.colored_label(egui::Color32::YELLOW, format!("{}", result.message));
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    format!("{}", result.message),
+                                );
                             }
                         } else {
-                            ui.colored_label(egui::Color32::from_rgb(0, 180, 0), tr!("未设置密码保护"));
+                            ui.colored_label(
+                                egui::Color32::from_rgb(0, 180, 0),
+                                tr!("未设置密码保护"),
+                            );
                         }
                     }
-                    
+
                     // 显示错误消息
                     if !result.is_valid && !result.message.is_empty() {
                         ui.add_space(5.0);

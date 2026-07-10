@@ -43,7 +43,7 @@ pub struct InstallConfig {
     pub image_path: String,
     /// 是否为GHO格式
     pub is_gho: bool,
-    
+
     // 高级选项
     /// 移除快捷方式小箭头
     pub remove_shortcut_arrow: bool,
@@ -72,7 +72,7 @@ pub struct InstallConfig {
     /// 自定义无人值守文件：UI 选择时为源文件绝对路径；
     /// 经 write_install_config 复制到数据目录后，写入 INI 的是相对文件名。
     pub custom_unattend_path: String,
-    
+
     // Win7 专用选项
     /// Win7 UEFI 补丁（使用 UefiSeven）
     pub win7_uefi_patch: bool,
@@ -114,7 +114,7 @@ impl InstallConfig {
             crate::app::DriverAction::AutoImport => 2,
         }
     }
-    
+
     /// 从driver_action_mode获取DriverAction
     pub fn mode_to_driver_action(mode: u8) -> crate::app::DriverAction {
         match mode {
@@ -125,7 +125,7 @@ impl InstallConfig {
             _ => crate::app::DriverAction::AutoImport,
         }
     }
-    
+
     /// 判断是否需要导入驱动
     pub fn should_import_drivers(&self) -> bool {
         // 优先使用新的driver_action_mode
@@ -177,17 +177,17 @@ impl ConfigFileManager {
     /// 标记文件名
     const INSTALL_MARKER: &'static str = "LetRecovery_Install.marker";
     const BACKUP_MARKER: &'static str = "LetRecovery_Backup.marker";
-    
+
     const EXPAND_MARKER: &'static str = "LetRecovery_Expand.marker";
 
     /// 配置文件名
     const INSTALL_CONFIG: &'static str = "LetRecovery_Install.ini";
     const BACKUP_CONFIG: &'static str = "LetRecovery_Backup.ini";
     const EXPAND_CONFIG: &'static str = "LetRecovery_Expand.ini";
-    
+
     /// PE文件目录名
     const PE_DIR: &'static str = "LetRecovery_PE";
-    
+
     /// 临时数据目录名
     const DATA_DIR: &'static str = "LetRecovery_Data";
 
@@ -231,7 +231,8 @@ impl ConfigFileManager {
             if Path::new(&config_path).exists() {
                 return Some(format!("{}:", letter));
             }
-            let backup_config_path = format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::BACKUP_CONFIG);
+            let backup_config_path =
+                format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::BACKUP_CONFIG);
             if Path::new(&backup_config_path).exists() {
                 return Some(format!("{}:", letter));
             }
@@ -252,8 +253,7 @@ impl ConfigFileManager {
 
         // 创建数据目录
         let data_dir = format!("{}\\{}", data_partition, Self::DATA_DIR);
-        std::fs::create_dir_all(&data_dir)
-            .context(tr!("创建数据目录失败"))?;
+        std::fs::create_dir_all(&data_dir).context(tr!("创建数据目录失败"))?;
 
         // 写入标记文件到目标分区
         let marker_path = format!("{}\\{}", target_partition, Self::INSTALL_MARKER);
@@ -269,8 +269,12 @@ impl ConfigFileManager {
         if !config.custom_unattend_path.is_empty() {
             const CUSTOM_UNATTEND_NAME: &str = "custom_unattend.xml";
             let dst = format!("{}\\{}", data_dir, CUSTOM_UNATTEND_NAME);
-            std::fs::copy(&config.custom_unattend_path, &dst)
-                .with_context(|| tr!("复制自定义无人值守文件失败: {}", config.custom_unattend_path))?;
+            std::fs::copy(&config.custom_unattend_path, &dst).with_context(|| {
+                tr!(
+                    "复制自定义无人值守文件失败: {}",
+                    config.custom_unattend_path
+                )
+            })?;
             config.custom_unattend_path = CUSTOM_UNATTEND_NAME.to_string();
             log::info!("[CONFIG] 已复制自定义无人值守文件 -> {}", dst);
         }
@@ -286,15 +290,17 @@ impl ConfigFileManager {
                     log::info!("[CONFIG] 已暂存 diskpart 脚本 -> {}", dst);
                 }
             } else {
-                log::info!("[CONFIG] 程序目录无 diskpart 文件夹，跳过暂存: {}", src.display());
+                log::info!(
+                    "[CONFIG] 程序目录无 diskpart 文件夹，跳过暂存: {}",
+                    src.display()
+                );
             }
         }
 
         // 写入配置文件
         let config_path = format!("{}\\{}", data_dir, Self::INSTALL_CONFIG);
         let content = Self::serialize_install_config(&config);
-        std::fs::write(&config_path, &content)
-            .context(tr!("写入安装配置文件失败"))?;
+        std::fs::write(&config_path, &content).context(tr!("写入安装配置文件失败"))?;
 
         log::info!("[CONFIG] 安装配置已写入: {}", config_path);
         log::info!("[CONFIG] 安装标记已写入: {}", marker_path);
@@ -319,7 +325,10 @@ impl ConfigFileManager {
         let config_path = format!("{}\\{}", data_dir, Self::EXPAND_CONFIG);
         let content = format!(
             "[Expand]\r\nTargetPartition={}\r\nTargetSizeMb={}\r\nWimEngine={}\r\nLanguage={}\r\n",
-            config.target_partition, config.target_size_mb, config.wim_engine, crate::utils::i18n::current_language()
+            config.target_partition,
+            config.target_size_mb,
+            config.wim_engine,
+            crate::utils::i18n::current_language()
         );
         std::fs::write(&config_path, &content).context(tr!("写入扩容配置文件失败"))?;
 
@@ -336,8 +345,7 @@ impl ConfigFileManager {
     ) -> Result<()> {
         // 创建数据目录
         let data_dir = format!("{}\\{}", data_partition, Self::DATA_DIR);
-        std::fs::create_dir_all(&data_dir)
-            .context(tr!("创建数据目录失败"))?;
+        std::fs::create_dir_all(&data_dir).context(tr!("创建数据目录失败"))?;
 
         // 写入标记文件到源分区
         let marker_path = format!("{}\\{}", source_partition, Self::BACKUP_MARKER);
@@ -347,8 +355,7 @@ impl ConfigFileManager {
         // 写入配置文件
         let config_path = format!("{}\\{}", data_dir, Self::BACKUP_CONFIG);
         let content = Self::serialize_backup_config(config);
-        std::fs::write(&config_path, &content)
-            .context(tr!("写入备份配置文件失败"))?;
+        std::fs::write(&config_path, &content).context(tr!("写入备份配置文件失败"))?;
 
         log::info!("[CONFIG] 备份配置已写入: {}", config_path);
         log::info!("[CONFIG] 备份标记已写入: {}", marker_path);
@@ -358,17 +365,25 @@ impl ConfigFileManager {
 
     /// 读取安装配置
     pub fn read_install_config(data_partition: &str) -> Result<InstallConfig> {
-        let config_path = format!("{}\\{}\\{}", data_partition, Self::DATA_DIR, Self::INSTALL_CONFIG);
-        let content = std::fs::read_to_string(&config_path)
-            .context(tr!("读取安装配置文件失败"))?;
+        let config_path = format!(
+            "{}\\{}\\{}",
+            data_partition,
+            Self::DATA_DIR,
+            Self::INSTALL_CONFIG
+        );
+        let content = std::fs::read_to_string(&config_path).context(tr!("读取安装配置文件失败"))?;
         Self::deserialize_install_config(&content)
     }
 
     /// 读取备份配置
     pub fn read_backup_config(data_partition: &str) -> Result<BackupConfig> {
-        let config_path = format!("{}\\{}\\{}", data_partition, Self::DATA_DIR, Self::BACKUP_CONFIG);
-        let content = std::fs::read_to_string(&config_path)
-            .context(tr!("读取备份配置文件失败"))?;
+        let config_path = format!(
+            "{}\\{}\\{}",
+            data_partition,
+            Self::DATA_DIR,
+            Self::BACKUP_CONFIG
+        );
+        let content = std::fs::read_to_string(&config_path).context(tr!("读取备份配置文件失败"))?;
         Self::deserialize_backup_config(&content)
     }
 
@@ -392,14 +407,14 @@ impl ConfigFileManager {
     /// 返回被清理的分区盘符（如果有的话）
     pub fn cleanup_auto_created_partitions() -> Vec<char> {
         let mut cleaned = Vec::new();
-        
+
         for letter in b'A'..=b'Z' {
             let c = letter as char;
             let marker_path = format!("{}:\\{}", c, Self::AUTO_CREATED_PARTITION_MARKER);
-            
+
             if Path::new(&marker_path).exists() {
                 log::info!("[CONFIG] 发现自动创建的分区: {}:", c);
-                
+
                 // 尝试删除分区
                 if let Ok(_) = crate::core::disk::DiskManager::delete_auto_created_partition(c) {
                     cleaned.push(c);
@@ -409,7 +424,7 @@ impl ConfigFileManager {
                 }
             }
         }
-        
+
         cleaned
     }
 
@@ -545,17 +560,17 @@ Language={}
     /// 反序列化安装配置
     fn deserialize_install_config(content: &str) -> Result<InstallConfig> {
         let mut config = InstallConfig::default();
-        
+
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('[') || line.starts_with('#') {
                 continue;
             }
-            
+
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim();
                 let value = value.trim();
-                
+
                 match key {
                     "SessionId" => config.session_id = value.to_string(),
                     "Unattended" => config.unattended = value.parse().unwrap_or(false),
@@ -569,51 +584,77 @@ Language={}
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "IsXp" => config.is_xp = value.parse().unwrap_or(false),
-                    "RunDiskpartScripts" => config.run_diskpart_scripts = value.parse().unwrap_or(false),
+                    "RunDiskpartScripts" => {
+                        config.run_diskpart_scripts = value.parse().unwrap_or(false)
+                    }
                     "BootMode" => config.boot_mode = value.parse().unwrap_or(0),
                     "BootPcaMode" => config.boot_pca_mode = BootPcaMode::from_config_value(value),
-                    "RemoveShortcutArrow" => config.remove_shortcut_arrow = value.parse().unwrap_or(false),
-                    "RestoreClassicContextMenu" => config.restore_classic_context_menu = value.parse().unwrap_or(false),
+                    "RemoveShortcutArrow" => {
+                        config.remove_shortcut_arrow = value.parse().unwrap_or(false)
+                    }
+                    "RestoreClassicContextMenu" => {
+                        config.restore_classic_context_menu = value.parse().unwrap_or(false)
+                    }
                     "BypassNRO" => config.bypass_nro = value.parse().unwrap_or(false),
-                    "DisableWindowsUpdate" => config.disable_windows_update = value.parse().unwrap_or(false),
-                    "DisableWindowsDefender" => config.disable_windows_defender = value.parse().unwrap_or(false),
-                    "DisableReservedStorage" => config.disable_reserved_storage = value.parse().unwrap_or(false),
+                    "DisableWindowsUpdate" => {
+                        config.disable_windows_update = value.parse().unwrap_or(false)
+                    }
+                    "DisableWindowsDefender" => {
+                        config.disable_windows_defender = value.parse().unwrap_or(false)
+                    }
+                    "DisableReservedStorage" => {
+                        config.disable_reserved_storage = value.parse().unwrap_or(false)
+                    }
                     "DisableUAC" => config.disable_uac = value.parse().unwrap_or(false),
-                    "DisableDeviceEncryption" => config.disable_device_encryption = value.parse().unwrap_or(false),
+                    "DisableDeviceEncryption" => {
+                        config.disable_device_encryption = value.parse().unwrap_or(false)
+                    }
                     "RemoveUWPApps" => config.remove_uwp_apps = value.parse().unwrap_or(false),
-                    "ImportStorageControllerDrivers" => config.import_storage_controller_drivers = value.parse().unwrap_or(false),
+                    "ImportStorageControllerDrivers" => {
+                        config.import_storage_controller_drivers = value.parse().unwrap_or(false)
+                    }
                     "CustomUsername" => config.custom_username = value.to_string(),
                     "VolumeLabel" => config.volume_label = value.to_string(),
                     "CustomUnattendFile" => config.custom_unattend_path = value.to_string(),
                     "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
-                    "Win7InjectUsb3Driver" => config.win7_inject_usb3_driver = value.parse().unwrap_or(false),
-                    "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
+                    "Win7InjectUsb3Driver" => {
+                        config.win7_inject_usb3_driver = value.parse().unwrap_or(false)
+                    }
+                    "Win7InjectNvmeDriver" => {
+                        config.win7_inject_nvme_driver = value.parse().unwrap_or(false)
+                    }
                     "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
-                    "Win7FixStorageBsod" => config.win7_fix_storage_bsod = value.parse().unwrap_or(false),
-                    "XpInjectUsb3Driver" => config.xp_inject_usb3_driver = value.parse().unwrap_or(false),
-                    "XpInjectNvmeDriver" => config.xp_inject_nvme_driver = value.parse().unwrap_or(false),
+                    "Win7FixStorageBsod" => {
+                        config.win7_fix_storage_bsod = value.parse().unwrap_or(false)
+                    }
+                    "XpInjectUsb3Driver" => {
+                        config.xp_inject_usb3_driver = value.parse().unwrap_or(false)
+                    }
+                    "XpInjectNvmeDriver" => {
+                        config.xp_inject_nvme_driver = value.parse().unwrap_or(false)
+                    }
                     _ => {}
                 }
             }
         }
-        
+
         Ok(config)
     }
 
     /// 反序列化备份配置
     fn deserialize_backup_config(content: &str) -> Result<BackupConfig> {
         let mut config = BackupConfig::default();
-        
+
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('[') || line.starts_with('#') {
                 continue;
             }
-            
+
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim();
                 let value = value.trim();
-                
+
                 match key {
                     "SavePath" => config.save_path = value.to_string(),
                     "Name" => config.name = value.to_string(),
@@ -627,7 +668,7 @@ Language={}
                 }
             }
         }
-        
+
         Ok(config)
     }
 }

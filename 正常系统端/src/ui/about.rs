@@ -1,9 +1,9 @@
 use egui;
 
 use crate::app::App;
+use crate::tr;
 use crate::utils::i18n::{self};
 use crate::utils::logger::LogManager;
-use crate::tr;
 
 impl App {
     pub fn show_about(&mut self, ui: &mut egui::Ui) {
@@ -24,27 +24,27 @@ impl App {
                 });
 
                 ui.add_space(15.0);
-                
+
                 // 语言设置
                 ui.separator();
                 ui.add_space(10.0);
                 ui.heading(tr!("语言设置"));
                 ui.add_space(10.0);
-                
+
                 // 获取可用语言列表
                 let available_languages = i18n::get_available_languages();
                 let current_language = self.app_config.language.clone();
-                
+
                 ui.horizontal(|ui| {
                     ui.label(tr!("界面语言:"));
-                    
+
                     // 查找当前语言的显示名称
                     let current_display = available_languages
                         .iter()
                         .find(|l| l.code == current_language)
                         .map(|l| l.display_name.as_str())
                         .unwrap_or("简体中文 - 中华人民共和国");
-                    
+
                     egui::ComboBox::from_id_salt("language_selector")
                         .selected_text(current_display)
                         .width(280.0)
@@ -75,13 +75,13 @@ impl App {
                                 }
                             }
                         });
-                    
+
                     // 刷新语言列表按钮
                     if ui.button(tr!("刷新")).on_hover_text(tr!("刷新语言列表")).clicked() {
                         i18n::refresh_available_languages();
                     }
                 });
-                
+
                 // 显示当前语言作者信息
                 if let Some(lang_info) = available_languages.iter().find(|l| l.code == current_language) {
                     if lang_info.code != "zh-CN" {
@@ -94,28 +94,28 @@ impl App {
                         });
                     }
                 }
-                
+
                 ui.add_space(10.0);
                 ui.separator();
-                
+
                 // 小白模式设置
                 ui.add_space(10.0);
                 ui.heading(tr!("模式设置"));
                 ui.add_space(10.0);
-                
+
                 let is_pe = self.system_info.as_ref()
                     .map(|info| info.is_pe_environment)
                     .unwrap_or(false);
-                
+
                 ui.horizontal(|ui| {
                     let mut easy_mode = self.app_config.easy_mode_enabled;
-                    
+
                     ui.add_enabled_ui(!is_pe, |ui| {
                         if ui.checkbox(&mut easy_mode, tr!("启用小白模式")).changed() {
                             self.app_config.set_easy_mode(easy_mode);
                         }
                     });
-                    
+
                     if is_pe {
                         ui.colored_label(
                             egui::Color32::from_rgb(255, 165, 0),
@@ -123,7 +123,7 @@ impl App {
                         );
                     }
                 });
-                
+
                 ui.add_space(5.0);
                 ui.indent("easy_mode_desc", |ui| {
                     ui.colored_label(
@@ -135,15 +135,15 @@ impl App {
                         tr!("适合不熟悉系统重装操作的用户。"),
                     );
                 });
-                
+
                 ui.add_space(10.0);
                 ui.separator();
-                
+
                 // 日志设置
                 ui.add_space(10.0);
                 ui.heading(tr!("日志设置"));
                 ui.add_space(10.0);
-                
+
                 // 日志开关
                 ui.horizontal(|ui| {
                     let mut log_enabled = self.app_config.log_enabled;
@@ -151,7 +151,7 @@ impl App {
                         self.app_config.set_log_enabled(log_enabled);
                     }
                 });
-                
+
                 ui.add_space(5.0);
                 ui.indent("log_desc", |ui| {
                     ui.colored_label(

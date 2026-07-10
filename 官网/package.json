@@ -2,7 +2,7 @@
   "name": "letrecovery-website",
   "version": "1.0.0",
   "description": "LetRecovery 官方网站源码",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "private": true,
   "type": "module",
   "keywords": [

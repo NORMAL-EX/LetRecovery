@@ -12,7 +12,7 @@ use std::sync::mpsc::Sender;
 
 use crate::core::dism_exe::{DismExe, DismExeProgress};
 use crate::tr;
-use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZX, WIM_COMPRESS_LZMS};
+use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZMS, WIM_COMPRESS_LZX};
 use lr_core::wimlib::WimlibManager;
 use lr_core::WimEngineManager;
 
@@ -59,7 +59,8 @@ impl Dism {
 
         log::info!("[Dism] 校验镜像完整性: {}", image_file);
 
-        let lib = Wimlib::new().map_err(|e| anyhow::anyhow!("{}", tr!("wimlib 初始化失败: {}", e)))?;
+        let lib =
+            Wimlib::new().map_err(|e| anyhow::anyhow!("{}", tr!("wimlib 初始化失败: {}", e)))?;
         let handle = lib
             .open_wim(image_file)
             .map_err(|e| anyhow::anyhow!("{}", tr!("打开镜像失败: {}", e)))?;
@@ -212,7 +213,11 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!("[Dism] 使用 wimlib 追加镜像: {} -> {}", capture_dir, image_file);
+        log::info!(
+            "[Dism] 使用 wimlib 追加镜像: {} -> {}",
+            capture_dir,
+            image_file
+        );
 
         // 对于追加操作，WimManager 的 capture_image 在文件存在时会自动追加
         self.capture_image(image_file, capture_dir, name, description, progress_tx)
@@ -278,7 +283,11 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!("[Dism] 使用 wimlib 追加ESD镜像: {} -> {}", capture_dir, image_file);
+        log::info!(
+            "[Dism] 使用 wimlib 追加ESD镜像: {} -> {}",
+            capture_dir,
+            image_file
+        );
         self.capture_image_esd(image_file, capture_dir, name, description, progress_tx)
     }
 
@@ -293,11 +302,16 @@ impl Dism {
         split_size_mb: u32,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!("[Dism] 捕获SWM分卷镜像: {} -> {} (分卷大小: {}MB)", capture_dir, image_file, split_size_mb);
+        log::info!(
+            "[Dism] 捕获SWM分卷镜像: {} -> {} (分卷大小: {}MB)",
+            capture_dir,
+            image_file,
+            split_size_mb
+        );
 
         // 先创建临时WIM文件
         let temp_wim = format!("{}.tmp.wim", image_file.trim_end_matches(".swm"));
-        
+
         // Step 1: 捕获为WIM
         if let Some(ref tx) = progress_tx {
             let _ = tx.send(DismProgress {
@@ -387,8 +401,8 @@ impl Dism {
         );
 
         // 使用 dism.exe 命令行方式导入驱动
-        let dism_exe = DismExe::new()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
+        let dism_exe =
+            DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
 
         dism_exe.add_driver_offline(image_path, driver_path, true, false, None)?;
 
@@ -409,8 +423,8 @@ impl Dism {
             image_path
         );
 
-        let dism_exe = DismExe::new()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
+        let dism_exe =
+            DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
 
         // 创建进度转换通道
         let (exe_tx, exe_rx) = std::sync::mpsc::channel::<DismExeProgress>();
@@ -428,7 +442,8 @@ impl Dism {
             }
         });
 
-        let result = dism_exe.add_driver_offline(image_path, driver_path, true, false, Some(exe_tx));
+        let result =
+            dism_exe.add_driver_offline(image_path, driver_path, true, false, Some(exe_tx));
 
         // 等待转发线程结束
         let _ = forward_thread.join();
@@ -453,8 +468,8 @@ impl Dism {
             image_path
         );
 
-        let dism_exe = DismExe::new()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
+        let dism_exe =
+            DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
 
         dism_exe.add_package_offline(image_path, cab_path, false, None)?;
 
@@ -475,8 +490,8 @@ impl Dism {
             image_path
         );
 
-        let dism_exe = DismExe::new()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
+        let dism_exe =
+            DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
 
         // 创建进度转换通道
         let (exe_tx, exe_rx) = std::sync::mpsc::channel::<DismExeProgress>();
@@ -494,11 +509,8 @@ impl Dism {
             }
         });
 
-        let result = dism_exe.add_packages_from_directory(
-            image_path,
-            Path::new(cab_dir),
-            Some(exe_tx),
-        );
+        let result =
+            dism_exe.add_packages_from_directory(image_path, Path::new(cab_dir), Some(exe_tx));
 
         // 等待转发线程结束
         let _ = forward_thread.join();
@@ -530,12 +542,15 @@ impl Dism {
         if let Ok(wim_manager) = WimlibManager::new() {
             if let Ok(images) = wim_manager.get_image_info(image_file) {
                 log::info!("[Dism] 从 wimlib 成功获取 {} 个镜像信息", images.len());
-                return Ok(images.into_iter().map(|img| ImageInfo {
-                    index: img.index,
-                    name: img.name,
-                    size_bytes: img.size_bytes,
-                    installation_type: img.installation_type,
-                }).collect());
+                return Ok(images
+                    .into_iter()
+                    .map(|img| ImageInfo {
+                        index: img.index,
+                        name: img.name,
+                        size_bytes: img.size_bytes,
+                        installation_type: img.installation_type,
+                    })
+                    .collect());
             }
         }
 
@@ -558,7 +573,7 @@ impl Dism {
         log::info!("[Dism] 尝试直接解析 WIM XML 元数据: {}", image_file);
 
         let mut file = File::open(image_file)?;
-        
+
         // 读取 WIM 文件头（208 字节）
         let mut header = [0u8; 208];
         file.read_exact(&mut header)?;
@@ -586,7 +601,7 @@ impl Dism {
 
         // XML 数据是 UTF-16LE 编码
         let xml_string = Self::decode_utf16le(&xml_data)?;
-        
+
         // 解析 XML
         Self::parse_wim_xml(&xml_string)
     }
@@ -606,7 +621,7 @@ impl Dism {
 
         let len = (data.len() - start) / 2;
         let mut utf16_data = Vec::with_capacity(len);
-        
+
         for i in 0..len {
             let offset = start + i * 2;
             if offset + 1 < data.len() {
@@ -631,7 +646,7 @@ impl Dism {
         let mut pos = 0;
         while let Some(start) = xml[pos..].find("<IMAGE INDEX=\"") {
             let abs_start = pos + start;
-            
+
             let index_start = abs_start + 14;
             if let Some(index_end) = xml[index_start..].find('"') {
                 let index_str = &xml[index_start..index_start + index_end];
@@ -639,19 +654,19 @@ impl Dism {
 
                 if let Some(image_end) = xml[abs_start..].find("</IMAGE>") {
                     let image_block = &xml[abs_start..abs_start + image_end + 8];
-                    
+
                     // 优先使用 DISPLAYNAME，其次使用 NAME，最后使用默认名称
                     let name = Self::extract_xml_tag(image_block, "DISPLAYNAME")
                         .or_else(|| Self::extract_xml_tag(image_block, "NAME"))
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| tr!("镜像 {}", index));
-                    
+
                     let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
-                    
-                    let installation_type = Self::extract_xml_tag(image_block, "INSTALLATIONTYPE")
-                        .unwrap_or_default();
+
+                    let installation_type =
+                        Self::extract_xml_tag(image_block, "INSTALLATIONTYPE").unwrap_or_default();
 
                     if index > 0 {
                         images.push(ImageInfo {
@@ -682,7 +697,7 @@ impl Dism {
     fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
         let open_tag = format!("<{}>", tag);
         let close_tag = format!("</{}>", tag);
-        
+
         if let Some(start) = xml.find(&open_tag) {
             let content_start = start + open_tag.len();
             if let Some(end) = xml[content_start..].find(&close_tag) {

@@ -2,6 +2,9 @@
 name = "LetRecovery"
 version = "2026.2.6"
 edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 authors = ["NORMAL-EX"]
 description = "Windows系统一键重装工具"
 

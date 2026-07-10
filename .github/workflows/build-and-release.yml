@@ -28,8 +28,11 @@ jobs:
         with:
           ref: ${{ inputs.branch || github.ref }}
 
-      - name: Setup Rust (stable)
+      - name: Setup Rust 1.88
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -38,26 +41,32 @@ jobs:
             正常系统端
             PE端
 
+      - name: Verify Rust workspace before release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo check --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --locked -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
+          cargo test --workspace --no-run --locked
+          cargo test -p lr-core --locked
+          cargo test -p letrecovery-pe account_fix --locked
+          cargo test -p LetRecovery fveapi --locked
+          cargo test -p LetRecovery download::config::tests --locked
+
       - name: Build system-side exe (LetRecovery.exe)
         shell: bash
         working-directory: 正常系统端
         run: |
           set -euo pipefail
-          # 有 Cargo.lock 才用 --locked（main 各 crate 自带锁；workspace 分支可能无锁需现生成）
-          LOCKED=""
-          if [ -f Cargo.lock ] || [ -f ../Cargo.lock ]; then LOCKED="--locked"; fi
-          echo "cargo build --release ${LOCKED:-(no --locked)}"
-          cargo build --release $LOCKED
+          cargo build --release --locked
 
       - name: Build PE-side exe (LetRecoveryPE.exe)
         shell: bash
         working-directory: PE端
         run: |
           set -euo pipefail
-          LOCKED=""
-          if [ -f Cargo.lock ] || [ -f ../Cargo.lock ]; then LOCKED="--locked"; fi
-          echo "cargo build --release ${LOCKED:-(no --locked)}"
-          cargo build --release $LOCKED
+          cargo build --release --locked
 
       - name: Download base package (template)
         shell: bash

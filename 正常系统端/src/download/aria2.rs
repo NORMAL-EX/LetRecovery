@@ -50,7 +50,7 @@ pub struct Aria2Manager {
 
 impl Aria2Manager {
     /// 预热aria2（在后台启动进程并建立连接）
-    /// 
+    ///
     /// 可以在应用启动时或用户选择PE时调用，提前准备好aria2
     pub async fn warmup() -> Result<()> {
         if ARIA2_WARMED_UP.load(Ordering::SeqCst) {
@@ -59,17 +59,17 @@ impl Aria2Manager {
         }
 
         log::info!("[aria2] 开始预热...");
-        
+
         // 获取或创建全局管理器
         let global = GLOBAL_ARIA2.get_or_init(|| Arc::new(TokioMutex::new(None)));
         let mut guard = global.lock().await;
-        
+
         if guard.is_some() {
             log::info!("[aria2] 全局管理器已存在");
             ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
             return Ok(());
         }
-        
+
         // 启动新的管理器
         match Self::start_internal().await {
             Ok(manager) => {
@@ -88,7 +88,7 @@ impl Aria2Manager {
     /// 获取全局aria2管理器（如果已预热）或创建新的
     pub async fn get_or_start() -> Result<Arc<TokioMutex<Option<Aria2Manager>>>> {
         let global = GLOBAL_ARIA2.get_or_init(|| Arc::new(TokioMutex::new(None)));
-        
+
         {
             let mut guard = global.lock().await;
             if guard.is_none() {
@@ -98,7 +98,7 @@ impl Aria2Manager {
                 ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
             }
         }
-        
+
         Ok(Arc::clone(global))
     }
 
@@ -147,7 +147,11 @@ impl Aria2Manager {
                 Ok(c) => {
                     client = Some(c);
                     let elapsed = start_time.elapsed();
-                    log::info!("[aria2] RPC 连接成功 (第 {} 次尝试)，总耗时: {:?}", i + 1, elapsed);
+                    log::info!(
+                        "[aria2] RPC 连接成功 (第 {} 次尝试)，总耗时: {:?}",
+                        i + 1,
+                        elapsed
+                    );
                     break;
                 }
                 Err(e) => {
@@ -163,9 +167,8 @@ impl Aria2Manager {
             }
         }
 
-        let client = client.ok_or_else(|| {
-            anyhow::anyhow!("{}", tr!("初始化aria2失败: {}", last_error))
-        })?;
+        let client =
+            client.ok_or_else(|| anyhow::anyhow!("{}", tr!("初始化aria2失败: {}", last_error)))?;
 
         Ok(Self {
             client: Some(Arc::new(client)),
@@ -185,7 +188,8 @@ impl Aria2Manager {
         save_dir: &str,
         filename: Option<&str>,
     ) -> Result<String> {
-        self.add_download_with_headers(url, save_dir, filename, None).await
+        self.add_download_with_headers(url, save_dir, filename, None)
+            .await
     }
 
     /// 添加下载任务（支持自定义headers）
@@ -240,12 +244,10 @@ impl Aria2Manager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("aria2 client not connected"))?;
 
-        let status = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.tell_status(gid),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("{}", tr!("查询下载状态超时")))??;
+        let status =
+            tokio::time::timeout(std::time::Duration::from_secs(10), client.tell_status(gid))
+                .await
+                .map_err(|_| anyhow::anyhow!("{}", tr!("查询下载状态超时")))??;
 
         let completed = status.completed_length;
         let total = status.total_length;

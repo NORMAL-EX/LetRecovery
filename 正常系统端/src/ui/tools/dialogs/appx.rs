@@ -1,10 +1,10 @@
+use super::super::appx::{get_appx_packages, remove_appx_packages};
+use super::common::{format_partition_display, get_message_color};
+use crate::app::App;
+use crate::tr;
 use egui;
 use std::collections::HashSet;
 use std::sync::mpsc;
-use crate::tr;
-use crate::app::App;
-use super::super::appx::{get_appx_packages, remove_appx_packages};
-use super::common::{format_partition_display, get_message_color};
 
 impl App {
     /// 渲染移除APPX对话框
@@ -65,7 +65,7 @@ impl App {
                                     );
                                     ui.separator();
                                 }
-                                
+
                                 // 离线分区选项
                                 for partition in &windows_partitions {
                                     let display = format!(
@@ -83,7 +83,8 @@ impl App {
                             });
 
                         // 分区改变时重新加载APPX列表
-                        if old_target != self.remove_appx_target && self.remove_appx_target.is_some()
+                        if old_target != self.remove_appx_target
+                            && self.remove_appx_target.is_some()
                         {
                             self.start_load_appx_list();
                         }
@@ -102,8 +103,7 @@ impl App {
                     ui.horizontal(|ui| {
                         if ui.button(tr!("全选")).clicked() {
                             for pkg in &self.remove_appx_list {
-                                self.remove_appx_selected
-                                    .insert(pkg.package_name.clone());
+                                self.remove_appx_selected.insert(pkg.package_name.clone());
                             }
                         }
                         if ui.button(tr!("反选")).clicked() {
@@ -111,8 +111,7 @@ impl App {
                             self.remove_appx_selected.clear();
                             for pkg in &self.remove_appx_list {
                                 if !current.contains(&pkg.package_name) {
-                                    self.remove_appx_selected
-                                        .insert(pkg.package_name.clone());
+                                    self.remove_appx_selected.insert(pkg.package_name.clone());
                                 }
                             }
                         }
@@ -129,8 +128,7 @@ impl App {
                                     self.remove_appx_selected.contains(&pkg.package_name);
                                 if ui.checkbox(&mut selected, &pkg.display_name).changed() {
                                     if selected {
-                                        self.remove_appx_selected
-                                            .insert(pkg.package_name.clone());
+                                        self.remove_appx_selected.insert(pkg.package_name.clone());
                                     } else {
                                         self.remove_appx_selected.remove(&pkg.package_name);
                                     }
@@ -166,7 +164,10 @@ impl App {
                     let can_refresh = self.remove_appx_target.is_some()
                         && !self.remove_appx_loading
                         && !is_loading_partitions;
-                    if ui.add_enabled(can_refresh, egui::Button::new(tr!("刷新列表"))).clicked() {
+                    if ui
+                        .add_enabled(can_refresh, egui::Button::new(tr!("刷新列表")))
+                        .clicked()
+                    {
                         self.start_load_appx_list();
                     }
 

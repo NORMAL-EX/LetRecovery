@@ -36,8 +36,7 @@ const DISM_ONLINE_IMAGE: &str = "DISM_{53BFAE52-B167-4E2F-A258-0A37B57FF845}";
 const DISMAPI_E_DISMAPI_ALREADY_INITIALIZED: i32 = 0xC004_0001u32 as i32;
 
 // ---- dismapi.dll 导出函数签名（全部 stdcall，返回 HRESULT） ----
-type FnDismInitialize =
-    unsafe extern "system" fn(u32, *const u16, *const u16) -> i32;
+type FnDismInitialize = unsafe extern "system" fn(u32, *const u16, *const u16) -> i32;
 type FnDismShutdown = unsafe extern "system" fn() -> i32;
 type FnDismOpenSession =
     unsafe extern "system" fn(*const u16, *const u16, *const u16, *mut DismSession) -> i32;
@@ -94,10 +93,7 @@ impl DismApi {
                 .get::<FnDismGetDrivers>(b"DismGetDrivers\0")
                 .ok()
                 .map(|s| *s);
-            let delete = lib
-                .get::<FnDismDelete>(b"DismDelete\0")
-                .ok()
-                .map(|s| *s);
+            let delete = lib.get::<FnDismDelete>(b"DismDelete\0").ok().map(|s| *s);
 
             Ok(Self {
                 _lib: lib,
@@ -180,7 +176,11 @@ impl DismApi {
         // 1) 初始化 DISM API（已初始化则复用，不再重复 Shutdown）
         let mut owns_init = true;
         unsafe {
-            let hr = (self.initialize)(DISM_LOG_ERRORS_WARNINGS_INFO, std::ptr::null(), std::ptr::null());
+            let hr = (self.initialize)(
+                DISM_LOG_ERRORS_WARNINGS_INFO,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
             if hr == DISMAPI_E_DISMAPI_ALREADY_INITIALIZED {
                 owns_init = false;
             } else if hr < 0 {
@@ -216,7 +216,9 @@ impl DismApi {
                 bail!(
                     "DismOpenSession 失败: HRESULT 0x{:08X}（映像: {}）",
                     hr as u32,
-                    image_root.map(|p| p.display().to_string()).unwrap_or_else(|| "在线".into())
+                    image_root
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "在线".into())
                 );
             }
         }
@@ -273,7 +275,11 @@ impl DismApi {
             let total = if total == 0 { exported as u32 } else { total };
             cb(exported as u32, total);
         }
-        log::info!("[DISM] DismExportDriver 完成，已导出 {} 个驱动到 {:?}", exported, destination);
+        log::info!(
+            "[DISM] DismExportDriver 完成，已导出 {} 个驱动到 {:?}",
+            exported,
+            destination
+        );
         Ok(exported)
     }
 
@@ -282,7 +288,12 @@ impl DismApi {
         let get = self.get_drivers?;
         let mut buf: *mut c_void = std::ptr::null_mut();
         let mut count: u32 = 0;
-        let hr = unsafe { get(session, 0 /* AllDrivers=FALSE → 仅 OOB */, &mut buf, &mut count) };
+        let hr = unsafe {
+            get(
+                session, 0, /* AllDrivers=FALSE → 仅 OOB */
+                &mut buf, &mut count,
+            )
+        };
         if hr < 0 {
             return None;
         }
@@ -301,10 +312,7 @@ impl DismApi {
 /// 统计目录下的一级子目录数量（DismExportDriver 每个驱动建一个子目录）。
 fn count_subdirs(dir: &Path) -> usize {
     match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .count(),
+        Ok(rd) => rd.flatten().filter(|e| e.path().is_dir()).count(),
         Err(_) => 0,
     }
 }

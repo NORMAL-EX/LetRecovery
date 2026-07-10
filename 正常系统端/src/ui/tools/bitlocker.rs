@@ -4,10 +4,7 @@
 //! 实际功能由 core::bitlocker 模块实现
 
 // 重新导出核心模块的类型，保持API兼容
-pub use crate::core::bitlocker::{
-    VolumeInfo as BitLockerPartition,
-    UnlockResult,
-};
+pub use crate::core::bitlocker::{UnlockResult, VolumeInfo as BitLockerPartition};
 
 // 重新导出便捷函数，保持API兼容
 pub use crate::core::bitlocker::{

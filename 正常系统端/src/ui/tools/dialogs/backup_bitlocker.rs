@@ -1,8 +1,8 @@
+use super::common::get_message_color;
+use crate::app::App;
+use crate::tr;
 use egui;
 use std::sync::mpsc;
-use crate::tr;
-use crate::app::App;
-use super::common::get_message_color;
 
 impl App {
     // ==================== 备份时BitLocker解锁对话框 ====================
@@ -31,7 +31,9 @@ impl App {
             .show(ui.ctx(), |ui| {
                 ui.set_min_width(500.0);
 
-                ui.label(tr!("检测到以下分区被BitLocker加密锁定，需要解锁后才能继续备份："));
+                ui.label(tr!(
+                    "检测到以下分区被BitLocker加密锁定，需要解锁后才能继续备份："
+                ));
                 ui.add_space(10.0);
 
                 // 显示锁定分区列表
@@ -51,23 +53,37 @@ impl App {
                                 ui.end_row();
 
                                 for partition in &self.backup_bitlocker_partitions {
-                                    let is_current = self.backup_bitlocker_current.as_ref() == Some(&partition.letter);
-                                    
+                                    let is_current = self.backup_bitlocker_current.as_ref()
+                                        == Some(&partition.letter);
+
                                     let status_color = match partition.status {
-                                        VolumeStatus::EncryptedLocked => egui::Color32::from_rgb(255, 100, 100),
-                                        VolumeStatus::EncryptedUnlocked => egui::Color32::from_rgb(100, 200, 100),
+                                        VolumeStatus::EncryptedLocked => {
+                                            egui::Color32::from_rgb(255, 100, 100)
+                                        }
+                                        VolumeStatus::EncryptedUnlocked => {
+                                            egui::Color32::from_rgb(100, 200, 100)
+                                        }
                                         _ => egui::Color32::GRAY,
                                     };
-                                    
+
                                     let label = if is_current {
-                                        egui::RichText::new(&partition.letter).strong().color(egui::Color32::from_rgb(100, 150, 255))
+                                        egui::RichText::new(&partition.letter)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(100, 150, 255))
                                     } else {
                                         egui::RichText::new(&partition.letter)
                                     };
-                                    
+
                                     ui.label(label);
-                                    ui.label(format!("{:.1} GB", partition.total_size_mb as f64 / 1024.0));
-                                    ui.label(if partition.label.is_empty() { "-" } else { &partition.label });
+                                    ui.label(format!(
+                                        "{:.1} GB",
+                                        partition.total_size_mb as f64 / 1024.0
+                                    ));
+                                    ui.label(if partition.label.is_empty() {
+                                        "-"
+                                    } else {
+                                        &partition.label
+                                    });
                                     ui.colored_label(status_color, tr!(partition.status.as_str()));
                                     ui.end_row();
                                 }
@@ -78,7 +94,9 @@ impl App {
                 ui.separator();
 
                 // 检查是否还有需要解锁的分区
-                let has_locked = self.backup_bitlocker_partitions.iter()
+                let has_locked = self
+                    .backup_bitlocker_partitions
+                    .iter()
                     .any(|p| p.status == VolumeStatus::EncryptedLocked);
 
                 if has_locked {
@@ -96,8 +114,16 @@ impl App {
                     // 解锁模式选择
                     ui.horizontal(|ui| {
                         ui.label(tr!("解锁方式:"));
-                        ui.radio_value(&mut self.backup_bitlocker_mode, BitLockerUnlockMode::Password, tr!("密码"));
-                        ui.radio_value(&mut self.backup_bitlocker_mode, BitLockerUnlockMode::RecoveryKey, tr!("恢复密钥"));
+                        ui.radio_value(
+                            &mut self.backup_bitlocker_mode,
+                            BitLockerUnlockMode::Password,
+                            tr!("密码"),
+                        );
+                        ui.radio_value(
+                            &mut self.backup_bitlocker_mode,
+                            BitLockerUnlockMode::RecoveryKey,
+                            tr!("恢复密钥"),
+                        );
                     });
 
                     ui.add_space(5.0);
@@ -118,9 +144,13 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.label(tr!("恢复密钥:"));
                                 ui.add(
-                                    egui::TextEdit::singleline(&mut self.backup_bitlocker_recovery_key)
-                                        .desired_width(300.0)
-                                        .hint_text("000000-000000-000000-000000-000000-000000-000000-000000"),
+                                    egui::TextEdit::singleline(
+                                        &mut self.backup_bitlocker_recovery_key,
+                                    )
+                                    .desired_width(300.0)
+                                    .hint_text(
+                                        "000000-000000-000000-000000-000000-000000-000000-000000",
+                                    ),
                                 );
                             });
                         }
@@ -153,11 +183,18 @@ impl App {
                     } else if has_locked {
                         let can_unlock = self.backup_bitlocker_current.is_some()
                             && match self.backup_bitlocker_mode {
-                                BitLockerUnlockMode::Password => !self.backup_bitlocker_password.is_empty(),
-                                BitLockerUnlockMode::RecoveryKey => !self.backup_bitlocker_recovery_key.is_empty(),
+                                BitLockerUnlockMode::Password => {
+                                    !self.backup_bitlocker_password.is_empty()
+                                }
+                                BitLockerUnlockMode::RecoveryKey => {
+                                    !self.backup_bitlocker_recovery_key.is_empty()
+                                }
                             };
 
-                        if ui.add_enabled(can_unlock, egui::Button::new(tr!("解锁"))).clicked() {
+                        if ui
+                            .add_enabled(can_unlock, egui::Button::new(tr!("解锁")))
+                            .clicked()
+                        {
                             do_unlock = true;
                         }
 
@@ -199,7 +236,8 @@ impl App {
 
         if do_skip_all {
             // 跳过所有锁定的分区
-            self.backup_bitlocker_partitions.retain(|p| p.status != VolumeStatus::EncryptedLocked);
+            self.backup_bitlocker_partitions
+                .retain(|p| p.status != VolumeStatus::EncryptedLocked);
             self.backup_bitlocker_current = None;
             self.backup_bitlocker_message = tr!("已跳过所有锁定的分区");
         }
@@ -223,7 +261,9 @@ impl App {
                     self.backup_bitlocker_message = tr!("{} 解锁成功", result.letter);
 
                     // 更新分区状态
-                    if let Some(partition) = self.backup_bitlocker_partitions.iter_mut()
+                    if let Some(partition) = self
+                        .backup_bitlocker_partitions
+                        .iter_mut()
                         .find(|p| p.letter == result.letter)
                     {
                         partition.status = VolumeStatus::EncryptedUnlocked;
@@ -236,7 +276,8 @@ impl App {
                     // 选择下一个需要解锁的分区
                     self.select_next_backup_bitlocker_partition();
                 } else {
-                    self.backup_bitlocker_message = tr!("{} 解锁失败: {}", result.letter, result.message);
+                    self.backup_bitlocker_message =
+                        tr!("{} 解锁失败: {}", result.letter, result.message);
                 }
             }
         }
@@ -285,9 +326,10 @@ impl App {
     fn skip_current_backup_bitlocker_partition(&mut self) {
         if let Some(ref current) = self.backup_bitlocker_current.clone() {
             // 从列表中移除当前分区
-            self.backup_bitlocker_partitions.retain(|p| p.letter != *current);
+            self.backup_bitlocker_partitions
+                .retain(|p| p.letter != *current);
             self.backup_bitlocker_message = tr!("已跳过分区 {}", current);
-            
+
             // 选择下一个需要解锁的分区
             self.select_next_backup_bitlocker_partition();
         }
@@ -297,7 +339,8 @@ impl App {
     fn select_next_backup_bitlocker_partition(&mut self) {
         use crate::core::bitlocker::VolumeStatus;
 
-        self.backup_bitlocker_current = self.backup_bitlocker_partitions
+        self.backup_bitlocker_current = self
+            .backup_bitlocker_partitions
             .iter()
             .find(|p| p.status == VolumeStatus::EncryptedLocked)
             .map(|p| p.letter.clone());

@@ -35,14 +35,18 @@ impl BootManager {
         ));
         std::fs::write(&script_path, script)?;
         let script_arg = script_path.to_string_lossy().into_owned();
-        let output = create_command("diskpart").args(["/s", &script_arg]).output();
+        let output = create_command("diskpart")
+            .args(["/s", &script_arg])
+            .output();
         let _ = std::fs::remove_file(&script_path);
         Ok(output?)
     }
 
     /// 获取当前系统引导 GUID
     pub fn get_current_boot_guid(&self) -> Result<String> {
-        let output = create_command(&self.bcdedit_path).args(["/enum"]).output()?;
+        let output = create_command(&self.bcdedit_path)
+            .args(["/enum"])
+            .output()?;
 
         let stdout = gbk_to_utf8(&output.stdout);
         let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
@@ -68,20 +72,25 @@ impl BootManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!("[BOOT] 查找 {} 所在磁盘的 ESP 分区...", windows_partition);
-        
+
         // 提取盘符（去掉冒号）
-        let drive_letter = windows_partition.trim_end_matches(':').trim_end_matches('\\');
-        
+        let drive_letter = windows_partition
+            .trim_end_matches(':')
+            .trim_end_matches('\\');
+
         // Step 1: 使用 diskpart 获取该分区所在的磁盘号
-        let script1 = format!(r#"select volume {}
+        let script1 = format!(
+            r#"select volume {}
 detail volume
-"#, drive_letter);
-        
+"#,
+            drive_letter
+        );
+
         let output = Self::run_diskpart_script(&script1, "find_disk")?;
-        
+
         let stdout = gbk_to_utf8(&output.stdout);
         log::info!("[BOOT] 查找磁盘号:\n{}", stdout);
-        
+
         // 解析磁盘号
         let mut disk_num: Option<usize> = None;
         for line in stdout.lines() {
@@ -101,20 +110,24 @@ detail volume
                 }
             }
         }
-        
-        let disk_num = disk_num.ok_or_else(|| anyhow::anyhow!("{}", tr!("无法确定分区所在磁盘")))?;
+
+        let disk_num =
+            disk_num.ok_or_else(|| anyhow::anyhow!("{}", tr!("无法确定分区所在磁盘")))?;
         log::info!("[BOOT] 目标分区在磁盘 {}", disk_num);
-        
+
         // Step 2: 查找该磁盘上的 ESP 分区（使用 GPT 类型）
-        let script2 = format!(r#"select disk {}
+        let script2 = format!(
+            r#"select disk {}
 list partition
-"#, disk_num);
-        
+"#,
+            disk_num
+        );
+
         let output = Self::run_diskpart_script(&script2, "list_partitions")?;
-        
+
         let stdout = gbk_to_utf8(&output.stdout);
         log::info!("[BOOT] 分区列表:\n{}", stdout);
-        
+
         // 查找 System/系统 类型的分区（ESP）
         let mut esp_partition: Option<usize> = None;
         for line in stdout.lines() {
@@ -139,26 +152,30 @@ list partition
                 }
             }
         }
-        
-        let esp_partition = esp_partition.ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
-        
+
+        let esp_partition =
+            esp_partition.ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
+
         // Step 3: 使用真正空闲的盘符挂载 ESP，不能覆盖用户已有的 S: 等盘符。
         let mount_letter = lr_core::boot_pca::find_available_drive_letter()
             .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
-        
-        let script3 = format!(r#"select disk {}
+
+        let script3 = format!(
+            r#"select disk {}
 select partition {}
 assign letter={}
-"#, disk_num, esp_partition, mount_letter);
-        
+"#,
+            disk_num, esp_partition, mount_letter
+        );
+
         let output = Self::run_diskpart_script(&script3, "assign_esp")?;
-        
+
         let stdout = gbk_to_utf8(&output.stdout);
         log::info!("[BOOT] 分配 ESP 盘符:\n{}", stdout);
-        
+
         // 等待盘符生效
         std::thread::sleep(std::time::Duration::from_millis(500));
-        
+
         // 验证
         let mount_root = format!("{}:\\", mount_letter);
         if Path::new(&mount_root).exists() {
@@ -200,7 +217,9 @@ assign letter={}
 
         // 方法1: 使用 mountvol /s 挂载当前系统 ESP。
         log::info!("[BOOT] 尝试使用 mountvol /s 挂载 ESP 到 {}", mounted);
-        let output = create_command("mountvol").args([mounted.as_str(), "/s"]).output();
+        let output = create_command("mountvol")
+            .args([mounted.as_str(), "/s"])
+            .output();
         if output.is_ok() {
             std::thread::sleep(std::time::Duration::from_millis(500));
             if Path::new(&mount_root).exists() {
@@ -216,22 +235,25 @@ assign letter={}
     /// 使用 diskpart 查找任意磁盘上的 ESP
     fn find_esp_with_diskpart(&self, mount_letter: char) -> Result<String> {
         log::info!("[BOOT] 使用 diskpart 查找 ESP");
-        
+
         // 遍历磁盘0-3
         for disk in 0..4 {
-            let script = format!(r#"select disk {}
+            let script = format!(
+                r#"select disk {}
 list partition
-"#, disk);
-            
+"#,
+                disk
+            );
+
             let script_path = std::env::temp_dir().join("check_disk.txt");
             std::fs::write(&script_path, &script)?;
-            
+
             let output = create_command("diskpart")
                 .args(["/s", &script_path.to_string_lossy()])
                 .output()?;
-            
+
             let stdout = gbk_to_utf8(&output.stdout);
-            
+
             // 查找 System 类型分区
             for line in stdout.lines() {
                 let line_lower = line.to_lowercase();
@@ -243,23 +265,30 @@ list partition
                             if let Some(num_str) = parts.get(i + 1) {
                                 if let Ok(part_num) = num_str.parse::<usize>() {
                                     // 找到了，分配盘符
-                                    let assign_script = format!(r#"select disk {}
+                                    let assign_script = format!(
+                                        r#"select disk {}
 select partition {}
 assign letter={}
-"#, disk, part_num, mount_letter);
-                                    
+"#,
+                                        disk, part_num, mount_letter
+                                    );
+
                                     let assign_path = std::env::temp_dir().join("assign_esp2.txt");
                                     std::fs::write(&assign_path, &assign_script)?;
-                                    
+
                                     let _ = create_command("diskpart")
                                         .args(["/s", &assign_path.to_string_lossy()])
                                         .output();
-                                    
+
                                     std::thread::sleep(std::time::Duration::from_millis(500));
-                                    
+
                                     let mount_root = format!("{}:\\", mount_letter);
                                     if Path::new(&mount_root).exists() {
-                                        log::info!("[BOOT] 找到 ESP: 磁盘 {} 分区 {}", disk, part_num);
+                                        log::info!(
+                                            "[BOOT] 找到 ESP: 磁盘 {} 分区 {}",
+                                            disk,
+                                            part_num
+                                        );
                                         return Ok(format!("{}:", mount_letter));
                                     }
                                 }
@@ -269,7 +298,7 @@ assign letter={}
                 }
             }
         }
-        
+
         anyhow::bail!("{}", tr!("未找到 EFI 系统分区"))
     }
 
@@ -323,7 +352,10 @@ assign letter={}
     /// 新版 Windows 的 `detail partition` 可能不显示"活动"字段，`list partition` 的 `*` 又只表示焦点，
     /// 两种文本解析都不可靠。给独立 System 分区挂一个盘符以便 bcdboot /s 指过去。
     /// 返回 (引导分区盘符如 "S:", 磁盘号, 分区号)。
-    fn prepare_legacy_boot_partition(&self, windows_partition: &str) -> Result<(String, usize, usize)> {
+    fn prepare_legacy_boot_partition(
+        &self,
+        windows_partition: &str,
+    ) -> Result<(String, usize, usize)> {
         let wl_char = windows_partition
             .trim_end_matches('\\')
             .trim_end_matches(':')
@@ -346,8 +378,12 @@ assign letter={}
                 }
             }
         }
-        let disk_num = disk_num
-            .ok_or_else(|| anyhow::anyhow!("无法确定 {} 所在磁盘（IOCTL 未匹配到盘符）", windows_partition))?;
+        let disk_num = disk_num.ok_or_else(|| {
+            anyhow::anyhow!(
+                "无法确定 {} 所在磁盘（IOCTL 未匹配到盘符）",
+                windows_partition
+            )
+        })?;
         let win_part = win_part.unwrap_or(0);
 
         // 该磁盘的活动（引导）分区——权威来源：MBR BootIndicator=0x80（复用上面同一次 IOCTL 扫描）。
@@ -363,7 +399,9 @@ assign letter={}
                 let letter = self.letter_for_partition(&disks, disk_num, ap)?;
                 log::info!(
                     "[BOOT] Legacy 引导分区 = 活动 System 分区 磁盘{}:分区{} -> {}",
-                    disk_num, ap, letter
+                    disk_num,
+                    ap,
+                    letter
                 );
                 Ok((letter, disk_num as usize, ap as usize))
             }
@@ -372,9 +410,15 @@ assign letter={}
             _ => {
                 log::info!(
                     "[BOOT] Legacy 引导分区 = Windows 分区自身 磁盘{}:分区{} -> {}",
-                    disk_num, win_part, windows_partition
+                    disk_num,
+                    win_part,
+                    windows_partition
                 );
-                Ok((windows_partition.to_string(), disk_num as usize, win_part as usize))
+                Ok((
+                    windows_partition.to_string(),
+                    disk_num as usize,
+                    win_part as usize,
+                ))
             }
         }
     }
@@ -407,12 +451,19 @@ assign letter={}
         );
         let p = std::env::temp_dir().join("lr_bp_asg.txt");
         std::fs::write(&p, script.as_bytes())?;
-        let _ = create_command("diskpart").args(["/s", &p.to_string_lossy()]).output()?;
+        let _ = create_command("diskpart")
+            .args(["/s", &p.to_string_lossy()])
+            .output()?;
         let _ = std::fs::remove_file(&p);
         std::thread::sleep(std::time::Duration::from_millis(600));
         let letter = format!("{}:", free);
         if !Path::new(&format!("{}\\", letter)).exists() {
-            anyhow::bail!("引导分区 磁盘{}:分区{} 盘符 {} 不可用", disk_num, part, letter);
+            anyhow::bail!(
+                "引导分区 磁盘{}:分区{} 盘符 {} 不可用",
+                disk_num,
+                part,
+                letter
+            );
         }
         Ok(letter)
     }
@@ -425,7 +476,9 @@ assign letter={}
         );
         let p = std::env::temp_dir().join("lr_set_active.txt");
         std::fs::write(&p, script.as_bytes())?;
-        let out = create_command("diskpart").args(["/s", &p.to_string_lossy()]).output()?;
+        let out = create_command("diskpart")
+            .args(["/s", &p.to_string_lossy()])
+            .output()?;
         let _ = std::fs::remove_file(&p);
         log::info!(
             "[BOOT] 设活动分区 磁盘{}:分区{}: {}",
@@ -443,9 +496,15 @@ assign letter={}
         let script = format!("select volume {}\r\nactive\r\n", vol);
         let p = std::env::temp_dir().join("lr_set_active_vol.txt");
         std::fs::write(&p, script.as_bytes())?;
-        let out = create_command("diskpart").args(["/s", &p.to_string_lossy()]).output()?;
+        let out = create_command("diskpart")
+            .args(["/s", &p.to_string_lossy()])
+            .output()?;
         let _ = std::fs::remove_file(&p);
-        log::info!("[BOOT] 设活动分区 卷{}: {}", vol, gbk_to_utf8(&out.stdout).trim());
+        log::info!(
+            "[BOOT] 设活动分区 卷{}: {}",
+            vol,
+            gbk_to_utf8(&out.stdout).trim()
+        );
         Ok(())
     }
 
@@ -457,10 +516,13 @@ assign letter={}
         pca_mode: BootPcaMode,
     ) -> Result<()> {
         let windows_path = format!("{}\\Windows", windows_partition);
-        
+
         log::info!("[BOOT] ========== 修复引导 ==========");
         log::info!("[BOOT] Windows 路径: {}", windows_path);
-        log::info!("[BOOT] 引导模式: {}", if use_uefi { "UEFI" } else { "Legacy/BIOS" });
+        log::info!(
+            "[BOOT] 引导模式: {}",
+            if use_uefi { "UEFI" } else { "Legacy/BIOS" }
+        );
 
         // 验证 Windows 目录存在
         if !Path::new(&windows_path).exists() {
@@ -469,12 +531,12 @@ assign letter={}
 
         let mounted_esp = if use_uefi {
             log::info!("[BOOT] UEFI 模式：查找目标磁盘 ESP 分区");
-            Some(self.find_esp_on_same_disk(windows_partition).map_err(|error| {
-                anyhow::anyhow!(
-                    "{}",
-                    tr!("目标系统所在磁盘没有可用的 ESP: {}", error)
-                )
-            })?)
+            Some(
+                self.find_esp_on_same_disk(windows_partition)
+                    .map_err(|error| {
+                        anyhow::anyhow!("{}", tr!("目标系统所在磁盘没有可用的 ESP: {}", error))
+                    })?,
+            )
         } else {
             None
         };
@@ -500,7 +562,10 @@ assign letter={}
             crate::core::app_config::AppConfig::load().enable_advanced_options;
         let repair_script = get_bin_dir().join("repair_boot.txt");
         if allow_custom_repair && repair_script.exists() {
-            log::info!("[BOOT] 检测到自定义修复引导脚本: {}", repair_script.display());
+            log::info!(
+                "[BOOT] 检测到自定义修复引导脚本: {}",
+                repair_script.display()
+            );
             match lr_core::boot::run_repair_script(
                 &repair_script,
                 &get_bin_dir(),
@@ -553,15 +618,31 @@ assign letter={}
                 match self.prepare_legacy_boot_partition(windows_partition) {
                     Ok(t) => t,
                     Err(e) => {
-                        log::warn!("[BOOT] 未找到引导/活动分区({})，回退用系统分区自身写引导", e);
+                        log::warn!(
+                            "[BOOT] 未找到引导/活动分区({})，回退用系统分区自身写引导",
+                            e
+                        );
                         (windows_partition.to_string(), 0usize, 0usize)
                     }
                 };
-            log::info!("[BOOT] Legacy 引导分区: {} (磁盘{}:分区{})", boot_letter, boot_disk, boot_part);
+            log::info!(
+                "[BOOT] Legacy 引导分区: {} (磁盘{}:分区{})",
+                boot_letter,
+                boot_disk,
+                boot_part
+            );
 
             // 1) bcdboot W:\Windows /s <引导分区> /f BIOS /l zh-cn（/s 指定系统分区——关键差异）
             let out = create_command(&self.bcdboot_path)
-                .args([windows_path.as_str(), "/s", boot_letter.as_str(), "/f", "BIOS", "/l", "zh-cn"])
+                .args([
+                    windows_path.as_str(),
+                    "/s",
+                    boot_letter.as_str(),
+                    "/f",
+                    "BIOS",
+                    "/l",
+                    "zh-cn",
+                ])
                 .output()?;
             log::info!(
                 "[BOOT] bcdboot /s {}: stdout={} stderr={}",
@@ -580,7 +661,10 @@ assign letter={}
                         .args([windows_path.as_str(), "/l", "zh-cn"])
                         .output()?;
                     if !out3.status.success() {
-                        anyhow::bail!("{}", tr!("Legacy 引导修复失败: {}", gbk_to_utf8(&out3.stderr)));
+                        anyhow::bail!(
+                            "{}",
+                            tr!("Legacy 引导修复失败: {}", gbk_to_utf8(&out3.stderr))
+                        );
                     }
                 }
             }
@@ -643,8 +727,8 @@ assign letter={}
         let esp = self
             .find_esp_on_same_disk(windows_partition)
             .map_err(|e| anyhow::anyhow!("{}", tr!("未找到 ESP，无法写 UEFI 引导: {}", e)))?;
-        let _esp_mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&esp)
-            .map_err(anyhow::Error::msg)?;
+        let _esp_mount_guard =
+            lr_core::boot_pca::TemporaryEspMountGuard::new(&esp).map_err(anyhow::Error::msg)?;
         log::info!("[BOOT] 使用 ESP: {}", esp);
         match lr_core::xp::write_xp_uefi_gpt_boot(
             windows_partition,

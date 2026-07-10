@@ -75,7 +75,9 @@ impl DismExe {
 
         // 系统目录路径
         if let Ok(system_root) = std::env::var("SystemRoot") {
-            let system_path = PathBuf::from(&system_root).join("System32").join("dism.exe");
+            let system_path = PathBuf::from(&system_root)
+                .join("System32")
+                .join("dism.exe");
             if system_path.exists() {
                 return Ok(system_path);
             }
@@ -97,16 +99,16 @@ impl DismExe {
         let where_result = {
             let mut cmd = Command::new("where");
             cmd.arg("dism.exe");
-            
+
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
-            
+
             cmd.output()
         };
-        
+
         if let Ok(output) = where_result {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(first_line) = stdout.lines().next() {
@@ -119,10 +121,12 @@ impl DismExe {
 
         bail!(
             "{}",
-            tr!("无法找到 dism.exe。请确保在 PE 环境或 Windows 系统中运行。\n\
+            tr!(
+                "无法找到 dism.exe。请确保在 PE 环境或 Windows 系统中运行。\n\
              已搜索的路径:\n\
              - X:\\Windows\\System32\\dism.exe (PE 环境)\n\
-             - C:\\Windows\\System32\\dism.exe (Windows 系统)")
+             - C:\\Windows\\System32\\dism.exe (Windows 系统)"
+            )
         )
     }
 
@@ -159,7 +163,7 @@ impl DismExe {
                 log::debug!("[DISM.EXE] 使用临时目录: {}", dir);
                 return dir.to_string();
             }
-            
+
             // 尝试创建目录
             if std::fs::create_dir_all(path).is_ok() {
                 log::info!("[DISM.EXE] 创建临时目录: {}", dir);
@@ -171,7 +175,7 @@ impl DismExe {
         let system_temp = std::env::temp_dir();
         let temp_str = system_temp.to_string_lossy().to_string();
         log::warn!("[DISM.EXE] 使用系统临时目录: {}", temp_str);
-        
+
         // 确保系统临时目录存在
         let _ = std::fs::create_dir_all(&system_temp);
         temp_str
@@ -191,7 +195,11 @@ impl DismExe {
         args: &[&str],
         progress_tx: Option<Sender<DismExeProgress>>,
     ) -> Result<String> {
-        log::info!("[DISM.EXE] 执行: {} {}", self.dism_path.display(), args.join(" "));
+        log::info!(
+            "[DISM.EXE] 执行: {} {}",
+            self.dism_path.display(),
+            args.join(" ")
+        );
 
         let mut child = self
             .create_command()

@@ -1,8 +1,6 @@
 use anyhow::Result;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::Security::{
-    GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// 检查当前进程是否具有管理员权限
@@ -49,7 +47,13 @@ pub fn restart_as_admin() -> Result<()> {
     // 无参数时为空字符串，行为与传 null 一致。
     let params: String = std::env::args()
         .skip(1)
-        .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a })
+        .map(|a| {
+            if a.contains(' ') {
+                format!("\"{}\"", a)
+            } else {
+                a
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ");
     let params_wide: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();

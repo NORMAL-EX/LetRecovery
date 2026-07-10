@@ -13,18 +13,15 @@ export default function DocsOutline({ headings }: { headings: Heading[] }) {
   )
   const ids = useMemo(() => items.map((i) => i.slug), [items])
   const [active, setActive] = useState('')
-  const lockUntil = useRef(0)
+  const lockTimeout = useRef<number | null>(null)
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const t = useT()
 
   useEffect(() => {
-    if (!ids.length) {
-      setActive('')
-      return
-    }
+    if (!ids.length) return
     const compute = () => {
-      if (Date.now() < lockUntil.current) return
+      if (lockTimeout.current !== null) return
       const els = ids
         .map((id) => document.getElementById(id))
         .filter((el): el is HTMLElement => !!el)
@@ -49,6 +46,10 @@ export default function DocsOutline({ headings }: { headings: Heading[] }) {
     return () => {
       window.removeEventListener('scroll', compute)
       window.removeEventListener('resize', compute)
+      if (lockTimeout.current !== null) {
+        window.clearTimeout(lockTimeout.current)
+        lockTimeout.current = null
+      }
     }
   }, [ids])
 
@@ -58,7 +59,10 @@ export default function DocsOutline({ headings }: { headings: Heading[] }) {
     const el = document.getElementById(slug)
     if (!el) return
     e.preventDefault()
-    lockUntil.current = Date.now() + 800 // 点击滚动期间锁定联动，避免来回闪
+    if (lockTimeout.current !== null) window.clearTimeout(lockTimeout.current)
+    lockTimeout.current = window.setTimeout(() => {
+      lockTimeout.current = null
+    }, 800)
     setActive(slug)
     el.scrollIntoView({ behavior: 'smooth' })
     navigate({ pathname, hash: `#${slug}` }, { replace: true })

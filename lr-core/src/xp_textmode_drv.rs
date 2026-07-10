@@ -104,7 +104,11 @@ pub fn parse_driver_inf(inf: &Path) -> Option<TxtmodeDriver> {
 /// 并合并进 `txtsetup`。文本期 miniport 既要在源里（GUI 阶段取文件）也要在 `$WIN_NT$.~BT`
 /// 里（文本启动阶段加载认盘），故 `.sys` 拷进所有 `copy_dirs`。
 /// 返回（合并后的 txtsetup.sif 内容, 日志）。
-pub fn integrate(txtsetup: &str, drivers: &[TxtmodeDriver], copy_dirs: &[&Path]) -> (String, String) {
+pub fn integrate(
+    txtsetup: &str,
+    drivers: &[TxtmodeDriver],
+    copy_dirs: &[&Path],
+) -> (String, String) {
     let mut log = String::new();
     if drivers.is_empty() {
         log.push_str("[TXTDRV] 未发现可集成的文本期存储驱动（跳过）\n");
@@ -140,7 +144,11 @@ pub fn integrate(txtsetup: &str, drivers: &[TxtmodeDriver], copy_dirs: &[&Path])
                 }
             }
             if copied_any {
-                log.push_str(&format!("[TXTDRV] 拷入 {} 个目标: {}\n", copy_dirs.len(), name));
+                log.push_str(&format!(
+                    "[TXTDRV] 拷入 {} 个目标: {}\n",
+                    copy_dirs.len(),
+                    name
+                ));
             }
             // [SourceDisksFiles]：原 txtsetup 没有该键、且本次还没为同名文件加过行时才加
             //（既避免与原版 storport.sys 等重复键，也避免多个驱动共享依赖 .sys 时重复键）。
@@ -439,7 +447,10 @@ ServiceBinary  = %12%\\stornvme.sys
 
     #[test]
     fn extract_hwids_from_rhs() {
-        assert_eq!(extract_hwids("genahci, PCI\\CC_010601"), vec!["PCI\\CC_010601"]);
+        assert_eq!(
+            extract_hwids("genahci, PCI\\CC_010601"),
+            vec!["PCI\\CC_010601"]
+        );
         assert_eq!(
             extract_hwids("x, PCI\\VEN_8086&DEV_2829&CC_0106"),
             vec!["PCI\\VEN_8086&DEV_2829&CC_0106"]
@@ -456,7 +467,11 @@ ServiceBinary  = %12%\\stornvme.sys
 
     #[test]
     fn append_creates_missing_section() {
-        let out = append_to_section("[Foo]\r\nx=1\r\n", "[HardwareIdsDatabase]", &["a = \"b\"".to_string()]);
+        let out = append_to_section(
+            "[Foo]\r\nx=1\r\n",
+            "[HardwareIdsDatabase]",
+            &["a = \"b\"".to_string()],
+        );
         assert!(out.contains("[HardwareIdsDatabase]\r\na = \"b\"\r\n"));
     }
 
@@ -502,7 +517,10 @@ ServiceBinary  = %12%\\stornvme.sys
                 .collect(),
         };
         let ahci = mk("genahci", &["genahci.sys", "ntoskrn8.sys", "storport.sys"]);
-        let nvme = mk("stornvme", &["stornvme.sys", "ntoskrn8.sys", "storport.sys"]);
+        let nvme = mk(
+            "stornvme",
+            &["stornvme.sys", "ntoskrn8.sys", "storport.sys"],
+        );
         let (out, _log) = integrate(ts, &[ahci, nvme], &[Path::new("/nonexistent-dst")]);
 
         let count_in_sdf = |key: &str| -> usize {
@@ -524,8 +542,16 @@ ServiceBinary  = %12%\\stornvme.sys
             }
             n
         };
-        assert_eq!(count_in_sdf("storport.sys"), 1, "共享依赖 storport.sys 应只一行");
-        assert_eq!(count_in_sdf("ntoskrn8.sys"), 1, "共享依赖 ntoskrn8.sys 应只一行");
+        assert_eq!(
+            count_in_sdf("storport.sys"),
+            1,
+            "共享依赖 storport.sys 应只一行"
+        );
+        assert_eq!(
+            count_in_sdf("ntoskrn8.sys"),
+            1,
+            "共享依赖 ntoskrn8.sys 应只一行"
+        );
         assert_eq!(count_in_sdf("genahci.sys"), 1);
         assert_eq!(count_in_sdf("stornvme.sys"), 1);
     }

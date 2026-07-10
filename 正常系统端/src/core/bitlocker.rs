@@ -784,7 +784,11 @@ impl BitLockerManager {
             // 检查是否超时
             if start_time.elapsed() > timeout {
                 log::error!("BitLocker 分区 {} 解锁超时（5分钟）", letter);
-                return UnlockResult::failure(letter, &tr!("解锁超时，分区可能仍在后台处理中"), None);
+                return UnlockResult::failure(
+                    letter,
+                    &tr!("解锁超时，分区可能仍在后台处理中"),
+                    None,
+                );
             }
 
             // 检查分区状态
@@ -816,7 +820,11 @@ impl BitLockerManager {
                 VolumeStatus::EncryptedLocked => {
                     // 仍然锁定，可能解锁失败
                     log::warn!("BitLocker 分区 {} 仍处于锁定状态", letter);
-                    return UnlockResult::failure(letter, &tr!("解锁失败，分区仍处于锁定状态"), None);
+                    return UnlockResult::failure(
+                        letter,
+                        &tr!("解锁失败，分区仍处于锁定状态"),
+                        None,
+                    );
                 }
                 _ => {
                     log::debug!(
@@ -919,9 +927,14 @@ impl BitLockerManager {
         match api.decrypt_unlocked_volume_blocking(&volume_path, 1000, 0) {
             Ok(_) => {
                 log::info!("BitLocker 分区 {} 开始解密 (fveapi)", letter);
-                DecryptResult::success(&letter, &tr!("已开始解密，此过程可能需要较长时间，请勿中断"))
+                DecryptResult::success(
+                    &letter,
+                    &tr!("已开始解密，此过程可能需要较长时间，请勿中断"),
+                )
             }
-            Err(FveError::NotEncrypted) => DecryptResult::success(&letter, &tr!("分区已经是未加密状态")),
+            Err(FveError::NotEncrypted) => {
+                DecryptResult::success(&letter, &tr!("分区已经是未加密状态"))
+            }
             Err(e) => {
                 log::error!("BitLocker 分区 {} 解密失败: {} (fveapi)", letter, e);
                 DecryptResult::failure(&letter, &e.to_string(), Some(e.code()))
@@ -947,9 +960,7 @@ impl BitLockerManager {
             cmd.output()
         } {
             Ok(o) => o,
-            Err(e) => {
-                return DecryptResult::failure(&letter, &tr!("执行命令失败: {}", e), None)
-            }
+            Err(e) => return DecryptResult::failure(&letter, &tr!("执行命令失败: {}", e), None),
         };
 
         let stdout = decode_windows_output(&output.stdout);
@@ -962,7 +973,10 @@ impl BitLockerManager {
             || stdout_lower.contains("解密正在进行")
         {
             log::info!("BitLocker 分区 {} 开始解密 (manage-bde)", letter);
-            DecryptResult::success(&letter, &tr!("已开始解密，此过程可能需要较长时间，请勿中断"))
+            DecryptResult::success(
+                &letter,
+                &tr!("已开始解密，此过程可能需要较长时间，请勿中断"),
+            )
         } else if stdout_lower.contains("already decrypted")
             || stdout_lower.contains("已解密")
             || stdout_lower.contains("not enabled")
@@ -975,8 +989,7 @@ impl BitLockerManager {
                 letter,
                 stdout
             );
-            let error_msg =
-                extract_error_message(&stdout).unwrap_or_else(|| tr!("解密操作失败"));
+            let error_msg = extract_error_message(&stdout).unwrap_or_else(|| tr!("解密操作失败"));
             DecryptResult::failure(&letter, &error_msg, None)
         }
     }
@@ -993,7 +1006,11 @@ impl BitLockerManager {
     /// 卷仍解密可读，但密钥以明文存放；重启后仍挂起，直到手动恢复。常用于换 BIOS/固件前。
     #[cfg(windows)]
     pub fn suspend_protection(&self, drive: &str) -> Result<String, String> {
-        self.run_protectors_cmd(drive, "-disable", &tr!("已挂起 BitLocker 保护（重启后仍挂起，直到手动恢复）"))
+        self.run_protectors_cmd(
+            drive,
+            "-disable",
+            &tr!("已挂起 BitLocker 保护（重启后仍挂起，直到手动恢复）"),
+        )
     }
 
     /// 恢复 BitLocker 保护（manage-bde -protectors -enable）。
@@ -1003,7 +1020,12 @@ impl BitLockerManager {
     }
 
     #[cfg(windows)]
-    fn run_protectors_cmd(&self, drive: &str, action: &str, ok_msg: &str) -> Result<String, String> {
+    fn run_protectors_cmd(
+        &self,
+        drive: &str,
+        action: &str,
+        ok_msg: &str,
+    ) -> Result<String, String> {
         use std::process::Command;
         let letter = drive.chars().next().unwrap_or('C');
         let d = format!("{}:", letter);
@@ -1021,8 +1043,7 @@ impl BitLockerManager {
             if !err.trim().is_empty() {
                 msg.push_str(&err);
             }
-            Err(extract_error_message(&msg)
-                .unwrap_or_else(|| tr!("操作失败: {}", msg.trim())))
+            Err(extract_error_message(&msg).unwrap_or_else(|| tr!("操作失败: {}", msg.trim())))
         }
     }
 

@@ -2,6 +2,9 @@
 name = "letrecovery-pe"
 version = "2026.2.6"
 edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 authors = ["NORMAL-EX"]
 description = "LetRecovery PE安装助手"
 

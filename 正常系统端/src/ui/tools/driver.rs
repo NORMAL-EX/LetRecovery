@@ -2,8 +2,8 @@
 //!
 //! 提供驱动备份、还原和导入功能
 
-use std::path::Path;
 use crate::tr;
+use std::path::Path;
 
 /// 导出驱动到指定目录（离线系统）
 pub fn export_drivers_offline(source_partition: &str, export_dir: &str) -> Result<(), String> {
@@ -15,8 +15,7 @@ pub fn export_drivers_offline(source_partition: &str, export_dir: &str) -> Resul
 /// 导出当前系统驱动
 pub fn export_drivers_online(export_dir: &str) -> Result<(), String> {
     let dism = crate::core::dism::Dism::new();
-    dism.export_drivers(export_dir)
-        .map_err(|e| e.to_string())
+    dism.export_drivers(export_dir).map_err(|e| e.to_string())
 }
 
 /// 导入驱动到离线系统
@@ -33,9 +32,8 @@ pub fn import_drivers_offline(target_partition: &str, driver_dir: &str) -> Resul
 
 /// 获取存储控制器驱动目录
 pub fn get_storage_driver_dir() -> Option<std::path::PathBuf> {
-    let driver_dir = crate::utils::path::get_drivers_dir()
-        .join("storage_controller");
-    
+    let driver_dir = crate::utils::path::get_drivers_dir().join("storage_controller");
+
     if driver_dir.exists() {
         Some(driver_dir)
     } else {
@@ -45,8 +43,7 @@ pub fn get_storage_driver_dir() -> Option<std::path::PathBuf> {
 
 /// 导入存储控制器驱动到离线系统
 pub fn import_storage_drivers(target_partition: &str) -> Result<(), String> {
-    let driver_dir = get_storage_driver_dir()
-        .ok_or_else(|| tr!("存储控制器驱动目录不存在"))?;
-    
+    let driver_dir = get_storage_driver_dir().ok_or_else(|| tr!("存储控制器驱动目录不存在"))?;
+
     import_drivers_offline(target_partition, &driver_dir.to_string_lossy())
 }

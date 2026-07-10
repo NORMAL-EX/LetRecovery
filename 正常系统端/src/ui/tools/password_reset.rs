@@ -10,8 +10,8 @@
 use egui;
 use std::sync::mpsc;
 
-use crate::tr;
 use crate::app::App;
+use crate::tr;
 
 /// 目标系统下拉框里代表“当前运行系统（在线）”的特殊值。
 const ONLINE_TARGET: &str = "__ONLINE__";

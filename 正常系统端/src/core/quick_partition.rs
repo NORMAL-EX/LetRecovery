@@ -9,14 +9,12 @@ use std::path::Path;
 use windows::{
     core::PCWSTR,
     Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
-    Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    },
-    Win32::System::IO::DeviceIoControl,
+    Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
     Win32::System::Ioctl::{
         IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, PARTITION_STYLE_GPT,
         PARTITION_STYLE_MBR, PARTITION_STYLE_RAW,
     },
+    Win32::System::IO::DeviceIoControl,
 };
 
 /// IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS 常量
@@ -76,7 +74,11 @@ impl PhysicalDisk {
     /// 获取显示名称
     pub fn display_name(&self) -> String {
         if self.model.is_empty() {
-            tr!("磁盘 {} ({} GB)", self.disk_number, format!("{:.1}", self.size_gb()))
+            tr!(
+                "磁盘 {} ({} GB)",
+                self.disk_number,
+                format!("{:.1}", self.size_gb())
+            )
         } else {
             tr!(
                 "磁盘 {} - {} ({} GB)",
@@ -209,13 +211,13 @@ pub struct QuickPartitionResult {
 #[derive(Default)]
 struct DiskGeometryEx {
     // DISK_GEOMETRY 部分 (24 bytes)
-    geometry_cylinders: i64,           // 8 bytes - LARGE_INTEGER 必须在最前面！
-    geometry_media_type: u32,          // 4 bytes
+    geometry_cylinders: i64,  // 8 bytes - LARGE_INTEGER 必须在最前面！
+    geometry_media_type: u32, // 4 bytes
     geometry_tracks_per_cylinder: u32, // 4 bytes
-    geometry_sectors_per_track: u32,   // 4 bytes
-    geometry_bytes_per_sector: u32,    // 4 bytes
+    geometry_sectors_per_track: u32, // 4 bytes
+    geometry_bytes_per_sector: u32, // 4 bytes
     // DISK_GEOMETRY_EX 扩展部分
-    disk_size: i64,                    // 8 bytes - 这才是我们需要的磁盘大小
+    disk_size: i64, // 8 bytes - 这才是我们需要的磁盘大小
 }
 
 /// DRIVE_LAYOUT_INFORMATION_EX 结构头部
@@ -506,9 +508,12 @@ fn parse_partition_layout(
         // offset 30: padding (2 bytes)
         // offset 32: Union start (MBR or GPT specific data)
 
-        let starting_offset = i64::from_le_bytes(partition_data[8..16].try_into().unwrap_or([0; 8]));
-        let partition_length = i64::from_le_bytes(partition_data[16..24].try_into().unwrap_or([0; 8]));
-        let partition_number = u32::from_le_bytes(partition_data[24..28].try_into().unwrap_or([0; 4]));
+        let starting_offset =
+            i64::from_le_bytes(partition_data[8..16].try_into().unwrap_or([0; 8]));
+        let partition_length =
+            i64::from_le_bytes(partition_data[16..24].try_into().unwrap_or([0; 8]));
+        let partition_number =
+            u32::from_le_bytes(partition_data[24..28].try_into().unwrap_or([0; 4]));
 
         // 跳过大小为0的分区
         if partition_length <= 0 {
@@ -619,7 +624,10 @@ fn get_drive_letter_for_partition(disk_number: u32, offset: u64) -> Option<char>
 fn get_volume_offset(letter: char) -> Option<(u32, u64)> {
     unsafe {
         let volume_path = format!("\\\\.\\{}:", letter);
-        let wide_path: Vec<u16> = volume_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_path: Vec<u16> = volume_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         let handle = CreateFileW(
             PCWSTR::from_raw(wide_path.as_ptr()),
@@ -685,7 +693,7 @@ fn get_volume_offset(letter: char) -> Option<(u32, u64)> {
 /// 获取卷信息（卷标、文件系统、已用空间、空闲空间）
 #[cfg(windows)]
 fn get_volume_info(letter: char) -> (String, String, u64, u64) {
-    use windows::Win32::Storage::FileSystem::{GetVolumeInformationW, GetDiskFreeSpaceExW};
+    use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumeInformationW};
 
     let path = format!("{}:\\", letter);
     let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
@@ -936,7 +944,12 @@ fn execute_diskpart_script(script: &str) -> Result<String> {
     std::fs::write(&script_path, script)?;
 
     let output = create_command(&get_diskpart_path())
-        .args(["/s", script_path.to_str().ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?])
+        .args([
+            "/s",
+            script_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?,
+        ])
         .output()?;
 
     let _ = std::fs::remove_file(&script_path);
@@ -972,7 +985,8 @@ pub fn can_safely_partition(disk: &PhysicalDisk) -> (bool, String) {
                     false,
                     tr!(
                         "磁盘 {} 包含当前系统盘 {}:，无法进行一键分区",
-                        disk.disk_number, system_drive
+                        disk.disk_number,
+                        system_drive
                     ),
                 );
             }
@@ -988,7 +1002,8 @@ pub fn can_safely_partition(disk: &PhysicalDisk) -> (bool, String) {
                     false,
                     tr!(
                         "磁盘 {} 上的分区 {}: 包含 Windows 系统，请先备份数据",
-                        disk.disk_number, letter
+                        disk.disk_number,
+                        letter
                     ),
                 );
             }
@@ -1042,7 +1057,7 @@ pub fn create_single_partition(
     let mut script = String::new();
 
     script.push_str(&format!("select disk {}\n", disk_number));
-    
+
     if size_mb > 0 {
         script.push_str(&format!("create partition primary size={}\n", size_mb));
     } else {
@@ -1160,7 +1175,9 @@ pub fn resize_existing_partition(
             success: false,
             message: tr!(
                 "目标大小 {} MB 必须大于已使用空间 {} MB (最小 {} MB)",
-                new_size_mb, used_mb, min_size_mb
+                new_size_mb,
+                used_mb,
+                min_size_mb
             ),
             new_size_mb: current_size_mb,
         };
@@ -1188,7 +1205,7 @@ pub fn resize_existing_partition(
     if new_size_mb < current_size_mb {
         // 缩小分区
         let shrink_amount_mb = current_size_mb - new_size_mb;
-        
+
         log::info!("缩小分区 {} MB", shrink_amount_mb);
 
         // 使用 diskpart shrink 命令
@@ -1197,14 +1214,20 @@ pub fn resize_existing_partition(
             // 通过盘符选择卷进行缩小
             let mut script = String::new();
             script.push_str(&format!("select volume {}\n", letter));
-            script.push_str(&format!("shrink desired={} minimum={}\n", shrink_amount_mb, shrink_amount_mb));
+            script.push_str(&format!(
+                "shrink desired={} minimum={}\n",
+                shrink_amount_mb, shrink_amount_mb
+            ));
             execute_diskpart_script(&script)
         } else {
             // 没有盘符的分区使用分区编号
             let mut script = String::new();
             script.push_str(&format!("select disk {}\n", disk_number));
             script.push_str(&format!("select partition {}\n", partition_number));
-            script.push_str(&format!("shrink desired={} minimum={}\n", shrink_amount_mb, shrink_amount_mb));
+            script.push_str(&format!(
+                "shrink desired={} minimum={}\n",
+                shrink_amount_mb, shrink_amount_mb
+            ));
             execute_diskpart_script(&script)
         };
 
@@ -1240,7 +1263,7 @@ pub fn resize_existing_partition(
     } else {
         // 扩大分区
         let extend_amount_mb = new_size_mb - current_size_mb;
-        
+
         log::info!("扩大分区 {} MB", extend_amount_mb);
 
         // 使用 diskpart extend 命令
@@ -1292,7 +1315,7 @@ pub fn resize_existing_partition(
 }
 
 /// 查询分区可缩小的最大空间（MB）
-/// 
+///
 /// 使用 diskpart 的 shrink querymax 命令获取
 pub fn query_shrink_max(drive_letter: char) -> Result<u64> {
     let mut script = String::new();
@@ -1300,12 +1323,15 @@ pub fn query_shrink_max(drive_letter: char) -> Result<u64> {
     script.push_str("shrink querymax\n");
 
     let output = execute_diskpart_script(&script)?;
-    
+
     // 解析输出，查找可缩小的最大值
     // 输出格式通常为 "可回收的最大字节数:  XXX MB" 或 "The maximum number of reclaimable bytes is: XXX MB"
     for line in output.lines() {
         let line_lower = line.to_lowercase();
-        if line_lower.contains("可回收") || line_lower.contains("reclaimable") || line_lower.contains("maximum") {
+        if line_lower.contains("可回收")
+            || line_lower.contains("reclaimable")
+            || line_lower.contains("maximum")
+        {
             // 尝试提取数字
             let parts: Vec<&str> = line.split_whitespace().collect();
             for (i, part) in parts.iter().enumerate() {
@@ -1332,12 +1358,19 @@ pub fn query_shrink_max(drive_letter: char) -> Result<u64> {
 }
 
 /// 获取磁盘上指定分区后面的未分配空间大小（MB）
-/// 
+///
 /// 这用于判断分区是否可以扩展
 /// 注意：此函数需要传入已有的磁盘信息，避免重复获取
-pub fn get_unallocated_space_after_partition_with_disk(disk: &PhysicalDisk, partition_number: u32) -> u64 {
+pub fn get_unallocated_space_after_partition_with_disk(
+    disk: &PhysicalDisk,
+    partition_number: u32,
+) -> u64 {
     // 找到目标分区
-    let target_partition = match disk.partitions.iter().find(|p| p.partition_number == partition_number) {
+    let target_partition = match disk
+        .partitions
+        .iter()
+        .find(|p| p.partition_number == partition_number)
+    {
         Some(p) => p,
         None => return 0,
     };
@@ -1373,7 +1406,7 @@ pub fn get_unallocated_space_after_partition_with_disk(disk: &PhysicalDisk, part
 }
 
 /// 获取磁盘上指定分区后面的未分配空间大小（MB）
-/// 
+///
 /// 兼容旧API，内部会获取磁盘信息（较慢）
 pub fn get_unallocated_space_after_partition(disk_number: u32, partition_number: u32) -> u64 {
     let disks = get_physical_disks();
@@ -1384,9 +1417,12 @@ pub fn get_unallocated_space_after_partition(disk_number: u32, partition_number:
 }
 
 /// 检查分区是否可以调整大小
-/// 
+///
 /// 返回 (是否可调整, 原因说明, 最小大小MB, 最大大小MB)
-pub fn can_resize_partition(partition: &DiskPartitionInfo, disk: &PhysicalDisk) -> (bool, String, u64, u64) {
+pub fn can_resize_partition(
+    partition: &DiskPartitionInfo,
+    disk: &PhysicalDisk,
+) -> (bool, String, u64, u64) {
     // 检查是否是特殊分区
     if partition.is_esp {
         return (false, tr!("ESP分区不支持调整大小"), 0, 0);
@@ -1422,10 +1458,8 @@ pub fn can_resize_partition(partition: &DiskPartitionInfo, disk: &PhysicalDisk) 
 
     // 计算最大大小
     let current_size_mb = partition.size_bytes / 1024 / 1024;
-    let unallocated_after_mb = get_unallocated_space_after_partition(
-        disk.disk_number,
-        partition.partition_number,
-    );
+    let unallocated_after_mb =
+        get_unallocated_space_after_partition(disk.disk_number, partition.partition_number);
     let max_size_mb = current_size_mb + unallocated_after_mb;
 
     // 如果没有可调整的空间
@@ -1434,7 +1468,8 @@ pub fn can_resize_partition(partition: &DiskPartitionInfo, disk: &PhysicalDisk) 
             false,
             tr!(
                 "分区无法调整大小，已用空间 {} MB 接近分区大小 {} MB",
-                used_mb, current_size_mb
+                used_mb,
+                current_size_mb
             ),
             0,
             0,
@@ -1445,7 +1480,9 @@ pub fn can_resize_partition(partition: &DiskPartitionInfo, disk: &PhysicalDisk) 
         true,
         tr!(
             "可调整范围: {} MB - {} MB (已用: {} MB)",
-            min_size_mb, max_size_mb, used_mb
+            min_size_mb,
+            max_size_mb,
+            used_mb
         ),
         min_size_mb,
         max_size_mb,

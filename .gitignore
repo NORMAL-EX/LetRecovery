@@ -2,9 +2,6 @@
 /target
 **/target/
 
-# Cargo.lock 由 CI 重新生成，不纳入版本控制
-Cargo.lock
-
 # 临时 / 日志文件
 nlog.txt
 *.tmp

@@ -77,7 +77,7 @@ const GHOST_SIGNATURE_3: [u8; 2] = [0xEB, 0x00]; // 另一种签名
 /// - `GhoPasswordInfo` 包含密码信息
 pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
     let path = file_path.as_ref();
-    
+
     // 检查文件是否存在
     if !path.exists() {
         return GhoPasswordInfo {
@@ -93,7 +93,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
-    
+
     if ext != "gho" && ext != "ghs" {
         return GhoPasswordInfo {
             is_valid_gho: false,
@@ -157,7 +157,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
         if let Some(info) = try_find_password_at_alternate_locations(&mut file) {
             return info;
         }
-        
+
         return GhoPasswordInfo {
             is_valid_gho: false,
             error: Some(tr!(
@@ -191,7 +191,7 @@ pub fn read_gho_password<P: AsRef<Path>>(file_path: P) -> GhoPasswordInfo {
 fn try_read_password_v1(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
     // 密码标志位于偏移 0x18
     let password_flag = header[0x18];
-    
+
     if password_flag == 0 {
         return Some(GhoPasswordInfo {
             is_valid_gho: true,
@@ -208,17 +208,17 @@ fn try_read_password_v1(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
 
     // 密码长度位于偏移 0x19
     let password_length = header[0x19] as usize;
-    
+
     if password_length == 0 || password_length > 32 {
         return None;
     }
 
     // 加密的密码数据位于偏移 0x1C
     let encrypted_password = &header[0x1C..0x1C + password_length];
-    
+
     // 尝试使用主密钥解密
     let decrypted = decrypt_password(encrypted_password, XOR_KEY);
-    
+
     // 验证解密结果是否为可打印字符
     if is_valid_password(&decrypted) {
         return Some(GhoPasswordInfo {
@@ -256,14 +256,14 @@ fn try_read_password_v1(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
 fn try_read_password_v2(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
     // 某些版本密码标志位于偏移 0x08
     let password_flag = header[0x08];
-    
+
     if password_flag == 0 {
         return None;
     }
 
     // 密码长度位于偏移 0x09
     let password_length = header[0x09] as usize;
-    
+
     if password_length == 0 || password_length > 32 {
         return None;
     }
@@ -272,9 +272,9 @@ fn try_read_password_v2(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
     if 0x0C + password_length > 64 {
         return None;
     }
-    
+
     let encrypted_password = &header[0x0C..0x0C + password_length];
-    
+
     let decrypted = decrypt_password(encrypted_password, XOR_KEY);
     if is_valid_password(&decrypted) {
         return Some(GhoPasswordInfo {
@@ -294,14 +294,14 @@ fn try_read_password_v3(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
     // Ghost 12+ 可能使用不同的偏移
     // 密码标志位于偏移 0x28
     let password_flag = header[0x28];
-    
+
     if password_flag == 0 {
         return None;
     }
 
     // 密码长度位于偏移 0x29
     let password_length = header[0x29] as usize;
-    
+
     if password_length == 0 || password_length > 32 {
         return None;
     }
@@ -310,9 +310,9 @@ fn try_read_password_v3(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
     if 0x2C + password_length > 64 {
         return None;
     }
-    
+
     let encrypted_password = &header[0x2C..0x2C + password_length];
-    
+
     let decrypted = decrypt_password(encrypted_password, XOR_KEY);
     if is_valid_password(&decrypted) {
         return Some(GhoPasswordInfo {
@@ -345,17 +345,17 @@ fn try_read_password_v3(header: &[u8; 64]) -> Option<GhoPasswordInfo> {
 fn try_find_password_at_alternate_locations(file: &mut File) -> Option<GhoPasswordInfo> {
     // 某些 GHO 文件的密码信息可能在文件的其他位置
     let positions: &[u64] = &[0x200, 0x400, 0x800, 0x1000];
-    
+
     for &pos in positions {
         if file.seek(SeekFrom::Start(pos)).is_err() {
             continue;
         }
-        
+
         let mut buffer = [0u8; 64];
         if file.read_exact(&mut buffer).is_err() {
             continue;
         }
-        
+
         // 尝试各种密码格式
         if let Some(info) = try_read_password_v1(&buffer) {
             if info.has_password || info.is_valid_gho {
@@ -363,7 +363,7 @@ fn try_find_password_at_alternate_locations(file: &mut File) -> Option<GhoPasswo
             }
         }
     }
-    
+
     None
 }
 
@@ -373,15 +373,19 @@ fn try_read_password_from_file(file: &mut File) -> Option<GhoPasswordInfo> {
     if file.seek(SeekFrom::End(-128)).is_err() {
         return None;
     }
-    
+
     let mut buffer = [0u8; 128];
     if file.read_exact(&mut buffer).is_err() {
         return None;
     }
-    
+
     // 查找密码标记 "GHPW" 或类似
     for i in 0..124 {
-        if buffer[i] == b'G' && buffer[i + 1] == b'H' && buffer[i + 2] == b'P' && buffer[i + 3] == b'W' {
+        if buffer[i] == b'G'
+            && buffer[i + 1] == b'H'
+            && buffer[i + 2] == b'P'
+            && buffer[i + 3] == b'W'
+        {
             let password_length = buffer[i + 4] as usize;
             if password_length > 0 && password_length <= 32 && i + 5 + password_length <= 128 {
                 let encrypted = &buffer[i + 5..i + 5 + password_length];
@@ -398,7 +402,7 @@ fn try_read_password_from_file(file: &mut File) -> Option<GhoPasswordInfo> {
             }
         }
     }
-    
+
     None
 }
 
@@ -409,7 +413,7 @@ fn decrypt_password(encrypted: &[u8], key: u8) -> String {
         .map(|&b| b ^ key)
         .take_while(|&b| b != 0)
         .collect();
-    
+
     String::from_utf8_lossy(&decrypted).to_string()
 }
 
@@ -418,14 +422,14 @@ fn is_valid_password(password: &str) -> bool {
     if password.is_empty() {
         return false;
     }
-    
+
     password.chars().all(|c| c.is_ascii_graphic() || c == ' ')
 }
 
 /// 格式化显示 GHO 密码信息
 pub fn format_gho_password_info(info: &GhoPasswordInfo) -> String {
     let mut result = String::new();
-    
+
     if !info.is_valid_gho {
         if let Some(ref err) = info.error {
             result.push_str(&tr!("无效的GHO文件: {}\n", err));
@@ -451,7 +455,7 @@ pub fn format_gho_password_info(info: &GhoPasswordInfo) -> String {
             result.push_str(&tr!("无法解密密码\n"));
         }
     }
-    
+
     result
 }
 

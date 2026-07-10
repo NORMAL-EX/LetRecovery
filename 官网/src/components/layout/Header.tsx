@@ -43,12 +43,16 @@ const Header: React.FC = () => {
   const isActive = (path: string) =>
     path === '/' ? location.pathname === '/' : location.pathname.startsWith(path)
 
-  const getThemeIcon = () => {
-    if (theme === 'system') return <CircleHalf className="size-4" />
-    return resolvedTheme === 'dark' ? <Moon className="size-4" /> : <Sun className="size-4" />
-  }
+  const themeIcon =
+    theme === 'system' ? (
+      <CircleHalf className="size-4" />
+    ) : resolvedTheme === 'dark' ? (
+      <Moon className="size-4" />
+    ) : (
+      <Sun className="size-4" />
+    )
 
-  const GithubButton = () => (
+  const githubButton = (
     <Button
       variant="ghost"
       size="icon"
@@ -59,7 +63,7 @@ const Header: React.FC = () => {
     </Button>
   )
 
-  const LanguageMenu = () => (
+  const languageMenu = (
     <DropdownMenu>
       <MenuTrigger
         render={
@@ -82,12 +86,12 @@ const Header: React.FC = () => {
     </DropdownMenu>
   )
 
-  const ThemeMenu = () => (
+  const themeMenu = (
     <DropdownMenu>
       <MenuTrigger
         render={
           <Button variant="ghost" size="icon">
-            {getThemeIcon()}
+            {themeIcon}
             <span className="sr-only">{t.common.toggleTheme}</span>
           </Button>
         }
@@ -224,9 +228,9 @@ const Header: React.FC = () => {
           />
 
           <DocsSearch active={isDocs} />
-          <GithubButton />
-          <LanguageMenu />
-          <ThemeMenu />
+          {githubButton}
+          {languageMenu}
+          {themeMenu}
         </div>
       </div>
     </header>

@@ -1,4 +1,4 @@
-//! 文件哈希（SHA-256）生成与校验（两端共享，纯逻辑）。
+//! 文件哈希（SHA-256 与兼容用 MD5）生成与校验（两端共享，纯逻辑）。
 //!
 //! 用于给 WIM/ESD/ISO/GHO 等镜像生成校验值、核对下载完整性，
 //! 与 wimlib 的内部完整性校验互补（后者只覆盖 WIM 系列）。
@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use md5::Md5;
 use sha2::{Digest, Sha256};
 
 /// 计算字节数据的 SHA-256，返回小写十六进制字符串。
@@ -45,6 +46,42 @@ pub fn sha256_file(
     sha256_reader(file, on_progress)
 }
 
+/// Calculate an MD5 digest from a reader.
+///
+/// MD5 is retained only for compatibility with existing PE metadata. New
+/// metadata should publish SHA-256 instead.
+pub fn md5_reader<R: Read>(
+    mut reader: R,
+    mut on_progress: impl FnMut(u64),
+) -> std::io::Result<String> {
+    let mut hasher = Md5::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0u64;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+        on_progress(total);
+    }
+    Ok(to_hex(&hasher.finalize()))
+}
+
+/// Calculate an MD5 digest for a file.
+pub fn md5_file(path: impl AsRef<Path>, on_progress: impl FnMut(u64)) -> std::io::Result<String> {
+    let file = File::open(path)?;
+    md5_reader(file, on_progress)
+}
+
+/// Calculate an MD5 digest for in-memory data.
+pub fn md5_bytes(data: &[u8]) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(data);
+    to_hex(&hasher.finalize())
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -81,6 +118,7 @@ mod tests {
             sha256_bytes(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        assert_eq!(md5_bytes(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
     }
 
     #[test]

@@ -1,8 +1,8 @@
-use egui;
-use crate::tr;
-use crate::app::App;
 use super::super::network::get_detailed_network_info;
 use super::super::network::reset_network;
+use crate::app::App;
+use crate::tr;
+use egui;
 
 impl App {
     /// 渲染网络信息对话框
@@ -112,16 +112,16 @@ impl App {
                 ui.label(tr!("此操作将执行以下命令重置网络设置："));
                 ui.add_space(5.0);
 
-                ui.add(
-                    egui::Label::new(egui::RichText::new(
+                ui.add(egui::Label::new(
+                    egui::RichText::new(
                         "• netsh winsock reset\n\
                          • netsh int ip reset\n\
                          • ipconfig /flushdns\n\
                          • netsh advfirewall reset",
                     )
                     .monospace()
-                    .size(12.0)),
-                );
+                    .size(12.0),
+                ));
 
                 ui.add_space(10.0);
                 ui.label(tr!("重置后可能需要重新配置网络连接。"));
@@ -153,11 +153,13 @@ impl App {
 
         self.tool_message = tr!(
             "网络重置完成: 成功 {} 个命令, 失败 {} 个命令",
-            success_count, fail_count
+            success_count,
+            fail_count
         );
 
         if success_count > 0 {
-            self.tool_message.push_str(&tr!("\n建议重启计算机以完成网络重置。"));
+            self.tool_message
+                .push_str(&tr!("\n建议重启计算机以完成网络重置。"));
         }
     }
 }

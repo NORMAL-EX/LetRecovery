@@ -23,12 +23,12 @@ impl DriverActionMode {
             _ => Self::None,
         }
     }
-    
+
     /// 是否需要导入驱动
     pub fn should_import(&self) -> bool {
         *self == Self::AutoImport
     }
-    
+
     /// 是否有驱动目录（SaveOnly 或 AutoImport 时都有）
     pub fn has_drivers(&self) -> bool {
         *self != Self::None
@@ -88,7 +88,7 @@ pub struct InstallConfig {
     pub volume_label: String,
     /// 自定义无人值守文件（数据目录下的相对文件名，空=使用内置生成）
     pub custom_unattend_file: String,
-    
+
     // Win7 专用选项
     /// Win7 UEFI 补丁（使用 UefiSeven）
     pub win7_uefi_patch: bool,
@@ -137,7 +137,7 @@ impl InstallConfig {
             self.restore_drivers
         }
     }
-    
+
     /// 判断是否有驱动目录需要处理
     pub fn has_driver_data(&self) -> bool {
         self.driver_action_mode.has_drivers() || self.restore_drivers
@@ -277,7 +277,12 @@ impl ConfigFileManager {
         let mut configs = Vec::new();
         for letter in Self::scan_letters() {
             let partition = format!("{}:", letter);
-            let config_path = format!("{}\\{}\\{}", partition, Self::DATA_DIR, Self::INSTALL_CONFIG);
+            let config_path = format!(
+                "{}\\{}\\{}",
+                partition,
+                Self::DATA_DIR,
+                Self::INSTALL_CONFIG
+            );
             if Path::new(&config_path).exists() {
                 log::info!("找到安装配置分区: {}", partition);
                 let config = Self::read_install_config(&partition)?;
@@ -337,9 +342,7 @@ impl ConfigFileManager {
                 && !config.session_id.is_empty()
                 && marker.session_id != config.session_id
             {
-                anyhow::bail!(
-                    "安装标记 SessionId 与配置 SessionId 不一致，已中止"
-                );
+                anyhow::bail!("安装标记 SessionId 与配置 SessionId 不一致，已中止");
             }
             let config_target = Self::normalize_partition(&config.target_partition);
             if !config_target.is_empty() && config_target != marker.partition {
@@ -456,8 +459,7 @@ impl ConfigFileManager {
             Self::EXPAND_CONFIG
         );
         log::info!("读取扩容配置: {}", config_path);
-        let content =
-            std::fs::read_to_string(&config_path).context("读取扩容配置文件失败")?;
+        let content = std::fs::read_to_string(&config_path).context("读取扩容配置文件失败")?;
         Self::deserialize_expand_config(&content)
     }
 
@@ -493,8 +495,7 @@ impl ConfigFileManager {
             Self::INSTALL_CONFIG
         );
         log::info!("读取安装配置: {}", config_path);
-        let content =
-            std::fs::read_to_string(&config_path).context("读取安装配置文件失败")?;
+        let content = std::fs::read_to_string(&config_path).context("读取安装配置文件失败")?;
         Self::deserialize_install_config(&content)
     }
 
@@ -507,8 +508,7 @@ impl ConfigFileManager {
             Self::BACKUP_CONFIG
         );
         log::info!("读取备份配置: {}", config_path);
-        let content =
-            std::fs::read_to_string(&config_path).context("读取备份配置文件失败")?;
+        let content = std::fs::read_to_string(&config_path).context("读取备份配置文件失败")?;
         Self::deserialize_backup_config(&content)
     }
 
@@ -605,11 +605,15 @@ impl ConfigFileManager {
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "IsXp" => config.is_xp = value.parse().unwrap_or(false),
-                    "RunDiskpartScripts" => config.run_diskpart_scripts = value.parse().unwrap_or(false),
+                    "RunDiskpartScripts" => {
+                        config.run_diskpart_scripts = value.parse().unwrap_or(false)
+                    }
                     "BootMode" => config.boot_mode = value.parse().unwrap_or(0),
                     "BootPcaMode" => config.boot_pca_mode = BootPcaMode::from_config_value(value),
                     "Language" => config.language = value.to_string(),
-                    "InstallCabPackages" => config.install_cab_packages = value.parse().unwrap_or(false),
+                    "InstallCabPackages" => {
+                        config.install_cab_packages = value.parse().unwrap_or(false)
+                    }
                     "RemoveShortcutArrow" => {
                         config.remove_shortcut_arrow = value.parse().unwrap_or(false)
                     }
@@ -638,12 +642,22 @@ impl ConfigFileManager {
                     "VolumeLabel" => config.volume_label = value.to_string(),
                     "CustomUnattendFile" => config.custom_unattend_file = value.to_string(),
                     "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
-                    "Win7InjectUsb3Driver" => config.win7_inject_usb3_driver = value.parse().unwrap_or(false),
-                    "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
+                    "Win7InjectUsb3Driver" => {
+                        config.win7_inject_usb3_driver = value.parse().unwrap_or(false)
+                    }
+                    "Win7InjectNvmeDriver" => {
+                        config.win7_inject_nvme_driver = value.parse().unwrap_or(false)
+                    }
                     "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
-                    "Win7FixStorageBsod" => config.win7_fix_storage_bsod = value.parse().unwrap_or(false),
-                    "XpInjectUsb3Driver" => config.xp_inject_usb3_driver = value.parse().unwrap_or(false),
-                    "XpInjectNvmeDriver" => config.xp_inject_nvme_driver = value.parse().unwrap_or(false),
+                    "Win7FixStorageBsod" => {
+                        config.win7_fix_storage_bsod = value.parse().unwrap_or(false)
+                    }
+                    "XpInjectUsb3Driver" => {
+                        config.xp_inject_usb3_driver = value.parse().unwrap_or(false)
+                    }
+                    "XpInjectNvmeDriver" => {
+                        config.xp_inject_nvme_driver = value.parse().unwrap_or(false)
+                    }
                     _ => {}
                 }
             }

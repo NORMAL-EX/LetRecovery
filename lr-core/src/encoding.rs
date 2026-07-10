@@ -33,7 +33,11 @@ mod tests {
 
     #[test]
     fn roundtrip_utf8_gbk_utf8() {
-        for s in ["系统备份", "加载离线注册表配置单元失败", "Administrator 管理员"] {
+        for s in [
+            "系统备份",
+            "加载离线注册表配置单元失败",
+            "Administrator 管理员",
+        ] {
             assert_eq!(gbk_to_utf8(&utf8_to_gbk(s)), s);
         }
     }

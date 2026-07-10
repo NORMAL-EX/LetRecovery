@@ -1,24 +1,24 @@
-use anyhow::Result;
-use std::path::Path;
+use crate::core::bitlocker::{BitLockerManager, VolumeStatus};
 use crate::tr;
 use crate::utils::cmd::create_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
-use crate::core::bitlocker::{BitLockerManager, VolumeStatus};
+use anyhow::Result;
+use std::path::Path;
 
 #[cfg(windows)]
 use windows::{
     core::PCWSTR,
     Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
     Win32::Storage::FileSystem::{
-        CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    },
+    Win32::System::Ioctl::{
+        IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER, PARTITION_STYLE_GPT,
+        PARTITION_STYLE_MBR,
     },
     Win32::System::IO::DeviceIoControl,
-    Win32::System::Ioctl::{
-        IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER,
-        PARTITION_STYLE_GPT, PARTITION_STYLE_MBR,
-    },
 };
 
 // 驱动器类型常量
@@ -129,7 +129,11 @@ impl DiskManager {
         Ok(partitions)
     }
 
-    fn get_partition_info(drive: &str, is_pe: bool, bitlocker_manager: &BitLockerManager) -> Result<Partition> {
+    fn get_partition_info(
+        drive: &str,
+        is_pe: bool,
+        bitlocker_manager: &BitLockerManager,
+    ) -> Result<Partition> {
         let path = format!("{}\\", drive);
         let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -215,10 +219,10 @@ impl DiskManager {
     #[cfg(windows)]
     fn get_partition_style(drive: &str) -> PartitionDetail {
         let letter = drive.chars().next().unwrap_or('C');
-        
+
         // 先获取磁盘号和分区号
         let (disk_number, partition_number) = Self::get_device_number(letter);
-        
+
         // 再获取分区表类型
         let style = if let Some(disk_num) = disk_number {
             Self::get_disk_partition_style_api(disk_num)
@@ -248,7 +252,10 @@ impl DiskManager {
         unsafe {
             // 打开卷设备
             let volume_path = format!("\\\\.\\{}:", letter);
-            let wide_path: Vec<u16> = volume_path.encode_utf16().chain(std::iter::once(0)).collect();
+            let wide_path: Vec<u16> = volume_path
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
 
             let handle = CreateFileW(
                 PCWSTR::from_raw(wide_path.as_ptr()),
@@ -286,7 +293,10 @@ impl DiskManager {
             let _ = CloseHandle(handle);
 
             if result.is_ok() {
-                (Some(device_number.device_number), Some(device_number.partition_number))
+                (
+                    Some(device_number.device_number),
+                    Some(device_number.partition_number),
+                )
             } else {
                 (None, None)
             }
@@ -342,7 +352,7 @@ impl DiskManager {
             if result.is_ok() && bytes_returned >= 8 {
                 // 读取头部的 partition_style 字段（前4字节）
                 let layout = &*(buffer.as_ptr() as *const DriveLayoutInformationEx);
-                
+
                 match layout.partition_style {
                     x if x == PARTITION_STYLE_MBR.0 as u32 => PartitionStyle::MBR,
                     x if x == PARTITION_STYLE_GPT.0 as u32 => PartitionStyle::GPT,
@@ -356,16 +366,19 @@ impl DiskManager {
 
     /// 格式化指定分区
     pub fn format_partition(partition: &str) -> Result<String> {
+        let spec = lr_core::format_command::FormatCommandSpec::new(partition, "NTFS", None)
+            .map_err(|error| anyhow::anyhow!("无效的格式化参数: {error}"))?;
+        let args = spec.args();
         let bin_dir = get_bin_dir();
         let format_exe = if Self::is_pe_environment() {
             bin_dir.join("format.com").to_string_lossy().to_string()
         } else {
-            "format.com".to_string()
+            lr_core::format_command::system_format_executable()
+                .to_string_lossy()
+                .to_string()
         };
 
-        let output = create_command(&format_exe)
-            .args([partition, "/FS:NTFS", "/q", "/y"])
-            .output()?;
+        let output = create_command(&format_exe).args(&args).output()?;
 
         Ok(gbk_to_utf8(&output.stdout))
     }
@@ -389,7 +402,12 @@ impl DiskManager {
         std::fs::write(&script_path, &script_content)?;
 
         let output = create_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?])
+            .args([
+                "/s",
+                script_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?,
+            ])
             .output()?;
 
         let _ = std::fs::remove_file(&script_path);
@@ -409,7 +427,12 @@ impl DiskManager {
         std::fs::write(&script_path, &script_content)?;
 
         let output = create_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?])
+            .args([
+                "/s",
+                script_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?,
+            ])
             .output()?;
 
         let _ = std::fs::remove_file(&script_path);
@@ -443,8 +466,9 @@ impl DiskManager {
         unsafe {
             let wide_path: Vec<u16> = ntoskrnl.encode_utf16().chain(std::iter::once(0)).collect();
             let mut handle: u32 = 0;
-            
-            let size = GetFileVersionInfoSizeW(PCWSTR::from_raw(wide_path.as_ptr()), Some(&mut handle));
+
+            let size =
+                GetFileVersionInfoSizeW(PCWSTR::from_raw(wide_path.as_ptr()), Some(&mut handle));
             if size == 0 {
                 return None;
             }
@@ -545,7 +569,7 @@ impl DiskManager {
     pub fn get_free_space_bytes(partition: &str) -> Option<u64> {
         let path = format!("{}\\", partition);
         let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-        
+
         let mut free_bytes_available: u64 = 0;
         let mut total_bytes: u64 = 0;
         let mut total_free_bytes: u64 = 0;
@@ -557,7 +581,7 @@ impl DiskManager {
                 Some(&mut total_bytes as *mut u64),
                 Some(&mut total_free_bytes as *mut u64),
             );
-            
+
             if result.is_ok() {
                 Some(free_bytes_available)
             } else {
@@ -602,10 +626,7 @@ impl DiskManager {
 
     /// 查询指定分区可缩小的最大空间（MB）
     pub fn query_shrink_max(letter: char) -> Result<u64> {
-        let script_content = format!(
-            "select volume {}\nshrink querymax",
-            letter
-        );
+        let script_content = format!("select volume {}\nshrink querymax", letter);
 
         let temp_dir = std::env::temp_dir();
         let script_path = temp_dir.join("lr_query_shrink.txt");
@@ -614,14 +635,22 @@ impl DiskManager {
         // 首先尝试使用内置 diskpart，如果失败则使用系统 diskpart
         let diskpart_path = get_diskpart_path();
         let output = create_command(&diskpart_path)
-            .args(["/s", script_path.to_str().ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?])
+            .args([
+                "/s",
+                script_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?,
+            ])
             .output()?;
 
         let output_text = gbk_to_utf8(&output.stdout);
         let error_text = gbk_to_utf8(&output.stderr);
-        
+
         log::info!("[DISK] Shrink querymax 使用: {}", diskpart_path);
-        log::info!("[DISK] Shrink querymax stdout 长度: {} 字节", output.stdout.len());
+        log::info!(
+            "[DISK] Shrink querymax stdout 长度: {} 字节",
+            output.stdout.len()
+        );
         log::info!("[DISK] Shrink querymax 输出: {}", output_text);
         if !error_text.is_empty() {
             log::error!("[DISK] Shrink querymax 错误: {}", error_text);
@@ -630,26 +659,34 @@ impl DiskManager {
         // 如果输出为空且使用的是内置 diskpart，尝试使用系统 diskpart
         let output_text = if output_text.trim().is_empty() || output.stdout.len() < 50 {
             log::warn!("[DISK] 内置 diskpart 输出异常，尝试使用系统 diskpart");
-            
+
             let sys_output = create_command("diskpart.exe")
-                .args(["/s", script_path.to_str().ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?])
+                .args([
+                    "/s",
+                    script_path
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?,
+                ])
                 .output()?;
-            
+
             let sys_output_text = gbk_to_utf8(&sys_output.stdout);
-            log::info!("[DISK] 系统 diskpart stdout 长度: {} 字节", sys_output.stdout.len());
+            log::info!(
+                "[DISK] 系统 diskpart stdout 长度: {} 字节",
+                sys_output.stdout.len()
+            );
             log::info!("[DISK] 系统 diskpart 输出: {}", sys_output_text);
-            
+
             sys_output_text
         } else {
             output_text
         };
-        
+
         let _ = std::fs::remove_file(&script_path);
 
         // 解析输出，查找可回收的最大空间
         // 英文: "The maximum number of reclaimable bytes is: XXX MB"
         // 中文: "可回收的最大字节数为:  XXX MB" 或 "最多可从此卷收回 XXX MB"
-        
+
         // 尝试多种模式匹配
         let max_mb = Self::parse_shrink_max_output(&output_text)
             .or_else(|| Self::parse_shrink_max_output_cn(&output_text))
@@ -692,12 +729,18 @@ impl DiskManager {
         for line in output.lines() {
             // 中文输出可能的格式：
             // "可回收的最大字节数为:  XXX MB"
-            // "最多可从此卷收回 XXX MB"  
+            // "最多可从此卷收回 XXX MB"
             // "可以从该卷收回的最大空间是: XXX MB"
             // "该卷可以收回的最大空间为 XXX MB"
-            if line.contains("回收") || line.contains("收回") || line.contains("可用") 
-                || line.contains("压缩") || line.contains("缩小") || line.contains("最大")
-                || line.contains("空间") || line.contains("字节") {
+            if line.contains("回收")
+                || line.contains("收回")
+                || line.contains("可用")
+                || line.contains("压缩")
+                || line.contains("缩小")
+                || line.contains("最大")
+                || line.contains("空间")
+                || line.contains("字节")
+            {
                 log::info!("[DISK] 尝试解析中文行: {}", line);
                 if let Some(size) = Self::extract_size_from_line(line) {
                     log::info!("[DISK] 解析成功: {} MB", size);
@@ -713,12 +756,16 @@ impl DiskManager {
         for line in output.lines() {
             // 跳过明显的非结果行
             let line_lower = line.to_lowercase();
-            if line_lower.contains("diskpart") || line_lower.contains("microsoft") 
-                || line_lower.contains("version") || line_lower.contains("volume")
-                || line_lower.contains("select") || line.trim().is_empty() {
+            if line_lower.contains("diskpart")
+                || line_lower.contains("microsoft")
+                || line_lower.contains("version")
+                || line_lower.contains("volume")
+                || line_lower.contains("select")
+                || line.trim().is_empty()
+            {
                 continue;
             }
-            
+
             if let Some(size) = Self::extract_size_from_line(line) {
                 return Some(size);
             }
@@ -731,7 +778,7 @@ impl DiskManager {
         let mut num_str = String::new();
         let mut found_num = false;
         let chars: Vec<char> = line.chars().collect();
-        
+
         for (i, c) in chars.iter().enumerate() {
             if c.is_ascii_digit() {
                 num_str.push(*c);
@@ -766,7 +813,7 @@ impl DiskManager {
                 found_num = false;
             }
         }
-        
+
         // 如果循环结束还有数字
         if !num_str.is_empty() {
             if let Ok(num) = num_str.parse::<u64>() {
@@ -775,17 +822,17 @@ impl DiskManager {
                 }
             }
         }
-        
+
         None
     }
 
     /// 从指定分区缩小并创建新分区（增强版，带标志文件）
-    /// 
+    ///
     /// # Arguments
     /// * `source_letter` - 源分区盘符
     /// * `desired_size_mb` - 期望的新分区大小（MB）
     /// * `pre_queried_max_mb` - 预先查询的最大可缩小空间（MB），如果为 None 则内部查询
-    /// 
+    ///
     /// # Returns
     /// * `Ok(char)` - 新分区的盘符
     /// * `Err` - 错误信息
@@ -799,7 +846,7 @@ impl DiskManager {
             Some(mb) => mb,
             None => Self::query_shrink_max(source_letter)?,
         };
-        
+
         if max_shrink_mb == 0 {
             anyhow::bail!(
                 "{}",
@@ -815,7 +862,8 @@ impl DiskManager {
         let actual_size_mb = if desired_size_mb > max_shrink_mb {
             log::warn!(
                 "[DISK] 警告: 期望缩小 {} MB，但最多只能缩小 {} MB，将使用最大可用值",
-                desired_size_mb, max_shrink_mb
+                desired_size_mb,
+                max_shrink_mb
             );
             max_shrink_mb
         } else {
@@ -829,7 +877,8 @@ impl DiskManager {
                 tr!(
                     "分区 {}: 可缩小空间太小（{} MB），需要至少 1024 MB (1 GB)。\n\
                 建议：清理磁盘空间或进行碎片整理后重试。",
-                    source_letter, actual_size_mb
+                    source_letter,
+                    actual_size_mb
                 )
             );
         }
@@ -840,7 +889,9 @@ impl DiskManager {
 
         log::info!(
             "[DISK] 准备从 {}: 缩小 {} MB 并创建新分区 {}:",
-            source_letter, actual_size_mb, new_letter
+            source_letter,
+            actual_size_mb,
+            new_letter
         );
 
         // 使用 diskpart 执行操作
@@ -851,9 +902,7 @@ impl DiskManager {
             create partition primary\n\
             format fs=ntfs quick label=\"LetRecovery\"\n\
             assign letter={}",
-            source_letter,
-            actual_size_mb,
-            new_letter
+            source_letter, actual_size_mb, new_letter
         );
 
         let temp_dir = std::env::temp_dir();
@@ -863,7 +912,12 @@ impl DiskManager {
         log::info!("[DISK] Diskpart 脚本内容:\n{}", script_content);
 
         let output = create_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?])
+            .args([
+                "/s",
+                script_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?,
+            ])
             .output()?;
 
         let _ = std::fs::remove_file(&script_path);
@@ -878,11 +932,17 @@ impl DiskManager {
 
         // 检查输出是否包含错误信息
         let output_lower = output_text.to_lowercase();
-        if output_lower.contains("error") || output_lower.contains("错误") 
-            || output_lower.contains("失败") || output_lower.contains("failed")
-            || output_lower.contains("无效") || output_lower.contains("invalid")
-            || output_lower.contains("不支持") || output_lower.contains("无法")
-            || output_lower.contains("拒绝") || output_lower.contains("denied") {
+        if output_lower.contains("error")
+            || output_lower.contains("错误")
+            || output_lower.contains("失败")
+            || output_lower.contains("failed")
+            || output_lower.contains("无效")
+            || output_lower.contains("invalid")
+            || output_lower.contains("不支持")
+            || output_lower.contains("无法")
+            || output_lower.contains("拒绝")
+            || output_lower.contains("denied")
+        {
             anyhow::bail!("{}", tr!("Diskpart 执行失败: {}", output_text));
         }
 
@@ -901,7 +961,8 @@ impl DiskManager {
                     tr!(
                         "分区创建失败：新分区 {}: 不可访问。\n\
                     Diskpart 输出: {}",
-                        new_letter, output_text
+                        new_letter,
+                        output_text
                     )
                 );
             }
@@ -927,7 +988,8 @@ impl DiskManager {
 
         log::info!(
             "[DISK] 新分区 {}: 创建成功，大小 {} MB，标志文件已写入",
-            new_letter, actual_size_mb
+            new_letter,
+            actual_size_mb
         );
 
         Ok(new_letter)
@@ -947,17 +1009,19 @@ impl DiskManager {
 
         log::info!("[DISK] 准备删除自动创建的分区 {}:", letter);
 
-        let script_content = format!(
-            "select volume {}\ndelete partition override",
-            letter
-        );
+        let script_content = format!("select volume {}\ndelete partition override", letter);
 
         let temp_dir = std::env::temp_dir();
         let script_path = temp_dir.join("lr_delete_script.txt");
         std::fs::write(&script_path, &script_content)?;
 
         let output = create_command(&get_diskpart_path())
-            .args(["/s", script_path.to_str().ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?])
+            .args([
+                "/s",
+                script_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?,
+            ])
             .output()?;
 
         let _ = std::fs::remove_file(&script_path);
@@ -969,11 +1033,11 @@ impl DiskManager {
     }
 
     /// 查找可用的数据分区（排除指定分区、光驱，检查空间）
-    /// 
+    ///
     /// # Arguments
     /// * `exclude_partition` - 要排除的分区（通常是目标安装分区）
     /// * `required_size_bytes` - 需要的最小空间（字节）
-    /// 
+    ///
     /// # Returns
     /// * `Ok(Some((partition, is_auto_created)))` - 找到可用分区，返回分区盘符和是否是自动创建的
     /// * `Ok(None)` - 没有找到可用分区，且无法自动创建
@@ -982,25 +1046,30 @@ impl DiskManager {
         exclude_partition: &str,
         required_size_bytes: u64,
     ) -> Result<Option<(String, bool)>> {
-        let exclude_letter = exclude_partition.chars().next().unwrap_or('C').to_ascii_uppercase();
-        
-        log::info!("[DISK] 查找数据分区，排除: {}, 需要空间: {} bytes ({:.2} GB)", 
-            exclude_partition, 
+        let exclude_letter = exclude_partition
+            .chars()
+            .next()
+            .unwrap_or('C')
+            .to_ascii_uppercase();
+
+        log::info!(
+            "[DISK] 查找数据分区，排除: {}, 需要空间: {} bytes ({:.2} GB)",
+            exclude_partition,
             required_size_bytes,
             required_size_bytes as f64 / 1024.0 / 1024.0 / 1024.0
         );
 
         // 第一遍：查找所有可用的固定磁盘分区（排除光驱、排除目标分区）
         let mut candidates: Vec<(char, u64)> = Vec::new();
-        
+
         for letter in b'A'..=b'Z' {
             let c = letter as char;
-            
+
             // 跳过排除的分区
             if c == exclude_letter {
                 continue;
             }
-            
+
             // 跳过 X 盘（PE 系统盘）
             if c == 'X' {
                 continue;
@@ -1025,9 +1094,13 @@ impl DiskManager {
 
             // 获取剩余空间
             if let Some(free_space) = Self::get_free_space_bytes(&format!("{}:", c)) {
-                log::info!("[DISK] 分区 {}:  剩余空间: {} bytes ({:.2} GB)",
-                    c, free_space, free_space as f64 / 1024.0 / 1024.0 / 1024.0);
-                
+                log::info!(
+                    "[DISK] 分区 {}:  剩余空间: {} bytes ({:.2} GB)",
+                    c,
+                    free_space,
+                    free_space as f64 / 1024.0 / 1024.0 / 1024.0
+                );
+
                 if free_space >= required_size_bytes {
                     candidates.push((c, free_space));
                 }
@@ -1041,9 +1114,9 @@ impl DiskManager {
                 let a_is_c = a.0 == 'C';
                 let b_is_c = b.0 == 'C';
                 match (a_is_c, b_is_c) {
-                    (true, false) => std::cmp::Ordering::Greater,  // C 盘排后面
+                    (true, false) => std::cmp::Ordering::Greater, // C 盘排后面
                     (false, true) => std::cmp::Ordering::Less,    // 非 C 盘排前面
-                    _ => b.1.cmp(&a.1),  // 空间大的优先
+                    _ => b.1.cmp(&a.1),                           // 空间大的优先
                 }
             });
 
@@ -1055,9 +1128,9 @@ impl DiskManager {
         // ========================================================================
         // 没有找到满足条件的现有分区，尝试从目标安装分区创建新分区
         // ========================================================================
-        // 
+        //
         // 重要：这里【不能】检查 exclude_letter == 'C' 然后直接返回！
-        // 
+        //
         // 错误的写法（已删除）：
         //   if exclude_letter == 'C' {
         //       return Ok(None);  // ← 这是错的！
@@ -1073,7 +1146,10 @@ impl DiskManager {
         //
         // 因此，即使 exclude_letter == 'C'，也必须尝试分割 C 盘！
         // ========================================================================
-        log::info!("[DISK] 没有找到满足条件的现有分区，尝试从 {} 盘创建新分区", exclude_letter);
+        log::info!(
+            "[DISK] 没有找到满足条件的现有分区，尝试从 {} 盘创建新分区",
+            exclude_letter
+        );
 
         // 使用 shrink querymax 查询目标分区实际可缩小的空间
         let max_shrink_mb = match Self::query_shrink_max(exclude_letter) {
@@ -1085,8 +1161,12 @@ impl DiskManager {
         };
 
         let max_shrink_bytes = max_shrink_mb * 1024 * 1024;
-        log::info!("[DISK] {} 盘实际可缩小空间: {} MB ({:.2} GB)",
-            exclude_letter, max_shrink_mb, max_shrink_bytes as f64 / 1024.0 / 1024.0 / 1024.0);
+        log::info!(
+            "[DISK] {} 盘实际可缩小空间: {} MB ({:.2} GB)",
+            exclude_letter,
+            max_shrink_mb,
+            max_shrink_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+        );
 
         // 检查可缩小空间是否足够容纳镜像
         if max_shrink_bytes < required_size_bytes {
@@ -1101,7 +1181,10 @@ impl DiskManager {
                 3. 或手动创建一个数据分区",
                     exclude_letter,
                     format!("{:.2}", max_shrink_bytes as f64 / 1024.0 / 1024.0 / 1024.0),
-                    format!("{:.2}", required_size_bytes as f64 / 1024.0 / 1024.0 / 1024.0),
+                    format!(
+                        "{:.2}",
+                        required_size_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+                    ),
                     exclude_letter
                 )
             ));
@@ -1112,31 +1195,43 @@ impl DiskManager {
         let required_size_mb = (required_size_bytes + 1024 * 1024 - 1) / (1024 * 1024); // 向上取整到 MB
         let ten_gb_mb: u64 = 10 * 1024; // 10GB in MB
         let ideal_size_mb = required_size_mb + ten_gb_mb;
-        
+
         // 向上取整到整数 GB
         let ideal_size_gb = (ideal_size_mb + 1023) / 1024;
         let ideal_size_mb_rounded = ideal_size_gb * 1024;
 
         let actual_size_mb: u64;
-        
+
         if max_shrink_mb >= ideal_size_mb_rounded {
             // 可缩小空间充足，使用理想大小（镜像 + 10GB 缓冲）
             actual_size_mb = ideal_size_mb_rounded;
-            log::info!("[DISK] 使用理想分区大小: {} MB ({} GB)", actual_size_mb, ideal_size_gb);
+            log::info!(
+                "[DISK] 使用理想分区大小: {} MB ({} GB)",
+                actual_size_mb,
+                ideal_size_gb
+            );
         } else {
             // 可缩小空间不足以达到理想大小
             // 确保至少能容纳镜像文件，向上取整到整数 GB
             let min_size_gb = (required_size_mb + 1023) / 1024; // 向上取整
             let available_size_gb = max_shrink_mb / 1024; // 可用的整数 GB
-            
+
             if available_size_gb >= min_size_gb {
                 // 使用可用的整数 GB
                 actual_size_mb = available_size_gb * 1024;
-                log::info!("[DISK] 可缩小空间有限，使用较小分区大小: {} MB ({} GB)", actual_size_mb, available_size_gb);
+                log::info!(
+                    "[DISK] 可缩小空间有限，使用较小分区大小: {} MB ({} GB)",
+                    actual_size_mb,
+                    available_size_gb
+                );
             } else {
                 // 整数 GB 不够，直接使用全部可缩小空间（不取整）
                 actual_size_mb = max_shrink_mb;
-                log::info!("[DISK] 空间紧张，使用全部可缩小空间: {} MB ({:.2} GB)", actual_size_mb, max_shrink_mb as f64 / 1024.0);
+                log::info!(
+                    "[DISK] 空间紧张，使用全部可缩小空间: {} MB ({:.2} GB)",
+                    actual_size_mb,
+                    max_shrink_mb as f64 / 1024.0
+                );
             }
         }
 
@@ -1166,8 +1261,12 @@ impl DiskManager {
         }
 
         // 创建新分区（传入预查询的 max_shrink_mb，避免重复查询）
-        let new_letter = Self::shrink_and_create_partition_with_marker(exclude_letter, actual_size_mb, Some(max_shrink_mb))?;
-        
+        let new_letter = Self::shrink_and_create_partition_with_marker(
+            exclude_letter,
+            actual_size_mb,
+            Some(max_shrink_mb),
+        )?;
+
         Ok(Some((format!("{}:", new_letter), true)))
     }
 }

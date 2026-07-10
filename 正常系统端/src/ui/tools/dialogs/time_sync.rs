@@ -1,12 +1,12 @@
+use super::common::get_message_color;
+use crate::app::App;
+use crate::tr;
 use egui;
 use std::sync::mpsc;
-use crate::tr;
-use crate::app::App;
-use super::common::get_message_color;
 
 impl App {
     // ==================== 时间同步对话框 ====================
-    
+
     /// 渲染时间同步对话框
     pub fn render_time_sync_dialog(&mut self, ui: &mut egui::Ui) {
         if !self.show_time_sync_dialog {
@@ -26,8 +26,12 @@ impl App {
                 ui.add_space(10.0);
 
                 ui.label(egui::RichText::new(tr!("将从以下NTP服务器获取时间：")).small());
-                ui.label(egui::RichText::new("• ntp.aliyun.com\n• ntp.tencent.com\n• cn.ntp.org.cn").monospace().small());
-                
+                ui.label(
+                    egui::RichText::new("• ntp.aliyun.com\n• ntp.tencent.com\n• cn.ntp.org.cn")
+                        .monospace()
+                        .small(),
+                );
+
                 ui.add_space(15.0);
 
                 // 显示状态消息

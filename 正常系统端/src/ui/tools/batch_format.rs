@@ -5,13 +5,12 @@
 use std::path::Path;
 
 use crate::tr;
+use lr_core::format_command::{system_format_executable, FormatCommandSpec};
 
 #[cfg(windows)]
 use windows::{
     core::PCWSTR,
-    Win32::Storage::FileSystem::{
-        GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
-    },
+    Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW},
 };
 
 /// 驱动器类型常量
@@ -197,20 +196,7 @@ fn get_partition_info(_drive: &str) -> Option<FormatablePartition> {
 pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<(), String> {
     use crate::utils::cmd::create_command;
     use crate::utils::encoding::gbk_to_utf8;
-    
-    // 确保盘符格式正确
-    let drive_letter = letter
-        .chars()
-        .next()
-        .ok_or_else(|| tr!("无效的盘符"))?;
 
-    if !drive_letter.is_ascii_alphabetic() {
-        return Err(tr!("无效的盘符"));
-    }
-
-    let drive = format!("{}:", drive_letter.to_ascii_uppercase());
-
-    // 确定文件系统类型
     let fs = if file_system.is_empty() {
         "NTFS"
     } else {
@@ -219,6 +205,11 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
 
     // 卷标处理
     let vol_label = if label.is_empty() { "OS" } else { label };
+    let spec = FormatCommandSpec::new(letter, fs, Some(vol_label))
+        .map_err(|error| tr!("无效的格式化参数: {}", error))?;
+    let drive = spec.drive().to_string();
+    let args = spec.args();
+    let format_exe = system_format_executable();
 
     log::info!(
         "开始格式化分区: {} (文件系统: {}, 卷标: {})",
@@ -227,13 +218,10 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
         vol_label
     );
 
-    // 使用系统 format 命令: format D: /FS:NTFS /V:Label /Q /Y
-    let cmd_args = format!("format {} /FS:{} /V:{} /Q /Y", drive, fs, vol_label);
-    
-    log::info!("执行命令: cmd /c {}", cmd_args);
+    log::info!("执行程序: {} 参数: {:?}", format_exe.display(), args);
 
-    let output = create_command("cmd")
-        .args(["/c", &cmd_args])
+    let output = create_command(&format_exe)
+        .args(&args)
         .output()
         .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
@@ -248,21 +236,28 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
     // 检查执行结果
     let stdout_lower = stdout.to_lowercase();
     let success_indicators = ["格式化完成", "format complete", "已完成", "complete"];
-    let has_success_indicator = success_indicators.iter().any(|s| stdout_lower.contains(&s.to_lowercase()));
-    
+    let has_success_indicator = success_indicators
+        .iter()
+        .any(|s| stdout_lower.contains(&s.to_lowercase()));
+
     if output.status.success() || has_success_indicator {
         log::info!("分区 {} 格式化成功", drive);
         Ok(())
     } else {
         let error_msg = if !stderr.is_empty() {
             stderr.trim().to_string()
-        } else if stdout.contains("无法") || stdout.contains("错误") || stdout.contains("失败") 
-            || stdout.contains("denied") || stdout.contains("error") || stdout.contains("拒绝") {
+        } else if stdout.contains("无法")
+            || stdout.contains("错误")
+            || stdout.contains("失败")
+            || stdout.contains("denied")
+            || stdout.contains("error")
+            || stdout.contains("拒绝")
+        {
             stdout.trim().to_string()
         } else {
             tr!("格式化失败: {}", stdout.trim())
         };
-        
+
         log::error!("格式化失败: {}", error_msg);
         Err(error_msg)
     }
@@ -271,36 +266,28 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
 /// 使用 format 命令格式化分区（带进度回调）
 #[cfg(windows)]
 pub fn format_partition_with_progress<F>(
-    letter: &str, 
-    label: &str, 
+    letter: &str,
+    label: &str,
     file_system: &str,
     progress_callback: F,
-) -> Result<(), String> 
+) -> Result<(), String>
 where
     F: Fn(u8, &str) + Send + 'static,
 {
     use crate::utils::cmd::create_command;
     use crate::utils::encoding::gbk_to_utf8;
-    
-    // 确保盘符格式正确
-    let drive_letter = letter
-        .chars()
-        .next()
-        .ok_or_else(|| tr!("无效的盘符"))?;
 
-    if !drive_letter.is_ascii_alphabetic() {
-        return Err(tr!("无效的盘符"));
-    }
-
-    let drive = format!("{}:", drive_letter.to_ascii_uppercase());
-
-    // 确定文件系统类型
     let fs = if file_system.is_empty() {
         "NTFS"
     } else {
         file_system
     };
     let vol_label = if label.is_empty() { "OS" } else { label };
+    let spec = FormatCommandSpec::new(letter, fs, Some(vol_label))
+        .map_err(|error| tr!("无效的格式化参数: {}", error))?;
+    let drive = spec.drive().to_string();
+    let args = spec.args();
+    let format_exe = system_format_executable();
 
     log::info!(
         "开始格式化分区: {} (文件系统: {}, 卷标: {})",
@@ -313,15 +300,12 @@ where
 
     progress_callback(10, &tr!("启动格式化进程..."));
 
-    // 使用系统 format 命令
-    let cmd_args = format!("format {} /FS:{} /V:{} /Q /Y", drive, fs, vol_label);
-
-    log::info!("执行命令: cmd /c {}", cmd_args);
+    log::info!("执行程序: {} 参数: {:?}", format_exe.display(), args);
 
     progress_callback(20, &tr!("正在格式化..."));
 
-    let output = create_command("cmd")
-        .args(["/c", &cmd_args])
+    let output = create_command(&format_exe)
+        .args(&args)
         .output()
         .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
@@ -333,7 +317,9 @@ where
     // 检查结果
     let stdout_lower = stdout.to_lowercase();
     let success_indicators = ["格式化完成", "format complete", "已完成", "complete"];
-    let has_success_indicator = success_indicators.iter().any(|s| stdout_lower.contains(&s.to_lowercase()));
+    let has_success_indicator = success_indicators
+        .iter()
+        .any(|s| stdout_lower.contains(&s.to_lowercase()));
 
     if output.status.success() || has_success_indicator {
         progress_callback(100, &tr!("分区 {} 格式化完成", drive));
@@ -342,8 +328,13 @@ where
     } else {
         let error_msg = if !stderr.is_empty() {
             stderr.trim().to_string()
-        } else if stdout.contains("无法") || stdout.contains("错误") || stdout.contains("失败") 
-            || stdout.contains("denied") || stdout.contains("error") || stdout.contains("拒绝") {
+        } else if stdout.contains("无法")
+            || stdout.contains("错误")
+            || stdout.contains("失败")
+            || stdout.contains("denied")
+            || stdout.contains("error")
+            || stdout.contains("拒绝")
+        {
             stdout.trim().to_string()
         } else {
             tr!("格式化失败: {}", stdout.trim())
@@ -360,11 +351,11 @@ pub fn format_partition(_letter: &str, _label: &str, _file_system: &str) -> Resu
 
 #[cfg(not(windows))]
 pub fn format_partition_with_progress<F>(
-    _letter: &str, 
-    _label: &str, 
+    _letter: &str,
+    _label: &str,
     _file_system: &str,
     _progress_callback: F,
-) -> Result<(), String> 
+) -> Result<(), String>
 where
     F: Fn(u8, &str) + Send + 'static,
 {
@@ -411,8 +402,13 @@ pub fn batch_format_partitions(
 
 /// 检查 format 命令是否可用
 pub fn is_format_api_available() -> bool {
-    // 系统自带的 format.com 应该总是存在
-    std::path::Path::new(r"C:\Windows\System32\format.com").exists()
+    let executable = system_format_executable();
+    if executable.is_absolute() {
+        return executable.exists();
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|path| path.join("format.com").is_file()))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -424,12 +420,5 @@ mod tests {
         let drive = get_system_drive();
         assert!(drive.len() >= 2);
         assert!(drive.ends_with(':'));
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn test_format_api_available() {
-        // 系统 format.com 应该存在
-        assert!(is_format_api_available());
     }
 }

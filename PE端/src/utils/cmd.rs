@@ -1,5 +1,5 @@
-use std::process::{Command};
 use std::ffi::OsStr;
+use std::process::Command;
 
 /// Windows CREATE_NO_WINDOW 标志
 #[cfg(windows)]

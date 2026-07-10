@@ -10,12 +10,13 @@ use crate::core::system_info::SystemInfo;
 use crate::download::aria2::DownloadProgress;
 use crate::download::config::ConfigManager;
 use crate::download::manager::DownloadManager;
-use crate::ui::advanced_options::AdvancedOptions;
 use crate::tr;
+use crate::ui::advanced_options::AdvancedOptions;
 use lr_core::boot_pca::{BootPcaMode, EfiSignatureInfo, FirmwarePcaInfo};
 
 // 异步加载系统/硬件信息的通道
-static ASYNC_INFO_RX: std::sync::OnceLock<Mutex<Option<mpsc::Receiver<AsyncInfoResult>>>> = std::sync::OnceLock::new();
+static ASYNC_INFO_RX: std::sync::OnceLock<Mutex<Option<mpsc::Receiver<AsyncInfoResult>>>> =
+    std::sync::OnceLock::new();
 
 struct AsyncInfoResult {
     system_info: Option<SystemInfo>,
@@ -83,26 +84,26 @@ impl BootModeSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum InstallMode {
     #[default]
-    Direct,       // 直接安装（目标分区非当前系统分区，或在PE中）
-    ViaPE,        // 通过PE安装（目标分区是当前系统分区）
+    Direct, // 直接安装（目标分区非当前系统分区，或在PE中）
+    ViaPE, // 通过PE安装（目标分区是当前系统分区）
 }
 
 /// 备份模式
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum BackupMode {
     #[default]
-    Direct,       // 直接备份
-    ViaPE,        // 通过PE备份
+    Direct, // 直接备份
+    ViaPE, // 通过PE备份
 }
 
 /// 备份格式
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum BackupFormat {
     #[default]
-    Wim,          // WIM格式（默认）
-    Esd,          // ESD格式（高压缩）
-    Swm,          // SWM格式（分卷）
-    Gho,          // GHO格式（Ghost）
+    Wim, // WIM格式（默认）
+    Esd, // ESD格式（高压缩）
+    Swm, // SWM格式（分卷）
+    Gho, // GHO格式（Ghost）
 }
 
 impl std::fmt::Display for BackupFormat {
@@ -126,7 +127,7 @@ impl BackupFormat {
             BackupFormat::Gho => "gho",
         }
     }
-    
+
     /// 获取文件过滤器描述
     pub fn filter_description(&self) -> &'static str {
         match self {
@@ -136,7 +137,7 @@ impl BackupFormat {
             BackupFormat::Gho => "GHO镜像",
         }
     }
-    
+
     /// 转换为配置文件中的数值
     pub fn to_config_value(&self) -> u8 {
         match self {
@@ -146,7 +147,7 @@ impl BackupFormat {
             BackupFormat::Gho => 3,
         }
     }
-    
+
     /// 从配置文件数值转换
     pub fn from_config_value(value: u8) -> Self {
         match value {
@@ -261,7 +262,7 @@ pub struct App {
 
     // 系统信息
     pub system_info: Option<SystemInfo>,
-    
+
     // 硬件信息
     pub hardware_info: Option<HardwareInfo>,
     pub hardware_info_loading: bool,
@@ -273,11 +274,11 @@ pub struct App {
     // 在线资源
     pub config: Option<ConfigManager>,
     pub selected_online_system: Option<usize>,
-    
+
     // 远程配置
     pub remote_config: Option<crate::download::server_config::RemoteConfig>,
     pub remote_config_loading: bool,
-    
+
     // PE选择（用于安装/备份界面）
     pub selected_pe_for_install: Option<usize>,
     pub selected_pe_for_backup: Option<usize>,
@@ -289,7 +290,6 @@ pub struct App {
     /// 选择的镜像被识别为 Windows XP/2003 的 i386 文本安装介质时，
     /// 这里存挂载 ISO 上的 i386 源目录（如 `F:\I386`）。非 None 即走 XP 文本安装路径。
     pub xp_i386_source: Option<String>,
-
 
     // Win7检测日志去重（仅在结果变化时输出）
     pub last_is_win7: Option<bool>,
@@ -351,12 +351,12 @@ pub struct App {
     pub backup_progress: u8,
     pub backup_mode: BackupMode,
     pub backup_format: BackupFormat,
-    pub backup_swm_split_size: u32,  // SWM分卷大小（MB）
+    pub backup_swm_split_size: u32, // SWM分卷大小（MB）
 
     // 工具箱
     pub tool_message: String,
     pub tool_target_partition: Option<String>,
-    
+
     // 一键修复引导对话框
     pub show_repair_boot_dialog: bool,
     pub repair_boot_loading: bool,
@@ -379,62 +379,62 @@ pub struct App {
     // 安装进度通道
     pub install_progress_rx: Option<Receiver<DismProgress>>,
     pub install_error: Option<String>,
-    
+
     // 自动重启标志（防止重复触发）
     pub auto_reboot_triggered: bool,
 
     // ISO 挂载状态
     pub iso_mounting: bool,
     pub iso_mount_error: Option<String>,
-    
+
     // 镜像信息加载状态
     pub image_info_loading: bool,
-    
+
     // PE 下载状态
     pub pe_downloading: bool,
     pub pe_download_error: Option<String>,
-    
+
     // PE下载完成后继续的操作
     pub pe_download_then_action: Option<PeDownloadThenAction>,
-    
+
     // 远程配置加载通道
     pub remote_config_rx: Option<Receiver<crate::download::server_config::RemoteConfig>>,
-    
+
     // 下载完成后跳转到安装页面
     pub download_then_install: bool,
     pub download_then_install_path: Option<String>,
-    
+
     // 软件下载后运行
     pub soft_download_then_run: bool,
     pub soft_download_then_run_path: Option<String>,
-    
+
     // 在线下载页面选项卡
     pub online_download_tab: OnlineDownloadTab,
-    
+
     // 软件下载相关
     pub soft_download_save_path: String,
     pub soft_download_run_after: bool,
     pub show_soft_download_modal: bool,
     pub pending_soft_download: Option<PendingSoftDownload>,
-    
+
     // 软件图标缓存
     pub soft_icon_cache: std::collections::HashMap<String, SoftIconState>,
     pub soft_icon_loading: std::collections::HashSet<String>,
-    
+
     // 错误对话框
     pub show_error_dialog: bool,
     pub error_dialog_message: String,
-    
+
     // 网络信息对话框
     pub show_network_info_dialog: bool,
     pub network_info_cache: Option<Vec<crate::core::hardware_info::NetworkAdapterInfo>>,
-    
+
     // 导入存储驱动对话框
     pub show_import_storage_driver_dialog: bool,
     pub import_storage_driver_target: Option<String>,
     pub import_storage_driver_message: String,
     pub import_storage_driver_loading: bool,
-    
+
     // 移除APPX对话框
     pub show_remove_appx_dialog: bool,
     pub remove_appx_target: Option<String>,
@@ -442,7 +442,7 @@ pub struct App {
     pub remove_appx_selected: HashSet<String>,
     pub remove_appx_loading: bool,
     pub remove_appx_message: String,
-    
+
     // 驱动备份还原对话框
     pub show_driver_backup_dialog: bool,
     pub driver_backup_mode: crate::ui::tools::DriverBackupMode,
@@ -450,38 +450,38 @@ pub struct App {
     pub driver_backup_path: String,
     pub driver_backup_loading: bool,
     pub driver_backup_message: String,
-    
+
     // 软件列表对话框
     pub show_software_list_dialog: bool,
     pub software_list: Vec<crate::ui::tools::InstalledSoftware>,
     pub software_list_loading: bool,
-    
+
     // 重置网络确认对话框
     pub show_reset_network_confirm_dialog: bool,
-    
+
     // Windows分区信息缓存（避免重复检测）
     pub windows_partitions_cache: Option<Vec<crate::ui::tools::WindowsPartitionInfo>>,
     pub windows_partitions_loading: bool,
     pub windows_partitions_rx: Option<Receiver<Vec<crate::ui::tools::WindowsPartitionInfo>>>,
-    
+
     // 驱动操作异步通道
     pub driver_operation_rx: Option<Receiver<Result<String, String>>>,
-    
+
     // 存储驱动导入异步通道
     pub storage_driver_rx: Option<Receiver<Result<String, String>>>,
-    
+
     // APPX移除异步通道
     pub appx_remove_rx: Option<Receiver<(usize, usize)>>,
-    
+
     // APPX列表加载异步通道
     pub appx_list_rx: Option<Receiver<Vec<crate::ui::tools::AppxPackageInfo>>>,
-    
+
     // 时间同步对话框
     pub show_time_sync_dialog: bool,
     pub time_sync_loading: bool,
     pub time_sync_message: String,
     pub time_sync_rx: Option<Receiver<crate::ui::tools::time_sync::TimeSyncResult>>,
-    
+
     // 批量格式化对话框
     pub show_batch_format_dialog: bool,
     pub batch_format_loading: bool,
@@ -491,24 +491,26 @@ pub struct App {
     pub batch_format_selected: std::collections::HashSet<String>,
     pub batch_format_rx: Option<Receiver<crate::ui::tools::batch_format::BatchFormatResult>>,
     pub batch_format_partitions_rx: Option<Receiver<Vec<crate::ui::tools::FormatablePartition>>>,
-    
+
     // GHO密码查看对话框
     pub show_gho_password_dialog: bool,
     pub gho_password_file_path: String,
     pub gho_password_result: Option<crate::ui::tools::types::GhoPasswordResult>,
     pub gho_password_loading: bool,
     pub gho_password_rx: Option<Receiver<crate::ui::tools::types::GhoPasswordResult>>,
-    
+
     // 英伟达驱动卸载对话框
     pub show_nvidia_uninstall_dialog: bool,
     pub nvidia_uninstall_target: Option<String>,
-    pub nvidia_uninstall_hardware_summary: Option<crate::core::nvidia_driver::SystemHardwareSummary>,
+    pub nvidia_uninstall_hardware_summary:
+        Option<crate::core::nvidia_driver::SystemHardwareSummary>,
     pub nvidia_uninstall_loading: bool,
     pub nvidia_uninstall_hardware_loading: bool,
     pub nvidia_uninstall_message: String,
     pub nvidia_uninstall_rx: Option<Receiver<crate::ui::tools::types::NvidiaUninstallResult>>,
-    pub nvidia_uninstall_hardware_rx: Option<Receiver<crate::core::nvidia_driver::SystemHardwareSummary>>,
-    
+    pub nvidia_uninstall_hardware_rx:
+        Option<Receiver<crate::core::nvidia_driver::SystemHardwareSummary>>,
+
     // 分区对拷对话框
     pub show_partition_copy_dialog: bool,
     pub partition_copy_loading: bool,
@@ -523,13 +525,15 @@ pub struct App {
     pub partition_copy_is_resume: bool,
     pub partition_copy_partitions_rx: Option<Receiver<Vec<crate::ui::tools::CopyablePartition>>>,
     pub partition_copy_progress_rx: Option<Receiver<crate::ui::tools::CopyProgress>>,
-    
+
     // 一键分区对话框
     pub show_quick_partition_dialog: bool,
     pub quick_partition_state: crate::ui::tools::QuickPartitionDialogState,
     pub quick_partition_disks_rx: Option<Receiver<Vec<crate::core::quick_partition::PhysicalDisk>>>,
-    pub quick_partition_result_rx: Option<Receiver<crate::core::quick_partition::QuickPartitionResult>>,
-    pub resize_existing_result_rx: Option<Receiver<crate::core::quick_partition::ResizePartitionResult>>,
+    pub quick_partition_result_rx:
+        Option<Receiver<crate::core::quick_partition::QuickPartitionResult>>,
+    pub resize_existing_result_rx:
+        Option<Receiver<crate::core::quick_partition::ResizePartitionResult>>,
 
     // 无损扩大C盘对话框
     pub show_expand_c_dialog: bool,
@@ -576,13 +580,15 @@ pub struct App {
 
     // 应用配置（小白模式等）
     pub app_config: crate::core::app_config::AppConfig,
-    
+
     // PE下载待校验的MD5
     pub pending_pe_md5: Option<String>,
-    
-    // MD5校验状态
-    pub md5_verify_state: crate::ui::download_progress::Md5VerifyState,
-    
+    // PE download SHA-256. Preferred when both hashes are present.
+    pub pending_pe_sha256: Option<String>,
+
+    // Download integrity verification state.
+    pub integrity_verify_state: crate::ui::download_progress::IntegrityVerifyState,
+
     // 小白模式相关
     pub easy_mode_selected_system: Option<usize>,
     pub easy_mode_selected_volume: Option<usize>,
@@ -593,10 +599,10 @@ pub struct App {
     pub easy_mode_auto_install: bool,
     /// 小白模式待自动开始标志：镜像加载完成后自动开始安装
     pub easy_mode_pending_auto_start: bool,
-    
+
     // 内嵌资源管理器
     pub embedded_assets: crate::ui::EmbeddedAssets,
-    
+
     // 无人值守检测相关
     /// 当前选中分区是否存在无人值守配置文件
     pub partition_has_unattend: bool,
@@ -615,7 +621,7 @@ pub struct App {
     pub custom_unattend_path: String,
     /// 自定义无人值守文件语法校验错误（Some=有错，禁用安装按钮并提示）
     pub custom_unattend_error: Option<String>,
-    
+
     // 安装时BitLocker解锁对话框
     /// 是否显示安装前BitLocker解锁对话框
     pub show_install_bitlocker_dialog: bool,
@@ -637,7 +643,7 @@ pub struct App {
     pub install_bitlocker_rx: Option<Receiver<crate::ui::tools::bitlocker::UnlockResult>>,
     /// 安装前BitLocker检查完成后是否继续安装
     pub install_bitlocker_continue_after: bool,
-    
+
     // 备份时BitLocker解锁对话框
     /// 是否显示备份前BitLocker解锁对话框
     pub show_backup_bitlocker_dialog: bool,
@@ -735,9 +741,9 @@ pub enum SoftIconState {
 /// PE下载完成后要执行的操作
 #[derive(Debug, Clone)]
 pub enum PeDownloadThenAction {
-    Install,  // 继续安装
-    Backup,   // 继续备份
-    Expand,   // 继续无损扩大C盘
+    Install, // 继续安装
+    Backup,  // 继续备份
+    Expand,  // 继续无损扩大C盘
 }
 
 /// BitLocker解锁模式
@@ -825,7 +831,7 @@ impl Default for App {
             backup_progress: 0,
             backup_mode: BackupMode::Direct,
             backup_format: BackupFormat::Wim,
-            backup_swm_split_size: 4096,  // 默认4GB分卷
+            backup_swm_split_size: 4096, // 默认4GB分卷
             tool_message: String::new(),
             tool_target_partition: None,
             show_repair_boot_dialog: false,
@@ -985,8 +991,9 @@ impl Default for App {
             app_config: crate::core::app_config::AppConfig::load(),
             // PE下载待校验的MD5
             pending_pe_md5: None,
-            // MD5校验状态
-            md5_verify_state: crate::ui::download_progress::Md5VerifyState::NotStarted,
+            pending_pe_sha256: None,
+            // Download integrity verification state.
+            integrity_verify_state: crate::ui::download_progress::IntegrityVerifyState::NotStarted,
             // 小白模式相关
             easy_mode_selected_system: None,
             easy_mode_selected_volume: None,
@@ -1065,9 +1072,12 @@ impl App {
     }
 
     /// 使用预加载的配置创建应用
-    pub fn new_with_preloaded(cc: &eframe::CreationContext<'_>, preloaded: &crate::PreloadedConfig) -> Self {
+    pub fn new_with_preloaded(
+        cc: &eframe::CreationContext<'_>,
+        preloaded: &crate::PreloadedConfig,
+    ) -> Self {
         log::info!("App::new_with_preloaded 开始");
-        
+
         // 设置中文字体
         log::info!("设置字体...");
         Self::setup_fonts(&cc.egui_ctx);
@@ -1082,7 +1092,7 @@ impl App {
 
         log::info!("加载预加载数据...");
         app.load_initial_data_with_preloaded(preloaded);
-        
+
         log::info!("App::new_with_preloaded 完成");
         app
     }
@@ -1163,7 +1173,7 @@ impl App {
 
     fn setup_style(ctx: &egui::Context) {
         let mut options = ctx.options(|o| o.clone());
-        
+
         // 修改深色样式
         let mut dark_style = (*options.dark_style).clone();
         dark_style.text_styles = [
@@ -1181,7 +1191,7 @@ impl App {
         dark_style.spacing.scroll.bar_inner_margin = 2.0;
         dark_style.spacing.scroll.bar_outer_margin = 2.0;
         dark_style.spacing.scroll.floating = false; // 不使用浮动滚动条，始终显示
-        
+
         // 修改浅色样式
         let mut light_style = (*options.light_style).clone();
         light_style.text_styles = [
@@ -1199,13 +1209,13 @@ impl App {
         light_style.spacing.scroll.bar_inner_margin = 2.0;
         light_style.spacing.scroll.bar_outer_margin = 2.0;
         light_style.spacing.scroll.floating = false; // 不使用浮动滚动条，始终显示
-        
+
         light_style.visuals.widgets.inactive.expansion = 0.0;
         light_style.visuals.widgets.hovered.expansion = 0.0;
         light_style.visuals.widgets.active.expansion = 0.0;
         light_style.visuals.widgets.open.expansion = 0.0;
         light_style.visuals.widgets.noninteractive.expansion = 0.0;
-        
+
         options.dark_style = std::sync::Arc::new(dark_style);
         options.light_style = std::sync::Arc::new(light_style);
         ctx.options_mut(|o| *o = options);
@@ -1222,20 +1232,25 @@ impl App {
         self.partitions = crate::core::disk::DiskManager::get_partitions().unwrap_or_default();
 
         // 判断是否为PE环境
-        let is_pe = self.system_info.as_ref().map(|s| s.is_pe_environment).unwrap_or(false);
-        
+        let is_pe = self
+            .system_info
+            .as_ref()
+            .map(|s| s.is_pe_environment)
+            .unwrap_or(false);
+
         // 选择默认分区
         // 非PE环境：默认选择当前系统分区
         // PE环境：如果只有一个装有系统的分区则默认选择它，否则不默认选择
         if is_pe {
             // PE环境下，统计有系统的分区
-            let windows_partitions: Vec<usize> = self.partitions
+            let windows_partitions: Vec<usize> = self
+                .partitions
                 .iter()
                 .enumerate()
                 .filter(|(_, p)| p.has_windows)
                 .map(|(i, _)| i)
                 .collect();
-            
+
             if windows_partitions.len() == 1 {
                 // 只有一个系统分区，默认选择它
                 self.selected_partition = Some(windows_partitions[0]);
@@ -1263,7 +1278,7 @@ impl App {
         // 设置默认备份名称
         self.backup_name = tr!("系统备份_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
         self.backup_description = tr!("使用 LetRecovery 创建的系统备份");
-        
+
         // 预加载Windows分区信息（后台异步）
         self.start_load_windows_partitions();
     }
@@ -1278,24 +1293,29 @@ impl App {
 
         // 使用预加载的分区列表
         self.partitions = preloaded.partitions.clone();
-        
+
         // 如果系统信息或硬件信息为空，启动异步加载
         if self.system_info.is_none() || self.hardware_info.is_none() {
             self.start_async_info_loading();
         }
 
         // 判断是否为PE环境
-        let is_pe = self.system_info.as_ref().map(|s| s.is_pe_environment).unwrap_or(false);
-        
+        let is_pe = self
+            .system_info
+            .as_ref()
+            .map(|s| s.is_pe_environment)
+            .unwrap_or(false);
+
         // 选择默认分区
         if is_pe {
-            let windows_partitions: Vec<usize> = self.partitions
+            let windows_partitions: Vec<usize> = self
+                .partitions
                 .iter()
                 .enumerate()
                 .filter(|(_, p)| p.has_windows)
                 .map(|(i, _)| i)
                 .collect();
-            
+
             if windows_partitions.len() == 1 {
                 self.selected_partition = Some(windows_partitions[0]);
                 self.backup_source_partition = Some(windows_partitions[0]);
@@ -1312,7 +1332,7 @@ impl App {
         // 使用预加载的远程配置
         if let Some(ref remote_config) = preloaded.remote_config {
             self.remote_config_loading = false;
-            
+
             if remote_config.loaded {
                 self.config = Some(ConfigManager::load_from_content_full_with_gpu(
                     remote_config.dl_content.as_deref(),
@@ -1322,7 +1342,7 @@ impl App {
                     remote_config.gpu_content.as_deref(),
                 ));
                 log::info!("使用预加载的远程配置");
-                
+
                 // 成功获取云端PE配置后，保存到本地缓存（不含下载链接）
                 if let Some(ref config) = self.config {
                     if !config.pe_list.is_empty() {
@@ -1331,7 +1351,7 @@ impl App {
                         }
                     }
                 }
-                
+
                 // 自动选择第一个PE
                 if let Some(ref config) = self.config {
                     if !config.pe_list.is_empty() {
@@ -1345,22 +1365,24 @@ impl App {
                 }
             } else {
                 log::warn!("预加载的远程配置加载失败: {:?}", remote_config.error);
-                
+
                 // 预加载配置失败，尝试从本地缓存加载PE配置
                 if let Some(cached_pe_list) = crate::download::config::PeCache::load() {
                     // 只保留已经下载过的PE
                     let available_pe_list: Vec<crate::download::config::OnlinePE> = cached_pe_list
                         .into_iter()
-                        .filter(|pe| crate::download::config::PeCache::has_downloaded_pe(&pe.filename))
+                        .filter(|pe| {
+                            crate::download::config::PeCache::has_downloaded_pe(&pe.filename)
+                        })
                         .collect();
-                    
+
                     if !available_pe_list.is_empty() {
                         log::info!("从本地缓存加载了 {} 个可用PE配置", available_pe_list.len());
-                        
+
                         let mut config = ConfigManager::default();
                         config.pe_list = available_pe_list;
                         self.config = Some(config);
-                        
+
                         // 自动选择第一个PE
                         if self.selected_pe_for_install.is_none() {
                             self.selected_pe_for_install = Some(0);
@@ -1371,7 +1393,7 @@ impl App {
                     }
                 }
             }
-            
+
             self.remote_config = Some(remote_config.clone());
         } else {
             // 如果没有预加载配置，则异步加载
@@ -1386,36 +1408,36 @@ impl App {
         // 设置默认备份名称
         self.backup_name = tr!("系统备份_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
         self.backup_description = tr!("使用 LetRecovery 创建的系统备份");
-        
+
         // 预加载Windows分区信息（后台异步）
         self.start_load_windows_partitions();
     }
-    
+
     /// 启动异步加载系统/硬件信息
     fn start_async_info_loading(&mut self) {
         log::info!("启动异步加载系统/硬件信息...");
-        
+
         let (tx, rx) = mpsc::channel();
-        
+
         // 存储接收端
         let _ = ASYNC_INFO_RX.get_or_init(|| Mutex::new(Some(rx)));
-        
+
         std::thread::spawn(move || {
             log::info!("异步线程: 开始收集系统信息...");
             let system_info = crate::core::system_info::SystemInfo::collect().ok();
             log::info!("异步线程: 系统信息收集完成");
-            
+
             log::info!("异步线程: 开始收集硬件信息...");
             let hardware_info = crate::core::hardware_info::HardwareInfo::collect().ok();
             log::info!("异步线程: 硬件信息收集完成");
-            
+
             let _ = tx.send(AsyncInfoResult {
                 system_info,
                 hardware_info,
             });
         });
     }
-    
+
     /// 处理异步加载的系统/硬件信息结果
     fn process_async_info_results(&mut self) {
         if let Some(mutex) = ASYNC_INFO_RX.get() {
@@ -1423,14 +1445,14 @@ impl App {
                 if let Some(ref rx) = *guard {
                     if let Ok(result) = rx.try_recv() {
                         log::info!("收到异步加载的系统/硬件信息");
-                        
+
                         if self.system_info.is_none() {
                             self.system_info = result.system_info;
                         }
                         if self.hardware_info.is_none() {
                             self.hardware_info = result.hardware_info;
                         }
-                        
+
                         // 清除接收端，避免重复处理
                         *guard = None;
                     }
@@ -1438,37 +1460,37 @@ impl App {
             }
         }
     }
-    
+
     /// 开始异步加载远程配置
     pub fn start_remote_config_loading(&mut self) {
         use std::sync::mpsc;
-        
+
         if self.remote_config_loading {
             return; // 已经在加载中
         }
-        
+
         self.remote_config_loading = true;
-        
+
         let (tx, rx) = mpsc::channel::<crate::download::server_config::RemoteConfig>();
         self.remote_config_rx = Some(rx);
-        
+
         std::thread::spawn(move || {
             let config = crate::download::server_config::RemoteConfig::load_from_server();
             let _ = tx.send(config);
         });
     }
-    
+
     /// 检查远程配置加载状态
     pub fn check_remote_config_loading(&mut self) {
         if !self.remote_config_loading {
             return;
         }
-        
+
         if let Some(ref rx) = self.remote_config_rx {
             if let Ok(remote_config) = rx.try_recv() {
                 self.remote_config_loading = false;
                 self.remote_config_rx = None;
-                
+
                 if remote_config.loaded {
                     self.config = Some(ConfigManager::load_from_content_full_with_gpu(
                         remote_config.dl_content.as_deref(),
@@ -1478,16 +1500,17 @@ impl App {
                         remote_config.gpu_content.as_deref(),
                     ));
                     log::info!("远程配置加载成功");
-                    
+
                     // 成功获取云端PE配置后，保存到本地缓存（不含下载链接）
                     if let Some(ref config) = self.config {
                         if !config.pe_list.is_empty() {
-                            if let Err(e) = crate::download::config::PeCache::save(&config.pe_list) {
+                            if let Err(e) = crate::download::config::PeCache::save(&config.pe_list)
+                            {
                                 log::warn!("保存PE缓存失败: {}", e);
                             }
                         }
                     }
-                    
+
                     // 自动选择第一个PE
                     if let Some(ref config) = self.config {
                         if !config.pe_list.is_empty() {
@@ -1497,34 +1520,41 @@ impl App {
                             if self.selected_pe_for_backup.is_none() {
                                 self.selected_pe_for_backup = Some(0);
                             }
-                            
+
                             // 预热PE下载连接（在后台进行，不阻塞UI）
                             if let Some(first_pe) = config.pe_list.first() {
                                 let warmup_url = first_pe.download_url.clone();
                                 std::thread::spawn(move || {
-                                    crate::download::pe_url_resolver::warmup_connection_blocking(&warmup_url);
+                                    crate::download::pe_url_resolver::warmup_connection_blocking(
+                                        &warmup_url,
+                                    );
                                 });
                             }
                         }
                     }
                 } else {
                     log::warn!("远程配置加载失败: {:?}", remote_config.error);
-                    
+
                     // 远程配置加载失败，尝试从本地缓存加载PE配置
                     if let Some(cached_pe_list) = crate::download::config::PeCache::load() {
                         // 只保留已经下载过的PE
-                        let available_pe_list: Vec<crate::download::config::OnlinePE> = cached_pe_list
-                            .into_iter()
-                            .filter(|pe| crate::download::config::PeCache::has_downloaded_pe(&pe.filename))
-                            .collect();
-                        
+                        let available_pe_list: Vec<crate::download::config::OnlinePE> =
+                            cached_pe_list
+                                .into_iter()
+                                .filter(|pe| {
+                                    crate::download::config::PeCache::has_downloaded_pe(
+                                        &pe.filename,
+                                    )
+                                })
+                                .collect();
+
                         if !available_pe_list.is_empty() {
                             log::info!("从本地缓存加载了 {} 个可用PE配置", available_pe_list.len());
-                            
+
                             let mut config = ConfigManager::default();
                             config.pe_list = available_pe_list;
                             self.config = Some(config);
-                            
+
                             // 自动选择第一个PE
                             if self.selected_pe_for_install.is_none() {
                                 self.selected_pe_for_install = Some(0);
@@ -1535,7 +1565,7 @@ impl App {
                         }
                     }
                 }
-                
+
                 self.remote_config = Some(remote_config);
             }
         }
@@ -1543,12 +1573,18 @@ impl App {
 
     /// 检查PE配置是否可用
     pub fn is_pe_config_available(&self) -> bool {
-        self.config.as_ref().map(|c| !c.pe_list.is_empty()).unwrap_or(false)
+        self.config
+            .as_ref()
+            .map(|c| !c.pe_list.is_empty())
+            .unwrap_or(false)
     }
 
     /// 检查是否在PE环境中
     pub fn is_pe_environment(&self) -> bool {
-        self.system_info.as_ref().map(|s| s.is_pe_environment).unwrap_or(false)
+        self.system_info
+            .as_ref()
+            .map(|s| s.is_pe_environment)
+            .unwrap_or(false)
     }
 
     /// 显示错误对话框
@@ -1565,19 +1601,19 @@ impl eframe::App for App {
 
         // 检查远程配置加载状态
         self.check_remote_config_loading();
-        
+
         // 处理异步加载的系统/硬件信息
         self.process_async_info_results();
-        
+
         // 处理图标加载结果
         self.process_icon_load_results(ctx);
-        
+
         // 处理小白模式Logo加载结果
         self.process_easy_mode_logo_results(ctx);
-        
+
         // 检查工具箱异步操作结果
         self.check_tools_async_operations();
-        
+
         // 错误对话框
         if self.show_error_dialog {
             egui::Window::new(tr!("错误"))
@@ -1599,7 +1635,7 @@ impl eframe::App for App {
                     });
                 });
         }
-        
+
         // 无人值守冲突提示对话框
         if self.show_unattend_conflict_modal {
             egui::Window::new(tr!("无人值守选项不可用"))
@@ -1613,52 +1649,57 @@ impl eframe::App for App {
                         ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "");
                         ui.add_space(10.0);
                     });
-                    
-                    ui.label(tr!("目标分区的系统文件中已存在无人值守配置文件（unattend.xml）。"));
+
+                    ui.label(tr!(
+                        "目标分区的系统文件中已存在无人值守配置文件（unattend.xml）。"
+                    ));
                     ui.add_space(10.0);
                     ui.label(tr!("为避免配置冲突导致安装失败，无人值守选项已被禁用。"));
                     ui.add_space(10.0);
-                    
+
                     ui.separator();
                     ui.add_space(5.0);
-                    
+
                     ui.label(egui::RichText::new(tr!("以下高级选项也将受到影响：")).strong());
                     ui.add_space(5.0);
                     ui.label(tr!("• OOBE绕过强制联网"));
                     ui.label(tr!("• 自定义用户名"));
                     ui.label(tr!("• 删除预装UWP应用"));
-                    
+
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(5.0);
-                    
+
                     ui.label(egui::RichText::new(tr!("解决方法：")).small());
-                    ui.label(egui::RichText::new(tr!("勾选「格式化分区」选项，安装时将清除现有配置文件。")).small());
-                    
+                    ui.label(
+                        egui::RichText::new(tr!(
+                            "勾选「格式化分区」选项，安装时将清除现有配置文件。"
+                        ))
+                        .small(),
+                    );
+
                     ui.add_space(15.0);
-                    
+
                     ui.vertical_centered(|ui| {
                         if ui.button(tr!("我知道了")).clicked() {
                             self.show_unattend_conflict_modal = false;
                         }
                     });
-                    
+
                     ui.add_space(10.0);
                 });
         }
 
         // 安装时BitLocker解锁对话框
         // 使用一个临时UI来渲染对话框
-        egui::Area::new(egui::Id::new("install_bitlocker_dialog_area"))
-            .show(ctx, |ui| {
-                self.render_install_bitlocker_dialog(ui);
-            });
-        
+        egui::Area::new(egui::Id::new("install_bitlocker_dialog_area")).show(ctx, |ui| {
+            self.render_install_bitlocker_dialog(ui);
+        });
+
         // 备份时BitLocker解锁对话框
-        egui::Area::new(egui::Id::new("backup_bitlocker_dialog_area"))
-            .show(ctx, |ui| {
-                self.render_backup_bitlocker_dialog(ui);
-            });
+        egui::Area::new(egui::Id::new("backup_bitlocker_dialog_area")).show(ctx, |ui| {
+            self.render_backup_bitlocker_dialog(ui);
+        });
 
         // 底部状态栏
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
@@ -1700,100 +1741,126 @@ impl eframe::App for App {
             egui::SidePanel::left("nav_panel")
                 .min_width(150.0)
                 .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.heading("LetRecovery");
+                    ui.vertical_centered(|ui| {
+                        ui.heading("LetRecovery");
+                    });
+
+                    ui.add_space(20.0);
+
+                    // 检查是否启用小白模式（PE环境下强制禁用）
+                    let is_pe = self
+                        .system_info
+                        .as_ref()
+                        .map(|info| info.is_pe_environment)
+                        .unwrap_or(false);
+                    let easy_mode = self.app_config.easy_mode_enabled && !is_pe;
+
+                    if is_busy {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 165, 0),
+                            format!("{}", tr!("操作进行中...")),
+                        );
+                        ui.add_space(5.0);
+                    }
+
+                    // 小白模式显示"系统重装"，普通模式显示"系统安装"
+                    let system_install_label = if easy_mode {
+                        tr!("系统重装")
+                    } else {
+                        tr!("系统安装")
+                    };
+                    if ui
+                        .add_enabled(
+                            !is_busy || self.current_panel == Panel::SystemInstall,
+                            egui::SelectableLabel::new(
+                                self.current_panel == Panel::SystemInstall,
+                                system_install_label,
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.current_panel = Panel::SystemInstall;
+                    }
+
+                    // 小白模式下隐藏以下菜单
+                    if !easy_mode {
+                        if ui
+                            .add_enabled(
+                                !is_busy || self.current_panel == Panel::SystemBackup,
+                                egui::SelectableLabel::new(
+                                    self.current_panel == Panel::SystemBackup,
+                                    tr!("系统备份"),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.current_panel = Panel::SystemBackup;
+                        }
+
+                        if ui
+                            .add_enabled(
+                                !is_busy || self.current_panel == Panel::OnlineDownload,
+                                egui::SelectableLabel::new(
+                                    self.current_panel == Panel::OnlineDownload,
+                                    tr!("在线下载"),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.current_panel = Panel::OnlineDownload;
+                        }
+
+                        if ui
+                            .add_enabled(
+                                !is_busy || self.current_panel == Panel::Tools,
+                                egui::SelectableLabel::new(
+                                    self.current_panel == Panel::Tools,
+                                    tr!("工具箱"),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.current_panel = Panel::Tools;
+                        }
+
+                        if ui
+                            .add_enabled(
+                                !is_busy || self.current_panel == Panel::HardwareInfo,
+                                egui::SelectableLabel::new(
+                                    self.current_panel == Panel::HardwareInfo,
+                                    tr!("硬件信息"),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.current_panel = Panel::HardwareInfo;
+                        }
+                    }
+
+                    if ui
+                        .add_enabled(
+                            !is_busy || self.current_panel == Panel::About,
+                            egui::SelectableLabel::new(
+                                self.current_panel == Panel::About,
+                                tr!("关于"),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.current_panel = Panel::About;
+                    }
                 });
-
-                ui.add_space(20.0);
-                
-                // 检查是否启用小白模式（PE环境下强制禁用）
-                let is_pe = self.system_info.as_ref()
-                    .map(|info| info.is_pe_environment)
-                    .unwrap_or(false);
-                let easy_mode = self.app_config.easy_mode_enabled && !is_pe;
-
-                if is_busy {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(255, 165, 0),
-                        format!("{}", tr!("操作进行中...")),
-                    );
-                    ui.add_space(5.0);
-                }
-
-                // 小白模式显示"系统重装"，普通模式显示"系统安装"
-                let system_install_label = if easy_mode { tr!("系统重装") } else { tr!("系统安装") };
-                if ui
-                    .add_enabled(
-                        !is_busy || self.current_panel == Panel::SystemInstall,
-                        egui::SelectableLabel::new(self.current_panel == Panel::SystemInstall, system_install_label),
-                    )
-                    .clicked()
-                {
-                    self.current_panel = Panel::SystemInstall;
-                }
-
-                // 小白模式下隐藏以下菜单
-                if !easy_mode {
-                    if ui
-                        .add_enabled(
-                            !is_busy || self.current_panel == Panel::SystemBackup,
-                            egui::SelectableLabel::new(self.current_panel == Panel::SystemBackup, tr!("系统备份")),
-                        )
-                        .clicked()
-                    {
-                        self.current_panel = Panel::SystemBackup;
-                    }
-
-                    if ui
-                        .add_enabled(
-                            !is_busy || self.current_panel == Panel::OnlineDownload,
-                            egui::SelectableLabel::new(self.current_panel == Panel::OnlineDownload, tr!("在线下载")),
-                        )
-                        .clicked()
-                    {
-                        self.current_panel = Panel::OnlineDownload;
-                    }
-
-                    if ui
-                        .add_enabled(
-                            !is_busy || self.current_panel == Panel::Tools,
-                            egui::SelectableLabel::new(self.current_panel == Panel::Tools, tr!("工具箱")),
-                        )
-                        .clicked()
-                    {
-                        self.current_panel = Panel::Tools;
-                    }
-
-                    if ui
-                        .add_enabled(
-                            !is_busy || self.current_panel == Panel::HardwareInfo,
-                            egui::SelectableLabel::new(self.current_panel == Panel::HardwareInfo, tr!("硬件信息")),
-                        )
-                        .clicked()
-                    {
-                        self.current_panel = Panel::HardwareInfo;
-                    }
-                }
-
-                if ui
-                    .add_enabled(
-                        !is_busy || self.current_panel == Panel::About,
-                        egui::SelectableLabel::new(self.current_panel == Panel::About, tr!("关于")),
-                    )
-                    .clicked()
-                {
-                    self.current_panel = Panel::About;
-                }
-            });
         }
 
         // 主面板
         // 检查是否启用小白模式（PE环境下强制禁用）
-        let is_pe_for_panel = self.system_info.as_ref()
+        let is_pe_for_panel = self
+            .system_info
+            .as_ref()
             .map(|info| info.is_pe_environment)
             .unwrap_or(false);
         let easy_mode_for_panel = self.app_config.easy_mode_enabled && !is_pe_for_panel;
-        
+
         egui::CentralPanel::default().show(ctx, |ui| match self.current_panel {
             Panel::SystemInstall => {
                 if easy_mode_for_panel {
@@ -1816,20 +1883,30 @@ impl eframe::App for App {
         if self.show_advanced_options {
             // 如果勾选了格式化，则不禁用无人值守相关选项
             let unattend_disabled = self.partition_has_unattend && !self.format_partition;
-            
+
             // 检测当前选择的镜像是否为 Win7
-            let is_win7 = self.selected_volume
+            let is_win7 = self
+                .selected_volume
                 .and_then(|idx| self.image_volumes.get(idx))
                 .map(|img| {
-                    log::debug!("Win7检测: name={}, major_version={:?}", img.name, img.major_version);
-                    
+                    log::debug!(
+                        "Win7检测: name={}, major_version={:?}",
+                        img.name,
+                        img.major_version
+                    );
+
                     // 1. 如果有版本号信息，优先用版本号判断
                     if let Some(major) = img.major_version {
                         // Win7 = 6.1, Vista = 6.0, Win8 = 6.2, Win8.1 = 6.3
                         if major == 6 {
                             if let Some(minor) = img.minor_version {
                                 let result = minor == 1;
-                                log::debug!("Win7检测: major={}, minor={}, 结果={}", major, minor, result);
+                                log::debug!(
+                                    "Win7检测: major={}, minor={}, 结果={}",
+                                    major,
+                                    minor,
+                                    result
+                                );
                                 return result;
                             }
 
@@ -1837,7 +1914,11 @@ impl eframe::App for App {
                             let result = img.name.contains("7")
                                 || img.name.to_lowercase().contains("win7")
                                 || img.name.to_lowercase().contains("windows 7");
-                            log::debug!("Win7检测: major={}, 无minor, 名称匹配, 结果={}", major, result);
+                            log::debug!(
+                                "Win7检测: major={}, 无minor, 名称匹配, 结果={}",
+                                major,
+                                result
+                            );
                             return result;
                         }
 
@@ -1845,19 +1926,21 @@ impl eframe::App for App {
                         log::debug!("Win7检测: major={}, 结果=false", major);
                         return false;
                     }
-                    
+
                     // 2. 如果没有 major_version（可能是整盘备份），检查名称
-                    if img.name.to_lowercase().contains("win7") || img.name.to_lowercase().contains("windows 7") {
+                    if img.name.to_lowercase().contains("win7")
+                        || img.name.to_lowercase().contains("windows 7")
+                    {
                         log::debug!("Win7检测: 名称包含win7，返回true");
                         return true;
                     }
-                    
+
                     // 3. 如果是 "镜像 N" 这样的默认名称，说明是整盘备份，显示 Win7 选项让用户自己选
                     if img.name.starts_with("镜像 ") && img.major_version.is_none() {
                         log::debug!("Win7检测: 默认名称且无版本，返回true");
                         return true; // 对于无法识别的镜像，显示 Win7 选项
                     }
-                    
+
                     log::debug!("Win7检测: 不满足条件，返回false");
                     false
                 })
@@ -1865,28 +1948,36 @@ impl eframe::App for App {
                     log::debug!("Win7检测: selected_volume为None或image_volumes为空");
                     false
                 });
-            
+
             // 检测当前是否为 UEFI 安装模式
-            let is_uefi_mode = self.selected_partition
+            let is_uefi_mode = self
+                .selected_partition
                 .and_then(|idx| self.partitions.get(idx))
                 .map(|partition| {
                     use crate::core::disk::PartitionStyle;
                     match self.selected_boot_mode {
                         BootModeSelection::UEFI => true,
                         BootModeSelection::Legacy => false,
-                        BootModeSelection::Auto => matches!(partition.partition_style, PartitionStyle::GPT),
+                        BootModeSelection::Auto => {
+                            matches!(partition.partition_style, PartitionStyle::GPT)
+                        }
                     }
                 })
                 .unwrap_or(false);
-            
+
             // 当Win7状态或UEFI模式变化时，自动设置Win7相关选项
             let win7_changed = self.last_is_win7 != Some(is_win7);
             let uefi_changed = self.last_is_uefi_mode != Some(is_uefi_mode);
-            
+
             if win7_changed || uefi_changed {
-                log::info!("状态变化检测: is_win7={} (changed={}), is_uefi_mode={} (changed={})", 
-                    is_win7, win7_changed, is_uefi_mode, uefi_changed);
-                
+                log::info!(
+                    "状态变化检测: is_win7={} (changed={}), is_uefi_mode={} (changed={})",
+                    is_win7,
+                    win7_changed,
+                    is_uefi_mode,
+                    uefi_changed
+                );
+
                 if is_win7 {
                     // 当首次检测到Win7或Win7状态变化时，自动勾选所有Win7相关选项
                     if win7_changed {
@@ -1896,7 +1987,7 @@ impl eframe::App for App {
                         self.advanced_options.win7_fix_acpi_bsod = true;
                         self.advanced_options.win7_fix_storage_bsod = true;
                     }
-                    
+
                     // 当是Win7且UEFI模式时，自动勾选UEFI修补选项
                     // 当UEFI模式变化时也需要更新
                     if is_uefi_mode {
@@ -1922,13 +2013,14 @@ impl eframe::App for App {
                         self.advanced_options.win7_uefi_patch = false;
                     }
                 }
-                
+
                 self.last_is_win7 = Some(is_win7);
                 self.last_is_uefi_mode = Some(is_uefi_mode);
             }
 
             // 检测当前选择的镜像是否为 XP/2003（NT 5.x，major_version==5）
-            let is_xp = self.selected_volume
+            let is_xp = self
+                .selected_volume
                 .and_then(|idx| self.image_volumes.get(idx))
                 .map(|img| img.major_version == Some(5))
                 .unwrap_or(false);
@@ -1953,8 +2045,14 @@ impl eframe::App for App {
                 .min_width(500.0)
                 .min_height(400.0)
                 .show(ctx, |ui| {
-                    self.advanced_options
-                        .show_ui(ui, self.hardware_info.as_ref(), unattend_disabled, is_win7, is_xp, is_uefi_mode);
+                    self.advanced_options.show_ui(
+                        ui,
+                        self.hardware_info.as_ref(),
+                        unattend_disabled,
+                        is_win7,
+                        is_xp,
+                        is_uefi_mode,
+                    );
                 });
 
             if self.show_advanced_options && !advanced_options_open {
@@ -1964,9 +2062,9 @@ impl eframe::App for App {
         }
 
         // 如果有正在进行的任务，定期刷新
-        let tools_loading = self.windows_partitions_loading 
-            || self.driver_backup_loading 
-            || self.import_storage_driver_loading 
+        let tools_loading = self.windows_partitions_loading
+            || self.driver_backup_loading
+            || self.import_storage_driver_loading
             || self.remove_appx_loading
             || self.gho_password_loading
             || self.nvidia_uninstall_loading
@@ -1980,10 +2078,15 @@ impl eframe::App for App {
             || self.unattend_check_loading
             || self.install_bitlocker_loading
             || self.backup_bitlocker_loading;
-        
-        if self.is_installing || self.is_backing_up || self.current_download.is_some() 
-            || self.iso_mounting || self.pe_downloading || self.remote_config_loading 
-            || tools_loading {
+
+        if self.is_installing
+            || self.is_backing_up
+            || self.current_download.is_some()
+            || self.iso_mounting
+            || self.pe_downloading
+            || self.remote_config_loading
+            || tools_loading
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }

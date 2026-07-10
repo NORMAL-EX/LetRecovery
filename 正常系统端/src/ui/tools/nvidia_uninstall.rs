@@ -5,13 +5,13 @@
 use egui;
 use std::sync::mpsc;
 
-use crate::tr;
+use super::types::{NvidiaUninstallResult, WindowsPartitionInfo};
 use crate::app::App;
 use crate::core::nvidia_driver::{
-    beautify_gpu_name, get_system_hardware_summary,
-    uninstall_nvidia_drivers_offline, uninstall_nvidia_drivers_online,
+    beautify_gpu_name, get_system_hardware_summary, uninstall_nvidia_drivers_offline,
+    uninstall_nvidia_drivers_online,
 };
-use super::types::{NvidiaUninstallResult, WindowsPartitionInfo};
+use crate::tr;
 
 impl App {
     /// 渲染英伟达驱动卸载对话框
@@ -69,7 +69,7 @@ impl App {
                                         ui.label(&display_name);
                                     }
                                 });
-                                
+
                                 ui.horizontal(|ui| {
                                     ui.label(tr!("显卡{}硬件ID:", i + 1));
                                     ui.monospace(&gpu.hardware_id);
@@ -77,10 +77,7 @@ impl App {
                             }
 
                             if summary.gpu_devices.is_empty() {
-                                ui.colored_label(
-                                    egui::Color32::YELLOW,
-                                    tr!("未检测到显卡设备"),
-                                );
+                                ui.colored_label(egui::Color32::YELLOW, tr!("未检测到显卡设备"));
                             }
 
                             // 分隔线
@@ -98,7 +95,8 @@ impl App {
 
                             // 内存信息
                             let total_gb = summary.memory_size as f64 / (1024.0 * 1024.0 * 1024.0);
-                            let avail_gb = summary.memory_available as f64 / (1024.0 * 1024.0 * 1024.0);
+                            let avail_gb =
+                                summary.memory_available as f64 / (1024.0 * 1024.0 * 1024.0);
                             ui.label(tr!(
                                 "内存大小: {} GB ({} GB可用)",
                                 format!("{:.0}", total_gb.ceil()),
@@ -190,10 +188,7 @@ impl App {
                     .inner_margin(10.0)
                     .corner_radius(5.0)
                     .show(ui, |ui| {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(255, 200, 100),
-                            tr!("注意事项:"),
-                        );
+                        ui.colored_label(egui::Color32::from_rgb(255, 200, 100), tr!("注意事项:"));
                         ui.label(tr!("1. 卸载驱动后可能需要重启系统"));
                         ui.label(tr!("2. 卸载后显示可能切换到基本显示适配器"));
                         ui.label(tr!("3. 建议在卸载前备份重要数据"));
@@ -362,7 +357,7 @@ impl App {
                 };
                 self.nvidia_uninstall_loading = false;
                 self.nvidia_uninstall_rx = None;
-                
+
                 // 刷新硬件信息
                 if result.success {
                     self.start_load_nvidia_hardware_summary();

@@ -119,7 +119,11 @@ fn init_svg_tree_cache() -> HashMap<EmbeddedLogoType, resvg::usvg::Tree> {
 }
 
 /// 将 SVG 树渲染为指定物理像素尺寸的 RGBA 数据
-fn render_svg_tree_to_pixels(tree: &resvg::usvg::Tree, physical_width: u32, physical_height: u32) -> Option<RenderedSvg> {
+fn render_svg_tree_to_pixels(
+    tree: &resvg::usvg::Tree,
+    physical_width: u32,
+    physical_height: u32,
+) -> Option<RenderedSvg> {
     if physical_width == 0 || physical_height == 0 {
         return None;
     }
@@ -209,12 +213,12 @@ impl EmbeddedAssets {
     }
 
     /// 获取指定类型的 Logo 纹理
-    /// 
+    ///
     /// # 参数
     /// - `ctx`: egui 上下文
     /// - `logo_type`: Logo 类型
     /// - `logical_size`: 逻辑像素尺寸（显示尺寸）
-    /// 
+    ///
     /// # 重要
     /// 此函数会根据 `ctx.pixels_per_point()` 计算实际需要的物理像素尺寸，
     /// 确保在高 DPI 显示器上也能清晰显示。
@@ -227,7 +231,7 @@ impl EmbeddedAssets {
         // 关键：计算物理像素尺寸 = 逻辑尺寸 * pixels_per_point
         let pixels_per_point = ctx.pixels_per_point();
         let physical_size = ((logical_size as f32 * pixels_per_point).ceil() as u32).max(1);
-        
+
         // 规范化物理尺寸，避免为每个像素创建新纹理
         let normalized_physical_size = normalize_physical_size(physical_size);
         let cache_key = (logo_type, normalized_physical_size);
@@ -242,7 +246,8 @@ impl EmbeddedAssets {
         let tree = tree_cache.get(&logo_type)?;
 
         // 按需渲染为物理像素尺寸
-        let rendered = render_svg_tree_to_pixels(tree, normalized_physical_size, normalized_physical_size)?;
+        let rendered =
+            render_svg_tree_to_pixels(tree, normalized_physical_size, normalized_physical_size)?;
 
         log::debug!(
             "渲染 {:?}: 逻辑{}px -> 物理{}px (ppp={:.2}), 实际渲染 {}x{}",
@@ -262,11 +267,7 @@ impl EmbeddedAssets {
 
         // 创建纹理，使用线性采样以获得平滑的缩放效果
         let texture_name = format!("{}_{}", logo_type.cache_key(), normalized_physical_size);
-        let texture = ctx.load_texture(
-            texture_name,
-            color_image,
-            TextureOptions::LINEAR,
-        );
+        let texture = ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
 
         // 缓存纹理
         self.texture_cache.insert(cache_key, texture.clone());
@@ -347,9 +348,15 @@ mod tests {
 
     #[test]
     fn test_is_embedded_logo_identifier() {
-        assert!(EmbeddedLogoType::is_embedded_logo_identifier("LOGO_WINDOWS10"));
-        assert!(EmbeddedLogoType::is_embedded_logo_identifier("LOGO_WINDOWS11"));
-        assert!(!EmbeddedLogoType::is_embedded_logo_identifier("https://example.com/logo.png"));
+        assert!(EmbeddedLogoType::is_embedded_logo_identifier(
+            "LOGO_WINDOWS10"
+        ));
+        assert!(EmbeddedLogoType::is_embedded_logo_identifier(
+            "LOGO_WINDOWS11"
+        ));
+        assert!(!EmbeddedLogoType::is_embedded_logo_identifier(
+            "https://example.com/logo.png"
+        ));
         assert!(!EmbeddedLogoType::is_embedded_logo_identifier(""));
     }
 
@@ -357,7 +364,7 @@ mod tests {
     fn test_normalize_physical_size() {
         // 测试各种输入尺寸
         assert_eq!(normalize_physical_size(50), 64);
-        assert_eq!(normalize_physical_size(72), 96);  // 72 * 2.1 = 90 -> 96
+        assert_eq!(normalize_physical_size(72), 96); // 72 * 2.1 = 90 -> 96
         assert_eq!(normalize_physical_size(108), 128); // 72 * 1.5 = 108 -> 128
         assert_eq!(normalize_physical_size(144), 144); // 72 * 2.0 = 144
         assert_eq!(normalize_physical_size(200), 256);

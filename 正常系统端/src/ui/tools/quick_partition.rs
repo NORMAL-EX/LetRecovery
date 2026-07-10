@@ -4,15 +4,15 @@
 
 use std::sync::mpsc;
 
-use crate::tr;
 use crate::app::App;
 use crate::core::disk::PartitionStyle;
 use crate::core::quick_partition::{
-    can_safely_partition, execute_quick_partition, get_next_available_drive_letter, get_physical_disks,
-    get_recommended_partition_style, get_unallocated_space_after_partition_with_disk,
-    get_used_drive_letters, resize_existing_partition, PartitionLayout, PhysicalDisk,
-    ResizePartitionResult,
+    can_safely_partition, execute_quick_partition, get_next_available_drive_letter,
+    get_physical_disks, get_recommended_partition_style,
+    get_unallocated_space_after_partition_with_disk, get_used_drive_letters,
+    resize_existing_partition, PartitionLayout, PhysicalDisk, ResizePartitionResult,
 };
+use crate::tr;
 
 /// 分区编辑器状态
 #[derive(Debug, Clone)]
@@ -149,9 +149,13 @@ impl EditablePartition {
             disk_number: None,
         }
     }
-    
+
     /// 从已有分区创建
-    fn from_existing(id: u32, partition: &crate::core::quick_partition::DiskPartitionInfo, disk_number: u32) -> Self {
+    fn from_existing(
+        id: u32,
+        partition: &crate::core::quick_partition::DiskPartitionInfo,
+        disk_number: u32,
+    ) -> Self {
         Self {
             size_gb: partition.size_gb(),
             drive_letter: partition.drive_letter,
@@ -179,7 +183,7 @@ impl EditablePartition {
             file_system: self.file_system.clone(),
         }
     }
-    
+
     /// 获取显示名称
     fn display_name(&self) -> String {
         if self.is_esp {
@@ -194,7 +198,7 @@ impl EditablePartition {
             tr!("未分配盘符")
         }
     }
-    
+
     /// 检查是否可以调整大小
     fn can_resize(&self) -> (bool, String) {
         if !self.is_existing {
@@ -213,21 +217,28 @@ impl EditablePartition {
         if self.drive_letter.is_none() {
             return (false, tr!("分区没有盘符，无法调整大小"));
         }
-        
+
         // 检查是否是当前系统盘
         let system_drive = std::env::var("SystemDrive")
             .unwrap_or_else(|_| "C:".to_string())
             .chars()
             .next()
             .unwrap_or('C');
-            
+
         if self.drive_letter == Some(system_drive) {
             return (false, tr!("无法调整当前系统分区大小"));
         }
 
-        (true, tr!("已用: {} GB / {} GB", format!("{:.1}", self.used_gb), format!("{:.1}", self.size_gb)))
+        (
+            true,
+            tr!(
+                "已用: {} GB / {} GB",
+                format!("{:.1}", self.used_gb),
+                format!("{:.1}", self.size_gb)
+            ),
+        )
     }
-    
+
     /// 获取最小可调整大小（GB）
     fn min_resize_gb(&self) -> f64 {
         if self.is_existing {
@@ -322,13 +333,14 @@ impl App {
                     self.quick_partition_state.loading = true;
                     self.start_load_physical_disks();
                     // 刷新主分区列表
-                    self.partitions = crate::core::disk::DiskManager::get_partitions().unwrap_or_default();
+                    self.partitions =
+                        crate::core::disk::DiskManager::get_partitions().unwrap_or_default();
                 } else {
                     self.quick_partition_state.message = tr!("分区失败: {}", result.message);
                 }
             }
         }
-        
+
         // 检查调整已有分区大小的结果
         self.check_resize_existing_result();
     }
@@ -337,7 +349,12 @@ impl App {
     fn select_disk_for_partition(&mut self, index: usize) {
         self.quick_partition_state.editor.selected_disk_index = Some(index);
 
-        if let Some(disk) = self.quick_partition_state.physical_disks.get(index).cloned() {
+        if let Some(disk) = self
+            .quick_partition_state
+            .physical_disks
+            .get(index)
+            .cloned()
+        {
             // 设置分区表类型
             if disk.is_initialized {
                 self.quick_partition_state.editor.partition_style = disk.partition_style;
@@ -359,14 +376,13 @@ impl App {
 
             for partition in &disk.partitions {
                 self.quick_partition_state.partition_id_counter += 1;
-                self.quick_partition_state
-                    .editor
-                    .partition_layouts
-                    .push(EditablePartition::from_existing(
+                self.quick_partition_state.editor.partition_layouts.push(
+                    EditablePartition::from_existing(
                         self.quick_partition_state.partition_id_counter,
                         partition,
                         disk.disk_number,
-                    ));
+                    ),
+                );
             }
         }
     }
@@ -378,27 +394,29 @@ impl App {
             Some(idx) => idx,
             None => return,
         };
-        
-        let disk = match self.quick_partition_state.physical_disks.get(disk_idx).cloned() {
+
+        let disk = match self
+            .quick_partition_state
+            .physical_disks
+            .get(disk_idx)
+            .cloned()
+        {
             Some(d) => d,
             None => return,
         };
-        
+
         let layouts = &mut self.quick_partition_state.editor.partition_layouts;
-        
+
         // 计算已规划的总空间
         let planned_total: f64 = layouts.iter().map(|p| p.size_gb).sum();
         let disk_total = disk.size_gb();
         let unallocated = disk_total - planned_total;
-        
+
         // 获取新盘符
-        let mut used_letters: Vec<char> = layouts
-            .iter()
-            .filter_map(|p| p.drive_letter)
-            .collect();
+        let mut used_letters: Vec<char> = layouts.iter().filter_map(|p| p.drive_letter).collect();
         used_letters.extend(get_used_drive_letters());
         let new_letter = get_next_available_drive_letter(&used_letters);
-        
+
         // 如果有未分配空间（超过1GB），直接使用
         if unallocated >= 1.0 {
             self.quick_partition_state.partition_id_counter += 1;
@@ -409,21 +427,21 @@ impl App {
             ));
             return;
         }
-        
+
         // 如果没有足够的未分配空间，从最后一个非系统分区分割
         // 找到最后一个可分割的分区（非ESP、非MSR、非恢复分区，且是新规划的分区）
         let splittable_idx = layouts.iter().rposition(|p| {
             !p.is_esp && !p.is_msr && !p.is_recovery && !p.is_existing && p.size_gb >= 2.0
         });
-        
+
         if let Some(idx) = splittable_idx {
             let last_size = layouts[idx].size_gb;
             let new_size = ((last_size / 5.0) * 10.0).floor() / 10.0; // 取整到0.1GB
-            
+
             if new_size >= 1.0 {
                 // 调整被分割分区的大小
                 layouts[idx].size_gb = ((last_size - new_size) * 10.0).round() / 10.0;
-                
+
                 // 创建新分区
                 self.quick_partition_state.partition_id_counter += 1;
                 layouts.push(EditablePartition::new(
@@ -434,7 +452,7 @@ impl App {
                 return;
             }
         }
-        
+
         self.quick_partition_state.message = tr!("无法创建新分区：没有足够的可用空间");
     }
 
@@ -450,23 +468,28 @@ impl App {
 
         // ESP 分区大小固定为 500MB = 0.5GB
         let esp_size = 0.5;
-        
+
         // 获取当前选中的磁盘
         let disk_idx = match self.quick_partition_state.editor.selected_disk_index {
             Some(idx) => idx,
             None => return,
         };
-        
-        let disk = match self.quick_partition_state.physical_disks.get(disk_idx).cloned() {
+
+        let disk = match self
+            .quick_partition_state
+            .physical_disks
+            .get(disk_idx)
+            .cloned()
+        {
             Some(d) => d,
             None => return,
         };
-        
+
         // 计算已规划的总空间
         let planned_total: f64 = layouts.iter().map(|p| p.size_gb).sum();
         let disk_total = disk.size_gb();
         let unallocated = disk_total - planned_total;
-        
+
         // 如果有足够的未分配空间
         if unallocated >= esp_size {
             // 创建 ESP 分区并插入到开头
@@ -484,7 +507,7 @@ impl App {
             !p.is_esp && !p.is_msr && !p.is_recovery && !p.is_existing && p.size_gb > esp_size + 1.0
         }) {
             layouts[first_data_idx].size_gb -= esp_size;
-            
+
             // 创建 ESP 分区并插入到开头
             self.quick_partition_state.partition_id_counter += 1;
             let esp = EditablePartition::new_esp(
@@ -494,7 +517,7 @@ impl App {
             layouts.insert(0, esp);
             return;
         }
-        
+
         self.quick_partition_state.message = tr!("无法创建 ESP 分区：没有足够的可用空间");
     }
 
@@ -505,7 +528,7 @@ impl App {
         if index >= layouts.len() {
             return;
         }
-        
+
         // 只允许删除新规划的分区，不能删除已有分区
         if layouts[index].is_existing {
             self.quick_partition_state.message = tr!("无法删除已有分区，一键分区会清除整个磁盘");
@@ -550,17 +573,14 @@ impl App {
             .iter()
             .filter(|p| !p.is_existing)
             .collect();
-            
+
         if new_partitions.is_empty() {
             self.quick_partition_state.message = tr!("请至少添加一个新分区");
             return;
         }
 
         // 转换分区布局
-        let layouts: Vec<PartitionLayout> = new_partitions
-            .iter()
-            .map(|p| p.to_layout())
-            .collect();
+        let layouts: Vec<PartitionLayout> = new_partitions.iter().map(|p| p.to_layout()).collect();
 
         let partition_style = state.editor.partition_style;
         let disk_number = disk.disk_number;
@@ -601,7 +621,7 @@ impl App {
         let mut should_show_resize_dialog: Option<usize> = None;
         let mut should_show_resize_existing_dialog: Option<usize> = None;
         let mut should_execute_resize_existing = false;
-        
+
         // 使用局部变量控制窗口开关，避免借用冲突
         let mut window_open = self.show_quick_partition_dialog;
 
@@ -661,7 +681,7 @@ impl App {
                             .enumerate()
                             .map(|(idx, d)| (idx, d.display_name()))
                             .collect();
-                        
+
                         let current_selection = self.quick_partition_state.editor.selected_disk_index;
 
                         egui::ComboBox::from_id_salt("disk_select")
@@ -691,14 +711,14 @@ impl App {
                                 ui.label(tr!("分区表类型:"));
 
                                 let mut style = self.quick_partition_state.editor.partition_style;
-                                
+
                                 if ui.radio_value(&mut style, PartitionStyle::MBR, "MBR").clicked() {
                                     self.quick_partition_state.editor.partition_style = PartitionStyle::MBR;
                                     self.quick_partition_state.editor.show_esp_button = false;
                                     // 删除 ESP 分区（如果有）
                                     self.quick_partition_state.editor.partition_layouts.retain(|p| !p.is_esp);
                                 }
-                                
+
                                 if ui.radio_value(&mut style, PartitionStyle::GPT, "GPT (GUID)").clicked() {
                                     self.quick_partition_state.editor.partition_style = PartitionStyle::GPT;
                                     self.quick_partition_state.editor.show_esp_button = true;
@@ -746,7 +766,7 @@ impl App {
                             let layouts = &self.quick_partition_state.editor.partition_layouts;
                             let total_layout_size: f64 = layouts.iter().map(|p| p.size_gb).sum();
                             let unallocated_size = total_size_gb - total_layout_size;
-                            
+
                             // 使用磁盘总大小来计算比例
                             let pixels_per_gb = if total_size_gb > 0.0 {
                                 (available_width as f64 - 4.0) / total_size_gb
@@ -759,7 +779,7 @@ impl App {
                             let existing_esp_color = egui::Color32::from_rgb(80, 120, 100);
                             let existing_msr_color = egui::Color32::from_rgb(80, 80, 100);
                             let existing_recovery_color = egui::Color32::from_rgb(120, 80, 80);
-                            
+
                             // 新规划分区颜色（彩色）
                             let new_colors = [
                                 egui::Color32::from_rgb(52, 152, 219),  // 蓝色
@@ -769,7 +789,7 @@ impl App {
                                 egui::Color32::from_rgb(230, 126, 34),  // 橙色
                             ];
                             let new_esp_color = egui::Color32::from_rgb(26, 188, 156); // 青色
-                            
+
                             // 未分配空间颜色
                             let unallocated_color = egui::Color32::from_gray(30);
 
@@ -796,7 +816,7 @@ impl App {
                                             c
                                         }
                                     };
-                                    
+
                                     let display_name = partition.display_name();
                                     let name_with_status = if partition.is_existing {
                                         tr!("{} (已有)", display_name)
@@ -804,7 +824,7 @@ impl App {
                                         tr!("{} (新)", display_name)
                                     };
                                     let size_text = format!("{:.1}GB", partition.size_gb);
-                                    
+
                                     (idx, partition.size_gb, name_with_status, size_text, color, partition.is_existing)
                                 }).collect()
                             };
@@ -812,28 +832,28 @@ impl App {
                             // 绘制分区条
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
-                                
+
                                 for (idx, size_gb, name, size_text, color, is_existing) in &partition_infos {
                                     let width = (*size_gb * pixels_per_gb) as f32;
                                     if width < 10.0 {
                                         continue;
                                     }
-                                    
+
                                     let (rect, response) = ui.allocate_exact_size(
                                         egui::vec2(width, bar_height),
                                         egui::Sense::click(),
                                     );
-                                    
+
                                     let is_hovered = response.hovered();
                                     let fill_color = if is_hovered {
                                         color.linear_multiply(1.2)
                                     } else {
                                         *color
                                     };
-                                    
+
                                     // 绘制分区矩形
                                     ui.painter().rect_filled(rect, 3.0, fill_color);
-                                    
+
                                     // 绘制文字
                                     ui.painter().text(
                                         egui::pos2(rect.center().x, rect.top() + 15.0),
@@ -842,7 +862,7 @@ impl App {
                                         egui::FontId::proportional(12.0),
                                         egui::Color32::WHITE,
                                     );
-                                    
+
                                     ui.painter().text(
                                         egui::pos2(rect.center().x, rect.bottom() - 15.0),
                                         egui::Align2::CENTER_CENTER,
@@ -850,7 +870,7 @@ impl App {
                                         egui::FontId::proportional(12.0),
                                         egui::Color32::from_gray(220),
                                     );
-                                    
+
                                     // 右键菜单
                                     response.context_menu(|ui| {
                                         if *is_existing {
@@ -892,7 +912,7 @@ impl App {
                                         }
                                     });
                                 }
-                                
+
                                 // 绘制未分配空间
                                 if unallocated_size >= 0.5 {
                                     let unalloc_width = (unallocated_size * pixels_per_gb) as f32;
@@ -901,9 +921,9 @@ impl App {
                                             egui::vec2(unalloc_width, bar_height),
                                             egui::Sense::hover(),
                                         );
-                                        
+
                                         ui.painter().rect_filled(rect, 3.0, unallocated_color);
-                                        
+
                                         ui.painter().text(
                                             egui::pos2(rect.center().x, rect.top() + 15.0),
                                             egui::Align2::CENTER_CENTER,
@@ -911,7 +931,7 @@ impl App {
                                             egui::FontId::proportional(12.0),
                                             egui::Color32::from_gray(150),
                                         );
-                                        
+
                                         ui.painter().text(
                                             egui::pos2(rect.center().x, rect.bottom() - 15.0),
                                             egui::Align2::CENTER_CENTER,
@@ -956,14 +976,14 @@ impl App {
                                                 } else {
                                                     ui.colored_label(egui::Color32::from_rgb(46, 204, 113), tr!("新建"));
                                                 }
-                                                
+
                                                 // 盘符
                                                 let name = partition.display_name();
                                                 ui.label(&name);
 
                                                 // 大小
                                                 ui.label(format!("{:.1} GB", partition.size_gb));
-                                                
+
                                                 // 已用/空闲
                                                 if partition.is_existing && partition.used_gb > 0.0 {
                                                     ui.label(format!("{:.1}/{:.1} GB", partition.used_gb, partition.free_gb));
@@ -1056,12 +1076,12 @@ impl App {
                     });
                 });
         }
-        
+
         // 调整大小对话框
         if self.quick_partition_state.editor.show_resize_dialog {
             let mut close_resize_dialog = false;
             let mut apply_resize = false;
-            
+
             egui::Window::new(tr!("调整分区大小"))
                 .collapsible(false)
                 .resizable(false)
@@ -1070,36 +1090,52 @@ impl App {
                     ui.vertical(|ui| {
                         ui.add_space(10.0);
 
-                        if let Some(idx) = self.quick_partition_state.editor.resize_partition_index {
-                            if let Some(partition) = self.quick_partition_state.editor.partition_layouts.get(idx) {
+                        if let Some(idx) = self.quick_partition_state.editor.resize_partition_index
+                        {
+                            if let Some(partition) =
+                                self.quick_partition_state.editor.partition_layouts.get(idx)
+                            {
                                 ui.label(tr!("分区: {}", partition.display_name()));
-                                ui.label(tr!("当前大小: {} GB", format!("{:.1}", partition.size_gb)));
+                                ui.label(tr!(
+                                    "当前大小: {} GB",
+                                    format!("{:.1}", partition.size_gb)
+                                ));
                                 ui.add_space(10.0);
 
                                 ui.horizontal(|ui| {
                                     ui.label(tr!("新大小 (GB):"));
                                     ui.add(
-                                        egui::TextEdit::singleline(&mut self.quick_partition_state.editor.resize_size_text)
-                                            .desired_width(100.0)
+                                        egui::TextEdit::singleline(
+                                            &mut self.quick_partition_state.editor.resize_size_text,
+                                        )
+                                        .desired_width(100.0),
                                     );
                                 });
-                                
+
                                 ui.add_space(10.0);
-                                
+
                                 // 获取磁盘总大小用于验证
-                                let disk_total = self.quick_partition_state.editor.selected_disk_index
-                                    .and_then(|disk_idx| self.quick_partition_state.physical_disks.get(disk_idx))
+                                let disk_total = self
+                                    .quick_partition_state
+                                    .editor
+                                    .selected_disk_index
+                                    .and_then(|disk_idx| {
+                                        self.quick_partition_state.physical_disks.get(disk_idx)
+                                    })
                                     .map(|d| d.size_gb())
                                     .unwrap_or(0.0);
-                                
+
                                 // 计算其他分区占用的空间
-                                let other_partitions_size: f64 = self.quick_partition_state.editor.partition_layouts
+                                let other_partitions_size: f64 = self
+                                    .quick_partition_state
+                                    .editor
+                                    .partition_layouts
                                     .iter()
                                     .enumerate()
                                     .filter(|(i, _)| *i != idx)
                                     .map(|(_, p)| p.size_gb)
                                     .sum();
-                                
+
                                 let max_size = disk_total - other_partitions_size;
                                 ui.label(tr!("最大可用: {} GB", format!("{:.1}", max_size)));
 
@@ -1115,36 +1151,51 @@ impl App {
                                 });
                             }
                         }
-                        
+
                         ui.add_space(10.0);
                     });
                 });
-            
+
             if apply_resize {
                 if let Some(idx) = self.quick_partition_state.editor.resize_partition_index {
-                    if let Ok(new_size) = self.quick_partition_state.editor.resize_size_text.parse::<f64>() {
+                    if let Ok(new_size) = self
+                        .quick_partition_state
+                        .editor
+                        .resize_size_text
+                        .parse::<f64>()
+                    {
                         // 获取磁盘总大小
-                        let disk_total = self.quick_partition_state.editor.selected_disk_index
-                            .and_then(|disk_idx| self.quick_partition_state.physical_disks.get(disk_idx))
+                        let disk_total = self
+                            .quick_partition_state
+                            .editor
+                            .selected_disk_index
+                            .and_then(|disk_idx| {
+                                self.quick_partition_state.physical_disks.get(disk_idx)
+                            })
                             .map(|d| d.size_gb())
                             .unwrap_or(0.0);
-                        
+
                         // 计算其他分区占用的空间
-                        let other_partitions_size: f64 = self.quick_partition_state.editor.partition_layouts
+                        let other_partitions_size: f64 = self
+                            .quick_partition_state
+                            .editor
+                            .partition_layouts
                             .iter()
                             .enumerate()
                             .filter(|(i, _)| *i != idx)
                             .map(|(_, p)| p.size_gb)
                             .sum();
-                        
+
                         let max_size = disk_total - other_partitions_size;
-                        
+
                         if new_size >= 0.5 && new_size <= max_size {
-                            self.quick_partition_state.editor.partition_layouts[idx].size_gb = new_size;
+                            self.quick_partition_state.editor.partition_layouts[idx].size_gb =
+                                new_size;
                             close_resize_dialog = true;
                         } else {
                             self.quick_partition_state.message = tr!(
-                                "大小必须在 0.5 GB 到 {} GB 之间", format!("{:.1}", max_size)
+                                "大小必须在 0.5 GB 到 {} GB 之间",
+                                format!("{:.1}", max_size)
                             );
                         }
                     } else {
@@ -1152,7 +1203,7 @@ impl App {
                     }
                 }
             }
-            
+
             if close_resize_dialog {
                 self.quick_partition_state.editor.show_resize_dialog = false;
                 self.quick_partition_state.editor.resize_partition_index = None;
@@ -1164,7 +1215,7 @@ impl App {
         if self.quick_partition_state.editor.resizing_existing {
             let mut close_dialog = false;
             let mut apply_resize = false;
-            
+
             egui::Window::new(tr!("调整已有分区大小"))
                 .collapsible(false)
                 .resizable(false)
@@ -1174,8 +1225,13 @@ impl App {
                         ui.add_space(10.0);
 
                         if let Some(idx) = self.quick_partition_state.editor.resize_existing_index {
-                            if let Some(partition) = self.quick_partition_state.editor.partition_layouts.get(idx) {
-                                ui.label(egui::RichText::new(tr!("分区: {}", partition.display_name())).strong());
+                            if let Some(partition) =
+                                self.quick_partition_state.editor.partition_layouts.get(idx)
+                            {
+                                ui.label(
+                                    egui::RichText::new(tr!("分区: {}", partition.display_name()))
+                                        .strong(),
+                                );
                                 ui.add_space(5.0);
 
                                 ui.horizontal(|ui| {
@@ -1187,29 +1243,31 @@ impl App {
                                     ui.label(tr!("已使用空间:"));
                                     ui.colored_label(
                                         egui::Color32::from_rgb(241, 196, 15),
-                                        format!("{:.1} GB", partition.used_gb)
+                                        format!("{:.1} GB", partition.used_gb),
                                     );
                                 });
-                                
+
                                 ui.horizontal(|ui| {
                                     ui.label(tr!("空闲空间:"));
                                     ui.colored_label(
                                         egui::Color32::from_rgb(46, 204, 113),
-                                        format!("{:.1} GB", partition.free_gb)
+                                        format!("{:.1} GB", partition.free_gb),
                                     );
                                 });
-                                
+
                                 ui.add_space(10.0);
                                 ui.separator();
                                 ui.add_space(10.0);
-                                
-                                let min_gb = self.quick_partition_state.editor.resize_existing_min_gb;
-                                let max_gb = self.quick_partition_state.editor.resize_existing_max_gb;
-                                
+
+                                let min_gb =
+                                    self.quick_partition_state.editor.resize_existing_min_gb;
+                                let max_gb =
+                                    self.quick_partition_state.editor.resize_existing_max_gb;
+
                                 // 判断是否只能缩小
                                 let can_extend = max_gb > partition.size_gb + 0.1;
                                 let can_shrink = min_gb < partition.size_gb - 0.1;
-                                
+
                                 ui.horizontal(|ui| {
                                     ui.label(tr!("可调整范围:"));
                                     ui.label(format!("{:.1} GB - {:.1} GB", min_gb, max_gb));
@@ -1219,48 +1277,57 @@ impl App {
                                 if !can_extend && can_shrink {
                                     ui.colored_label(
                                         egui::Color32::from_rgb(52, 152, 219),
-                                        tr!("ℹ 分区后方无未分配空间，只能缩小")
+                                        tr!("ℹ 分区后方无未分配空间，只能缩小"),
                                     );
                                 } else if can_extend && !can_shrink {
                                     ui.colored_label(
                                         egui::Color32::from_rgb(52, 152, 219),
-                                        tr!("ℹ 分区已用空间接近总容量，只能扩大")
+                                        tr!("ℹ 分区已用空间接近总容量，只能扩大"),
                                     );
                                 }
-                                
+
                                 ui.add_space(10.0);
-                                
+
                                 ui.horizontal(|ui| {
                                     ui.label(tr!("新大小 (GB):"));
                                     ui.add(
-                                        egui::TextEdit::singleline(&mut self.quick_partition_state.editor.resize_size_text)
-                                            .desired_width(100.0)
+                                        egui::TextEdit::singleline(
+                                            &mut self.quick_partition_state.editor.resize_size_text,
+                                        )
+                                        .desired_width(100.0),
                                     );
                                 });
 
                                 // 显示大小滑块
                                 ui.add_space(5.0);
-                                let mut slider_value: f64 = self.quick_partition_state.editor.resize_size_text
+                                let mut slider_value: f64 = self
+                                    .quick_partition_state
+                                    .editor
+                                    .resize_size_text
                                     .parse()
                                     .unwrap_or(partition.size_gb);
-                                
-                                if ui.add(
-                                    egui::Slider::new(&mut slider_value, min_gb..=max_gb)
-                                        .suffix(" GB")
-                                ).changed() {
-                                    self.quick_partition_state.editor.resize_size_text = format!("{:.1}", slider_value);
+
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut slider_value, min_gb..=max_gb)
+                                            .suffix(" GB"),
+                                    )
+                                    .changed()
+                                {
+                                    self.quick_partition_state.editor.resize_size_text =
+                                        format!("{:.1}", slider_value);
                                 }
-                                
+
                                 ui.add_space(10.0);
-                                
+
                                 // 提示信息
                                 ui.colored_label(
                                     egui::Color32::from_rgb(46, 204, 113),
-                                    tr!("此操作会立即执行，分区数据会保留")
+                                    tr!("此操作会立即执行，分区数据会保留"),
                                 );
                                 ui.colored_label(
                                     egui::Color32::from_rgb(241, 196, 15),
-                                    tr!("调整可能需要一些时间，请勿中断！")
+                                    tr!("调整可能需要一些时间，请勿中断！"),
                                 );
 
                                 ui.add_space(15.0);
@@ -1280,15 +1347,15 @@ impl App {
                                 }
                             }
                         }
-                        
+
                         ui.add_space(10.0);
                     });
                 });
-            
+
             if apply_resize {
                 should_execute_resize_existing = true;
             }
-            
+
             if close_dialog {
                 self.quick_partition_state.editor.resizing_existing = false;
                 self.quick_partition_state.editor.resize_existing_index = None;
@@ -1320,69 +1387,78 @@ impl App {
         if should_close {
             self.show_quick_partition_dialog = false;
         }
-        
+
         // 处理磁盘选择
         if let Some(idx) = should_select_disk {
             self.select_disk_for_partition(idx);
         }
-        
+
         // 处理刷新
         if should_refresh {
             self.quick_partition_state.loading = true;
             self.start_load_physical_disks();
         }
-        
+
         // 处理显示调整大小对话框
         if let Some(idx) = should_show_resize_dialog {
             if let Some(partition) = self.quick_partition_state.editor.partition_layouts.get(idx) {
                 self.quick_partition_state.editor.show_resize_dialog = true;
                 self.quick_partition_state.editor.resize_partition_index = Some(idx);
-                self.quick_partition_state.editor.resize_size_text = format!("{:.1}", partition.size_gb);
+                self.quick_partition_state.editor.resize_size_text =
+                    format!("{:.1}", partition.size_gb);
             }
         }
-        
+
         // 处理显示调整已有分区大小对话框
         if let Some(idx) = should_show_resize_existing_dialog {
-            if let Some(partition) = self.quick_partition_state.editor.partition_layouts.get(idx).cloned() {
+            if let Some(partition) = self
+                .quick_partition_state
+                .editor
+                .partition_layouts
+                .get(idx)
+                .cloned()
+            {
                 // 获取磁盘信息来计算可调整范围
                 if let Some(disk_idx) = self.quick_partition_state.editor.selected_disk_index {
                     if let Some(disk) = self.quick_partition_state.physical_disks.get(disk_idx) {
                         // 计算最小大小（已用空间 + 0.1GB 余量）
                         let min_gb = partition.min_resize_gb();
-                        
+
                         // 计算最大大小 = 当前分区大小 + 分区右侧的未分配空间
                         // 重要：DiskPart 的 extend 命令只能使用紧邻分区右侧的未分配空间
                         // 不能使用磁盘上其他位置的未分配空间
                         let max_gb = if let Some(part_num) = partition.partition_number {
-                            let unallocated_after_mb = get_unallocated_space_after_partition_with_disk(disk, part_num);
+                            let unallocated_after_mb =
+                                get_unallocated_space_after_partition_with_disk(disk, part_num);
                             let unallocated_after_gb = unallocated_after_mb as f64 / 1024.0;
                             partition.size_gb + unallocated_after_gb
                         } else {
                             // 如果没有分区编号，则无法扩展
                             partition.size_gb
                         };
-                        
+
                         self.quick_partition_state.editor.resizing_existing = true;
                         self.quick_partition_state.editor.resize_existing_index = Some(idx);
                         self.quick_partition_state.editor.resize_existing_min_gb = min_gb;
                         self.quick_partition_state.editor.resize_existing_max_gb = max_gb;
-                        self.quick_partition_state.editor.resize_size_text = format!("{:.1}", partition.size_gb);
+                        self.quick_partition_state.editor.resize_size_text =
+                            format!("{:.1}", partition.size_gb);
                     }
                 }
             }
         }
-        
+
         // 处理执行调整已有分区大小
         if should_execute_resize_existing {
             self.execute_resize_existing_partition();
         }
-        
+
         // 同步窗口开关状态
         if !window_open {
             self.show_quick_partition_dialog = false;
         }
     }
-    
+
     /// 执行调整已有分区大小
     fn execute_resize_existing_partition(&mut self) {
         let idx = match self.quick_partition_state.editor.resize_existing_index {
@@ -1393,7 +1469,13 @@ impl App {
             }
         };
 
-        let partition = match self.quick_partition_state.editor.partition_layouts.get(idx).cloned() {
+        let partition = match self
+            .quick_partition_state
+            .editor
+            .partition_layouts
+            .get(idx)
+            .cloned()
+        {
             Some(p) => p,
             None => {
                 self.quick_partition_state.message = tr!("分区信息不可用");
@@ -1408,19 +1490,20 @@ impl App {
                 return;
             }
         };
-        
+
         // 验证大小范围
         let min_gb = self.quick_partition_state.editor.resize_existing_min_gb;
         let max_gb = self.quick_partition_state.editor.resize_existing_max_gb;
-        
+
         if new_size_gb < min_gb || new_size_gb > max_gb {
             self.quick_partition_state.message = tr!(
                 "大小必须在 {} GB 到 {} GB 之间",
-                format!("{:.1}", min_gb), format!("{:.1}", max_gb)
+                format!("{:.1}", min_gb),
+                format!("{:.1}", max_gb)
             );
             return;
         }
-        
+
         // 获取必要信息
         let disk_number = match partition.disk_number {
             Some(d) => d,
@@ -1437,23 +1520,23 @@ impl App {
                 return;
             }
         };
-        
+
         let current_size_mb = (partition.size_gb * 1024.0) as u64;
         let new_size_mb = (new_size_gb * 1024.0) as u64;
         let used_mb = (partition.used_gb * 1024.0) as u64;
-        
+
         // 关闭对话框
         self.quick_partition_state.editor.resizing_existing = false;
         self.quick_partition_state.editor.resize_existing_index = None;
-        
+
         // 显示执行中状态
         self.quick_partition_state.executing = true;
         self.quick_partition_state.message = tr!("正在调整分区大小，请稍候...");
-        
+
         // 在后台线程执行
         let drive_letter = partition.drive_letter;
         let (tx, rx) = std::sync::mpsc::channel::<ResizePartitionResult>();
-        
+
         std::thread::spawn(move || {
             let result = resize_existing_partition(
                 disk_number,
@@ -1465,25 +1548,26 @@ impl App {
             );
             let _ = tx.send(result);
         });
-        
+
         // 存储接收器以便后续检查结果
         self.resize_existing_result_rx = Some(rx);
     }
-    
+
     /// 检查调整已有分区大小的结果
     pub fn check_resize_existing_result(&mut self) {
         if let Some(ref rx) = self.resize_existing_result_rx {
             if let Ok(result) = rx.try_recv() {
                 self.quick_partition_state.executing = false;
                 self.resize_existing_result_rx = None;
-                
+
                 if result.success {
                     self.quick_partition_state.message = tr!("操作成功：{}", result.message);
                     // 刷新磁盘列表
                     self.quick_partition_state.loading = true;
                     self.start_load_physical_disks();
                     // 刷新主分区列表
-                    self.partitions = crate::core::disk::DiskManager::get_partitions().unwrap_or_default();
+                    self.partitions =
+                        crate::core::disk::DiskManager::get_partitions().unwrap_or_default();
                 } else {
                     self.quick_partition_state.message = tr!("操作失败：{}", result.message);
                 }

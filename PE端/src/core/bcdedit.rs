@@ -42,14 +42,8 @@ impl BootManager {
     pub fn new() -> Self {
         let bin_dir = get_bin_dir();
         Self {
-            bcdedit_path: bin_dir
-                .join("bcdedit.exe")
-                .to_string_lossy()
-                .to_string(),
-            bcdboot_path: bin_dir
-                .join("bcdboot.exe")
-                .to_string_lossy()
-                .to_string(),
+            bcdedit_path: bin_dir.join("bcdedit.exe").to_string_lossy().to_string(),
+            bcdboot_path: bin_dir.join("bcdboot.exe").to_string_lossy().to_string(),
         }
     }
 
@@ -95,7 +89,8 @@ detail volume
             }
         }
 
-        let disk_num = disk_num.ok_or_else(|| anyhow::anyhow!("{}", tr!("无法确定分区所在磁盘")))?;
+        let disk_num =
+            disk_num.ok_or_else(|| anyhow::anyhow!("{}", tr!("无法确定分区所在磁盘")))?;
         log::info!("目标分区在磁盘 {}", disk_num);
 
         // Step 2: 查找该磁盘上的 ESP 分区
@@ -133,7 +128,8 @@ list partition
             }
         }
 
-        let esp_partition = esp_partition.ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
+        let esp_partition =
+            esp_partition.ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
 
         // Step 3: 使用真正空闲的盘符挂载 ESP，不能覆盖用户已有的 S: 等盘符。
         let mount_letter = lr_core::boot_pca::find_available_drive_letter()
@@ -209,12 +205,12 @@ assign letter={}
 
         let mounted_esp = if use_uefi {
             log::info!("UEFI 模式：查找目标磁盘 ESP 分区");
-            Some(self.find_esp_on_same_disk(windows_partition).map_err(|error| {
-                anyhow::anyhow!(
-                    "{}",
-                    tr!("目标系统所在磁盘没有可用的 ESP: {}", error)
-                )
-            })?)
+            Some(
+                self.find_esp_on_same_disk(windows_partition)
+                    .map_err(|error| {
+                        anyhow::anyhow!("{}", tr!("目标系统所在磁盘没有可用的 ESP: {}", error))
+                    })?,
+            )
         } else {
             None
         };
@@ -350,8 +346,8 @@ assign letter={}
         let esp = self
             .find_esp_on_same_disk(windows_partition)
             .map_err(|e| anyhow::anyhow!("{}", tr!("未找到 ESP，无法写 UEFI 引导: {}", e)))?;
-        let _esp_mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&esp)
-            .map_err(anyhow::Error::msg)?;
+        let _esp_mount_guard =
+            lr_core::boot_pca::TemporaryEspMountGuard::new(&esp).map_err(anyhow::Error::msg)?;
         log::info!("使用 ESP: {}", esp);
 
         match lr_core::xp::write_xp_uefi_gpt_boot(

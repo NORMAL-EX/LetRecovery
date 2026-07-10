@@ -1,5 +1,5 @@
-use std::process::{Command, Output, Child, Stdio};
 use std::ffi::OsStr;
+use std::process::{Child, Command, Output, Stdio};
 
 use crate::utils::encoding::gbk_to_utf8;
 
@@ -68,7 +68,10 @@ pub fn run_command_string<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io
 }
 
 /// 执行命令并返回 stdout 字符串（带自定义参数的版本）
-pub fn run_command_with_args<S: AsRef<OsStr>>(program: S, args: Vec<String>) -> std::io::Result<Output> {
+pub fn run_command_with_args<S: AsRef<OsStr>>(
+    program: S,
+    args: Vec<String>,
+) -> std::io::Result<Output> {
     let program_str = program.as_ref().to_string_lossy();
 
     #[cfg(debug_assertions)]

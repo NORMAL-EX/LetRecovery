@@ -16,18 +16,13 @@ use crate::wimgapi::WimgapiManager;
 use crate::wimlib::WimlibManager;
 
 /// 镜像引擎
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WimEngine {
     /// 内置 libwim（libwim-15.dll）——默认，跨环境一致。
+    #[default]
     Libwim,
     /// 系统 wimgapi（wimgapi.dll）——可选，Windows 原生 API。
     Wimgapi,
-}
-
-impl Default for WimEngine {
-    fn default() -> Self {
-        WimEngine::Libwim
-    }
 }
 
 impl WimEngine {
@@ -78,8 +73,7 @@ pub struct WimEngineManager {
 impl WimEngineManager {
     /// 按指定引擎构造。libwim 始终初始化；若指定 wimgapi 但其初始化失败，则回退 libwim。
     pub fn new(engine: WimEngine) -> Result<Self, String> {
-        let libwim = WimlibManager::new()
-            .map_err(|e| format!("libwim 初始化失败: {}", e))?;
+        let libwim = WimlibManager::new().map_err(|e| format!("libwim 初始化失败: {}", e))?;
 
         let mut active = WimEngine::Libwim;
         let mut wimgapi = None;
@@ -122,7 +116,8 @@ impl WimEngineManager {
         index: u32,
         paths: &[&str],
     ) -> Result<bool, String> {
-        self.libwim.image_contains_any_path(image_file, index, paths)
+        self.libwim
+            .image_contains_any_path(image_file, index, paths)
     }
 
     /// 应用/释放镜像；wimgapi 失败时回退 libwim。

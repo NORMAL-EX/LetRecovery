@@ -1,7 +1,7 @@
-use egui;
-use crate::tr;
-use crate::app::App;
 use super::common::{format_partition_display, get_message_color};
+use crate::app::App;
+use crate::tr;
+use egui;
 
 impl App {
     // ==================== 一键修复引导对话框 ====================
@@ -69,7 +69,9 @@ impl App {
 
                     // 显示所选分区的详细信息
                     if let Some(ref selected) = self.repair_boot_selected_partition {
-                        if let Some(partition) = windows_partitions.iter().find(|p| &p.letter == selected) {
+                        if let Some(partition) =
+                            windows_partitions.iter().find(|p| &p.letter == selected)
+                        {
                             ui.add_space(10.0);
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
@@ -108,7 +110,7 @@ impl App {
 
                 // 按钮
                 ui.horizontal(|ui| {
-                    let can_repair = !self.repair_boot_loading 
+                    let can_repair = !self.repair_boot_loading
                         && self.repair_boot_selected_partition.is_some()
                         && !windows_partitions.is_empty();
 

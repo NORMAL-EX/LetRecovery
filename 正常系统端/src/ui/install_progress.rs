@@ -1,13 +1,13 @@
 use egui;
-use std::sync::mpsc;
 use std::path::Path;
+use std::sync::mpsc;
 
-use crate::tr;
 use crate::app::{App, BootModeSelection, InstallMode};
-use crate::core::dism::DismProgress;
 use crate::core::disk::{Partition, PartitionStyle};
+use crate::core::dism::DismProgress;
 use crate::core::ghost::Ghost;
 use crate::core::install_config::{ConfigFileManager, InstallConfig};
+use crate::tr;
 use crate::ui::advanced_options::AdvancedOptions;
 
 impl App {
@@ -33,10 +33,7 @@ impl App {
         ui.label(tr!("安装模式: {}", mode_text));
 
         ui.add_space(15.0);
-        ui.label(tr!(
-            "当前步骤: {}",
-            self.install_progress.current_step
-        ));
+        ui.label(tr!("当前步骤: {}", self.install_progress.current_step));
 
         ui.add(
             egui::ProgressBar::new(self.install_progress.step_progress as f32 / 100.0)
@@ -145,7 +142,10 @@ impl App {
                     });
                 }
                 InstallMode::ViaPE => {
-                    ui.colored_label(egui::Color32::from_rgb(102, 187, 106), tr!("PE环境准备完成！"));
+                    ui.colored_label(
+                        egui::Color32::from_rgb(102, 187, 106),
+                        tr!("PE环境准备完成！"),
+                    );
                     ui.label(tr!("系统将重启进入PE环境继续安装。"));
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
@@ -186,7 +186,10 @@ impl App {
                     self.install_progress.current_step = tr!("准备开始安装...");
                     return;
                 } else if progress.status.starts_with("DECRYPTING:") {
-                    self.install_progress.current_step = progress.status.trim_start_matches("DECRYPTING:").to_string();
+                    self.install_progress.current_step = progress
+                        .status
+                        .trim_start_matches("DECRYPTING:")
+                        .to_string();
                     // 使用实际的解密进度（从加密百分比计算得出）
                     self.install_progress.step_progress = progress.percentage;
                     return;
@@ -200,13 +203,18 @@ impl App {
 
                 if let Some((step, name)) = parse_step_from_status(&progress.status) {
                     self.install_progress.step_progress = progress.percentage;
-                    
+
                     if step != self.install_step || self.install_progress.current_step != name {
                         self.install_step = step;
                         self.install_progress.current_step = name.clone();
-                        log::info!("[INSTALL UI] 步骤更新: {} - {} ({}%)", step, name, progress.percentage);
+                        log::info!(
+                            "[INSTALL UI] 步骤更新: {} - {} ({}%)",
+                            step,
+                            name,
+                            progress.percentage
+                        );
                     }
-                    
+
                     // 计算总进度
                     let (base_progress, step_weight) = match self.install_mode {
                         InstallMode::Direct => {
@@ -240,14 +248,15 @@ impl App {
                             (base, weight)
                         }
                     };
-                    
-                    self.install_progress.total_progress = 
-                        (base_progress + (progress.percentage as usize * step_weight / 100)).min(100) as u8;
-                    
+
+                    self.install_progress.total_progress = (base_progress
+                        + (progress.percentage as usize * step_weight / 100))
+                        .min(100) as u8;
+
                     // 检查是否安装完成，并且用户勾选了自动重启
-                    if self.install_progress.total_progress >= 100 
-                        && self.install_options.auto_reboot 
-                        && !self.auto_reboot_triggered 
+                    if self.install_progress.total_progress >= 100
+                        && self.install_options.auto_reboot
+                        && !self.auto_reboot_triggered
                     {
                         log::info!("[INSTALL] 安装完成，用户已勾选立即重启，执行自动重启");
                         self.auto_reboot_triggered = true;
@@ -274,7 +283,7 @@ impl App {
         let options = self.install_options.clone();
         let advanced_options = self.advanced_options.clone();
         let partitions: Vec<Partition> = self.partitions.clone();
-        
+
         // 选中目标分区的「磁盘号:分区号」——安装目标以此为准（照搬 DSI），盘符只是 PE 里临时的、会变。
         // 跑完 diskpart 脚本后用它把目标重新定位回来；分区表类型也一并取出（脚本后会刷新）。
         let selected_partition = self
@@ -299,7 +308,7 @@ impl App {
             // 跑完 diskpart 脚本后，target_partition / partition_style 可能要按 disk:partition 重定位刷新。
             let mut target_partition = target_partition;
             let mut partition_style = partition_style;
-            
+
             let temp_dir = std::env::temp_dir();
             let driver_backup_path = temp_dir.join("LetRecovery_DriverBackup");
             let driver_backup_str = driver_backup_path.to_string_lossy().to_string();
@@ -450,7 +459,7 @@ impl App {
             if options.export_drivers {
                 log::info!("[INSTALL STEP 2] 开始导出驱动到: {}", driver_backup_str);
                 send_step(&progress_tx, 2, &tr!("导出驱动"), 20);
-                
+
                 match export_drivers(&driver_backup_str) {
                     Ok(_) => {
                         log::info!("[INSTALL STEP 2] 驱动导出成功");
@@ -477,9 +486,9 @@ impl App {
 
             if is_gho {
                 log::info!("[INSTALL STEP 3] 检测到 GHO 镜像，使用 Ghost 恢复");
-                
+
                 let ghost = Ghost::new();
-                
+
                 if !ghost.is_available() {
                     log::error!("[INSTALL STEP 3] 错误: Ghost 可执行文件不存在");
                     let _ = progress_tx.send(DismProgress {
@@ -490,14 +499,19 @@ impl App {
                 } else {
                     let ghost_tx = progress_tx.clone();
                     let (inner_tx, inner_rx) = mpsc::channel::<DismProgress>();
-                    
+
                     std::thread::spawn(move || {
                         while let Ok(p) = inner_rx.recv() {
                             let _ = ghost_tx.send(p);
                         }
                     });
-                    
-                    match ghost.restore_image_to_letter(&image_path, &target_partition, &partitions, Some(inner_tx)) {
+
+                    match ghost.restore_image_to_letter(
+                        &image_path,
+                        &target_partition,
+                        &partitions,
+                        Some(inner_tx),
+                    ) {
                         Ok(_) => log::info!("[INSTALL STEP 3] Ghost 镜像恢复成功"),
                         Err(e) => {
                             log::error!("[INSTALL STEP 3] Ghost 镜像恢复失败: {}", e);
@@ -509,16 +523,16 @@ impl App {
                         }
                     }
                 }
-                
+
                 send_step(&progress_tx, 3, &tr!("释放系统镜像"), 100);
             } else {
                 log::info!("[INSTALL STEP 3] 使用 DISM 应用 WIM/ESD 镜像");
                 let dism = crate::core::dism::Dism::new();
                 let apply_dir = format!("{}\\", target_partition);
-                
+
                 let step_tx = progress_tx.clone();
                 let (inner_tx, inner_rx) = mpsc::channel::<DismProgress>();
-                
+
                 std::thread::spawn(move || {
                     while let Ok(p) = inner_rx.recv() {
                         let _ = step_tx.send(DismProgress {
@@ -527,7 +541,7 @@ impl App {
                         });
                     }
                 });
-                
+
                 match dism.apply_image(&image_path, &apply_dir, volume_index, Some(inner_tx)) {
                     Ok(_) => log::info!("[INSTALL STEP 3] DISM 镜像释放成功"),
                     Err(e) => {
@@ -546,14 +560,15 @@ impl App {
             // Step 4: 导入驱动（仅在 AutoImport 模式下导入）
             send_step(&progress_tx, 4, &tr!("导入驱动"), 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            
+
             // 判断是否需要导入驱动（只有 AutoImport 模式才导入）
-            let should_import = matches!(options.driver_action, crate::app::DriverAction::AutoImport);
-            
+            let should_import =
+                matches!(options.driver_action, crate::app::DriverAction::AutoImport);
+
             if should_import && driver_backup_path.exists() {
                 log::info!("[INSTALL STEP 4] 开始导入驱动 (AutoImport模式)");
                 send_step(&progress_tx, 4, &tr!("导入驱动"), 30);
-                
+
                 match import_drivers(&target_partition, &driver_backup_str) {
                     Ok(_) => {
                         log::info!("[INSTALL STEP 4] 驱动导入成功");
@@ -566,22 +581,27 @@ impl App {
                         send_step(&progress_tx, 4, &tr!("导入驱动"), 100);
                     }
                 }
-            } else if matches!(options.driver_action, crate::app::DriverAction::SaveOnly) && driver_backup_path.exists() {
+            } else if matches!(options.driver_action, crate::app::DriverAction::SaveOnly)
+                && driver_backup_path.exists()
+            {
                 // SaveOnly 模式：保留驱动备份到目标分区
                 log::info!("[INSTALL STEP 4] 仅保存驱动 (SaveOnly模式)");
                 send_step(&progress_tx, 4, &tr!("保存驱动"), 30);
-                
+
                 let target_driver_dir = format!("{}\\LetRecovery_Drivers", target_partition);
                 if let Err(e) = copy_dir_recursive(&driver_backup_str, &target_driver_dir) {
                     log::error!("[INSTALL STEP 4] 保存驱动到目标分区失败: {}", e);
                 } else {
                     log::info!("[INSTALL STEP 4] 驱动已保存到: {}", target_driver_dir);
                 }
-                
+
                 let _ = std::fs::remove_dir_all(&driver_backup_path);
                 send_step(&progress_tx, 4, &tr!("保存驱动"), 100);
             } else {
-                log::info!("[INSTALL STEP 4] 跳过驱动处理 (driver_action: {:?})", options.driver_action);
+                log::info!(
+                    "[INSTALL STEP 4] 跳过驱动处理 (driver_action: {:?})",
+                    options.driver_action
+                );
                 send_step(&progress_tx, 4, &tr!("导入驱动"), 100);
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -597,14 +617,17 @@ impl App {
             if options.repair_boot {
                 log::info!("[INSTALL STEP 5] 开始修复引导");
                 send_step(&progress_tx, 5, &tr!("修复引导"), 20);
-                
+
                 let use_uefi = match options.boot_mode {
                     BootModeSelection::UEFI => true,
                     BootModeSelection::Legacy => false,
                     BootModeSelection::Auto => matches!(partition_style, PartitionStyle::GPT),
                 };
-                
-                log::info!("[INSTALL STEP 5] 引导模式: {}", if use_uefi { "UEFI" } else { "Legacy" });
+
+                log::info!(
+                    "[INSTALL STEP 5] 引导模式: {}",
+                    if use_uefi { "UEFI" } else { "Legacy" }
+                );
                 send_step(&progress_tx, 5, &tr!("修复引导"), 50);
 
                 // Legacy/MBR 写引导前：确保目标磁盘有【非 0 的唯一 MBR 签名】。
@@ -615,7 +638,9 @@ impl App {
                     if let Some(d) = target_disk {
                         match ensure_mbr_disk_signature(d) {
                             Ok(msg) => log::info!("[INSTALL STEP 5] MBR 签名: {}", msg),
-                            Err(e) => log::warn!("[INSTALL STEP 5] MBR 签名检查失败（继续）: {}", e),
+                            Err(e) => {
+                                log::warn!("[INSTALL STEP 5] MBR 签名检查失败（继续）: {}", e)
+                            }
                         }
                     }
                 }
@@ -628,12 +653,17 @@ impl App {
                         match boot_manager.write_xp_uefi_gpt_boot(&target_partition) {
                             Ok(()) => Ok(()),
                             Err(e) => {
-                                log::warn!("[INSTALL STEP 5] XP UEFI 引导失败({})，回退 Legacy(ntldr)", e);
+                                log::warn!(
+                                    "[INSTALL STEP 5] XP UEFI 引导失败({})，回退 Legacy(ntldr)",
+                                    e
+                                );
                                 boot_manager.write_xp_boot(&target_partition)
                             }
                         }
                     } else {
-                        log::info!("[INSTALL STEP 5] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
+                        log::info!(
+                            "[INSTALL STEP 5] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)"
+                        );
                         boot_manager.write_xp_boot(&target_partition)
                     }
                 } else {
@@ -646,15 +676,20 @@ impl App {
                 match boot_result {
                     Ok(_) => {
                         log::info!("[INSTALL STEP 5] 引导修复成功");
-                        
+
                         // 如果是 Win7 + UEFI 模式，且启用了 UefiSeven 补丁
                         if use_uefi && advanced_options.win7_uefi_patch {
-                            log::info!("[INSTALL STEP 5] 检测到 Win7 UEFI 补丁选项，开始应用 UefiSeven");
+                            log::info!(
+                                "[INSTALL STEP 5] 检测到 Win7 UEFI 补丁选项，开始应用 UefiSeven"
+                            );
                             send_step(&progress_tx, 5, &tr!("应用Win7 UEFI补丁"), 70);
-                            
+
                             match advanced_options.apply_uefiseven_patch(&target_partition) {
                                 Ok(_) => log::info!("[INSTALL STEP 5] UefiSeven 补丁应用成功"),
-                                Err(e) => log::warn!("[INSTALL STEP 5] UefiSeven 补丁应用失败: {} (继续安装)", e),
+                                Err(e) => log::warn!(
+                                    "[INSTALL STEP 5] UefiSeven 补丁应用失败: {} (继续安装)",
+                                    e
+                                ),
                             }
                         }
                     }
@@ -672,7 +707,7 @@ impl App {
             std::thread::sleep(std::time::Duration::from_millis(50));
             log::info!("[INSTALL STEP 6] 应用高级选项");
             send_step(&progress_tx, 6, &tr!("应用高级选项"), 20);
-            
+
             match advanced_options.apply_to_system(&target_partition, is_xp) {
                 Ok(_) => log::info!("[INSTALL STEP 6] 高级选项应用成功"),
                 Err(e) => log::error!("[INSTALL STEP 6] 高级选项应用失败: {}", e),
@@ -683,7 +718,7 @@ impl App {
             // （win7/win8/win10/win11 走 DISM 离线注入；XP 由上方 apply_to_system 的 XP 注入处理）。
             inject_user_version_drivers(&target_partition, is_xp);
             send_step(&progress_tx, 6, &tr!("应用高级选项"), 70);
-            
+
             if options.unattended_install {
                 log::info!("[INSTALL STEP 6] 生成无人值守配置");
                 match generate_unattend_xml(&target_partition, &advanced_options) {
@@ -715,10 +750,12 @@ impl App {
         let volume_index = self.install_volume_index;
         let options = self.install_options.clone();
         let advanced_options = self.advanced_options.clone();
-        
+
         // 获取选中的PE信息
         let pe_info = self.selected_pe_for_install.and_then(|idx| {
-            self.config.as_ref().and_then(|c| c.pe_list.get(idx).cloned())
+            self.config
+                .as_ref()
+                .and_then(|c| c.pe_list.get(idx).cloned())
         });
 
         self.install_step = 1;
@@ -730,7 +767,7 @@ impl App {
             // Step 1: 检查PE环境
             send_step(&progress_tx, 1, &tr!("检查PE环境"), 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            
+
             let pe_info = match pe_info {
                 Some(pe) => pe,
                 None => {
@@ -739,18 +776,19 @@ impl App {
                     return;
                 }
             };
-            
+
             log::info!("[INSTALL PE STEP 1] 检查PE: {}", pe_info.display_name);
             send_step(&progress_tx, 1, &tr!("检查PE环境"), 50);
-            
-            let (pe_exists, pe_path) = crate::core::pe::PeManager::check_pe_exists(&pe_info.filename);
+
+            let (pe_exists, pe_path) =
+                crate::core::pe::PeManager::check_pe_exists(&pe_info.filename);
             if !pe_exists {
                 log::info!("[INSTALL PE STEP 1] PE文件不存在，需要下载");
                 // 这里应该触发下载，但为了简化，我们直接返回错误
                 send_step(&progress_tx, 1, &tr!("检查PE环境"), 100);
                 return;
             }
-            
+
             log::info!("[INSTALL PE STEP 1] PE文件存在: {}", pe_path);
             send_step(&progress_tx, 1, &tr!("检查PE环境"), 100);
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -758,10 +796,10 @@ impl App {
             // Step 2: 安装PE引导
             send_step(&progress_tx, 2, &tr!("安装PE引导"), 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            
+
             log::info!("[INSTALL PE STEP 2] 安装PE引导");
             send_step(&progress_tx, 2, &tr!("安装PE引导"), 30);
-            
+
             let pe_manager = crate::core::pe::PeManager::new();
             match pe_manager.boot_to_pe(&pe_path, &pe_info.display_name) {
                 Ok(_) => log::info!("[INSTALL PE STEP 2] PE引导安装成功"),
@@ -777,40 +815,48 @@ impl App {
             // Step 3: 导出驱动
             send_step(&progress_tx, 3, &tr!("导出驱动"), 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            
+
             // 找一个可用的数据分区来存储数据（传入镜像路径以检查空间）
-            let (data_partition, _is_auto_created) = match find_data_partition(&target_partition, &image_path) {
-                Ok(result) => result,
-                Err(e) => {
-                    log::error!("[INSTALL PE STEP 3] 查找数据分区失败: {}", e);
-                    let _ = progress_tx.send(DismProgress {
-                        percentage: 0,
-                        status: format!("ERROR:{}", e),
-                    });
-                    return;
-                }
-            };
-            
+            let (data_partition, _is_auto_created) =
+                match find_data_partition(&target_partition, &image_path) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        log::error!("[INSTALL PE STEP 3] 查找数据分区失败: {}", e);
+                        let _ = progress_tx.send(DismProgress {
+                            percentage: 0,
+                            status: format!("ERROR:{}", e),
+                        });
+                        return;
+                    }
+                };
+
             let data_dir = ConfigFileManager::get_data_dir(&data_partition);
             std::fs::create_dir_all(&data_dir).ok();
-            
+
             // 根据driver_action决定是否导出驱动
             let should_export = matches!(
-                options.driver_action, 
+                options.driver_action,
                 crate::app::DriverAction::SaveOnly | crate::app::DriverAction::AutoImport
             );
-            
+
             if should_export {
-                log::info!("[INSTALL PE STEP 3] 导出驱动到: {} (driver_action: {:?})", data_dir, options.driver_action);
+                log::info!(
+                    "[INSTALL PE STEP 3] 导出驱动到: {} (driver_action: {:?})",
+                    data_dir,
+                    options.driver_action
+                );
                 send_step(&progress_tx, 3, &tr!("导出驱动"), 30);
-                
+
                 let driver_path = format!("{}\\drivers", data_dir);
                 match export_drivers(&driver_path) {
                     Ok(_) => log::info!("[INSTALL PE STEP 3] 驱动导出成功"),
                     Err(e) => log::warn!("[INSTALL PE STEP 3] 驱动导出失败: {}", e),
                 }
             } else {
-                log::info!("[INSTALL PE STEP 3] 跳过驱动导出 (driver_action: {:?})", options.driver_action);
+                log::info!(
+                    "[INSTALL PE STEP 3] 跳过驱动导出 (driver_action: {:?})",
+                    options.driver_action
+                );
             }
             send_step(&progress_tx, 3, &tr!("导出驱动"), 100);
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -831,7 +877,11 @@ impl App {
                 let vres = ImageVerifier::new().verify(&image_path, Some(vtx));
                 let _ = vh.join();
                 if vres.status != VerifyStatus::Valid {
-                    log::error!("[INSTALL PE] 镜像校验失败: {} - {}", vres.status, vres.message);
+                    log::error!(
+                        "[INSTALL PE] 镜像校验失败: {} - {}",
+                        vres.status,
+                        vres.message
+                    );
                     let _ = progress_tx.send(DismProgress {
                         percentage: 0,
                         status: format!(
@@ -855,7 +905,7 @@ impl App {
                 .to_string_lossy()
                 .to_string();
             let target_image_path = format!("{}\\{}", data_dir, image_filename);
-            
+
             // 使用带进度的复制函数
             match copy_file_with_progress(&image_path, &target_image_path, |progress| {
                 send_step(&progress_tx, 4, &tr!("复制镜像文件"), progress);
@@ -879,7 +929,7 @@ impl App {
                 log::info!("[INSTALL PE STEP 4.5] 复制 UefiSeven 文件到数据分区");
                 let uefiseven_dir = format!("{}\\uefiseven", data_dir);
                 let _ = std::fs::create_dir_all(&uefiseven_dir);
-                
+
                 // 从程序目录复制 UefiSeven 文件（bin\uefiseven）
                 {
                     let source_uefiseven_dir = crate::utils::path::get_uefiseven_dir();
@@ -889,22 +939,35 @@ impl App {
                         let dst_efi = format!("{}\\bootx64.efi", uefiseven_dir);
                         if src_efi.exists() {
                             match std::fs::copy(&src_efi, &dst_efi) {
-                                Ok(_) => log::info!("[INSTALL PE STEP 4.5] 复制 UefiSeven bootx64.efi 成功"),
-                                Err(e) => log::warn!("[INSTALL PE STEP 4.5] 复制 UefiSeven bootx64.efi 失败: {}", e),
+                                Ok(_) => log::info!(
+                                    "[INSTALL PE STEP 4.5] 复制 UefiSeven bootx64.efi 成功"
+                                ),
+                                Err(e) => log::warn!(
+                                    "[INSTALL PE STEP 4.5] 复制 UefiSeven bootx64.efi 失败: {}",
+                                    e
+                                ),
                             }
                         }
-                        
+
                         // 复制 UefiSeven.ini（如果存在）
                         let src_ini = source_uefiseven_dir.join("UefiSeven.ini");
                         let dst_ini = format!("{}\\UefiSeven.ini", uefiseven_dir);
                         if src_ini.exists() {
                             match std::fs::copy(&src_ini, &dst_ini) {
-                                Ok(_) => log::info!("[INSTALL PE STEP 4.5] 复制 UefiSeven.ini 成功"),
-                                Err(e) => log::warn!("[INSTALL PE STEP 4.5] 复制 UefiSeven.ini 失败: {}", e),
+                                Ok(_) => {
+                                    log::info!("[INSTALL PE STEP 4.5] 复制 UefiSeven.ini 成功")
+                                }
+                                Err(e) => log::warn!(
+                                    "[INSTALL PE STEP 4.5] 复制 UefiSeven.ini 失败: {}",
+                                    e
+                                ),
                             }
                         }
                     } else {
-                        log::warn!("[INSTALL PE STEP 4.5] 警告: UefiSeven 源目录不存在: {}", source_uefiseven_dir.display());
+                        log::warn!(
+                            "[INSTALL PE STEP 4.5] 警告: UefiSeven 源目录不存在: {}",
+                            source_uefiseven_dir.display()
+                        );
                     }
                 }
             }
@@ -926,12 +989,12 @@ impl App {
             // Step 5: 写入配置文件
             send_step(&progress_tx, 5, &tr!("写入配置文件"), 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            
+
             log::info!("[INSTALL PE STEP 5] 写入配置文件");
-            
-            let is_gho = image_path.to_lowercase().ends_with(".gho") 
+
+            let is_gho = image_path.to_lowercase().ends_with(".gho")
                 || image_path.to_lowercase().ends_with(".ghs");
-            
+
             let install_config = InstallConfig {
                 session_id: String::new(),
                 unattended: options.unattended_install,
@@ -952,7 +1015,8 @@ impl App {
                 disable_uac: advanced_options.disable_uac,
                 disable_device_encryption: advanced_options.disable_device_encryption,
                 remove_uwp_apps: advanced_options.remove_uwp_apps,
-                import_storage_controller_drivers: advanced_options.import_storage_controller_drivers,
+                import_storage_controller_drivers: advanced_options
+                    .import_storage_controller_drivers,
                 custom_username: if advanced_options.custom_username {
                     advanced_options.username.clone()
                 } else {
@@ -977,8 +1041,12 @@ impl App {
                 boot_mode: options.boot_mode.as_u8(),
                 boot_pca_mode: options.boot_pca_mode,
             };
-            
-            match ConfigFileManager::write_install_config(&target_partition, &data_partition, &install_config) {
+
+            match ConfigFileManager::write_install_config(
+                &target_partition,
+                &data_partition,
+                &install_config,
+            ) {
                 Ok(_) => log::info!("[INSTALL PE STEP 5] 配置文件写入成功"),
                 Err(e) => {
                     log::error!("[INSTALL PE STEP 5] 配置文件写入失败: {}", e);
@@ -989,7 +1057,7 @@ impl App {
                     return;
                 }
             }
-            
+
             send_step(&progress_tx, 5, &tr!("写入配置文件"), 100);
             std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1003,7 +1071,13 @@ impl App {
     fn reboot_system(&self) {
         log::info!("[INSTALL] 执行重启命令");
         let _ = crate::utils::cmd::create_command("shutdown")
-            .args(["/r", "/t", "5", "/c", "LetRecovery 系统安装完成，即将重启..."])
+            .args([
+                "/r",
+                "/t",
+                "5",
+                "/c",
+                "LetRecovery 系统安装完成，即将重启...",
+            ])
             .spawn();
     }
 }
@@ -1097,13 +1171,18 @@ fn inject_user_version_drivers(target_partition: &str, is_xp: bool) {
     }
     log::info!(
         "[USER DRV] 注入 bin/drivers/{} 用户驱动到 {} ...",
-        version, target_partition
+        version,
+        target_partition
     );
     let dism = crate::core::dism::Dism::new();
     let image_path = format!("{}\\", target_partition);
     match dism.add_drivers_offline(&image_path, &dir.to_string_lossy()) {
         Ok(_) => log::info!("[USER DRV] bin/drivers/{} 注入成功", version),
-        Err(e) => log::warn!("[USER DRV] bin/drivers/{} 注入失败: {}（继续安装）", version, e),
+        Err(e) => log::warn!(
+            "[USER DRV] bin/drivers/{} 注入失败: {}（继续安装）",
+            version,
+            e
+        ),
     }
 }
 
@@ -1127,12 +1206,15 @@ fn resolve_install_target(
         (Some(d), Some(p)) => (d, p),
         _ => {
             let orig = norm(orig_letter);
-            let parts = DiskManager::get_partitions().map_err(|e| format!("枚举分区失败: {}", e))?;
+            let parts =
+                DiskManager::get_partitions().map_err(|e| format!("枚举分区失败: {}", e))?;
             return parts
                 .iter()
                 .find(|p| norm(&p.letter).eq_ignore_ascii_case(&orig))
                 .map(|p| (format!("{}:", norm(&p.letter)), p.partition_style))
-                .ok_or_else(|| format!("目标分区 {} 不存在，且无磁盘/分区号可重定位", orig_letter));
+                .ok_or_else(|| {
+                    format!("目标分区 {} 不存在，且无磁盘/分区号可重定位", orig_letter)
+                });
         }
     };
 
@@ -1185,7 +1267,11 @@ fn resolve_install_target(
     // 3) 验证刚挂的盘符是否生效（生效 = 该 disk:partition 确实存在且现在可用）。PE 里卷管理器可能慢，重试几次。
     let free_norm = free.to_string();
     for attempt in 0..4 {
-        std::thread::sleep(std::time::Duration::from_millis(if attempt == 0 { 800 } else { 500 }));
+        std::thread::sleep(std::time::Duration::from_millis(if attempt == 0 {
+            800
+        } else {
+            500
+        }));
         if let Ok(parts) = DiskManager::get_partitions() {
             if let Some(p) = parts
                 .iter()
@@ -1227,7 +1313,10 @@ fn ensure_mbr_disk_signature(disk: u32) -> Result<String, String> {
     };
 
     // 1) 读当前磁盘 ID（MBR 签名）。
-    let stdout = run(&format!("select disk {}\r\nuniqueid disk\r\nexit\r\n", disk), "read")?;
+    let stdout = run(
+        &format!("select disk {}\r\nuniqueid disk\r\nexit\r\n", disk),
+        "read",
+    )?;
     // 解析输出里的 8 位十六进制磁盘 ID（含 "ID" 的行里取第一个 8-hex token）。
     let mut current: Option<String> = None;
     for line in stdout.lines() {
@@ -1265,7 +1354,10 @@ fn ensure_mbr_disk_signature(disk: u32) -> Result<String, String> {
     };
     let new_hex = format!("{:08X}", new_id);
     let so = run(
-        &format!("select disk {}\r\nuniqueid disk id={}\r\nexit\r\n", disk, new_hex),
+        &format!(
+            "select disk {}\r\nuniqueid disk id={}\r\nexit\r\n",
+            disk, new_hex
+        ),
         "set",
     )?;
     Ok(format!(
@@ -1280,20 +1372,24 @@ fn ensure_mbr_disk_signature(disk: u32) -> Result<String, String> {
 fn format_partition(partition: &str, volume_label: Option<&str>) -> anyhow::Result<()> {
     use crate::utils::cmd::create_command;
 
-    let letter = partition.trim_end_matches('\\').trim_end_matches(':');
+    let label = volume_label.filter(|label| !label.trim().is_empty());
+    let spec = lr_core::format_command::FormatCommandSpec::new(partition, "NTFS", label)
+        .map_err(|error| anyhow::anyhow!("无效的格式化参数: {error}"))?;
+    let letter = spec.drive().trim_end_matches(':');
     log::info!(
         "[FORMAT] 用 diskpart 格式化分区: {} (volume {}, label {:?})",
-        partition, letter, volume_label
+        partition,
+        letter,
+        volume_label
     );
 
     // 用 diskpart 格式化，而不是 format.com 管道喂提示：
     // format.com 在【卷已有卷标】时会先问「输入驱动器 X: 的当前卷标」做安全确认，喂 y 会被当成卷标 →
     // 报「卷标不正确」中止（实机 C:(卷标 DATA) 就栽在这）。diskpart 不问卷标，直接快速格式化为 NTFS；
     // override 在卷被占用（如 PE 资源管理器正浏览该盘）时强制卸载文件系统后再格式化，且不丢盘符。
-    let format_cmd = match volume_label {
-        Some(label) if !label.trim().is_empty() => {
-            let escaped_label = label.replace('"', "'");
-            format!("format fs=ntfs label=\"{}\" quick override", escaped_label)
+    let format_cmd = match spec.volume_label() {
+        Some(label) => {
+            format!("format fs=ntfs label=\"{}\" quick override", label)
         }
         _ => "format fs=ntfs quick override".to_string(),
     };
@@ -1375,17 +1471,20 @@ fn format_partition_with_format_command(
     letter: &str,
     volume_label: Option<&str>,
 ) -> Result<(), String> {
-    let drive = format!("{}:", letter);
     let label = volume_label
         .filter(|label| !label.trim().is_empty())
-        .unwrap_or("本地磁盘")
-        .replace('"', "'");
-    let label_arg = format!("/v:{}", label);
+        .unwrap_or("本地磁盘");
+    let spec = lr_core::format_command::FormatCommandSpec::new(letter, "NTFS", Some(label))
+        .map_err(|error| tr!("无效的格式化参数: {}", error))?
+        .with_force_dismount(true);
+    let drive = spec.drive().to_string();
+    let args = spec.args();
+    let format_exe = lr_core::format_command::system_format_executable();
 
     log::warn!("[FORMAT] DiskPart 失败，尝试 fallback: format {}", drive);
 
-    let output = crate::utils::cmd::create_command("cmd")
-        .args(["/c", "format", drive.as_str(), "/fs:ntfs", "/q", "/x", "/y", label_arg.as_str()])
+    let output = crate::utils::cmd::create_command(&format_exe)
+        .args(&args)
         .output()
         .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
@@ -1432,7 +1531,10 @@ fn deactivate_sibling_active_partitions(target: &str, partitions: &[Partition]) 
     let target_disk = match target_disk {
         Some(d) => d,
         None => {
-            log::warn!("[ACTIVE] 未能确定 {} 的物理磁盘号，跳过清同盘其他活动标志", target);
+            log::warn!(
+                "[ACTIVE] 未能确定 {} 的物理磁盘号，跳过清同盘其他活动标志",
+                target
+            );
             return;
         }
     };
@@ -1465,18 +1567,18 @@ fn deactivate_sibling_active_partitions(target: &str, partitions: &[Partition]) 
 /// 导出驱动
 fn export_drivers(destination: &str) -> anyhow::Result<()> {
     log::info!("[DRIVER EXPORT] 目标路径: {}", destination);
-    
+
     if Path::new(destination).exists() {
         let _ = std::fs::remove_dir_all(destination);
     }
-    
+
     std::fs::create_dir_all(destination)?;
-    
+
     let dism = crate::core::dism::Dism::new();
-    
+
     if dism.is_pe_environment() {
         log::info!("[DRIVER EXPORT] PE 环境，查找现有 Windows 系统...");
-        
+
         for letter in ['C', 'D', 'E', 'F', 'G'] {
             let windows_path = format!("{}:\\Windows\\System32\\drivers", letter);
             if Path::new(&windows_path).exists() {
@@ -1493,7 +1595,7 @@ fn export_drivers(destination: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        
+
         anyhow::bail!("PE 环境下未找到可用的 Windows 系统来导出驱动")
     } else {
         log::info!("[DRIVER EXPORT] 桌面环境，使用在线模式导出");
@@ -1503,11 +1605,15 @@ fn export_drivers(destination: &str) -> anyhow::Result<()> {
 
 /// 导入驱动到目标系统
 fn import_drivers(target_partition: &str, driver_path: &str) -> anyhow::Result<()> {
-    log::info!("[DRIVER IMPORT] 目标分区: {}, 驱动路径: {}", target_partition, driver_path);
-    
+    log::info!(
+        "[DRIVER IMPORT] 目标分区: {}, 驱动路径: {}",
+        target_partition,
+        driver_path
+    );
+
     let dism = crate::core::dism::Dism::new();
     let image_path = format!("{}\\", target_partition);
-    
+
     dism.add_drivers_offline(&image_path, driver_path)
 }
 
@@ -1515,44 +1621,41 @@ fn import_drivers(target_partition: &str, driver_path: &str) -> anyhow::Result<(
 fn copy_dir_recursive(src: &str, dst: &str) -> anyhow::Result<()> {
     use std::fs;
     use std::path::Path;
-    
+
     let src_path = Path::new(src);
     let dst_path = Path::new(dst);
-    
+
     if !src_path.exists() {
         anyhow::bail!("源目录不存在: {}", src);
     }
-    
+
     // 创建目标目录
     fs::create_dir_all(dst_path)?;
-    
+
     // 遍历源目录
     for entry in fs::read_dir(src_path)? {
         let entry = entry?;
         let src_file = entry.path();
         let dst_file = dst_path.join(entry.file_name());
-        
+
         if src_file.is_dir() {
             // 递归复制子目录
-            copy_dir_recursive(
-                &src_file.to_string_lossy(),
-                &dst_file.to_string_lossy(),
-            )?;
+            copy_dir_recursive(&src_file.to_string_lossy(), &dst_file.to_string_lossy())?;
         } else {
             // 复制文件
             fs::copy(&src_file, &dst_file)?;
         }
     }
-    
+
     Ok(())
 }
 
 /// 生成无人值守 XML 文件
 fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> anyhow::Result<()> {
     use crate::core::system_utils::{get_file_version, get_system_architecture};
-    
+
     log::info!("[UNATTEND] 生成无人值守配置文件");
-    
+
     let username = if options.custom_username && !options.username.is_empty() {
         options.username.clone()
     } else {
@@ -1566,17 +1669,28 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
 
     // 通过 ntdll.dll 文件版本检测目标系统版本
     // Windows 7: 6.1.x, Windows 8: 6.2.x, Windows 8.1: 6.3.x, Windows 10/11: 10.0.x
-    let ntdll_path = Path::new(target_partition).join("Windows").join("System32").join("ntdll.dll");
+    let ntdll_path = Path::new(target_partition)
+        .join("Windows")
+        .join("System32")
+        .join("ntdll.dll");
     let (is_win7, is_win8) = match get_file_version(&ntdll_path) {
         Some((major, minor, build, _)) => {
-            log::info!("[UNATTEND] 检测到目标系统版本 (ntdll.dll): {}.{}.{}", major, minor, build);
-            
+            log::info!(
+                "[UNATTEND] 检测到目标系统版本 (ntdll.dll): {}.{}.{}",
+                major,
+                minor,
+                build
+            );
+
             let is_win7 = major == 6 && minor == 1;
             let is_win8 = major == 6 && (minor == 2 || minor == 3);
             (is_win7, is_win8)
         }
         None => {
-            log::warn!("[UNATTEND] 无法读取 ntdll.dll 版本: {:?}, 默认使用 Win10/11 配置", ntdll_path);
+            log::warn!(
+                "[UNATTEND] 无法读取 ntdll.dll 版本: {:?}, 默认使用 Win10/11 配置",
+                ntdll_path
+            );
             (false, false)
         }
     };
@@ -1606,13 +1720,16 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
     }
 
     // 清理脚本目录（最后执行）
-    first_logon_commands.push_str(&format!(r#"
+    first_logon_commands.push_str(&format!(
+        r#"
                 <SynchronousCommand wcm:action="add">
                     <Order>{}</Order>
                     <CommandLine>cmd /c rd /s /q %SystemDrive%\LetRecovery_Scripts</CommandLine>
                     <Description>Cleanup scripts directory</Description>
-                </SynchronousCommand>"#, order));
-    
+                </SynchronousCommand>"#,
+        order
+    ));
+
     // 根据系统版本生成不同的OOBE配置
     // Win7: 移除HideOEMRegistrationScreen（家庭版不支持）
     let oobe_section = if is_win7 {
@@ -1621,7 +1738,8 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                 <HideEULAPage>true</HideEULAPage>
                 <ProtectYourPC>3</ProtectYourPC>
                 <NetworkLocation>Home</NetworkLocation>
-            </OOBE>"#.to_string()
+            </OOBE>"#
+            .to_string()
     } else if is_win8 {
         // Windows 8/8.1: 支持 HideLocalAccountScreen，不支持其他新选项
         r#"<OOBE>
@@ -1629,7 +1747,8 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                 <HideLocalAccountScreen>true</HideLocalAccountScreen>
                 <ProtectYourPC>3</ProtectYourPC>
                 <NetworkLocation>Home</NetworkLocation>
-            </OOBE>"#.to_string()
+            </OOBE>"#
+            .to_string()
     } else {
         // Windows 10/11: 完整支持所有OOBE选项
         r#"<OOBE>
@@ -1638,10 +1757,12 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
-            </OOBE>"#.to_string()
+            </OOBE>"#
+            .to_string()
     };
-    
-    let xml_content = format!(r#"<?xml version="1.0" encoding="utf-8"?>
+
+    let xml_content = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
         <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -1697,33 +1818,44 @@ fn generate_unattend_xml(target_partition: &str, options: &AdvancedOptions) -> a
             </FirstLogonCommands>
         </component>
     </settings>
-</unattend>"#, arch = arch_str, oobe_section = oobe_section, username = username, first_logon_commands = first_logon_commands);
+</unattend>"#,
+        arch = arch_str,
+        oobe_section = oobe_section,
+        username = username,
+        first_logon_commands = first_logon_commands
+    );
 
     let panther_dir = format!("{}\\Windows\\Panther", target_partition);
     std::fs::create_dir_all(&panther_dir)?;
-    
+
     let unattend_path = format!("{}\\unattend.xml", panther_dir);
     std::fs::write(&unattend_path, &xml_content)?;
     log::info!("[UNATTEND] 已写入: {}", unattend_path);
-    
+
     let sysprep_dir = format!("{}\\Windows\\System32\\Sysprep", target_partition);
     if Path::new(&sysprep_dir).exists() {
         let sysprep_unattend = format!("{}\\unattend.xml", sysprep_dir);
         match std::fs::write(&sysprep_unattend, &xml_content) {
             Ok(_) => log::info!("[UNATTEND] 已写入: {}", sysprep_unattend),
-            Err(e) => log::warn!("[UNATTEND] 警告：写入 Sysprep unattend 失败: {} ({})", sysprep_unattend, e),
+            Err(e) => log::warn!(
+                "[UNATTEND] 警告：写入 Sysprep unattend 失败: {} ({})",
+                sysprep_unattend,
+                e
+            ),
         }
     }
-    
+
     Ok(())
 }
 
-
 /// 查找可用的数据分区（非系统分区）
 /// 返回 (分区盘符, 是否自动创建)
-fn find_data_partition(exclude_partition: &str, image_path: &str) -> Result<(String, bool), String> {
+fn find_data_partition(
+    exclude_partition: &str,
+    image_path: &str,
+) -> Result<(String, bool), String> {
     use crate::core::disk::DiskManager;
-    
+
     // 获取镜像文件大小
     let image_size = match std::fs::metadata(image_path) {
         Ok(meta) => meta.len(),
@@ -1731,8 +1863,9 @@ fn find_data_partition(exclude_partition: &str, image_path: &str) -> Result<(Str
             return Err(tr!("无法获取镜像文件大小: {}", e));
         }
     };
-    
-    log::info!("[DATA PARTITION] 镜像文件大小: {} bytes ({:.2} GB)",
+
+    log::info!(
+        "[DATA PARTITION] 镜像文件大小: {} bytes ({:.2} GB)",
         image_size,
         image_size as f64 / 1024.0 / 1024.0 / 1024.0
     );
@@ -1740,15 +1873,15 @@ fn find_data_partition(exclude_partition: &str, image_path: &str) -> Result<(Str
     // 调用 DiskManager 的新函数
     match DiskManager::find_suitable_data_partition(exclude_partition, image_size) {
         Ok(Some((partition, is_auto_created))) => {
-            log::info!("[DATA PARTITION] 选择分区: {}, 自动创建: {}", partition, is_auto_created);
+            log::info!(
+                "[DATA PARTITION] 选择分区: {}, 自动创建: {}",
+                partition,
+                is_auto_created
+            );
             Ok((partition, is_auto_created))
         }
-        Ok(None) => {
-            Err(tr!("没有找到可用的数据分区，且无法自动创建"))
-        }
-        Err(e) => {
-            Err(format!("{}", e))
-        }
+        Ok(None) => Err(tr!("没有找到可用的数据分区，且无法自动创建")),
+        Err(e) => Err(format!("{}", e)),
     }
 }
 
@@ -1764,7 +1897,7 @@ where
 
     let src_file = File::open(src)?;
     let total_size = src_file.metadata()?.len();
-    
+
     if total_size == 0 {
         // 空文件直接创建
         File::create(dst)?;
@@ -1790,7 +1923,7 @@ where
         copied += bytes_read as u64;
 
         let progress = ((copied as f64 / total_size as f64) * 100.0) as u8;
-        
+
         // 只在进度变化时回调，避免过多调用
         if progress != last_progress {
             progress_callback(progress);
@@ -1802,6 +1935,6 @@ where
     writer.flush()?;
     progress_callback(100);
     log::info!("[COPY] 复制完成: {}", dst);
-    
+
     Ok(())
 }

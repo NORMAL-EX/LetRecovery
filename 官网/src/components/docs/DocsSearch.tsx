@@ -75,7 +75,9 @@ export default function DocsSearch({
 
   // 离开文档页时关闭弹窗，避免再次进入时残留打开状态
   useEffect(() => {
-    if (!active) setOpen(false)
+    if (active) return
+    const timeout = window.setTimeout(() => setOpen(false), 0)
+    return () => window.clearTimeout(timeout)
   }, [active])
 
   // ⌘K / Ctrl+K / "/" 打开（仅在文档页生效）

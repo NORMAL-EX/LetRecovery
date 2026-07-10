@@ -6,13 +6,13 @@
 //! - ISO 镜像校验（自动挂载并检查内部镜像）
 
 use egui;
-use std::sync::mpsc;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 
+use super::types::ImageVerifyResult;
 use crate::app::App;
 use crate::core::image_verify::{ImageType, ImageVerifier, VerifyProgress, VerifyStatus};
 use crate::tr;
-use super::types::ImageVerifyResult;
 
 impl App {
     /// 渲染镜像校验对话框
@@ -28,7 +28,9 @@ impl App {
             .default_width(600.0)
             .default_height(450.0)
             .show(ui.ctx(), |ui| {
-                ui.label(tr!("校验镜像文件的完整性，支持 WIM、ESD、SWM、GHO、ISO 格式"));
+                ui.label(tr!(
+                    "校验镜像文件的完整性，支持 WIM、ESD、SWM、GHO、ISO 格式"
+                ));
                 ui.add_space(10.0);
 
                 // 文件路径输入区域
@@ -41,9 +43,15 @@ impl App {
                     );
 
                     let can_browse = !self.image_verify_loading;
-                    if ui.add_enabled(can_browse, egui::Button::new(tr!("浏览..."))).clicked() {
+                    if ui
+                        .add_enabled(can_browse, egui::Button::new(tr!("浏览...")))
+                        .clicked()
+                    {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(tr!("系统镜像"), &["wim", "esd", "swm", "gho", "ghs", "iso"])
+                            .add_filter(
+                                tr!("系统镜像"),
+                                &["wim", "esd", "swm", "gho", "ghs", "iso"],
+                            )
                             .add_filter("WIM/ESD/SWM", &["wim", "esd", "swm"])
                             .add_filter("GHO", &["gho", "ghs"])
                             .add_filter("ISO", &["iso"])
@@ -61,9 +69,13 @@ impl App {
 
                 // 校验按钮和进度
                 ui.horizontal(|ui| {
-                    let can_verify = !self.image_verify_file_path.is_empty() && !self.image_verify_loading;
+                    let can_verify =
+                        !self.image_verify_file_path.is_empty() && !self.image_verify_loading;
 
-                    if ui.add_enabled(can_verify, egui::Button::new(tr!("开始校验"))).clicked() {
+                    if ui
+                        .add_enabled(can_verify, egui::Button::new(tr!("开始校验")))
+                        .clicked()
+                    {
                         self.start_image_verify();
                     }
 
@@ -88,7 +100,8 @@ impl App {
                 // 进度条
                 if self.image_verify_loading {
                     ui.add_space(10.0);
-                    let progress = self.image_verify_progress
+                    let progress = self
+                        .image_verify_progress
                         .as_ref()
                         .map(|p| p.percentage as f32 / 100.0)
                         .unwrap_or(0.0);
@@ -103,10 +116,7 @@ impl App {
                 if let Some(ref result) = self.image_verify_result {
                     Self::render_verify_result(ui, result);
                 } else if !self.image_verify_loading {
-                    ui.colored_label(
-                        egui::Color32::GRAY,
-                        tr!("请选择镜像文件并点击「开始校验」"),
-                    );
+                    ui.colored_label(egui::Color32::GRAY, tr!("请选择镜像文件并点击「开始校验」"));
                 }
 
                 ui.add_space(20.0);
@@ -151,10 +161,7 @@ impl App {
         // 校验状态（使用醒目的颜色）
         if result.is_valid {
             ui.horizontal(|ui| {
-                ui.colored_label(
-                    egui::Color32::from_rgb(0, 200, 0),
-                    tr!("校验通过"),
-                );
+                ui.colored_label(egui::Color32::from_rgb(0, 200, 0), tr!("校验通过"));
             });
         } else {
             ui.horizontal(|ui| {

@@ -14,12 +14,11 @@ use crate::tr;
 #[cfg(windows)]
 use windows::{
     core::PCWSTR,
-    Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE, HANDLE},
+    Win32::Foundation::{FILETIME, HANDLE, INVALID_HANDLE_VALUE},
     Win32::Storage::FileSystem::{
-        CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetDiskFreeSpaceExW,
-        GetDriveTypeW, GetFileAttributesW, GetVolumeInformationW, SetFileAttributesW,
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
-        FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetDiskFreeSpaceExW, GetDriveTypeW,
+        GetFileAttributesW, GetVolumeInformationW, SetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
         WIN32_FIND_DATAW,
     },
@@ -281,7 +280,10 @@ fn write_copy_marker(target_partition: &str, marker: &CopyMarker) -> std::io::Re
     // 设置为隐藏文件
     #[cfg(windows)]
     {
-        let wide_path: Vec<u16> = marker_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_path: Vec<u16> = marker_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         unsafe {
             let _ = SetFileAttributesW(PCWSTR(wide_path.as_ptr()), FILE_ATTRIBUTE_HIDDEN);
         }
@@ -309,7 +311,10 @@ pub fn delete_copy_marker(target_partition: &str) -> std::io::Result<()> {
         // 先移除只读/隐藏属性
         #[cfg(windows)]
         {
-            let wide_path: Vec<u16> = marker_path.encode_utf16().chain(std::iter::once(0)).collect();
+            let wide_path: Vec<u16> = marker_path
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
             unsafe {
                 let _ = SetFileAttributesW(PCWSTR(wide_path.as_ptr()), FILE_ATTRIBUTE_NORMAL);
             }
@@ -322,7 +327,9 @@ pub fn delete_copy_marker(target_partition: &str) -> std::io::Result<()> {
 /// 检查是否可以继续对拷（目标分区有标记文件且源分区匹配）
 pub fn can_resume_copy(source_partition: &str, target_partition: &str) -> bool {
     if let Some(marker) = read_copy_marker(target_partition) {
-        return marker.source_partition.eq_ignore_ascii_case(source_partition);
+        return marker
+            .source_partition
+            .eq_ignore_ascii_case(source_partition);
     }
     false
 }
@@ -336,13 +343,17 @@ fn collect_all_files(root_path: &str) -> Vec<String> {
     while let Some(current_dir) = dirs_to_process.pop() {
         let search_pattern = current_dir.join("*");
         let pattern_str = search_pattern.to_string_lossy();
-        let wide_pattern: Vec<u16> = pattern_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_pattern: Vec<u16> = pattern_str
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         unsafe {
             let mut find_data: WIN32_FIND_DATAW = std::mem::zeroed();
-            
+
             // FindFirstFileW 返回 Result<HANDLE, Error>
-            let handle: HANDLE = match FindFirstFileW(PCWSTR(wide_pattern.as_ptr()), &mut find_data) {
+            let handle: HANDLE = match FindFirstFileW(PCWSTR(wide_pattern.as_ptr()), &mut find_data)
+            {
                 Ok(h) => h,
                 Err(_) => continue,
             };
@@ -605,7 +616,9 @@ pub fn execute_partition_copy(
             }
             Err(e) => {
                 progress.failed_count += 1;
-                progress.failed_files.push(format!("{}: {}", relative_path, e));
+                progress
+                    .failed_files
+                    .push(format!("{}: {}", relative_path, e));
                 // 继续复制其他文件，不中断
             }
         }

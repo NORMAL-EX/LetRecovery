@@ -212,7 +212,6 @@ struct WimlibUpdateCommandAdd {
 }
 const WIMLIB_UPDATE_OP_ADD: c_int = 0;
 
-
 /// struct wimlib_wim_info（前若干字段，足够取 image_count / 完整性表标志）
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -255,7 +254,10 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 fn path_to_wide(p: &Path) -> Vec<u16> {
-    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 unsafe fn utf16_ptr_to_string(ptr: *const u16) -> Option<String> {
@@ -272,7 +274,9 @@ unsafe fn utf16_ptr_to_string(ptr: *const u16) -> Option<String> {
     if len == 0 {
         return None;
     }
-    Some(String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len)))
+    Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+        ptr, len,
+    )))
 }
 
 unsafe fn read_u64(base: *const c_void, off: usize) -> u64 {
@@ -352,11 +356,7 @@ struct ProgressCtx {
     status_prefix: &'static str,
 }
 
-unsafe extern "C" fn progress_callback(
-    msg: c_int,
-    info: *const c_void,
-    ctx: *mut c_void,
-) -> c_int {
+unsafe extern "C" fn progress_callback(msg: c_int, info: *const c_void, ctx: *mut c_void) -> c_int {
     let result = catch_unwind(AssertUnwindSafe(|| {
         if ctx.is_null() || info.is_null() {
             return;
@@ -497,16 +497,26 @@ impl Wimlib {
         let lib = find_and_load_dll()?;
         let global_init = load_sym!(lib, b"wimlib_global_init\0", FnGlobalInit);
         let global_cleanup = load_sym!(lib, b"wimlib_global_cleanup\0", FnGlobalCleanup);
-        let open_wim = load_sym!(lib, b"wimlib_open_wim_with_progress\0", FnOpenWimWithProgress);
+        let open_wim = load_sym!(
+            lib,
+            b"wimlib_open_wim_with_progress\0",
+            FnOpenWimWithProgress
+        );
         let free_wim = load_sym!(lib, b"wimlib_free\0", FnFree);
         let verify_wim = load_sym!(lib, b"wimlib_verify_wim\0", FnVerifyWim);
         let get_error_string = load_sym!(lib, b"wimlib_get_error_string\0", FnGetErrorString);
         let get_wim_info = load_sym!(lib, b"wimlib_get_wim_info\0", FnGetWimInfo);
         let get_image_name = load_sym!(lib, b"wimlib_get_image_name\0", FnGetImageName);
-        let get_image_description =
-            load_sym!(lib, b"wimlib_get_image_description\0", FnGetImageDescription);
-        let reference_resource_files =
-            load_sym!(lib, b"wimlib_reference_resource_files\0", FnReferenceResourceFiles);
+        let get_image_description = load_sym!(
+            lib,
+            b"wimlib_get_image_description\0",
+            FnGetImageDescription
+        );
+        let reference_resource_files = load_sym!(
+            lib,
+            b"wimlib_reference_resource_files\0",
+            FnReferenceResourceFiles
+        );
 
         if !ensure_global_init(global_init) {
             return Err("wimlib 全局初始化失败".to_string());
@@ -532,7 +542,9 @@ impl Wimlib {
             utf16_ptr_to_string(p)
         };
         match msg {
-            Some(m) if !m.is_empty() => format!("{}（{}，错误码 {}）", m, err_description(code), code),
+            Some(m) if !m.is_empty() => {
+                format!("{}（{}，错误码 {}）", m, err_description(code), code)
+            }
             _ => format!("{}（错误码 {}）", err_description(code), code),
         }
     }
@@ -673,22 +685,35 @@ impl WimlibManager {
         let lib = find_and_load_dll()?;
         let global_init = load_sym!(lib, b"wimlib_global_init\0", FnGlobalInit);
         let global_cleanup = load_sym!(lib, b"wimlib_global_cleanup\0", FnGlobalCleanup);
-        let open_wim = load_sym!(lib, b"wimlib_open_wim_with_progress\0", FnOpenWimWithProgress);
+        let open_wim = load_sym!(
+            lib,
+            b"wimlib_open_wim_with_progress\0",
+            FnOpenWimWithProgress
+        );
         let create_new_wim = load_sym!(lib, b"wimlib_create_new_wim\0", FnCreateNewWim);
         let free_wim = load_sym!(lib, b"wimlib_free\0", FnFree);
         let get_error_string = load_sym!(lib, b"wimlib_get_error_string\0", FnGetErrorString);
-        let register_progress =
-            load_sym!(lib, b"wimlib_register_progress_function\0", FnRegisterProgress);
+        let register_progress = load_sym!(
+            lib,
+            b"wimlib_register_progress_function\0",
+            FnRegisterProgress
+        );
         let extract_image = load_sym!(lib, b"wimlib_extract_image\0", FnExtractImage);
         let extract_paths = load_sym!(lib, b"wimlib_extract_paths\0", FnExtractPaths);
         let add_image = load_sym!(lib, b"wimlib_add_image\0", FnAddImage);
         let write = load_sym!(lib, b"wimlib_write\0", FnWrite);
         let overwrite = load_sym!(lib, b"wimlib_overwrite\0", FnOverwrite);
-        let set_output_compression =
-            load_sym!(lib, b"wimlib_set_output_compression_type\0", FnSetOutputCompression);
+        let set_output_compression = load_sym!(
+            lib,
+            b"wimlib_set_output_compression_type\0",
+            FnSetOutputCompression
+        );
         let split = load_sym!(lib, b"wimlib_split\0", FnSplit);
-        let reference_resource_files =
-            load_sym!(lib, b"wimlib_reference_resource_files\0", FnReferenceResourceFiles);
+        let reference_resource_files = load_sym!(
+            lib,
+            b"wimlib_reference_resource_files\0",
+            FnReferenceResourceFiles
+        );
         let iterate_dir_tree = load_sym!(lib, b"wimlib_iterate_dir_tree\0", FnIterateDirTree);
         let get_xml_data = load_sym!(lib, b"wimlib_get_xml_data\0", FnGetXmlData);
         let update_image = load_sym!(lib, b"wimlib_update_image\0", FnUpdateImage);
@@ -722,7 +747,9 @@ impl WimlibManager {
     fn error_message(&self, code: c_int) -> String {
         let msg = unsafe { utf16_ptr_to_string((self.get_error_string)(code)) };
         match msg {
-            Some(m) if !m.is_empty() => format!("{}（{}，错误码 {}）", m, err_description(code), code),
+            Some(m) if !m.is_empty() => {
+                format!("{}（{}，错误码 {}）", m, err_description(code), code)
+            }
             _ => format!("{}（错误码 {}）", err_description(code), code),
         }
     }
@@ -861,7 +888,11 @@ impl WimlibManager {
                 (self.add_image)(
                     wim,
                     wsource.as_ptr(),
-                    if name.is_empty() { null_mut() } else { wname.as_ptr() },
+                    if name.is_empty() {
+                        null_mut()
+                    } else {
+                        wname.as_ptr()
+                    },
                     null_mut(),
                     WIMLIB_ADD_FLAG_WINCONFIG,
                 )
@@ -886,7 +917,13 @@ impl WimlibManager {
                     0
                 };
                 let rc = unsafe {
-                    (self.write)(wim, wpath.as_ptr(), WIMLIB_ALL_IMAGES, flags, optimal_threads())
+                    (self.write)(
+                        wim,
+                        wpath.as_ptr(),
+                        WIMLIB_ALL_IMAGES,
+                        flags,
+                        optimal_threads(),
+                    )
                 };
                 if rc != WIMLIB_ERR_SUCCESS {
                     return Err(self.error_message(rc));
@@ -943,7 +980,12 @@ impl WimlibManager {
     }
 
     /// 把已有 WIM 分割为 SWM 分卷
-    pub fn split_wim(&self, wim_path: &str, swm_path: &str, part_size_mb: u64) -> Result<(), String> {
+    pub fn split_wim(
+        &self,
+        wim_path: &str,
+        swm_path: &str,
+        part_size_mb: u64,
+    ) -> Result<(), String> {
         let wim = self.open(wim_path)?;
         let _prio = HighPriorityGuard::new();
         let wswm = to_wide(swm_path);
@@ -982,11 +1024,23 @@ impl WimlibManager {
 
     /// 判断镜像某卷是否包含指定路径（替代挂载查目录结构）。
     /// 用 iterate_dir_tree 的返回码判断：成功=存在，PATH_DOES_NOT_EXIST=不存在。
-    pub fn image_contains_path(&self, image_file: &str, index: u32, path_in_image: &str) -> Result<bool, String> {
+    pub fn image_contains_path(
+        &self,
+        image_file: &str,
+        index: u32,
+        path_in_image: &str,
+    ) -> Result<bool, String> {
         let wim = self.open(image_file)?;
         let wpath = to_wide(path_in_image);
         let rc = unsafe {
-            (self.iterate_dir_tree)(wim, index as c_int, wpath.as_ptr(), 0, noop_iterate_cb, null_mut())
+            (self.iterate_dir_tree)(
+                wim,
+                index as c_int,
+                wpath.as_ptr(),
+                0,
+                noop_iterate_cb,
+                null_mut(),
+            )
         };
         unsafe { (self.free_wim)(wim) };
         if rc == WIMLIB_ERR_SUCCESS {
@@ -1016,7 +1070,14 @@ impl WimlibManager {
         for p in paths {
             let wpath = to_wide(p);
             let rc = unsafe {
-                (self.iterate_dir_tree)(wim, index as c_int, wpath.as_ptr(), 0, noop_iterate_cb, null_mut())
+                (self.iterate_dir_tree)(
+                    wim,
+                    index as c_int,
+                    wpath.as_ptr(),
+                    0,
+                    noop_iterate_cb,
+                    null_mut(),
+                )
             };
             if rc == WIMLIB_ERR_SUCCESS {
                 found = true;

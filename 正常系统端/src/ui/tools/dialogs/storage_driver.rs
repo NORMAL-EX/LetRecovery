@@ -1,8 +1,8 @@
+use super::common::{format_partition_display, get_message_color};
+use crate::app::App;
+use crate::tr;
 use egui;
 use std::sync::mpsc;
-use crate::tr;
-use crate::app::App;
-use super::common::{format_partition_display, get_message_color};
 
 impl App {
     /// 渲染导入存储驱动对话框
@@ -19,7 +19,9 @@ impl App {
             .resizable(false)
             .default_width(450.0)
             .show(ui.ctx(), |ui| {
-                ui.label(tr!("将 Intel VMD / Apple SSD / Visior 等硬盘控制器驱动导入到离线系统"));
+                ui.label(tr!(
+                    "将 Intel VMD / Apple SSD / Visior 等硬盘控制器驱动导入到离线系统"
+                ));
                 ui.add_space(10.0);
 
                 if is_loading_partitions {
@@ -39,9 +41,7 @@ impl App {
                         let current_text = self
                             .import_storage_driver_target
                             .as_ref()
-                            .map(|letter| {
-                                format_partition_display(&windows_partitions, letter)
-                            })
+                            .map(|letter| format_partition_display(&windows_partitions, letter))
                             .unwrap_or_else(|| tr!("请选择"));
 
                         egui::ComboBox::from_id_salt("import_storage_driver_partition")
@@ -82,7 +82,10 @@ impl App {
                         ui.spinner();
                         ui.label(tr!("正在导入驱动..."));
                     } else {
-                        if ui.add_enabled(can_import, egui::Button::new(tr!("导入驱动"))).clicked() {
+                        if ui
+                            .add_enabled(can_import, egui::Button::new(tr!("导入驱动")))
+                            .clicked()
+                        {
                             self.start_import_storage_driver();
                         }
                     }
@@ -109,12 +112,10 @@ impl App {
         };
 
         // 检查驱动目录是否存在
-        let driver_dir = crate::utils::path::get_drivers_dir()
-            .join("storage_controller");
+        let driver_dir = crate::utils::path::get_drivers_dir().join("storage_controller");
 
         if !driver_dir.exists() {
-            self.import_storage_driver_message =
-                tr!("驱动目录不存在: {}", driver_dir.display());
+            self.import_storage_driver_message = tr!("驱动目录不存在: {}", driver_dir.display());
             return;
         }
 

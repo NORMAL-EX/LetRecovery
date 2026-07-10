@@ -1,9 +1,9 @@
-use egui;
-use std::sync::mpsc;
-use crate::tr;
-use crate::app::App;
 use super::super::types::WindowsPartitionInfo;
 use super::super::version_detect::get_windows_partition_infos;
+use crate::app::App;
+use crate::tr;
+use egui;
+use std::sync::mpsc;
 
 impl App {
     /// 检查并处理异步操作结果
@@ -16,7 +16,7 @@ impl App {
                 self.windows_partitions_rx = None;
             }
         }
-        
+
         // 检查驱动操作结果
         if let Some(ref rx) = self.driver_operation_rx {
             if let Ok(result) = rx.try_recv() {
@@ -32,7 +32,7 @@ impl App {
                 self.driver_operation_rx = None;
             }
         }
-        
+
         // 检查存储驱动导入结果
         if let Some(ref rx) = self.storage_driver_rx {
             if let Ok(result) = rx.try_recv() {
@@ -48,7 +48,7 @@ impl App {
                 self.storage_driver_rx = None;
             }
         }
-        
+
         // 检查APPX列表加载结果
         if let Some(ref rx) = self.appx_list_rx {
             if let Ok(packages) = rx.try_recv() {
@@ -62,7 +62,7 @@ impl App {
                 self.appx_list_rx = None;
             }
         }
-        
+
         // 检查APPX移除结果
         if let Some(ref rx) = self.appx_remove_rx {
             if let Ok((success, fail)) = rx.try_recv() {
@@ -73,7 +73,7 @@ impl App {
                 self.start_load_appx_list();
             }
         }
-        
+
         // 检查时间同步结果
         if let Some(ref rx) = self.time_sync_rx {
             if let Ok(result) = rx.try_recv() {
@@ -91,7 +91,7 @@ impl App {
                 self.time_sync_rx = None;
             }
         }
-        
+
         // 检查批量格式化分区列表加载结果
         if let Some(ref rx) = self.batch_format_partitions_rx {
             if let Ok(partitions) = rx.try_recv() {
@@ -100,13 +100,14 @@ impl App {
                 self.batch_format_partitions_rx = None;
             }
         }
-        
+
         // 检查批量格式化结果
         if let Some(ref rx) = self.batch_format_rx {
             if let Ok(result) = rx.try_recv() {
                 let mut msg = tr!(
                     "格式化完成: 成功 {}, 失败 {}",
-                    result.success_count, result.fail_count
+                    result.success_count,
+                    result.fail_count
                 );
                 for r in &result.results {
                     msg.push_str(&format!("\n{}: {}", r.letter, r.message));
@@ -118,19 +119,19 @@ impl App {
                 self.start_load_formatable_partitions();
             }
         }
-        
+
         // 检查GHO密码读取结果
         self.check_gho_password_result();
-        
+
         // 检查英伟达驱动卸载结果
         self.check_nvidia_uninstall_result();
-        
+
         // 检查分区对拷异步操作
         self.check_partition_copy_async_operations();
-        
+
         // 检查一键分区异步操作
         self.check_quick_partition_disk_load();
-        
+
         // 检查镜像校验状态
         self.check_image_verify_status();
 
@@ -150,13 +151,13 @@ impl App {
         if self.windows_partitions_loading {
             return;
         }
-        
+
         self.windows_partitions_loading = true;
         let partitions = self.partitions.clone();
-        
+
         let (tx, rx) = mpsc::channel();
         self.windows_partitions_rx = Some(rx);
-        
+
         std::thread::spawn(move || {
             let result = get_windows_partition_infos(&partitions);
             let _ = tx.send(result);
@@ -179,7 +180,10 @@ impl App {
 }
 
 /// 格式化分区显示文本
-pub(super) fn format_partition_display(partitions: &[WindowsPartitionInfo], letter: &str) -> String {
+pub(super) fn format_partition_display(
+    partitions: &[WindowsPartitionInfo],
+    letter: &str,
+) -> String {
     partitions
         .iter()
         .find(|p| p.letter == letter)
@@ -191,7 +195,8 @@ pub(super) fn format_partition_display(partitions: &[WindowsPartitionInfo], lett
 pub(super) fn get_message_color(message: &str) -> egui::Color32 {
     if message.contains("成功") {
         egui::Color32::from_rgb(0, 180, 0)
-    } else if message.contains("失败") || message.contains("错误") || message.contains("不存在") {
+    } else if message.contains("失败") || message.contains("错误") || message.contains("不存在")
+    {
         egui::Color32::from_rgb(255, 80, 80)
     } else {
         egui::Color32::GRAY

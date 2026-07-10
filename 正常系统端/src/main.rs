@@ -21,13 +21,13 @@ pub struct PreloadedConfig {
 fn main() -> eframe::Result<()> {
     // 加载应用配置（用于获取日志设置）
     let app_config = core::app_config::AppConfig::load();
-    
+
     // 初始化日志系统
     if let Err(e) = utils::logger::LogManager::init(app_config.log_enabled) {
         eprintln!("日志系统初始化失败: {}", e);
         // 即使日志初始化失败，程序也应该继续运行
     }
-    
+
     // 清理旧日志文件
     if app_config.log_enabled {
         if let Err(e) = utils::logger::LogManager::cleanup_old_logs(app_config.log_retention_days) {
@@ -45,12 +45,12 @@ fn main() -> eframe::Result<()> {
 
     // 检查命令行参数，处理PE环境下的自动安装/备份
     let args: Vec<String> = std::env::args().collect();
-    
+
     if args.contains(&"/PEINSTALL".to_string()) || args.contains(&"--pe-install".to_string()) {
         log::info!("检测到PE安装模式，执行自动安装...");
         return run_pe_install();
     }
-    
+
     if args.contains(&"/PEBACKUP".to_string()) || args.contains(&"--pe-backup".to_string()) {
         log::info!("检测到PE备份模式，执行自动备份...");
         return run_pe_backup();
@@ -171,10 +171,10 @@ fn main() -> eframe::Result<()> {
 /// 预加载所有配置和系统信息
 fn preload_all_config() -> PreloadedConfig {
     use std::time::{Duration, Instant};
-    
+
     // 只等待远程配置和分区信息（这两个比较快且重要）
     // 系统信息和硬件信息改为异步加载，不阻塞窗口显示
-    
+
     let remote_config_handle = std::thread::spawn(|| {
         log::info!("开始加载远程配置...");
         let config = download::server_config::RemoteConfig::load_from_server();
@@ -192,7 +192,7 @@ fn preload_all_config() -> PreloadedConfig {
     // 等待远程配置（带超时）
     let start = Instant::now();
     let timeout = Duration::from_secs(5);
-    
+
     log::info!("等待远程配置...");
     let remote_config = loop {
         if remote_config_handle.is_finished() {
@@ -204,18 +204,18 @@ fn preload_all_config() -> PreloadedConfig {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    
+
     // 等待分区信息（这个通常很快）
     log::info!("等待分区信息...");
     let partitions = partitions_handle.join().ok().unwrap_or_default();
 
     log::info!("预加载完成，耗时: {:?}", start.elapsed());
-    
+
     // 系统信息和硬件信息不在这里等待，改为在 App 中异步加载
     PreloadedConfig {
         remote_config,
-        system_info: None,      // 稍后异步加载
-        hardware_info: None,    // 稍后异步加载
+        system_info: None,   // 稍后异步加载
+        hardware_info: None, // 稍后异步加载
         partitions,
     }
 }
@@ -223,7 +223,7 @@ fn preload_all_config() -> PreloadedConfig {
 fn load_icon() -> egui::IconData {
     // 使用内嵌的图标数据（编译时嵌入）
     const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.png");
-    
+
     // 从内嵌的PNG数据加载图标
     if let Ok(image) = image::load_from_memory(ICON_BYTES) {
         let image = image.to_rgba8();
@@ -243,7 +243,7 @@ fn load_icon() -> egui::IconData {
 /// 返回 Ok(()) 表示所有文件存在，Err(Vec<String>) 包含缺失的文件列表
 fn check_dependencies() -> Result<(), Vec<String>> {
     let exe_dir = utils::path::get_exe_dir();
-    
+
     // 必需的依赖文件列表
     let required_files = [
         // bin 目录 - 核心工具
@@ -254,9 +254,9 @@ fn check_dependencies() -> Result<(), Vec<String>> {
         "bin/aria2c.exe",
         "bin/ghost/ghost64.exe",
     ];
-    
+
     let mut missing_files = Vec::new();
-    
+
     for file in &required_files {
         let file_path = exe_dir.join(file);
         if !file_path.exists() {
@@ -264,7 +264,7 @@ fn check_dependencies() -> Result<(), Vec<String>> {
             missing_files.push(file.to_string());
         }
     }
-    
+
     if missing_files.is_empty() {
         Ok(())
     } else {
@@ -290,7 +290,10 @@ fn log_machine_info() {
             if let Some(si) = &sys_info {
                 log::info!(
                     "启动模式: {} | 安全启动: {} | TPM: {} | 64位: {}",
-                    si.boot_mode, si.secure_boot, si.tpm_enabled, si.is_64bit
+                    si.boot_mode,
+                    si.secure_boot,
+                    si.tpm_enabled,
+                    si.is_64bit
                 );
             }
         }
@@ -305,18 +308,18 @@ fn check_system_components() -> Result<(), Vec<String>> {
     let system_root = std::env::var("SYSTEMROOT")
         .or_else(|_| std::env::var("WINDIR"))
         .unwrap_or_else(|_| "C:\\Windows".to_string());
-    
+
     let system32_path = std::path::Path::new(&system_root).join("System32");
-    
+
     // 必需的系统组件列表
     // 注：WIM 处理已改用内置的 libwim-15.dll，不再依赖系统 wimgapi.dll
     let required_components = [
         ("diskpart.exe", "磁盘分区工具"),
         ("advapi32.dll", "高级 Windows API 库"),
     ];
-    
+
     let mut missing_components = Vec::new();
-    
+
     for (file, description) in &required_components {
         let file_path = system32_path.join(file);
         if !file_path.exists() {
@@ -324,7 +327,7 @@ fn check_system_components() -> Result<(), Vec<String>> {
             missing_components.push(format!("{} - {}", file, description));
         }
     }
-    
+
     if missing_components.is_empty() {
         Ok(())
     } else {
@@ -369,7 +372,7 @@ fn run_cli_install_entry(config: Option<&str>, advanced: Option<&str>) -> eframe
 
 fn run_pe_install() -> eframe::Result<()> {
     use core::install_config::ConfigFileManager;
-    
+
     log::info!("[PE INSTALL] ========== PE自动安装模式 ==========");
 
     // 查找配置文件所在分区
@@ -396,17 +399,17 @@ fn run_pe_install() -> eframe::Result<()> {
 
     log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
     log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
-    
+
     // 查找安装标记分区
     let target_partition = match ConfigFileManager::find_install_marker_partition() {
         Some(p) => p,
         None => config.target_partition.clone(),
     };
-    
+
     // 构建完整镜像路径
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
     let image_path = format!("{}\\{}", data_dir, config.image_path);
-    
+
     if !std::path::Path::new(&image_path).exists() {
         log::error!("[PE INSTALL] 错误: 镜像文件不存在: {}", image_path);
         show_error_message(&format!("镜像文件不存在: {}", image_path));
@@ -414,20 +417,26 @@ fn run_pe_install() -> eframe::Result<()> {
     }
 
     log::info!("[PE INSTALL] 完整镜像路径: {}", image_path);
-    
+
     // 执行安装
     let result = execute_pe_install(&target_partition, &image_path, &config, &data_dir);
-    
+
     // 清理标记文件
     ConfigFileManager::cleanup_partition_markers(&target_partition);
-    
+
     match result {
         Ok(_) => {
             log::info!("[PE INSTALL] 安装完成!");
             if config.auto_reboot {
                 log::info!("[PE INSTALL] 即将重启...");
                 let _ = utils::cmd::create_command("shutdown")
-                    .args(["/r", "/t", "10", "/c", "LetRecovery 系统安装完成，即将重启..."])
+                    .args([
+                        "/r",
+                        "/t",
+                        "10",
+                        "/c",
+                        "LetRecovery 系统安装完成，即将重启...",
+                    ])
                     .spawn();
             } else {
                 show_success_message("系统安装完成！请手动重启计算机。");
@@ -438,14 +447,14 @@ fn run_pe_install() -> eframe::Result<()> {
             show_error_message(&format!("系统安装失败: {}", e));
         }
     }
-    
+
     Ok(())
 }
 
 /// PE环境下自动执行备份
 fn run_pe_backup() -> eframe::Result<()> {
     use core::install_config::ConfigFileManager;
-    
+
     log::info!("[PE BACKUP] ========== PE自动备份模式 ==========");
 
     // 查找配置文件所在分区
@@ -472,19 +481,19 @@ fn run_pe_backup() -> eframe::Result<()> {
 
     log::info!("[PE BACKUP] 源分区: {}", config.source_partition);
     log::info!("[PE BACKUP] 保存路径: {}", config.save_path);
-    
+
     // 查找备份标记分区
     let source_partition = match ConfigFileManager::find_backup_marker_partition() {
         Some(p) => p,
         None => config.source_partition.clone(),
     };
-    
+
     // 执行备份
     let result = execute_pe_backup(&source_partition, &config);
-    
+
     // 清理标记文件
     ConfigFileManager::cleanup_partition_markers(&source_partition);
-    
+
     match result {
         Ok(_) => {
             log::info!("[PE BACKUP] 备份完成!");
@@ -495,7 +504,7 @@ fn run_pe_backup() -> eframe::Result<()> {
             show_error_message(&format!("系统备份失败: {}", e));
         }
     }
-    
+
     Ok(())
 }
 
@@ -507,30 +516,35 @@ fn execute_pe_install(
     data_dir: &str,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
-    
+
     log::info!("[PE INSTALL] Step 1: 格式化分区");
     // 格式化目标分区
+    let spec = lr_core::format_command::FormatCommandSpec::new(target_partition, "NTFS", None)
+        .map_err(|error| anyhow::anyhow!("无效的格式化参数: {error}"))?;
+    let args = spec.args();
+    let mut cmd_args = vec!["/d", "/s", "/c", "format.com"];
+    cmd_args.extend(args.iter().map(String::as_str));
     let output = utils::cmd::create_command("cmd")
-        .args(["/c", &format!("format {} /FS:NTFS /Q /Y", target_partition)])
+        .args(&cmd_args)
         .output()
         .context("执行格式化命令失败")?;
-    
+
     if !output.status.success() {
         let stderr = utils::encoding::gbk_to_utf8(&output.stderr);
         anyhow::bail!("格式化分区失败: {}", stderr);
     }
-    
+
     log::info!("[PE INSTALL] Step 2: 释放镜像");
     // 释放镜像
     let apply_dir = format!("{}\\", target_partition);
-    
+
     if config.is_gho {
         // GHO镜像使用Ghost
         let ghost = core::ghost::Ghost::new();
         if !ghost.is_available() {
             anyhow::bail!("Ghost工具不可用");
         }
-        
+
         let partitions = core::disk::DiskManager::get_partitions().unwrap_or_default();
         ghost.restore_image_to_letter(image_path, target_partition, &partitions, None)?;
     } else {
@@ -538,7 +552,7 @@ fn execute_pe_install(
         let dism = core::dism::Dism::new();
         dism.apply_image(image_path, &apply_dir, config.volume_index, None)?;
     }
-    
+
     log::info!("[PE INSTALL] Step 3: 导入驱动");
     // 导入驱动
     if config.restore_drivers {
@@ -548,7 +562,7 @@ fn execute_pe_install(
             let _ = dism.add_drivers_offline(&apply_dir, &driver_path);
         }
     }
-    
+
     log::info!("[PE INSTALL] Step 4: 修复引导");
     // 修复引导
     let boot_manager = core::bcdedit::BootManager::new();
@@ -556,14 +570,17 @@ fn execute_pe_install(
         1 => true,
         2 => false,
         _ => {
-            let target_style = core::disk::DiskManager::get_partitions()
-                .ok()
-                .and_then(|partitions| {
-                    partitions
-                        .into_iter()
-                        .find(|partition| partition.letter.eq_ignore_ascii_case(target_partition))
-                        .map(|partition| partition.partition_style)
-                });
+            let target_style =
+                core::disk::DiskManager::get_partitions()
+                    .ok()
+                    .and_then(|partitions| {
+                        partitions
+                            .into_iter()
+                            .find(|partition| {
+                                partition.letter.eq_ignore_ascii_case(target_partition)
+                            })
+                            .map(|partition| partition.partition_style)
+                    });
             match target_style {
                 Some(core::disk::PartitionStyle::GPT) => true,
                 Some(core::disk::PartitionStyle::MBR) => false,
@@ -608,16 +625,16 @@ fn execute_pe_install(
     advanced_options.xp_inject_nvme_driver = config.xp_inject_nvme_driver;
 
     let _ = advanced_options.apply_to_system(target_partition, is_xp);
-    
+
     // 生成无人值守配置
     if config.unattended {
         let _ = generate_unattend_xml_pe(target_partition, &config.custom_username);
     }
-    
+
     log::info!("[PE INSTALL] Step 6: 清理临时文件");
     // 清理数据目录
     let _ = std::fs::remove_dir_all(data_dir);
-    
+
     Ok(())
 }
 
@@ -640,21 +657,52 @@ fn execute_pe_backup(
         1 => {
             let dism = core::dism::Dism::new();
             if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                dism.append_image_esd(&config.save_path, &capture_dir, &config.name, &config.description, None)
+                dism.append_image_esd(
+                    &config.save_path,
+                    &capture_dir,
+                    &config.name,
+                    &config.description,
+                    None,
+                )
             } else {
-                dism.capture_image_esd(&config.save_path, &capture_dir, &config.name, &config.description, None)
+                dism.capture_image_esd(
+                    &config.save_path,
+                    &capture_dir,
+                    &config.name,
+                    &config.description,
+                    None,
+                )
             }
         }
         2 => {
             let dism = core::dism::Dism::new();
-            dism.capture_image_swm(&config.save_path, &capture_dir, &config.name, &config.description, config.swm_split_size, None)
+            dism.capture_image_swm(
+                &config.save_path,
+                &capture_dir,
+                &config.name,
+                &config.description,
+                config.swm_split_size,
+                None,
+            )
         }
         _ => {
             let dism = core::dism::Dism::new();
             if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                dism.append_image(&config.save_path, &capture_dir, &config.name, &config.description, None)
+                dism.append_image(
+                    &config.save_path,
+                    &capture_dir,
+                    &config.name,
+                    &config.description,
+                    None,
+                )
             } else {
-                dism.capture_image(&config.save_path, &capture_dir, &config.name, &config.description, None)
+                dism.capture_image(
+                    &config.save_path,
+                    &capture_dir,
+                    &config.name,
+                    &config.description,
+                    None,
+                )
             }
         }
     }
@@ -669,7 +717,7 @@ fn detect_uefi_mode() -> bool {
             return true;
         }
     }
-    
+
     // 使用 Windows API 检测固件类型
     #[cfg(windows)]
     {
@@ -701,7 +749,7 @@ fn detect_uefi_mode() -> bool {
             if result == 0 {
                 let error = std::io::Error::last_os_error();
                 let raw_error = error.raw_os_error().unwrap_or(0) as u32;
-                
+
                 // ERROR_INVALID_FUNCTION (1) 表示是 Legacy BIOS
                 if raw_error == 1 {
                     return false;
@@ -711,7 +759,7 @@ fn detect_uefi_mode() -> bool {
             return true;
         }
     }
-    
+
     #[cfg(not(windows))]
     false
 }
@@ -720,24 +768,31 @@ fn detect_uefi_mode() -> bool {
 fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::Result<()> {
     use crate::core::system_utils::{get_file_version, get_system_architecture};
     use std::path::Path;
-    
-    let username = if username.is_empty() { "User" } else { username };
-    
+
+    let username = if username.is_empty() {
+        "User"
+    } else {
+        username
+    };
+
     // 检测目标系统架构
     let arch = get_system_architecture(target_partition);
     let arch_str = arch.as_unattend_str();
-    
+
     // 通过 ntdll.dll 文件版本检测目标系统版本
-    let ntdll_path = Path::new(target_partition).join("Windows").join("System32").join("ntdll.dll");
+    let ntdll_path = Path::new(target_partition)
+        .join("Windows")
+        .join("System32")
+        .join("ntdll.dll");
     let (is_win7, is_win8) = match get_file_version(&ntdll_path) {
         Some((major, minor, _, _)) => {
             let is_win7 = major == 6 && minor == 1;
             let is_win8 = major == 6 && (minor == 2 || minor == 3);
             (is_win7, is_win8)
         }
-        None => (false, false)
+        None => (false, false),
     };
-    
+
     // 根据系统版本生成不同的OOBE配置
     // Win7: 移除HideOEMRegistrationScreen（家庭版不支持）
     let oobe_section = if is_win7 {
@@ -762,8 +817,9 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
                 <ProtectYourPC>3</ProtectYourPC>
             </OOBE>"#
     };
-    
-    let xml_content = format!(r#"<?xml version="1.0" encoding="utf-8"?>
+
+    let xml_content = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
         <component name="Microsoft-Windows-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -802,17 +858,20 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
             </AutoLogon>
         </component>
     </settings>
-</unattend>"#, arch = arch_str, oobe = oobe_section, user = username);
+</unattend>"#,
+        arch = arch_str,
+        oobe = oobe_section,
+        user = username
+    );
 
     let panther_dir = format!("{}\\Windows\\Panther", target_partition);
     std::fs::create_dir_all(&panther_dir)?;
-    
+
     let unattend_path = format!("{}\\unattend.xml", panther_dir);
     std::fs::write(&unattend_path, &xml_content)?;
-    
+
     Ok(())
 }
-
 
 /// 显示错误消息框
 fn show_error_message(message: &str) {
@@ -821,7 +880,7 @@ fn show_error_message(message: &str) {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
         use std::ptr::null_mut;
-        
+
         let wide_message: Vec<u16> = OsStr::new(message)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -830,16 +889,22 @@ fn show_error_message(message: &str) {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        
+
         unsafe {
             #[link(name = "user32")]
             extern "system" {
-                fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, utype: u32) -> i32;
+                fn MessageBoxW(
+                    hwnd: *mut std::ffi::c_void,
+                    text: *const u16,
+                    caption: *const u16,
+                    utype: u32,
+                ) -> i32;
             }
-            MessageBoxW(null_mut(), wide_message.as_ptr(), wide_title.as_ptr(), 0x10); // MB_ICONERROR
+            MessageBoxW(null_mut(), wide_message.as_ptr(), wide_title.as_ptr(), 0x10);
+            // MB_ICONERROR
         }
     }
-    
+
     #[cfg(not(windows))]
     {
         log::error!("错误: {}", message);
@@ -853,7 +918,7 @@ fn show_success_message(message: &str) {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
         use std::ptr::null_mut;
-        
+
         let wide_message: Vec<u16> = OsStr::new(message)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -862,16 +927,22 @@ fn show_success_message(message: &str) {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        
+
         unsafe {
             #[link(name = "user32")]
             extern "system" {
-                fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, utype: u32) -> i32;
+                fn MessageBoxW(
+                    hwnd: *mut std::ffi::c_void,
+                    text: *const u16,
+                    caption: *const u16,
+                    utype: u32,
+                ) -> i32;
             }
-            MessageBoxW(null_mut(), wide_message.as_ptr(), wide_title.as_ptr(), 0x40); // MB_ICONINFORMATION
+            MessageBoxW(null_mut(), wide_message.as_ptr(), wide_title.as_ptr(), 0x40);
+            // MB_ICONINFORMATION
         }
     }
-    
+
     #[cfg(not(windows))]
     {
         log::info!("成功: {}", message);

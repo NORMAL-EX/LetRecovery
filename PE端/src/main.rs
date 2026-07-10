@@ -564,8 +564,7 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         // Step 5: 修复引导
         log::info!("[PE INSTALL] Step 5: 修复引导");
         let boot_manager = BootManager::new();
-        let use_uefi =
-            DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition);
+        let use_uefi = DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition);
 
         // XP/2003：写 XP 引导（UEFI 化映像走 UEFI/GPT，否则 ntldr）；其余走 bcdboot。
         let win_boot_dir = format!("{}\\Windows\\Boot", target_partition);

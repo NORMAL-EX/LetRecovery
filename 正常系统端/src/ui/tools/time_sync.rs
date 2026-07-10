@@ -15,7 +15,7 @@ const NTP_EPOCH_OFFSET: u64 = 2_208_988_800;
 /// NTP服务器列表（中国）
 const NTP_SERVERS: &[&str] = &[
     "ntp.aliyun.com",
-    "ntp.tencent.com", 
+    "ntp.tencent.com",
     "cn.ntp.org.cn",
     "time.windows.com",
     "pool.ntp.org",
@@ -92,9 +92,7 @@ impl NtpPacket {
         if bytes.len() < std::mem::size_of::<Self>() {
             return None;
         }
-        unsafe {
-            Some(std::ptr::read_unaligned(bytes.as_ptr() as *const Self))
-        }
+        unsafe { Some(std::ptr::read_unaligned(bytes.as_ptr() as *const Self)) }
     }
 
     /// 获取传输时间戳（NTP时间，秒数）
@@ -117,29 +115,32 @@ pub struct TimeSyncResult {
 }
 
 /// 从NTP服务器获取当前时间
-/// 
+///
 /// 返回Unix时间戳（秒）
 fn get_ntp_time(server: &str) -> Result<u64, String> {
     let addr = format!("{}:123", server);
-    
+
     // 创建UDP socket
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| tr!("无法创建套接字: {}", e))?;
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| tr!("无法创建套接字: {}", e))?;
 
     // 设置超时
-    socket.set_read_timeout(Some(Duration::from_secs(3)))
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
         .map_err(|e| tr!("设置超时失败: {}", e))?;
-    socket.set_write_timeout(Some(Duration::from_secs(3)))
+    socket
+        .set_write_timeout(Some(Duration::from_secs(3)))
         .map_err(|e| tr!("设置超时失败: {}", e))?;
 
     // 发送NTP请求
     let request = NtpPacket::new_request();
-    socket.send_to(request.as_bytes(), &addr)
+    socket
+        .send_to(request.as_bytes(), &addr)
         .map_err(|e| tr!("发送请求失败: {}", e))?;
 
     // 接收响应
     let mut buffer = [0u8; 48];
-    let (len, _) = socket.recv_from(&mut buffer)
+    let (len, _) = socket
+        .recv_from(&mut buffer)
         .map_err(|e| tr!("接收响应失败: {}", e))?;
 
     if len < 48 {
@@ -147,15 +148,14 @@ fn get_ntp_time(server: &str) -> Result<u64, String> {
     }
 
     // 解析响应
-    let response = NtpPacket::from_bytes(&buffer)
-        .ok_or_else(|| tr!("解析响应失败"))?;
+    let response = NtpPacket::from_bytes(&buffer).ok_or_else(|| tr!("解析响应失败"))?;
 
     // 获取传输时间戳并转换为Unix时间戳
     let ntp_secs = response.get_transmit_timestamp_secs();
     if ntp_secs < NTP_EPOCH_OFFSET {
         return Err(tr!("时间戳无效"));
     }
-    
+
     let unix_secs = ntp_secs - NTP_EPOCH_OFFSET;
     Ok(unix_secs)
 }
@@ -164,19 +164,19 @@ fn get_ntp_time(server: &str) -> Result<u64, String> {
 fn unix_to_beijing_time(unix_secs: u64) -> (u16, u16, u16, u16, u16, u16, u16) {
     // 转换为北京时间（UTC+8）
     let beijing_secs = unix_secs + 8 * 3600;
-    
+
     // 计算年月日时分秒
     let days_since_1970 = beijing_secs / 86400;
     let time_of_day = beijing_secs % 86400;
-    
+
     let hour = (time_of_day / 3600) as u16;
     let minute = ((time_of_day % 3600) / 60) as u16;
     let second = (time_of_day % 60) as u16;
-    
+
     // 计算日期（简化算法）
     let mut year: i32 = 1970;
     let mut remaining_days = days_since_1970 as i32;
-    
+
     loop {
         let days_in_year = if is_leap_year(year) { 366 } else { 365 };
         if remaining_days < days_in_year {
@@ -185,13 +185,13 @@ fn unix_to_beijing_time(unix_secs: u64) -> (u16, u16, u16, u16, u16, u16, u16) {
         remaining_days -= days_in_year;
         year += 1;
     }
-    
+
     let days_in_months: [i32; 12] = if is_leap_year(year) {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
         [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
-    
+
     let mut month: i32 = 1;
     for days in days_in_months.iter() {
         if remaining_days < *days {
@@ -200,13 +200,21 @@ fn unix_to_beijing_time(unix_secs: u64) -> (u16, u16, u16, u16, u16, u16, u16) {
         remaining_days -= *days;
         month += 1;
     }
-    
+
     let day = remaining_days + 1;
-    
+
     // 计算星期几（0 = 周日）
     let day_of_week = ((days_since_1970 + 4) % 7) as u16; // 1970-01-01是周四
-    
-    (year as u16, month as u16, day as u16, hour, minute, second, day_of_week)
+
+    (
+        year as u16,
+        month as u16,
+        day as u16,
+        hour,
+        minute,
+        second,
+        day_of_week,
+    )
 }
 
 fn is_leap_year(year: i32) -> bool {
@@ -215,9 +223,17 @@ fn is_leap_year(year: i32) -> bool {
 
 /// 设置系统时间（Windows）
 #[cfg(windows)]
-fn set_system_time(year: u16, month: u16, day: u16, hour: u16, minute: u16, second: u16, day_of_week: u16) -> Result<(), String> {
+fn set_system_time(
+    year: u16,
+    month: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    day_of_week: u16,
+) -> Result<(), String> {
     use windows::Win32::System::SystemInformation::SetLocalTime;
-    
+
     // 使用SetLocalTime设置本地时间（北京时间）
     let st = SYSTEMTIME {
         wYear: year,
@@ -229,17 +245,24 @@ fn set_system_time(year: u16, month: u16, day: u16, hour: u16, minute: u16, seco
         wSecond: second,
         wMilliseconds: 0,
     };
-    
+
     unsafe {
-        SetLocalTime(&st)
-            .map_err(|e| tr!("设置系统时间失败: {}", e))?;
+        SetLocalTime(&st).map_err(|e| tr!("设置系统时间失败: {}", e))?;
     }
 
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn set_system_time(_year: u16, _month: u16, _day: u16, _hour: u16, _minute: u16, _second: u16, _day_of_week: u16) -> Result<(), String> {
+fn set_system_time(
+    _year: u16,
+    _month: u16,
+    _day: u16,
+    _hour: u16,
+    _minute: u16,
+    _second: u16,
+    _day_of_week: u16,
+) -> Result<(), String> {
     Err(tr!("仅支持Windows系统"))
 }
 
@@ -247,9 +270,9 @@ fn set_system_time(_year: u16, _month: u16, _day: u16, _hour: u16, _minute: u16,
 #[cfg(windows)]
 fn get_local_time_string() -> String {
     use windows::Win32::System::SystemInformation::GetLocalTime;
-    
+
     let st = unsafe { GetLocalTime() };
-    
+
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
@@ -264,25 +287,25 @@ fn get_local_time_string() -> String {
 /// 同步系统时间到北京时间
 pub fn sync_time_to_beijing() -> TimeSyncResult {
     let old_time = get_local_time_string();
-    
+
     // 尝试从多个NTP服务器获取时间
     let mut last_error = String::new();
-    
+
     for server in NTP_SERVERS {
         log::info!("正在尝试NTP服务器: {}", server);
-        
+
         match get_ntp_time(server) {
             Ok(unix_secs) => {
-                let (year, month, day, hour, minute, second, day_of_week) = 
+                let (year, month, day, hour, minute, second, day_of_week) =
                     unix_to_beijing_time(unix_secs);
-                
+
                 let new_time_str = format!(
                     "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
                     year, month, day, hour, minute, second
                 );
-                
+
                 log::info!("从 {} 获取到时间: {}", server, new_time_str);
-                
+
                 // 设置系统时间
                 match set_system_time(year, month, day, hour, minute, second, day_of_week) {
                     Ok(_) => {
@@ -311,7 +334,7 @@ pub fn sync_time_to_beijing() -> TimeSyncResult {
             }
         }
     }
-    
+
     TimeSyncResult {
         success: false,
         message: tr!("无法连接到任何NTP服务器。最后错误: {}", last_error),

@@ -16,7 +16,7 @@ use crate::core::dism_cmd::DismCmd;
 use crate::core::driver::DriverManager;
 use crate::core::system_utils;
 use crate::tr;
-use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZX, WIM_COMPRESS_LZMS};
+use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZMS, WIM_COMPRESS_LZX};
 use lr_core::wimlib::WimlibManager;
 use lr_core::WimEngineManager;
 
@@ -75,7 +75,11 @@ impl Dism {
         index: u32,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!("[Dism] 使用 wimlib 应用镜像: {} -> {}", image_file, apply_dir);
+        log::info!(
+            "[Dism] 使用 wimlib 应用镜像: {} -> {}",
+            image_file,
+            apply_dir
+        );
 
         let wim_manager = WimEngineManager::new_current()
             .map_err(|e| anyhow::anyhow!("{}", tr!("镜像引擎初始化失败: {}", e)))?;
@@ -123,7 +127,11 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!("[Dism] 使用 wimlib 捕获镜像: {} -> {}", capture_dir, image_file);
+        log::info!(
+            "[Dism] 使用 wimlib 捕获镜像: {} -> {}",
+            capture_dir,
+            image_file
+        );
 
         let wim_manager = WimEngineManager::new_current()
             .map_err(|e| anyhow::anyhow!("{}", tr!("镜像引擎初始化失败: {}", e)))?;
@@ -174,7 +182,11 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!("[Dism] 使用 wimlib 追加镜像: {} -> {}", capture_dir, image_file);
+        log::info!(
+            "[Dism] 使用 wimlib 追加镜像: {} -> {}",
+            capture_dir,
+            image_file
+        );
 
         // 对于追加操作，WimManager 的 capture_image 在文件存在时会自动追加
         self.capture_image(image_file, capture_dir, name, description, progress_tx)
@@ -190,7 +202,11 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!("[Dism] 捕获 ESD 镜像(LZMS): {} -> {}", capture_dir, image_file);
+        log::info!(
+            "[Dism] 捕获 ESD 镜像(LZMS): {} -> {}",
+            capture_dir,
+            image_file
+        );
 
         let wim_manager = WimEngineManager::new_current()
             .map_err(|e| anyhow::anyhow!("{}", tr!("镜像引擎初始化失败: {}", e)))?;
@@ -253,7 +269,9 @@ impl Dism {
     ) -> Result<()> {
         log::info!(
             "[Dism] 捕获 SWM 分卷: {} -> {} (分卷 {}MB)",
-            capture_dir, image_file, split_size_mb
+            capture_dir,
+            image_file,
+            split_size_mb
         );
 
         // 临时 WIM 与最终 .swm 同目录
@@ -345,7 +363,11 @@ impl Dism {
         match crate::core::dismapi::DismApi::load() {
             Ok(api) => match api.export_drivers_online(Path::new(destination), None) {
                 Ok(count) => {
-                    log::info!("[Dism] DismExportDriver(在线) 成功导出 {} 个驱动 -> {}", count, destination);
+                    log::info!(
+                        "[Dism] DismExportDriver(在线) 成功导出 {} 个驱动 -> {}",
+                        count,
+                        destination
+                    );
                     return Ok(());
                 }
                 Err(e) => {
@@ -358,7 +380,10 @@ impl Dism {
         }
 
         // 回退：SetupAPI 枚举 + 手工复制 DriverStore
-        log::info!("[Dism] 使用 Windows API(SetupAPI) 导出驱动到: {}", destination);
+        log::info!(
+            "[Dism] 使用 Windows API(SetupAPI) 导出驱动到: {}",
+            destination
+        );
         let manager = DriverManager::new()
             .map_err(|e| anyhow::anyhow!("{}", tr!("驱动管理器初始化失败: {}", e)))?;
         let count = manager.export_drivers(Path::new(destination), true)?;
@@ -368,7 +393,11 @@ impl Dism {
 
     /// 从指定系统分区导出驱动 (PE/正常环境均可)
     /// 优先 DISM API(DismExportDriver)，失败回退手工遍历 DriverStore
-    pub fn export_drivers_from_system(&self, system_partition: &str, destination: &str) -> Result<()> {
+    pub fn export_drivers_from_system(
+        &self,
+        system_partition: &str,
+        destination: &str,
+    ) -> Result<()> {
         std::fs::create_dir_all(destination)?;
 
         // 判断目标是否就是“当前运行系统”：非 PE 且盘符等于 %SystemDrive% → 用在线映像，
@@ -382,15 +411,23 @@ impl Dism {
             .ok()
             .and_then(|s| s.trim().chars().next())
             .map(|c| c.to_ascii_uppercase());
-        let is_online_target = !self.is_pe && target_drive.is_some() && target_drive == system_drive;
+        let is_online_target =
+            !self.is_pe && target_drive.is_some() && target_drive == system_drive;
 
         match crate::core::dismapi::DismApi::load() {
             Ok(api) => {
                 let result = if is_online_target {
-                    log::info!("[Dism] DismExportDriver: 目标为当前运行系统，使用在线映像导出 -> {}", destination);
+                    log::info!(
+                        "[Dism] DismExportDriver: 目标为当前运行系统，使用在线映像导出 -> {}",
+                        destination
+                    );
                     api.export_drivers_online(Path::new(destination), None)
                 } else {
-                    log::info!("[Dism] DismExportDriver: 离线映像 {} -> {}", system_partition, destination);
+                    log::info!(
+                        "[Dism] DismExportDriver: 离线映像 {} -> {}",
+                        system_partition,
+                        destination
+                    );
                     api.export_drivers_offline(
                         Path::new(system_partition),
                         Path::new(destination),
@@ -413,13 +450,15 @@ impl Dism {
         }
 
         // 回退：手工遍历 FileRepository
-        log::info!("[Dism] 使用 Windows API 从 {} 导出驱动到: {}", system_partition, destination);
+        log::info!(
+            "[Dism] 使用 Windows API 从 {} 导出驱动到: {}",
+            system_partition,
+            destination
+        );
         let manager = DriverManager::new()
             .map_err(|e| anyhow::anyhow!("{}", tr!("驱动管理器初始化失败: {}", e)))?;
-        let count = manager.export_drivers_from_system(
-            Path::new(system_partition),
-            Path::new(destination),
-        )?;
+        let count = manager
+            .export_drivers_from_system(Path::new(system_partition), Path::new(destination))?;
         log::info!("[Dism] 成功导出 {} 个驱动", count);
         Ok(())
     }
@@ -438,7 +477,10 @@ impl Dism {
     /// 使用 Windows API (newdev.dll/setupapi.dll)
     pub fn add_drivers_online(&self, driver_path: &str) -> Result<()> {
         if self.is_pe {
-            anyhow::bail!("{}", tr!("PE环境下无法使用在线方式添加驱动，请使用 add_drivers_offline"));
+            anyhow::bail!(
+                "{}",
+                tr!("PE环境下无法使用在线方式添加驱动，请使用 add_drivers_offline")
+            );
         }
 
         log::info!("[Dism] 使用 Windows API 导入驱动: {}", driver_path);
@@ -453,7 +495,9 @@ impl Dism {
 
         log::info!(
             "[Dism] 驱动导入完成: 成功 {}, 失败 {}, 需要重启: {}",
-            success, fail, need_reboot
+            success,
+            fail,
+            need_reboot
         );
 
         if fail > 0 && success == 0 {
@@ -463,22 +507,22 @@ impl Dism {
     }
 
     /// 导入驱动到离线系统 (PE和正常环境都可用)
-    /// 
+    ///
     /// 使用 dism.exe 命令行进行离线驱动注入：
     /// - 支持普通驱动（.inf 文件）
     /// - 支持 CAB 包（Windows 更新）
-    /// 
+    ///
     /// 优先使用 {程序目录}\bin\Dism\dism.exe
     pub fn add_drivers_offline(&self, image_path: &str, driver_path: &str) -> Result<()> {
         log::info!("[Dism] 离线导入驱动: {} -> {}", driver_path, image_path);
 
         // 规范化路径：移除尾部的反斜杠
         let image_path_clean = image_path.trim_end_matches('\\').trim_end_matches('/');
-        
+
         // 使用 dism.exe 命令行进行离线驱动注入
         // 这将使用 DISM 的 /Add-Driver 和 /Add-Package 功能
         log::info!("[Dism] 使用 dism.exe 命令行进行离线驱动注入...");
-        
+
         let dism_cmd = DismCmd::new()
             .map_err(|e| anyhow::anyhow!("{}", tr!("DISM 命令行初始化失败: {}", e)))?;
 
@@ -493,7 +537,7 @@ impl Dism {
 
                 // 尝试回退到 DriverManager（仅当 DISM 完全失败时）
                 log::info!("[Dism] 尝试使用备用方法（DriverManager）...");
-                
+
                 let manager = DriverManager::new()
                     .map_err(|e| anyhow::anyhow!("{}", tr!("驱动管理器初始化失败: {}", e)))?;
 
@@ -503,10 +547,7 @@ impl Dism {
                     Path::new(driver_path),
                 )?;
 
-                log::info!(
-                    "[Dism] 备用方法完成: 成功 {}, 失败 {}",
-                    success, fail
-                );
+                log::info!("[Dism] 备用方法完成: 成功 {}, 失败 {}", success, fail);
 
                 if fail > 0 && success == 0 {
                     anyhow::bail!("{}", tr!("所有驱动导入失败"));
@@ -532,16 +573,19 @@ impl Dism {
                 match wim_manager.get_image_info(image_file) {
                     Ok(images) => {
                         log::info!("[Dism] 从 wimlib 成功获取 {} 个镜像信息", images.len());
-                        return Ok(images.into_iter().map(|img| ImageInfo {
-                            index: img.index,
-                            name: img.name,
-                            size_bytes: img.size_bytes,
-                            installation_type: img.installation_type,
-                            major_version: img.major_version,
-                            minor_version: img.minor_version,
-                            image_type: img.image_type,
-                            verified_installable: img.verified_installable,
-                        }).collect());
+                        return Ok(images
+                            .into_iter()
+                            .map(|img| ImageInfo {
+                                index: img.index,
+                                name: img.name,
+                                size_bytes: img.size_bytes,
+                                installation_type: img.installation_type,
+                                major_version: img.major_version,
+                                minor_version: img.minor_version,
+                                image_type: img.image_type,
+                                verified_installable: img.verified_installable,
+                            })
+                            .collect());
                     }
                     Err(e) => {
                         log::warn!("[Dism] wimlib 获取镜像信息失败: {}", e);
@@ -549,7 +593,10 @@ impl Dism {
                 }
             }
             Err(e) => {
-                log::warn!("[Dism] wimlib (libwim-15.dll) 加载失败: {} (PE 环境会自动释放内置 DLL)", e);
+                log::warn!(
+                    "[Dism] wimlib (libwim-15.dll) 加载失败: {} (PE 环境会自动释放内置 DLL)",
+                    e
+                );
             }
         }
 
@@ -565,7 +612,10 @@ impl Dism {
                 }
             }
             Err(e) => {
-                log::warn!("[Dism] WIM XML 直接解析失败: {} (ESD 文件的元数据是压缩的，需要 wimlib)", e);
+                log::warn!(
+                    "[Dism] WIM XML 直接解析失败: {} (ESD 文件的元数据是压缩的，需要 wimlib)",
+                    e
+                );
             }
         }
 
@@ -698,9 +748,7 @@ impl Dism {
                 let index: u32 = index_str.parse().unwrap_or(0);
                 if let Some(image_end) = xml[abs_start..].find("</IMAGE>") {
                     if index == target_index {
-                        return Some(
-                            xml[abs_start..abs_start + image_end + 8].to_string(),
-                        );
+                        return Some(xml[abs_start..abs_start + image_end + 8].to_string());
                     }
                     pos = abs_start + image_end + 8;
                 } else {
@@ -728,7 +776,7 @@ impl Dism {
 
         let len = (data.len() - start) / 2;
         let mut utf16_data = Vec::with_capacity(len);
-        
+
         for i in 0..len {
             let offset = start + i * 2;
             if offset + 1 < data.len() {
@@ -748,13 +796,12 @@ impl Dism {
 
     /// 解析 WIM XML 元数据字符串
     fn parse_wim_xml(xml: &str) -> Result<Vec<ImageInfo>> {
-        
         let mut images = Vec::new();
 
         let mut pos = 0;
         while let Some(start) = xml[pos..].find("<IMAGE INDEX=\"") {
             let abs_start = pos + start;
-            
+
             let index_start = abs_start + 14;
             if let Some(index_end) = xml[index_start..].find('"') {
                 let index_str = &xml[index_start..index_start + index_end];
@@ -762,19 +809,19 @@ impl Dism {
 
                 if let Some(image_end) = xml[abs_start..].find("</IMAGE>") {
                     let image_block = &xml[abs_start..abs_start + image_end + 8];
-                    
+
                     // 优先使用 DISPLAYNAME，其次使用 NAME，最后使用默认名称
                     let name = Self::extract_xml_tag(image_block, "DISPLAYNAME")
                         .or_else(|| Self::extract_xml_tag(image_block, "NAME"))
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| tr!("镜像 {}", index));
-                    
+
                     let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
-                    
-                    let installation_type = Self::extract_xml_tag(image_block, "INSTALLATIONTYPE")
-                        .unwrap_or_default();
+
+                    let installation_type =
+                        Self::extract_xml_tag(image_block, "INSTALLATIONTYPE").unwrap_or_default();
 
                     // 提取版本信息 - 先尝试从 VERSION 块中获取，然后直接从 IMAGE 块获取
                     let major_version = Self::extract_xml_tag(image_block, "VERSION")
@@ -789,7 +836,10 @@ impl Dism {
 
                     // 确定镜像类型
                     let image_type = Self::determine_image_type_from_info(
-                        &name, &installation_type, major_version, size_bytes
+                        &name,
+                        &installation_type,
+                        major_version,
+                        size_bytes,
                     );
 
                     if index > 0 {
@@ -826,44 +876,47 @@ impl Dism {
         name: &str,
         installation_type: &str,
         major_version: Option<u16>,
-        size_bytes: u64
+        size_bytes: u64,
     ) -> lr_core::image_meta::WimImageType {
         use lr_core::image_meta::WimImageType;
-        
+
         let name_lower = name.to_lowercase();
         let install_type_lower = installation_type.to_lowercase();
-        
+
         // 检测 PE 环境
-        if install_type_lower == "windowspe" 
+        if install_type_lower == "windowspe"
             || name_lower.contains("windows pe")
             || name_lower.contains("winpe")
-            || name_lower.contains("windows setup") {
+            || name_lower.contains("windows setup")
+        {
             return WimImageType::WindowsPE;
         }
-        
+
         // 检测标准安装镜像
-        if !installation_type.is_empty() 
-            && major_version.is_some() 
-            && (install_type_lower == "client" || install_type_lower == "server") {
+        if !installation_type.is_empty()
+            && major_version.is_some()
+            && (install_type_lower == "client" || install_type_lower == "server")
+        {
             return WimImageType::StandardInstall;
         }
-        
+
         // 检测整盘备份型
         if installation_type.is_empty() && size_bytes > 1_000_000_000 {
             return WimImageType::FullBackup;
         }
-        
-        if name_lower.contains("backup") 
+
+        if name_lower.contains("backup")
             || name_lower.contains("备份")
             || name_lower.contains("ghost")
-            || name_lower.contains("clone") {
+            || name_lower.contains("clone")
+        {
             return WimImageType::FullBackup;
         }
-        
+
         if major_version.is_some() && installation_type.is_empty() {
             return WimImageType::FullBackup;
         }
-        
+
         WimImageType::Unknown
     }
 
@@ -871,7 +924,7 @@ impl Dism {
     fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
         let open_tag = format!("<{}>", tag);
         let close_tag = format!("</{}>", tag);
-        
+
         if let Some(start) = xml.find(&open_tag) {
             let content_start = start + open_tag.len();
             if let Some(end) = xml[content_start..].find(&close_tag) {
@@ -890,7 +943,7 @@ impl Dism {
     /// 使用 advapi32.dll 的 RegLoadKey API 读取离线注册表
     pub fn get_offline_system_info(&self, image_path: &str) -> Result<String> {
         let info = system_utils::get_offline_system_info(image_path)?;
-        
+
         let result = format!(
             "产品名称: {}\n版本: {}\n构建: {}\n版本ID: {}\n安装类型: {}",
             info.product_name,

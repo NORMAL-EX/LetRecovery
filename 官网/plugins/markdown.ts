@@ -8,6 +8,7 @@ import { transformerMetaHighlight } from '@shikijs/transformers'
 import { slugify } from '../src/lib/slugify'
 
 type Heading = { level: number; title: string; slug: string }
+type MdToken = ReturnType<MarkdownIt['parse']>[number]
 
 // 容器无显式标题时的默认标题，按文档语言（路径含 /docs/en/ 则英文）取用。
 const DEFAULT_TITLES: Record<'zh' | 'en', Record<string, string>> = {
@@ -47,9 +48,8 @@ async function getMd(): Promise<MarkdownIt> {
           transformerMetaHighlight(),
           {
             name: 'cosspress-lang-attr',
-            pre(node: any) {
-              node.properties['data-lang'] =
-                (this as any).options?.lang ?? 'text'
+            pre(node) {
+              node.properties['data-lang'] = this.options.lang ?? 'text'
             },
           },
         ],
@@ -93,7 +93,7 @@ async function getMd(): Promise<MarkdownIt> {
 
     for (const type of ['tip', 'success', 'info', 'warning', 'danger'] as const) {
       md.use(container, type, {
-        render(tokens: any[], idx: number) {
+        render(tokens: MdToken[], idx: number) {
           const token = tokens[idx]
           if (token.nesting === 1) {
             const info = token.info.trim().slice(type.length).trim()
@@ -108,7 +108,7 @@ async function getMd(): Promise<MarkdownIt> {
     }
 
     md.use(container, 'details', {
-      render(tokens: any[], idx: number) {
+      render(tokens: MdToken[], idx: number) {
         const token = tokens[idx]
         if (token.nesting === 1) {
           const info = token.info.trim().slice('details'.length).trim()
@@ -125,8 +125,6 @@ async function getMd(): Promise<MarkdownIt> {
   })()
   return mdPromise
 }
-
-type MdToken = ReturnType<MarkdownIt['parse']>[number]
 
 /** Plain text of a heading's inline tokens — text + inline code only, matching
  * what markdown-it-anchor uses, so links/images/bold don't leak markup. */

@@ -1,9 +1,9 @@
+use super::common::get_message_color;
+use crate::app::App;
+use crate::tr;
 use egui;
 use std::collections::HashSet;
 use std::sync::mpsc;
-use crate::tr;
-use crate::app::App;
-use super::common::get_message_color;
 
 impl App {
     // ==================== 批量格式化对话框 ====================
@@ -63,12 +63,17 @@ impl App {
                         .max_height(250.0)
                         .show(ui, |ui| {
                             for partition in &self.batch_format_partitions.clone() {
-                                let mut selected = self.batch_format_selected.contains(&partition.letter);
-                                
+                                let mut selected =
+                                    self.batch_format_selected.contains(&partition.letter);
+
                                 let display_text = tr!(
                                     "{} [{}] - {} ({} GB / {} GB 可用)",
                                     partition.letter,
-                                    if partition.label.is_empty() { "无标签" } else { &partition.label },
+                                    if partition.label.is_empty() {
+                                        "无标签"
+                                    } else {
+                                        &partition.label
+                                    },
                                     partition.file_system,
                                     format!("{:.1}", partition.total_size_mb as f64 / 1024.0),
                                     format!("{:.1}", partition.free_size_mb as f64 / 1024.0),
@@ -103,7 +108,10 @@ impl App {
                             && !self.batch_format_partitions_loading;
 
                         if ui
-                            .add_enabled(can_format, egui::Button::new(tr!("应用（格式化选中分区）")))
+                            .add_enabled(
+                                can_format,
+                                egui::Button::new(tr!("应用（格式化选中分区）")),
+                            )
                             .clicked()
                         {
                             // 显示确认对话框
@@ -163,7 +171,8 @@ impl App {
         self.batch_format_rx = Some(rx);
 
         std::thread::spawn(move || {
-            let result = super::super::batch_format::batch_format_partitions(&selected, "新加卷", "NTFS");
+            let result =
+                super::super::batch_format::batch_format_partitions(&selected, "新加卷", "NTFS");
             let _ = tx.send(result);
         });
     }

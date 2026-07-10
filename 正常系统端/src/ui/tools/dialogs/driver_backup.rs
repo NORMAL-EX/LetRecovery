@@ -1,9 +1,9 @@
-use egui;
-use std::sync::mpsc;
-use crate::tr;
-use crate::app::App;
 use super::super::types::DriverBackupMode;
 use super::common::{format_partition_display, get_message_color};
+use crate::app::App;
+use crate::tr;
+use egui;
+use std::sync::mpsc;
 
 impl App {
     /// 渲染驱动备份还原对话框
@@ -26,8 +26,16 @@ impl App {
                 // 模式选择
                 ui.horizontal(|ui| {
                     ui.label(tr!("操作模式:"));
-                    ui.radio_value(&mut self.driver_backup_mode, DriverBackupMode::Export, tr!("导出驱动"));
-                    ui.radio_value(&mut self.driver_backup_mode, DriverBackupMode::Import, tr!("导入驱动"));
+                    ui.radio_value(
+                        &mut self.driver_backup_mode,
+                        DriverBackupMode::Export,
+                        tr!("导出驱动"),
+                    );
+                    ui.radio_value(
+                        &mut self.driver_backup_mode,
+                        DriverBackupMode::Import,
+                        tr!("导入驱动"),
+                    );
                 });
 
                 ui.add_space(10.0);
@@ -47,7 +55,9 @@ impl App {
                                 let current_text = self
                                     .driver_backup_target
                                     .as_ref()
-                                    .map(|letter| format_partition_display(&windows_partitions, letter))
+                                    .map(|letter| {
+                                        format_partition_display(&windows_partitions, letter)
+                                    })
                                     .unwrap_or_else(|| tr!("请选择"));
 
                                 egui::ComboBox::from_id_salt("driver_backup_source")
@@ -78,7 +88,8 @@ impl App {
                                 );
                                 if ui.button(tr!("浏览...")).clicked() {
                                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                        self.driver_backup_path = path.to_string_lossy().to_string();
+                                        self.driver_backup_path =
+                                            path.to_string_lossy().to_string();
                                     }
                                 }
                             });
@@ -90,7 +101,9 @@ impl App {
                                 let current_text = self
                                     .driver_backup_target
                                     .as_ref()
-                                    .map(|letter| format_partition_display(&windows_partitions, letter))
+                                    .map(|letter| {
+                                        format_partition_display(&windows_partitions, letter)
+                                    })
                                     .unwrap_or_else(|| tr!("请选择"));
 
                                 egui::ComboBox::from_id_salt("driver_import_target")
@@ -121,7 +134,8 @@ impl App {
                                 );
                                 if ui.button(tr!("浏览...")).clicked() {
                                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                        self.driver_backup_path = path.to_string_lossy().to_string();
+                                        self.driver_backup_path =
+                                            path.to_string_lossy().to_string();
                                     }
                                 }
                             });
@@ -200,14 +214,12 @@ impl App {
 
         std::thread::spawn(move || {
             let dism = crate::core::dism::Dism::new();
-            
+
             let result = match mode {
-                DriverBackupMode::Export => {
-                    match dism.export_drivers_from_system(&target, &path) {
-                        Ok(_) => Ok(tr!("驱动导出成功: {} -> {}", target, path)),
-                        Err(e) => Err(tr!("驱动导出失败: {}", e)),
-                    }
-                }
+                DriverBackupMode::Export => match dism.export_drivers_from_system(&target, &path) {
+                    Ok(_) => Ok(tr!("驱动导出成功: {} -> {}", target, path)),
+                    Err(e) => Err(tr!("驱动导出失败: {}", e)),
+                },
                 DriverBackupMode::Import => {
                     // 检查驱动目录是否存在
                     if !std::path::Path::new(&path).exists() {
@@ -220,7 +232,7 @@ impl App {
                     }
                 }
             };
-            
+
             let _ = tx.send(result);
         });
     }

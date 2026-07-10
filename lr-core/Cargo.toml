@@ -2,6 +2,9 @@
 name = "lr-core"
 version = "2026.2.6"
 edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 authors = ["NORMAL-EX"]
 description = "LetRecovery 两端共享的核心库（逐步收纳重复模块）"
 
@@ -12,6 +15,8 @@ anyhow = "1"
 encoding_rs = "0.8"
 roxmltree = "0.20"
 sha2 = "0.10"
+md-5 = "0.10"
+url = "2"
 walkdir = "2"
 serde = { version = "1", features = ["derive"] }
 

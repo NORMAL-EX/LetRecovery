@@ -426,7 +426,10 @@ impl DismCmd {
         );
 
         if success_count == 0 && !cab_files.is_empty() {
-            bail!("{}", tr!("所有 CAB 包添加失败: {}", format!("{:?}", failed_packages)));
+            bail!(
+                "{}",
+                tr!("所有 CAB 包添加失败: {}", format!("{:?}", failed_packages))
+            );
         }
 
         Ok(())
@@ -688,7 +691,14 @@ impl DismCmd {
                     Self::send_progress(&progress_tx, 100, &tr!("{}完成", operation_name));
                     Ok(())
                 } else {
-                    bail!("{}", tr!("{}失败，退出代码: {}", operation_name, format!("{:?}", status.code())))
+                    bail!(
+                        "{}",
+                        tr!(
+                            "{}失败，退出代码: {}",
+                            operation_name,
+                            format!("{:?}", status.code())
+                        )
+                    )
                 }
             }
             Err(e) => Err(e),
@@ -893,7 +903,10 @@ impl DismCmd {
 impl Default for DismCmd {
     fn default() -> Self {
         Self::new().unwrap_or_else(|e| {
-            log::error!("[DismCmd] 初始化 DISM 命令行执行器失败，回退到 PATH 中的 dism.exe: {}", e);
+            log::error!(
+                "[DismCmd] 初始化 DISM 命令行执行器失败，回退到 PATH 中的 dism.exe: {}",
+                e
+            );
             Self {
                 dism_path: PathBuf::from("dism.exe"),
             }
@@ -962,11 +975,11 @@ mod tests {
     fn test_normalize_image_path() {
         assert_eq!(DismCmd::normalize_image_path("D:"), "D:\\");
         assert_eq!(DismCmd::normalize_image_path("D:\\"), "D:\\");
-        assert_eq!(DismCmd::normalize_image_path("D:\\Windows"), "D:\\Windows\\");
         assert_eq!(
-            DismCmd::normalize_image_path("  C:\\Test  "),
-            "C:\\Test\\"
+            DismCmd::normalize_image_path("D:\\Windows"),
+            "D:\\Windows\\"
         );
+        assert_eq!(DismCmd::normalize_image_path("  C:\\Test  "), "C:\\Test\\");
     }
 
     #[test]

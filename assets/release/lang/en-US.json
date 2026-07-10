@@ -1347,6 +1347,16 @@
     "当前固件没有可用的 Windows EFI 引导信任链。": "The current firmware has no usable Windows EFI boot trust chain.",
     "固件已撤销 PCA2011，但无法确认 PCA2023 信任；请完成固件证书更新，或手动选择 PCA2023。": "The firmware has revoked PCA2011, but PCA2023 trust could not be confirmed. Update the firmware certificates or explicitly select PCA2023.",
     "无可用 Windows EFI 信任链": "No usable Windows EFI trust chain",
+    "下载地址不安全或无效: {}": "The download URL is insecure or invalid: {}",
+    "下载文件名不安全或无效: {}": "The download filename is unsafe or invalid: {}",
+    "正在使用 {} 校验文件完整性，请稍候...": "Verifying file integrity with {}. Please wait...",
+    "{} 校验通过，下载完成！": "{} verification passed. Download complete!",
+    "未提供文件校验值，已跳过完整性校验": "No checksum was provided; integrity verification was skipped.",
+    "预期{}: {}": "Expected {}: {}",
+    "实际{}: {}": "Actual {}: {}",
+    "{} 校验出错，已停止使用该文件: {}": "{} verification failed; use of this file was stopped: {}",
+    "无效的格式化参数: {}": "Invalid format parameters: {}",
+    "PE fallback 卷标不安全: {}": "The PE fallback volume label is unsafe: {}",
     "不可用": "Unavailable"
   }
 }

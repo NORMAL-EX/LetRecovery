@@ -1,8 +1,8 @@
+use super::common::get_message_color;
+use crate::app::App;
+use crate::tr;
 use egui;
 use std::sync::mpsc;
-use crate::tr;
-use crate::app::App;
-use super::common::get_message_color;
 
 impl App {
     // ==================== BitLocker 管理对话框 ====================
@@ -426,8 +426,11 @@ impl App {
             }
         };
         self.bitlocker_manage_loading = true;
-        self.bitlocker_manage_message =
-            if suspend { tr!("正在挂起保护...") } else { tr!("正在恢复保护...") };
+        self.bitlocker_manage_message = if suspend {
+            tr!("正在挂起保护...")
+        } else {
+            tr!("正在恢复保护...")
+        };
         let (tx, rx) = mpsc::channel();
         self.bitlocker_manage_protect_rx = Some(rx);
         std::thread::spawn(move || {
@@ -484,7 +487,8 @@ impl App {
                 self.bitlocker_manage_loading = false;
                 self.bitlocker_manage_decrypt_rx = None;
                 if result.success {
-                    self.bitlocker_manage_message = format!("{}: {}", result.letter, result.message);
+                    self.bitlocker_manage_message =
+                        format!("{}: {}", result.letter, result.message);
                     // 刷新列表以更新状态
                     self.start_load_bitlocker_manage_partitions();
                 } else {
