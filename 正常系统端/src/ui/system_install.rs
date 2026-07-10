@@ -1,10 +1,11 @@
 use egui;
 use std::sync::mpsc;
 
-use crate::tr;
 use crate::app::{App, BootModeSelection, UnattendCheckResult};
 use crate::core::disk::{Partition, PartitionStyle};
 use crate::core::dism::ImageInfo;
+use crate::tr;
+use lr_core::boot_pca::BootPcaMode;
 
 /// ISO 挂载结果
 pub enum IsoMountResult {
@@ -32,6 +33,7 @@ impl App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
         let is_pe = self.is_pe_environment();
+        self.update_boot_pca_detection();
         
         // 显示小白模式提示（非PE环境下，且未关闭提示）
         if !is_pe && !self.app_config.easy_mode_tip_dismissed {
@@ -522,6 +524,8 @@ impl App {
             });
         }
 
+        self.show_boot_pca_controls(ui);
+
         // PE选择（仅在需要通过PE安装时显示）
         if show_pe_selector {
             ui.add_space(10.0);
@@ -599,7 +603,9 @@ impl App {
             && !install_blocked
             && (!show_pe_selector || self.selected_pe_for_install.is_some())
             // 选择了自定义无人值守但语法有误 -> 禁用安装
-            && self.custom_unattend_error.is_none();
+            && self.custom_unattend_error.is_none()
+            && !self.boot_pca_detection_loading
+            && self.boot_pca_selection_error().is_none();
 
         ui.horizontal(|ui| {
             if ui
@@ -643,30 +649,318 @@ impl App {
         if self.is_pe_environment() {
             return false;
         }
-        
+
         // 检查目标分区是否是当前系统分区
         if let Some(idx) = self.selected_partition {
             if let Some(partition) = self.partitions.get(idx) {
                 return partition.is_system_partition;
             }
         }
-        
+
         false
     }
 
     /// 根据选择和分区表类型获取实际的引导模式
-    fn get_actual_boot_mode(selection: BootModeSelection, partition_style: PartitionStyle) -> &'static str {
+    fn get_actual_boot_mode(
+        selection: BootModeSelection,
+        partition_style: PartitionStyle,
+    ) -> &'static str {
         match selection {
             BootModeSelection::UEFI => "UEFI",
             BootModeSelection::Legacy => "Legacy",
-            BootModeSelection::Auto => {
-                match partition_style {
-                    PartitionStyle::GPT => "UEFI",
-                    PartitionStyle::MBR => "Legacy",
-                    PartitionStyle::Unknown => "UEFI",
+            BootModeSelection::Auto => match partition_style {
+                PartitionStyle::GPT => "UEFI",
+                PartitionStyle::MBR => "Legacy",
+                PartitionStyle::Unknown => "UEFI",
+            },
+        }
+    }
+
+    fn selected_target_uses_uefi(&self) -> bool {
+        self.selected_partition
+            .and_then(|index| self.partitions.get(index))
+            .map(|partition| {
+                Self::get_actual_boot_mode(self.selected_boot_mode, partition.partition_style)
+                    == "UEFI"
+            })
+            .unwrap_or(false)
+    }
+
+    fn update_boot_pca_detection(&mut self) {
+        if let Some(receiver) = self.boot_pca_detection_rx.take() {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    if result
+                        .target_partition
+                        .eq_ignore_ascii_case(&self.boot_pca_detection_target)
+                    {
+                        match result.existing_esp {
+                            Ok(info) => {
+                                self.boot_pca_existing_esp = Some(info);
+                                self.boot_pca_detection_error = None;
+                            }
+                            Err(error) => {
+                                self.boot_pca_existing_esp = None;
+                                self.boot_pca_detection_error = Some(error);
+                            }
+                        }
+                        self.boot_pca_firmware = Some(result.firmware);
+                        self.boot_pca_detection_loading = false;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.boot_pca_detection_rx = Some(receiver);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.boot_pca_detection_loading = false;
+                    self.boot_pca_existing_esp = None;
+                    self.boot_pca_firmware = None;
+                    self.boot_pca_detection_error = Some(tr!("EFI 引导签名检测任务异常结束"));
                 }
             }
         }
+
+        let target_partition = self
+            .selected_partition
+            .and_then(|index| self.partitions.get(index))
+            .filter(|_| self.repair_boot && self.selected_target_uses_uefi())
+            .map(|partition| partition.letter.clone());
+        let Some(target_partition) = target_partition else {
+            self.boot_pca_detection_target.clear();
+            self.boot_pca_detection_loading = false;
+            self.boot_pca_existing_esp = None;
+            self.boot_pca_detection_error = None;
+            self.boot_pca_firmware = None;
+            self.boot_pca_detection_rx = None;
+            return;
+        };
+
+        if self
+            .boot_pca_detection_target
+            .eq_ignore_ascii_case(&target_partition)
+        {
+            return;
+        }
+
+        self.boot_pca_detection_target = target_partition.clone();
+        self.boot_pca_detection_loading = true;
+        self.boot_pca_existing_esp = None;
+        self.boot_pca_detection_error = None;
+        self.boot_pca_firmware = None;
+        let (sender, receiver) = mpsc::channel();
+        self.boot_pca_detection_rx = Some(receiver);
+        std::thread::spawn(move || {
+            let boot_manager = crate::core::bcdedit::BootManager::new();
+            let existing_esp = boot_manager
+                .inspect_existing_esp_pca(&target_partition)
+                .map_err(|error| error.to_string());
+            let firmware = lr_core::boot_pca::inspect_firmware_pca();
+            let _ = sender.send(crate::app::BootPcaDetectionResult {
+                target_partition,
+                existing_esp,
+                firmware,
+            });
+        });
+    }
+
+    fn show_boot_pca_controls(&mut self, ui: &mut egui::Ui) {
+        if !self.repair_boot || !self.selected_target_uses_uefi() {
+            return;
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tr!("Windows 启动签名:"));
+            ui.selectable_value(
+                &mut self.selected_boot_pca_mode,
+                BootPcaMode::Auto,
+                tr!("自动 (推荐)"),
+            );
+
+            let pca2011_allowed = !self
+                .boot_pca_firmware
+                .as_ref()
+                .is_some_and(Self::firmware_rejects_pca2011);
+            ui.add_enabled_ui(pca2011_allowed, |ui| {
+                ui.selectable_value(
+                    &mut self.selected_boot_pca_mode,
+                    BootPcaMode::Pca2011,
+                    "PCA2011",
+                );
+            });
+
+            let pca2023_allowed = !self
+                .boot_pca_firmware
+                .as_ref()
+                .is_some_and(Self::firmware_rejects_pca2023);
+            ui.add_enabled_ui(pca2023_allowed, |ui| {
+                ui.selectable_value(
+                    &mut self.selected_boot_pca_mode,
+                    BootPcaMode::Pca2023,
+                    "PCA2023",
+                );
+            });
+        });
+
+        if self.boot_pca_detection_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(tr!("正在检测目标磁盘的 EFI 引导签名..."));
+            });
+            return;
+        }
+
+        let existing = self
+            .boot_pca_existing_esp
+            .as_ref()
+            .filter(|info| info.signature_valid)
+            .map(|info| info.generation.to_string())
+            .unwrap_or_else(|| tr!("未检测到"));
+        let firmware = self
+            .boot_pca_firmware
+            .as_ref()
+            .map(Self::format_firmware_pca_status)
+            .unwrap_or_else(|| tr!("未知"));
+        let resolved = self.preview_boot_pca_generation();
+        ui.label(
+            egui::RichText::new(tr!(
+                "固件: {}  |  同盘 ESP: {}  |  将使用: {}",
+                firmware,
+                existing,
+                resolved
+            ))
+            .weak(),
+        );
+
+        let esp_will_be_created_by_script = self.app_config.enable_advanced_options
+            && self.run_diskpart_scripts
+            && self.boot_pca_firmware.is_some()
+            && self.boot_pca_detection_error.is_some();
+        if esp_will_be_created_by_script {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 165, 0),
+                tr!("当前未检测到同盘 ESP；Diskpart 脚本必须在安装前创建 ESP。"),
+            );
+        } else if let Some(error) = self.boot_pca_selection_error() {
+            ui.colored_label(egui::Color32::RED, error);
+        } else if self.selected_boot_pca_mode == BootPcaMode::Pca2023 {
+            ui.colored_label(
+                egui::Color32::from_rgb(30, 144, 255),
+                tr!("将使用目标 Windows 中的 PCA2023 BootEx 文件；安装后会验证 EFI 签名。"),
+            );
+        } else if self.selected_boot_pca_mode == BootPcaMode::Pca2011 {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 165, 0),
+                tr!("兼容仅信任 PCA2011 的旧设备；已撤销 PCA2011 的设备无法使用。"),
+            );
+        }
+    }
+
+    fn format_firmware_pca_status(info: &lr_core::boot_pca::FirmwarePcaInfo) -> String {
+        if info.secure_boot_enabled == Some(false) {
+            return tr!("安全启动关闭");
+        }
+        if Self::firmware_rejects_pca2011(info) && Self::firmware_rejects_pca2023(info) {
+            return tr!("无可用 Windows EFI 信任链");
+        }
+        if Self::firmware_has_unconfirmed_pca2023_after_2011_revocation(info) {
+            return tr!("PCA2011 已撤销，PCA2023 信任未知");
+        }
+        if info.secure_boot_enabled == Some(true) && info.revokes_pca2011 == Some(true) {
+            return tr!("仅 PCA2023 (PCA2011 已撤销)");
+        }
+        match (info.trusts_pca2011, info.trusts_pca2023) {
+            (Some(true), Some(true)) => tr!("支持 PCA2011 / PCA2023"),
+            (Some(true), Some(false)) => tr!("仅支持 PCA2011"),
+            (Some(false), Some(true)) => tr!("仅支持 PCA2023"),
+            _ => tr!("信任链未知"),
+        }
+    }
+
+    fn preview_boot_pca_generation(&self) -> String {
+        match self.selected_boot_pca_mode {
+            BootPcaMode::Pca2011 => "PCA2011".to_string(),
+            BootPcaMode::Pca2023 => "PCA2023".to_string(),
+            BootPcaMode::Auto => {
+                if let Some(firmware) = self.boot_pca_firmware.as_ref() {
+                    if Self::firmware_has_unconfirmed_pca2023_after_2011_revocation(firmware) {
+                        return tr!("不可用");
+                    }
+                    if Self::firmware_rejects_pca2011(firmware)
+                        && Self::firmware_rejects_pca2023(firmware)
+                    {
+                        return tr!("不可用");
+                    }
+                    if Self::firmware_rejects_pca2011(firmware) {
+                        return "PCA2023".to_string();
+                    }
+                }
+                self.boot_pca_existing_esp
+                    .as_ref()
+                    .filter(|info| info.signature_valid)
+                    .map(|info| info.generation.to_string())
+                    .filter(|generation| generation != "Unknown")
+                    .unwrap_or_else(|| tr!("安装后自动判定"))
+            }
+        }
+    }
+
+    fn boot_pca_selection_error(&self) -> Option<String> {
+        if !self.repair_boot || !self.selected_target_uses_uefi() {
+            return None;
+        }
+        if let Some(error) = self.boot_pca_detection_error.as_ref() {
+            let diskpart_may_create_esp =
+                self.app_config.enable_advanced_options
+                    && self.run_diskpart_scripts
+                    && self.boot_pca_firmware.is_some();
+            if !diskpart_may_create_esp {
+                return Some(tr!("目标系统所在磁盘没有可用的 ESP: {}", error));
+            }
+        }
+        let firmware = self.boot_pca_firmware.as_ref()?;
+        if firmware.secure_boot_enabled != Some(true) {
+            return None;
+        }
+        match self.selected_boot_pca_mode {
+            BootPcaMode::Auto
+                if Self::firmware_has_unconfirmed_pca2023_after_2011_revocation(firmware) =>
+            {
+                Some(tr!(
+                    "固件已撤销 PCA2011，但无法确认 PCA2023 信任；请完成固件证书更新，或手动选择 PCA2023。"
+                ))
+            }
+            BootPcaMode::Auto
+                if Self::firmware_rejects_pca2011(firmware)
+                    && Self::firmware_rejects_pca2023(firmware) =>
+            {
+                Some(tr!("当前固件没有可用的 Windows EFI 引导信任链。"))
+            }
+            BootPcaMode::Pca2011 if Self::firmware_rejects_pca2011(firmware) => {
+                Some(tr!("当前固件无法启动 PCA2011，引导签名选择无效。"))
+            }
+            BootPcaMode::Pca2023 if Self::firmware_rejects_pca2023(firmware) => Some(tr!(
+                "当前固件不信任 Windows UEFI CA 2023，引导签名选择无效。"
+            )),
+            _ => None,
+        }
+    }
+
+    fn firmware_rejects_pca2011(info: &lr_core::boot_pca::FirmwarePcaInfo) -> bool {
+        info.secure_boot_enabled == Some(true)
+            && (info.revokes_pca2011 == Some(true) || info.trusts_pca2011 == Some(false))
+    }
+
+    fn firmware_rejects_pca2023(info: &lr_core::boot_pca::FirmwarePcaInfo) -> bool {
+        info.secure_boot_enabled == Some(true) && info.trusts_pca2023 == Some(false)
+    }
+
+    fn firmware_has_unconfirmed_pca2023_after_2011_revocation(
+        info: &lr_core::boot_pca::FirmwarePcaInfo,
+    ) -> bool {
+        info.secure_boot_enabled == Some(true)
+            && info.revokes_pca2011 == Some(true)
+            && info.trusts_pca2023 != Some(true)
     }
 
     pub fn load_image_volumes(&mut self) {
@@ -684,10 +978,13 @@ impl App {
 
     fn start_image_info_loading(&mut self, image_path: &str) {
         let path_lower = image_path.to_lowercase();
-        
-        if path_lower.ends_with(".wim") || path_lower.ends_with(".esd") || path_lower.ends_with(".swm") {
+
+        if path_lower.ends_with(".wim")
+            || path_lower.ends_with(".esd")
+            || path_lower.ends_with(".swm")
+        {
             log::info!("[IMAGE INFO] 开始后台加载镜像信息: {}", image_path);
-            
+
             self.image_info_loading = true;
             self.image_volumes.clear();
             self.selected_volume = None;
@@ -700,7 +997,7 @@ impl App {
 
             std::thread::spawn(move || {
                 log::info!("[IMAGE INFO THREAD] 线程启动，加载: {}", path);
-                
+
                 let dism = crate::core::dism::Dism::new();
                 match dism.get_image_info(&path) {
                     Ok(volumes) => {
@@ -724,7 +1021,7 @@ impl App {
 
     fn start_iso_mount(&mut self) {
         log::info!("[ISO MOUNT] 开始后台挂载 ISO: {}", self.local_image_path);
-        
+
         self.iso_mounting = true;
         self.iso_mount_error = None;
 
@@ -736,17 +1033,26 @@ impl App {
 
         std::thread::spawn(move || {
             log::info!("[ISO MOUNT THREAD] 线程启动，挂载: {}", iso_path);
-            
+
             match crate::core::iso::IsoMounter::mount_iso(&iso_path) {
                 Ok(drive) => {
-                    log::info!("[ISO MOUNT THREAD] 挂载成功，盘符: {}，查找安装镜像...", drive);
+                    log::info!(
+                        "[ISO MOUNT THREAD] 挂载成功，盘符: {}，查找安装镜像...",
+                        drive
+                    );
                     // 使用刚挂载的盘符查找镜像，而不是遍历所有盘符
-                    if let Some(image_path) = crate::core::iso::IsoMounter::find_install_image_in_drive(&drive) {
+                    if let Some(image_path) =
+                        crate::core::iso::IsoMounter::find_install_image_in_drive(&drive)
+                    {
                         log::info!("[ISO MOUNT THREAD] 找到镜像: {}", image_path);
                         let _ = tx.send(IsoMountResult::Success(image_path));
-                    } else if let Some(i386_dir) = crate::core::iso::IsoMounter::xp_i386_dir(&drive) {
+                    } else if let Some(i386_dir) = crate::core::iso::IsoMounter::xp_i386_dir(&drive)
+                    {
                         // 无 \sources\install.wim/esd，但有 \I386(\AMD64) 文本安装结构 → XP/2003 介质
-                        log::info!("[ISO MOUNT THREAD] 识别为 XP/2003 i386 文本安装介质: {}", i386_dir);
+                        log::info!(
+                            "[ISO MOUNT THREAD] 识别为 XP/2003 i386 文本安装介质: {}",
+                            i386_dir
+                        );
                         let _ = tx.send(IsoMountResult::XpI386(i386_dir));
                     } else {
                         log::info!("[ISO MOUNT THREAD] 未找到安装镜像");
@@ -796,7 +1102,10 @@ impl App {
                     IsoMountResult::XpI386(i386_dir) => {
                         // XP/2003 i386 文本安装介质：无 WIM 可枚举，参照 GHO 的处理方式——
                         // 不加载分卷信息，合成单一可安装项（selected_volume=Some(0)）。
-                        log::info!("[ISO MOUNT] 识别为 XP/2003 i386 介质，i386 源: {}", i386_dir);
+                        log::info!(
+                            "[ISO MOUNT] 识别为 XP/2003 i386 介质，i386 源: {}",
+                            i386_dir
+                        );
                         self.local_image_path = i386_dir.clone();
                         self.xp_i386_source = Some(i386_dir);
                         self.iso_mount_error = None;
@@ -847,14 +1156,18 @@ impl App {
 
                             // 根据预设的 install_volume_index 找到对应的分卷索引
                             let target_volume_index = self.install_volume_index;
-                            self.selected_volume = self.image_volumes
+                            self.selected_volume = self
+                                .image_volumes
                                 .iter()
                                 .enumerate()
                                 .find(|(_, vol)| vol.index == target_volume_index)
                                 .map(|(i, _)| i);
 
                             if self.selected_volume.is_some() {
-                                log::info!("[EASY MODE] 找到目标分卷 {}，开始安装", target_volume_index);
+                                log::info!(
+                                    "[EASY MODE] 找到目标分卷 {}，开始安装",
+                                    target_volume_index
+                                );
 
                                 // 重置标志
                                 self.easy_mode_pending_auto_start = false;
@@ -862,13 +1175,20 @@ impl App {
                                 // 开始安装
                                 self.start_installation();
                             } else {
-                                log::error!("[EASY MODE] 未找到目标分卷 {}，自动安装失败", target_volume_index);
+                                log::error!(
+                                    "[EASY MODE] 未找到目标分卷 {}，自动安装失败",
+                                    target_volume_index
+                                );
                                 self.easy_mode_pending_auto_start = false;
-                                self.show_error(&tr!("未找到目标分卷 {}，请手动选择", target_volume_index));
+                                self.show_error(&tr!(
+                                    "未找到目标分卷 {}，请手动选择",
+                                    target_volume_index
+                                ));
                             }
                         } else {
                             // 普通模式：自动选择第一个可安装的系统镜像
-                            self.selected_volume = self.image_volumes
+                            self.selected_volume = self
+                                .image_volumes
                                 .iter()
                                 .enumerate()
                                 .find(|(_, vol)| Self::is_installable_image(vol))
@@ -876,7 +1196,9 @@ impl App {
 
                             if self.selected_volume.is_none() && !self.image_volumes.is_empty() {
                                 // 如果没有可用的系统版本，仍然设为 None
-                                log::warn!("镜像中没有可安装的系统版本（全部为 PE 环境或安装媒体）");
+                                log::warn!(
+                                    "镜像中没有可安装的系统版本（全部为 PE 环境或安装媒体）"
+                                );
                             }
                         }
                     }
@@ -893,19 +1215,19 @@ impl App {
     }
 
     /// 判断镜像是否为可安装的系统镜像
-    /// 
+    ///
     /// 使用新的 image_type 字段进行快速判断，同时保留传统的关键词检测作为后备
-    /// 
+    ///
     /// 可安装的类型：
     /// - StandardInstall: 标准Windows安装镜像
     /// - FullBackup: 整盘备份镜像 (包含完整Windows目录结构)
     /// - Unknown: 未知类型但满足基本条件
-    /// 
+    ///
     /// 排除的类型：
     /// - WindowsPE: PE环境镜像
     fn is_installable_image(vol: &ImageInfo) -> bool {
         use lr_core::image_meta::WimImageType;
-        
+
         // 1. 优先使用 image_type 字段判断
         match vol.image_type {
             WimImageType::StandardInstall => return true,
@@ -915,29 +1237,24 @@ impl App {
                 // 继续使用传统检测方法
             }
         }
-        
+
         let name_lower = vol.name.to_lowercase();
         let install_type_lower = vol.installation_type.to_lowercase();
-        
+
         // 2. 排除 installation_type 为 WindowsPE 的
         if install_type_lower == "windowspe" {
             return false;
         }
-        
+
         // 3. 排除名称包含特定关键词的（PE环境、安装程序、安装媒体）
-        let excluded_keywords = [
-            "windows pe",
-            "windows setup",
-            "setup media",
-            "winpe",
-        ];
-        
+        let excluded_keywords = ["windows pe", "windows setup", "setup media", "winpe"];
+
         for keyword in &excluded_keywords {
             if name_lower.contains(keyword) {
                 return false;
             }
         }
-        
+
         // 4. 如果 installation_type 为空，进行额外检查
         // 整盘备份型WIM通常缺失 INSTALLATIONTYPE / DISPLAYNAME
         // 这时如果能拿到版本号（MAJOR/MINOR），就认为它是可安装系统镜像
@@ -947,7 +1264,7 @@ impl App {
             }
 
             // 名称包含系统版本标识（Windows 10/11/Server 等）或备份标识
-            let is_valid_system = name_lower.contains("windows 10") 
+            let is_valid_system = name_lower.contains("windows 10")
                 || name_lower.contains("windows 11")
                 || name_lower.contains("windows server")
                 || name_lower.contains("windows 8")
@@ -955,18 +1272,18 @@ impl App {
                 || name_lower.contains("backup")
                 || name_lower.contains("备份")
                 || name_lower.contains("系统镜像")
-                || name_lower.contains("镜像");  // 默认生成的名称
-            
+                || name_lower.contains("镜像"); // 默认生成的名称
+
             if !is_valid_system {
                 return false;
             }
         }
-        
+
         // 5. 如果 installation_type 明确是 Client 或 Server，直接通过
         if install_type_lower == "client" || install_type_lower == "server" {
             return true;
         }
-        
+
         // 6. 其他情况（installation_type 为空但名称包含有效系统标识），通过
         true
     }
@@ -991,14 +1308,15 @@ impl App {
         if target_id != self.storage_driver_default_target {
             self.storage_driver_default_target = target_id;
             self.advanced_options.import_storage_controller_drivers = is_win10_or_11;
-            
+
             // 只在变化时打印日志
             if let Some(idx) = self.selected_volume {
                 if let Some(vol) = self.image_volumes.get(idx) {
                     if let Some(v) = vol.major_version {
                         log::info!(
                             "[STORAGE DRIVER] 镜像版本: major_version={}, is_win10_or_11={}",
-                            v, is_win10_or_11
+                            v,
+                            is_win10_or_11
                         );
                     } else {
                         log::info!("[STORAGE DRIVER] 未检测到版本信息，不自动勾选磁盘控制器驱动");
@@ -1030,19 +1348,24 @@ impl App {
     pub fn refresh_partitions(&mut self) {
         if let Ok(partitions) = crate::core::disk::DiskManager::get_partitions() {
             self.partitions = partitions;
-            
+
             // 判断是否为PE环境
-            let is_pe = self.system_info.as_ref().map(|s| s.is_pe_environment).unwrap_or(false);
-            
+            let is_pe = self
+                .system_info
+                .as_ref()
+                .map(|s| s.is_pe_environment)
+                .unwrap_or(false);
+
             if is_pe {
                 // PE环境下，统计有系统的分区
-                let windows_partitions: Vec<usize> = self.partitions
+                let windows_partitions: Vec<usize> = self
+                    .partitions
                     .iter()
                     .enumerate()
                     .filter(|(_, p)| p.has_windows)
                     .map(|(i, _)| i)
                     .collect();
-                
+
                 if windows_partitions.len() == 1 {
                     // 只有一个系统分区，默认选择它
                     self.selected_partition = Some(windows_partitions[0]);
@@ -1055,10 +1378,8 @@ impl App {
                 }
             } else {
                 // 非PE环境，选择当前系统分区
-                self.selected_partition = self
-                    .partitions
-                    .iter()
-                    .position(|p| p.is_system_partition);
+                self.selected_partition =
+                    self.partitions.iter().position(|p| p.is_system_partition);
                 // 触发无人值守检测
                 if let Some(idx) = self.selected_partition {
                     self.start_unattend_check_for_partition(idx);
@@ -1071,14 +1392,14 @@ impl App {
     /// 返回需要解锁的分区列表
     fn check_bitlocker_for_install(&self) -> Vec<crate::ui::tools::BitLockerPartition> {
         use crate::core::bitlocker::BitLockerManager;
-        
+
         let manager = BitLockerManager::new();
         if !manager.is_available() {
             return Vec::new();
         }
-        
+
         let mut locked_partitions = Vec::new();
-        
+
         // 检查目标安装分区
         if let Some(idx) = self.selected_partition {
             if let Some(partition) = self.partitions.get(idx) {
@@ -1096,19 +1417,22 @@ impl App {
                 }
             }
         }
-        
+
         // 检查所有可能用于存储数据的分区（非系统分区、非PE分区）
         for partition in &self.partitions {
             // 跳过已经添加的分区
-            if locked_partitions.iter().any(|p| p.letter == partition.letter) {
+            if locked_partitions
+                .iter()
+                .any(|p| p.letter == partition.letter)
+            {
                 continue;
             }
-            
+
             // 跳过X:盘（PE系统盘）
             if partition.letter.to_uppercase().starts_with('X') {
                 continue;
             }
-            
+
             let letter = partition.letter.chars().next().unwrap_or('C');
             if manager.needs_unlock(letter) {
                 let status = manager.get_status(letter);
@@ -1122,7 +1446,7 @@ impl App {
                 });
             }
         }
-        
+
         locked_partitions
     }
 
@@ -1160,7 +1484,10 @@ impl App {
 
         if !target_encrypted {
             // 目标盘未加密：无需任何 BitLocker 处理（数据盘若加密，由密钥注入一并处理）。
-            log::info!("[BITLOCKER] 目标盘 {} 未加密，无需预解密，正常继续", target_drive);
+            log::info!(
+                "[BITLOCKER] 目标盘 {} 未加密，无需预解密，正常继续",
+                target_drive
+            );
             self.decrypting_partitions.clear();
             return false;
         }
@@ -1177,7 +1504,8 @@ impl App {
             Err(e) => {
                 log::warn!(
                     "[BITLOCKER] 获取目标盘 {} 恢复密钥失败（{}）→ 回退彻底解密 BitLocker 方案",
-                    target_drive, e
+                    target_drive,
+                    e
                 );
                 // 落入下方预解密流程
             }
@@ -1199,23 +1527,37 @@ impl App {
 
             // 情况1: 已加密且已解锁 -> 发送解密指令并等待
             if current_status == crate::core::bitlocker::VolumeStatus::EncryptedUnlocked {
-                log::info!("[BITLOCKER] 检测到已解锁的加密分区 {}，正在尝试彻底解密...", drive_str);
+                log::info!(
+                    "[BITLOCKER] 检测到已解锁的加密分区 {}，正在尝试彻底解密...",
+                    drive_str
+                );
 
                 let result = manager.decrypt(&drive_str);
 
                 if result.success {
-                    log::info!("[BITLOCKER] 分区 {} 解密指令已发送: {}", drive_str, result.message);
+                    log::info!(
+                        "[BITLOCKER] 分区 {} 解密指令已发送: {}",
+                        drive_str,
+                        result.message
+                    );
                     self.decrypting_partitions.push(drive_str);
                     decryption_started = true;
                 } else {
-                    log::error!("[BITLOCKER] 分区 {} 解密失败: {} (Code: {:?})",
-                        drive_str, result.message, result.error_code);
+                    log::error!(
+                        "[BITLOCKER] 分区 {} 解密失败: {} (Code: {:?})",
+                        drive_str,
+                        result.message,
+                        result.error_code
+                    );
                     // 即使失败，如果是因为已经在解密中，也应该等待
                 }
             }
             // 情况2: 正在解密中 -> 直接加入等待列表
             else if current_status == crate::core::bitlocker::VolumeStatus::Decrypting {
-                log::info!("[BITLOCKER] 分区 {} 已经在解密过程中，加入等待列表", drive_str);
+                log::info!(
+                    "[BITLOCKER] 分区 {} 已经在解密过程中，加入等待列表",
+                    drive_str
+                );
                 self.decrypting_partitions.push(drive_str);
                 decryption_started = true;
             }
@@ -1232,10 +1574,7 @@ impl App {
                 return;
             }
         };
-        let partition = self
-            .partitions
-            .get(selected_index)
-            .cloned();
+        let partition = self.partitions.get(selected_index).cloned();
         if partition.is_none() {
             return;
         }
@@ -1259,10 +1598,10 @@ impl App {
                 return;
             }
             if !self.is_pe_environment() && partition.is_system_partition {
-                self.show_error(
-                    &tr!("从 XP i386 介质安装不支持在运行中的系统上原地安装到当前系统盘。\n\
-                     请先重启进入 PE 环境，再选择目标分区进行安装。"),
-                );
+                self.show_error(&tr!(
+                    "从 XP i386 介质安装不支持在运行中的系统上原地安装到当前系统盘。\n\
+                     请先重启进入 PE 环境，再选择目标分区进行安装。"
+                ));
                 return;
             }
         }
@@ -1270,9 +1609,15 @@ impl App {
         // 1. 检查是否有需要解锁的 BitLocker 分区 (优先级最高)
         let locked_partitions = self.check_bitlocker_for_install();
         if !locked_partitions.is_empty() {
-            log::info!("[INSTALL] 检测到 {} 个BitLocker锁定的分区，需要先解锁", locked_partitions.len());
+            log::info!(
+                "[INSTALL] 检测到 {} 个BitLocker锁定的分区，需要先解锁",
+                locked_partitions.len()
+            );
             self.install_bitlocker_partitions = locked_partitions;
-            self.install_bitlocker_current = self.install_bitlocker_partitions.first().map(|p| p.letter.clone());
+            self.install_bitlocker_current = self
+                .install_bitlocker_partitions
+                .first()
+                .map(|p| p.letter.clone());
             self.install_bitlocker_message.clear();
             self.install_bitlocker_password.clear();
             self.install_bitlocker_recovery_key.clear();
@@ -1286,13 +1631,13 @@ impl App {
         // 如果有分区正在解密或开始解密，进入解密等待流程
         if self.initiate_bitlocker_decryption() {
             log::info!("[INSTALL] 检测到 BitLocker 分区需要解密，进入解密等待流程");
-            
+
             self.bitlocker_decryption_needed = true;
-            
+
             // 初始化安装状态，但步骤设为 0 (解密阶段)
             self.initialize_install_state(&partition, self.local_image_path.clone());
             self.install_step = 0; // 0 表示预处理/解密阶段
-            
+
             return;
         }
 
@@ -1300,9 +1645,13 @@ impl App {
         self.bitlocker_decryption_needed = false;
         self.continue_installation_after_bitlocker();
     }
-    
+
     /// 初始化安装状态变量
-    fn initialize_install_state(&mut self, partition: &crate::core::disk::Partition, image_path: String) {
+    fn initialize_install_state(
+        &mut self,
+        partition: &crate::core::disk::Partition,
+        image_path: String,
+    ) {
         let volume_index = self
             .selected_volume
             .and_then(|i| self.image_volumes.get(i).map(|v| v.index))
@@ -1328,15 +1677,20 @@ impl App {
                 .unwrap_or(false);
         // 即使用户没打开过高级面板，也在发起安装时按「检测到 XP」应用一次默认勾选
         // （注入USB3/NVMe）。已应用过则尊重用户手动取消，不覆盖。
-        self.advanced_options.apply_xp_defaults_if_needed(selected_is_xp);
+        self.advanced_options
+            .apply_xp_defaults_if_needed(selected_is_xp);
 
         self.install_options = crate::app::InstallOptions {
             format_partition: self.format_partition,
             repair_boot: self.repair_boot,
             unattended_install: self.unattended_install,
-            export_drivers: matches!(self.driver_action, crate::app::DriverAction::SaveOnly | crate::app::DriverAction::AutoImport),
+            export_drivers: matches!(
+                self.driver_action,
+                crate::app::DriverAction::SaveOnly | crate::app::DriverAction::AutoImport
+            ),
             auto_reboot: self.auto_reboot,
             boot_mode: self.selected_boot_mode,
+            boot_pca_mode: self.selected_boot_pca_mode,
             advanced_options: self.advanced_options.clone(),
             driver_action: self.driver_action,
             custom_unattend_path: if self.unattended_install {
@@ -1362,19 +1716,19 @@ impl App {
         self.install_image_path = image_path;
         self.install_volume_index = volume_index;
         self.install_is_system_partition = is_system_partition;
-        
+
         // 创建进度通道
         let (tx, rx) = std::sync::mpsc::channel();
         self.install_progress_rx = Some(rx);
-        
+
         // 如果有正在解密的分区，启动监控线程
         if !self.decrypting_partitions.is_empty() {
             log::info!("[INSTALL] 启动 BitLocker 解密监控线程...");
             let partitions = self.decrypting_partitions.clone();
-            
+
             std::thread::spawn(move || {
                 let manager = crate::core::bitlocker::BitLockerManager::new();
-                
+
                 loop {
                     let mut all_decrypted = true;
                     let mut waiting_list = Vec::new();
@@ -1405,11 +1759,15 @@ impl App {
                         break;
                     } else {
                         // 将加密百分比转换为解密进度（100% - 加密百分比）
-                        let decryption_progress = (100.0 - max_percentage).max(0.0).min(100.0) as u8;
+                        let decryption_progress =
+                            (100.0 - max_percentage).max(0.0).min(100.0) as u8;
 
                         let _ = tx.send(crate::core::dism::DismProgress {
                             percentage: decryption_progress,
-                            status: format!("DECRYPTING:{}", tr!("正在解密: {}", waiting_list.join(", "))),
+                            status: format!(
+                                "DECRYPTING:{}",
+                                tr!("正在解密: {}", waiting_list.join(", "))
+                            ),
                         });
                     }
 
@@ -1428,10 +1786,7 @@ impl App {
                 return;
             }
         };
-        let partition = self
-            .partitions
-            .get(selected_index)
-            .cloned();
+        let partition = self.partitions.get(selected_index).cloned();
         if partition.is_none() {
             return;
         }
@@ -1454,9 +1809,11 @@ impl App {
         // 如果需要通过PE安装，检查PE是否存在
         if self.install_mode == crate::app::InstallMode::ViaPE {
             let pe_info = self.selected_pe_for_install.and_then(|idx| {
-                self.config.as_ref().and_then(|c| c.pe_list.get(idx).cloned())
+                self.config
+                    .as_ref()
+                    .and_then(|c| c.pe_list.get(idx).cloned())
             });
-            
+
             if let Some(pe) = pe_info {
                 let (pe_exists, _) = crate::core::pe::PeManager::check_pe_exists(&pe.filename);
                 if !pe_exists {
@@ -1470,7 +1827,7 @@ impl App {
                     self.download_save_path = pe_dir;
                     self.pe_download_then_action = Some(crate::app::PeDownloadThenAction::Install);
                     self.current_panel = crate::app::Panel::DownloadProgress;
-                    
+
                     // 因为转到了下载页面，需要重置 is_installing
                     self.is_installing = false;
                     return;
@@ -1483,19 +1840,19 @@ impl App {
         // 但我们需要区分 "解密等待中(step=0)" 和 "刚初始化准备开始(step=0)"
         // 为了区分，我们将 install_step 设为 1 表示准备好开始安装了 (对于 Direct 模式)
         // 或者保持 0，但在 UI update 中判断 decrypting_partitions 是否为空
-        
+
         // 这里的 install_step = 0 会触发 show_install_progress 里的启动线程逻辑
         // 我们只需确保 decrypting_partitions 为空，这样 UI 就不会卡在解密界面
         self.install_step = 0;
     }
-    
+
     /// 开始异步检测分区中的无人值守配置文件
     fn start_unattend_check_for_partition(&mut self, partition_index: usize) {
         let partition = match self.partitions.get(partition_index) {
             Some(p) => p,
             None => return,
         };
-        
+
         // 如果分区没有 Windows 系统，不需要检测
         if !partition.has_windows {
             self.partition_has_unattend = false;
@@ -1504,34 +1861,37 @@ impl App {
             self.unattended_install = true;
             return;
         }
-        
+
         // 避免重复检测同一分区
         let partition_id = partition.letter.clone();
         if self.last_unattend_check_partition.as_ref() == Some(&partition_id) {
             return;
         }
-        
-        log::info!("[UNATTEND CHECK] 开始检测分区 {} 的无人值守配置", partition_id);
-        
+
+        log::info!(
+            "[UNATTEND CHECK] 开始检测分区 {} 的无人值守配置",
+            partition_id
+        );
+
         self.unattend_check_loading = true;
         self.last_unattend_check_partition = Some(partition_id.clone());
-        
+
         let (tx, rx) = mpsc::channel::<UnattendCheckResult>();
 
         *UNATTEND_CHECK_RESULT_RX.lock().unwrap() = Some(rx);
 
         let partition_letter = partition_id;
-        
+
         std::thread::spawn(move || {
             let result = Self::check_unattend_files_in_partition(&partition_letter);
             let _ = tx.send(result);
         });
     }
-    
+
     /// 检查分区中的无人值守配置文件（在后台线程执行）
     fn check_unattend_files_in_partition(partition_letter: &str) -> UnattendCheckResult {
         use std::path::Path;
-        
+
         // 常见的无人值守配置文件位置
         let unattend_locations = [
             // Windows 安装后的位置
@@ -1540,9 +1900,18 @@ impl App {
             format!("{}\\Windows\\Panther\\autounattend.xml", partition_letter),
             format!("{}\\Windows\\Panther\\Autounattend.xml", partition_letter),
             // Sysprep 位置
-            format!("{}\\Windows\\System32\\Sysprep\\unattend.xml", partition_letter),
-            format!("{}\\Windows\\System32\\Sysprep\\Unattend.xml", partition_letter),
-            format!("{}\\Windows\\System32\\Sysprep\\Panther\\unattend.xml", partition_letter),
+            format!(
+                "{}\\Windows\\System32\\Sysprep\\unattend.xml",
+                partition_letter
+            ),
+            format!(
+                "{}\\Windows\\System32\\Sysprep\\Unattend.xml",
+                partition_letter
+            ),
+            format!(
+                "{}\\Windows\\System32\\Sysprep\\Panther\\unattend.xml",
+                partition_letter
+            ),
             // 根目录位置（安装媒体）
             format!("{}\\unattend.xml", partition_letter),
             format!("{}\\Unattend.xml", partition_letter),
@@ -1550,38 +1919,44 @@ impl App {
             format!("{}\\Autounattend.xml", partition_letter),
             format!("{}\\AutoUnattend.xml", partition_letter),
         ];
-        
+
         let mut detected_paths = Vec::new();
-        
+
         for location in &unattend_locations {
             if Path::new(location).exists() {
                 log::info!("[UNATTEND CHECK] 发现无人值守配置: {}", location);
                 detected_paths.push(location.clone());
             }
         }
-        
+
         let has_unattend = !detected_paths.is_empty();
-        
+
         if has_unattend {
-            log::info!("[UNATTEND CHECK] 分区 {} 存在 {} 个无人值守配置文件",
-                partition_letter, detected_paths.len());
+            log::info!(
+                "[UNATTEND CHECK] 分区 {} 存在 {} 个无人值守配置文件",
+                partition_letter,
+                detected_paths.len()
+            );
         } else {
-            log::info!("[UNATTEND CHECK] 分区 {} 无无人值守配置文件", partition_letter);
+            log::info!(
+                "[UNATTEND CHECK] 分区 {} 无无人值守配置文件",
+                partition_letter
+            );
         }
-        
+
         UnattendCheckResult {
             partition_letter: partition_letter.to_string(),
             has_unattend,
             detected_paths,
         }
     }
-    
+
     /// 检查无人值守检测状态
     fn check_unattend_status(&mut self) {
         if !self.unattend_check_loading {
             return;
         }
-        
+
         // 同上：只在 try_recv 期间短暂持锁，取出结果后释放 guard 再处理（下方会调用
         // self.apply_unattend_default 等方法）。
         let received = {
@@ -1602,7 +1977,8 @@ impl App {
             self.unattend_check_loading = false;
 
             // 确保结果对应当前选中的分区
-            let current_partition = self.selected_partition
+            let current_partition = self
+                .selected_partition
                 .and_then(|idx| self.partitions.get(idx))
                 .map(|p| p.letter.clone());
 
@@ -1613,7 +1989,7 @@ impl App {
             }
         }
     }
-    
+
     /// 根据「目标分区」与「源镜像」是否自带无人值守，决定勾选框默认值。
     /// 任一存在即默认取消勾选；都不存在则默认勾选。仅改默认，不禁用——
     /// 分区冲突的禁用由 is_unattend_option_disabled 单独处理。
@@ -1622,7 +1998,8 @@ impl App {
             self.unattended_install = false;
             log::info!(
                 "[UNATTEND CHECK] 检测到自带无人值守(分区={}, 源镜像={})，默认取消勾选",
-                self.partition_has_unattend, self.source_has_unattend
+                self.partition_has_unattend,
+                self.source_has_unattend
             );
         } else {
             self.unattended_install = true;
@@ -1723,7 +2100,13 @@ impl App {
         if base.is_empty() {
             return false;
         }
-        for name in ["autounattend.xml", "Autounattend.xml", "AutoUnattend.xml", "unattend.xml", "Unattend.xml"] {
+        for name in [
+            "autounattend.xml",
+            "Autounattend.xml",
+            "AutoUnattend.xml",
+            "unattend.xml",
+            "Unattend.xml",
+        ] {
             if Path::new(&format!("{}\\{}", base.trim_end_matches('\\'), name)).exists() {
                 log::info!("[UNATTEND CHECK] 源介质根/镜像目录自带 {}", name);
                 return true;
@@ -1736,7 +2119,7 @@ impl App {
     pub fn is_unattend_option_disabled(&self) -> bool {
         self.partition_has_unattend && !self.format_partition
     }
-    
+
     /// 获取依赖无人值守的高级选项提示
     pub fn get_unattend_dependent_options_hint(&self) -> &'static str {
         "以下选项依赖无人值守配置：\n\
@@ -1747,6 +2130,9 @@ impl App {
     }
 }
 
-static ISO_MOUNT_RESULT_RX: std::sync::Mutex<Option<mpsc::Receiver<IsoMountResult>>> = std::sync::Mutex::new(None);
-static IMAGE_INFO_RESULT_RX: std::sync::Mutex<Option<mpsc::Receiver<ImageInfoResult>>> = std::sync::Mutex::new(None);
-static UNATTEND_CHECK_RESULT_RX: std::sync::Mutex<Option<mpsc::Receiver<UnattendCheckResult>>> = std::sync::Mutex::new(None);
+static ISO_MOUNT_RESULT_RX: std::sync::Mutex<Option<mpsc::Receiver<IsoMountResult>>> =
+    std::sync::Mutex::new(None);
+static IMAGE_INFO_RESULT_RX: std::sync::Mutex<Option<mpsc::Receiver<ImageInfoResult>>> =
+    std::sync::Mutex::new(None);
+static UNATTEND_CHECK_RESULT_RX: std::sync::Mutex<Option<mpsc::Receiver<UnattendCheckResult>>> =
+    std::sync::Mutex::new(None);

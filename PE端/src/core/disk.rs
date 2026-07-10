@@ -325,7 +325,10 @@ impl DiskManager {
 
     /// 获取指定磁盘的分区表类型
     fn get_disk_partition_style(disk_number: u32) -> PartitionStyle {
-        let script = format!("select disk {}\ndetail disk", disk_number);
+        // `detail disk` does not consistently print the words GPT/MBR across
+        // DiskPart versions and languages. `uniqueid disk` is stable: GPT uses
+        // a GUID and MBR uses an eight-digit hexadecimal disk signature.
+        let script = format!("select disk {}\nuniqueid disk", disk_number);
         let temp_dir = Self::reliable_temp_dir();
         let script_path = temp_dir.join("dp_disk_style.txt");
 
@@ -354,15 +357,30 @@ impl DiskManager {
         };
 
         let _ = std::fs::remove_file(&script_path);
-        let stdout = gbk_to_utf8(&output.stdout).to_uppercase();
+        Self::partition_style_from_unique_id_output(&gbk_to_utf8(&output.stdout))
+    }
 
-        if stdout.contains("GPT") {
-            PartitionStyle::GPT
-        } else if stdout.contains("MBR") {
-            PartitionStyle::MBR
-        } else {
-            PartitionStyle::Unknown
+    fn partition_style_from_unique_id_output(output: &str) -> PartitionStyle {
+        for raw in output.split_whitespace() {
+            let value = raw.trim_matches(|character: char| {
+                matches!(character, '{' | '}' | ':' | ',' | ';')
+            });
+            if value.len() == 36
+                && value
+                    .chars()
+                    .enumerate()
+                    .all(|(index, character)| match index {
+                        8 | 13 | 18 | 23 => character == '-',
+                        _ => character.is_ascii_hexdigit(),
+                    })
+            {
+                return PartitionStyle::GPT;
+            }
+            if value.len() == 8 && value.chars().all(|character| character.is_ascii_hexdigit()) {
+                return PartitionStyle::MBR;
+            }
         }
+        PartitionStyle::Unknown
     }
 
     /// 格式化指定分区
@@ -517,6 +535,46 @@ impl DiskManager {
         }
 
         false
+    }
+
+    /// Resolve the install boot mode against the selected target disk.
+    ///
+    /// Auto must follow the target partition table rather than the way WinPE
+    /// itself was booted. The PE firmware mode is only a last-resort fallback
+    /// when DiskPart cannot identify the target disk layout.
+    pub fn resolve_install_uefi_mode(boot_mode: u8, target_partition: &str) -> bool {
+        match boot_mode {
+            1 => true,
+            2 => false,
+            _ => {
+                let detail = Self::get_partition_style(target_partition);
+                match detail.style {
+                    PartitionStyle::GPT => {
+                        log::info!(
+                            "[BOOT] 自动模式：目标分区 {} 位于 GPT 磁盘，使用 UEFI",
+                            target_partition
+                        );
+                        true
+                    }
+                    PartitionStyle::MBR => {
+                        log::info!(
+                            "[BOOT] 自动模式：目标分区 {} 位于 MBR 磁盘，使用 Legacy",
+                            target_partition
+                        );
+                        false
+                    }
+                    PartitionStyle::Unknown => {
+                        let fallback = Self::detect_uefi_mode();
+                        log::warn!(
+                            "[BOOT] 无法识别目标分区 {} 的分区表，回退当前 PE 固件模式: {}",
+                            target_partition,
+                            if fallback { "UEFI" } else { "Legacy" }
+                        );
+                        fallback
+                    }
+                }
+            }
+        }
     }
 
     fn read_auto_marker_source(letter: char) -> Option<char> {
@@ -1038,5 +1096,28 @@ impl DiskManager {
             anyhow::bail!("{}", tr!("diskpart 报告成功，但分区大小未增加（{} MB）。可能没有相邻未分配空间。", new_mb));
         }
         Ok(tr!("分区 {}: 已从 {} MB 扩大到 {} MB", letter, current_mb, new_mb))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DiskManager, PartitionStyle};
+
+    #[test]
+    fn parses_diskpart_unique_ids_without_depending_on_language() {
+        assert_eq!(
+            DiskManager::partition_style_from_unique_id_output(
+                "Disk ID: {01234567-89AB-CDEF-0123-456789ABCDEF}"
+            ),
+            PartitionStyle::GPT
+        );
+        assert_eq!(
+            DiskManager::partition_style_from_unique_id_output("磁盘 ID: 89ABCDEF"),
+            PartitionStyle::MBR
+        );
+        assert_eq!(
+            DiskManager::partition_style_from_unique_id_output("DiskPart failed"),
+            PartitionStyle::Unknown
+        );
     }
 }

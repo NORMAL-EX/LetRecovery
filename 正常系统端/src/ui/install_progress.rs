@@ -637,7 +637,11 @@ impl App {
                         boot_manager.write_xp_boot(&target_partition)
                     }
                 } else {
-                    boot_manager.repair_boot_advanced(&target_partition, use_uefi)
+                    boot_manager.repair_boot_advanced(
+                        &target_partition,
+                        use_uefi,
+                        options.boot_pca_mode,
+                    )
                 };
                 match boot_result {
                     Ok(_) => {
@@ -970,6 +974,8 @@ impl App {
                 xp_inject_usb3_driver: advanced_options.xp_inject_usb3_driver,
                 xp_inject_nvme_driver: advanced_options.xp_inject_nvme_driver,
                 run_diskpart_scripts: options.run_diskpart_scripts,
+                boot_mode: options.boot_mode.as_u8(),
+                boot_pca_mode: options.boot_pca_mode,
             };
             
             match ConfigFileManager::write_install_config(&target_partition, &data_partition, &install_config) {

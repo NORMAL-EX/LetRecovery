@@ -1,7 +1,8 @@
 //! XP 引导写入 + 可编辑修复引导脚本（两端共享）。
 //!
 //! - [`write_xp_boot`]：为已释放的 XP/2003 系统写入引导（ntldr/boot.ini + MBR，仅 Legacy）。
-//! - [`run_repair_script`]：执行用户可编辑的 `bin\repair_boot.txt`，覆盖默认修复引导逻辑。
+//! - [`run_repair_script`]：执行用户可编辑的 `bin\repair_boot.txt`；是否作为前置步骤或
+//!   覆盖默认逻辑由调用方按引导模式决定。
 
 use std::path::Path;
 

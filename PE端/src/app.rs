@@ -520,7 +520,8 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在修复引导...")));
 
     let boot_manager = BootManager::new();
-    let use_uefi = DiskManager::detect_uefi_mode();
+    let use_uefi =
+        DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition);
 
     // XP/2003 写 ntldr 引导；其余走 bcdboot。
     // XP 判定：配置已标记 或 释放后的系统缺少 \Windows\Boot（该目录仅 Vista+ 才有）。
@@ -546,7 +547,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             boot_manager.write_xp_boot(&target_partition)
         }
     } else {
-        boot_manager.repair_boot_advanced(&target_partition, use_uefi)
+        boot_manager.repair_boot_advanced(&target_partition, use_uefi, config.boot_pca_mode)
     };
     if let Err(e) = boot_result {
         let _ = tx.send(WorkerMessage::Failed(tr!("修复引导失败: {}", e)));

@@ -167,7 +167,7 @@ impl AdvancedOptions {
     /// 它通过在 Windows 启动前安装一个最小的 Int10h 处理程序来工作。
     /// 
     /// 参考: https://github.com/manatails/uefiseven
-    pub fn apply_uefiseven_patch(&self, _target_partition: &str) -> anyhow::Result<()> {
+    pub fn apply_uefiseven_patch(&self, target_partition: &str) -> anyhow::Result<()> {
         if !self.win7_uefi_patch {
             log::info!("[UEFISEVEN] Win7 UEFI补丁未启用，跳过");
             return Ok(());
@@ -197,12 +197,14 @@ impl AdvancedOptions {
             return Err(anyhow::anyhow!("UefiSeven bootx64.efi 不存在"));
         }
         
-        // 查找 EFI 系统分区
-        let efi_partition = Self::find_efi_partition()?;
-        log::info!("[UEFISEVEN] 找到 EFI 分区: {}", efi_partition);
-        
-        // 确保 EFI 分区已挂载
-        let efi_mount_point = Self::ensure_efi_mounted(&efi_partition)?;
+        // UefiSeven 必须跟随目标 Windows 所在磁盘，不能改写其它硬盘的 ESP。
+        let boot_manager = crate::core::bcdedit::BootManager::new();
+        let efi_mount_point = boot_manager
+            .find_esp_on_same_disk(target_partition)
+            .map_err(|error| anyhow::anyhow!("查找目标磁盘 EFI 分区失败: {}", error))?;
+        let _esp_mount_guard =
+            lr_core::boot_pca::TemporaryEspMountGuard::new(&efi_mount_point)
+                .map_err(anyhow::Error::msg)?;
         log::info!("[UEFISEVEN] EFI 分区挂载点: {}", efi_mount_point);
         
         // Microsoft Boot 目录
@@ -254,127 +256,6 @@ log=0
         Ok(())
     }
     
-    /// 查找 EFI 系统分区
-    fn find_efi_partition() -> anyhow::Result<String> {
-        use std::process::Command;
-        
-        // 使用 PowerShell 查找 EFI 分区
-        let output = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                r#"
-                $efiPart = Get-Partition | Where-Object { $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' } | Select-Object -First 1
-                if ($efiPart) {
-                    $efiPart.DiskNumber.ToString() + ':' + $efiPart.PartitionNumber.ToString()
-                }
-                "#
-            ])
-            .output()?;
-        
-        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        
-        if result.is_empty() {
-            return Err(anyhow::anyhow!("未找到 EFI 系统分区"));
-        }
-        
-        Ok(result)
-    }
-    
-    /// 确保 EFI 分区已挂载，返回挂载点
-    fn ensure_efi_mounted(efi_partition: &str) -> anyhow::Result<String> {
-        use std::process::Command;
-        
-        // 解析磁盘号和分区号
-        let parts: Vec<&str> = efi_partition.split(':').collect();
-        if parts.len() != 2 {
-            return Err(anyhow::anyhow!("无效的 EFI 分区标识: {}", efi_partition));
-        }
-        
-        let disk_num = parts[0];
-        let part_num = parts[1];
-        
-        // 检查是否已经有挂载点
-        let check_output = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(r#"
-                $vol = Get-Partition -DiskNumber {} -PartitionNumber {} | Get-Volume -ErrorAction SilentlyContinue
-                if ($vol -and $vol.DriveLetter) {{
-                    $vol.DriveLetter + ':'
-                }}
-                "#, disk_num, part_num)
-            ])
-            .output()?;
-        
-        let existing_mount = String::from_utf8_lossy(&check_output.stdout).trim().to_string();
-        
-        if !existing_mount.is_empty() && existing_mount.len() == 2 {
-            return Ok(existing_mount);
-        }
-        
-        // 查找可用盘符
-        let find_letter = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                r#"
-                $used = (Get-Volume).DriveLetter
-                $available = 90..65 | ForEach-Object { [char]$_ } | Where-Object { $_ -notin $used }
-                if ($available) { $available[0] }
-                "#
-            ])
-            .output()?;
-        
-        let letter = String::from_utf8_lossy(&find_letter.stdout).trim().to_string();
-        
-        if letter.is_empty() {
-            return Err(anyhow::anyhow!("没有可用的盘符"));
-        }
-        
-        // 使用 mountvol 挂载 EFI 分区
-        let mount_result = Command::new("cmd")
-            .args([
-                "/c",
-                &format!("mountvol {}:\\ /s", letter)
-            ])
-            .output();
-        
-        match mount_result {
-            Ok(output) if output.status.success() => {
-                Ok(format!("{}:", letter))
-            }
-            Ok(output) => {
-                // mountvol /s 可能失败，尝试使用 diskpart
-                let diskpart_script = format!(
-                    "select disk {}\nselect partition {}\nassign letter={}\n",
-                    disk_num, part_num, letter
-                );
-                
-                let temp_script = std::env::temp_dir().join("efi_mount.txt");
-                std::fs::write(&temp_script, &diskpart_script)?;
-                
-                let diskpart_result = Command::new("diskpart")
-                    .args(["/s", &temp_script.to_string_lossy()])
-                    .output();
-                
-                let _ = std::fs::remove_file(&temp_script);
-                
-                match diskpart_result {
-                    Ok(dp_output) if dp_output.status.success() => {
-                        Ok(format!("{}:", letter))
-                    }
-                    _ => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        Err(anyhow::anyhow!("挂载 EFI 分区失败: {}", stderr))
-                    }
-                }
-            }
-            Err(e) => Err(anyhow::anyhow!("执行挂载命令失败: {}", e))
-        }
-    }
-
     /// 应用选项到目标系统
     /// 抓取当前连接的 WiFi（SSID + 含明文密钥的 profile XML），存入瞬态字段。
     /// 在勾选「迁移 WiFi」时调用（须在有 WiFi 连接的正常系统中）。

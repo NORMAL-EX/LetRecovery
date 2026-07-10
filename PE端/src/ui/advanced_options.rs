@@ -1303,7 +1303,7 @@ pub fn get_scripts_dir_name() -> &'static str {
 /// UefiSeven 是一个 EFI 加载器，用于模拟 Int10h 中断，使 Windows 7 能够在 UEFI Class 3 系统上启动。
 /// 
 /// 参考: https://github.com/manatails/uefiseven
-pub fn apply_uefiseven_patch(data_partition: &str, _target_partition: &str) -> anyhow::Result<()> {
+pub fn apply_uefiseven_patch(data_partition: &str, target_partition: &str) -> anyhow::Result<()> {
     use crate::core::bcdedit::BootManager;
     use std::path::Path;
     
@@ -1322,10 +1322,13 @@ pub fn apply_uefiseven_patch(data_partition: &str, _target_partition: &str) -> a
     
     log::info!("[UEFISEVEN] 找到 UefiSeven 文件: {}", uefiseven_efi);
     
-    // 查找并挂载 EFI 分区
+    // 只挂载目标 Windows 所在磁盘的 ESP，不能改写其它硬盘的引导。
     let boot_manager = BootManager::new();
-    let esp_letter = boot_manager.find_and_mount_esp()
-        .map_err(|e| anyhow::anyhow!("查找 EFI 分区失败: {}", e))?;
+    let esp_letter = boot_manager
+        .find_esp_on_same_disk(target_partition)
+        .map_err(|e| anyhow::anyhow!("查找目标磁盘 EFI 分区失败: {}", e))?;
+    let _esp_mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&esp_letter)
+        .map_err(anyhow::Error::msg)?;
     
     log::info!("[UEFISEVEN] EFI 分区: {}", esp_letter);
     

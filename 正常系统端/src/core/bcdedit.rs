@@ -1,10 +1,16 @@
 use anyhow::Result;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::tr;
 use crate::utils::cmd::create_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
+use lr_core::boot_pca::BootPcaMode;
+
+static DISKPART_SCRIPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static ESP_MOUNT_LOCK: Mutex<()> = Mutex::new(());
 
 pub struct BootManager {
     bcdedit_path: String,
@@ -18,6 +24,20 @@ impl BootManager {
             bcdedit_path: bin_dir.join("bcdedit.exe").to_string_lossy().to_string(),
             bcdboot_path: bin_dir.join("bcdboot.exe").to_string_lossy().to_string(),
         }
+    }
+
+    fn run_diskpart_script(script: &str, purpose: &str) -> Result<std::process::Output> {
+        let sequence = DISKPART_SCRIPT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let script_path = std::env::temp_dir().join(format!(
+            "lr_{purpose}_{}_{}.txt",
+            std::process::id(),
+            sequence
+        ));
+        std::fs::write(&script_path, script)?;
+        let script_arg = script_path.to_string_lossy().into_owned();
+        let output = create_command("diskpart").args(["/s", &script_arg]).output();
+        let _ = std::fs::remove_file(&script_path);
+        Ok(output?)
     }
 
     /// 获取当前系统引导 GUID
@@ -44,6 +64,9 @@ impl BootManager {
 
     /// 查找目标 Windows 分区所在磁盘的 ESP 分区
     pub fn find_esp_on_same_disk(&self, windows_partition: &str) -> Result<String> {
+        let _mount_lock = ESP_MOUNT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!("[BOOT] 查找 {} 所在磁盘的 ESP 分区...", windows_partition);
         
         // 提取盘符（去掉冒号）
@@ -54,12 +77,7 @@ impl BootManager {
 detail volume
 "#, drive_letter);
         
-        let script1_path = std::env::temp_dir().join("find_disk.txt");
-        std::fs::write(&script1_path, &script1)?;
-        
-        let output = create_command("diskpart")
-            .args(["/s", &script1_path.to_string_lossy()])
-            .output()?;
+        let output = Self::run_diskpart_script(&script1, "find_disk")?;
         
         let stdout = gbk_to_utf8(&output.stdout);
         log::info!("[BOOT] 查找磁盘号:\n{}", stdout);
@@ -92,12 +110,7 @@ detail volume
 list partition
 "#, disk_num);
         
-        let script2_path = std::env::temp_dir().join("list_part.txt");
-        std::fs::write(&script2_path, &script2)?;
-        
-        let output = create_command("diskpart")
-            .args(["/s", &script2_path.to_string_lossy()])
-            .output()?;
+        let output = Self::run_diskpart_script(&script2, "list_partitions")?;
         
         let stdout = gbk_to_utf8(&output.stdout);
         log::info!("[BOOT] 分区列表:\n{}", stdout);
@@ -129,22 +142,16 @@ list partition
         
         let esp_partition = esp_partition.ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
         
-        // Step 3: 为 ESP 分配盘符
-        // 先尝试移除可能存在的旧盘符
-        let _ = create_command("mountvol").args(["S:", "/d"]).output();
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Step 3: 使用真正空闲的盘符挂载 ESP，不能覆盖用户已有的 S: 等盘符。
+        let mount_letter = lr_core::boot_pca::find_available_drive_letter()
+            .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
         
         let script3 = format!(r#"select disk {}
 select partition {}
-assign letter=S
-"#, disk_num, esp_partition);
+assign letter={}
+"#, disk_num, esp_partition, mount_letter);
         
-        let script3_path = std::env::temp_dir().join("assign_esp.txt");
-        std::fs::write(&script3_path, &script3)?;
-        
-        let output = create_command("diskpart")
-            .args(["/s", &script3_path.to_string_lossy()])
-            .output()?;
+        let output = Self::run_diskpart_script(&script3, "assign_esp")?;
         
         let stdout = gbk_to_utf8(&output.stdout);
         log::info!("[BOOT] 分配 ESP 盘符:\n{}", stdout);
@@ -153,41 +160,61 @@ assign letter=S
         std::thread::sleep(std::time::Duration::from_millis(500));
         
         // 验证
-        if Path::new("S:\\").exists() {
-            log::info!("[BOOT] ESP 已挂载到 S:");
-            Ok("S:".to_string())
+        let mount_root = format!("{}:\\", mount_letter);
+        if Path::new(&mount_root).exists() {
+            let mounted = format!("{}:", mount_letter);
+            log::info!("[BOOT] ESP 已挂载到 {}", mounted);
+            Ok(mounted)
         } else {
+            let _ = lr_core::boot_pca::unmount_esp(&mount_letter.to_string());
             anyhow::bail!("{}", tr!("ESP 盘符分配失败"))
         }
     }
 
+    /// Inspect the existing Windows boot manager on the ESP that belongs to
+    /// `windows_partition`. This is used only as an automatic-selection signal;
+    /// the installer performs a fresh source and firmware check before writing.
+    pub fn inspect_existing_esp_pca(
+        &self,
+        windows_partition: &str,
+    ) -> Result<lr_core::boot_pca::EfiSignatureInfo> {
+        let esp_letter = self.find_esp_on_same_disk(windows_partition)?;
+        let esp_mount = lr_core::boot_pca::TemporaryEspMountGuard::new(&esp_letter)
+            .map_err(anyhow::Error::msg)?;
+        let esp_root = format!("{}\\", esp_mount.letter().trim_end_matches('\\'));
+        let result = lr_core::boot_pca::inspect_esp_generation(Path::new(&esp_root));
+        Ok(result)
+    }
+
     /// 查找并挂载 EFI 系统分区（旧方法，作为备选）
     pub fn find_and_mount_esp(&self) -> Result<String> {
+        let _mount_lock = ESP_MOUNT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!("[BOOT] 查找 EFI 系统分区...");
-        
-        // 方法1: 检查 S: 是否已经是 ESP
-        if Path::new("S:\\EFI").exists() {
-            log::info!("[BOOT] S: 已经是 ESP");
-            return Ok("S:".to_string());
-        }
-        
-        // 方法2: 使用 mountvol /s 挂载 ESP 到 S:
-        log::info!("[BOOT] 尝试使用 mountvol /s 挂载 ESP");
-        let output = create_command("mountvol").args(["S:", "/s"]).output();
+
+        let mount_letter = lr_core::boot_pca::find_available_drive_letter()
+            .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
+        let mounted = format!("{}:", mount_letter);
+        let mount_root = format!("{}\\", mounted);
+
+        // 方法1: 使用 mountvol /s 挂载当前系统 ESP。
+        log::info!("[BOOT] 尝试使用 mountvol /s 挂载 ESP 到 {}", mounted);
+        let output = create_command("mountvol").args([mounted.as_str(), "/s"]).output();
         if output.is_ok() {
             std::thread::sleep(std::time::Duration::from_millis(500));
-            if Path::new("S:\\").exists() {
-                log::info!("[BOOT] ESP 已通过 mountvol 挂载到 S:");
-                return Ok("S:".to_string());
+            if Path::new(&mount_root).exists() {
+                log::info!("[BOOT] ESP 已通过 mountvol 挂载到 {}", mounted);
+                return Ok(mounted);
             }
         }
-        
-        // 方法3: 使用 diskpart 查找所有磁盘的 ESP
-        self.find_esp_with_diskpart()
+
+        // 方法2: 使用 diskpart 查找所有磁盘的 ESP。
+        self.find_esp_with_diskpart(mount_letter)
     }
 
     /// 使用 diskpart 查找任意磁盘上的 ESP
-    fn find_esp_with_diskpart(&self) -> Result<String> {
+    fn find_esp_with_diskpart(&self, mount_letter: char) -> Result<String> {
         log::info!("[BOOT] 使用 diskpart 查找 ESP");
         
         // 遍历磁盘0-3
@@ -218,8 +245,8 @@ list partition
                                     // 找到了，分配盘符
                                     let assign_script = format!(r#"select disk {}
 select partition {}
-assign letter=S
-"#, disk, part_num);
+assign letter={}
+"#, disk, part_num, mount_letter);
                                     
                                     let assign_path = std::env::temp_dir().join("assign_esp2.txt");
                                     std::fs::write(&assign_path, &assign_script)?;
@@ -230,9 +257,10 @@ assign letter=S
                                     
                                     std::thread::sleep(std::time::Duration::from_millis(500));
                                     
-                                    if Path::new("S:\\").exists() {
+                                    let mount_root = format!("{}:\\", mount_letter);
+                                    if Path::new(&mount_root).exists() {
                                         log::info!("[BOOT] 找到 ESP: 磁盘 {} 分区 {}", disk, part_num);
-                                        return Ok("S:".to_string());
+                                        return Ok(format!("{}:", mount_letter));
                                     }
                                 }
                             }
@@ -283,7 +311,7 @@ assign letter=S
 
     /// 修复指定分区的引导（简单版本）
     pub fn repair_boot(&self, windows_partition: &str) -> Result<()> {
-        self.repair_boot_advanced(windows_partition, true)
+        self.repair_boot_advanced(windows_partition, true, BootPcaMode::Auto)
     }
 
     /// Legacy/MBR：在 windows_partition 所在磁盘上确定【引导分区】并挂好盘符（照搬 DSI）。
@@ -422,7 +450,12 @@ assign letter=S
     }
 
     /// 修复指定分区的引导（高级版本，支持指定引导模式）
-    pub fn repair_boot_advanced(&self, windows_partition: &str, use_uefi: bool) -> Result<()> {
+    pub fn repair_boot_advanced(
+        &self,
+        windows_partition: &str,
+        use_uefi: bool,
+        pca_mode: BootPcaMode,
+    ) -> Result<()> {
         let windows_path = format!("{}\\Windows", windows_partition);
         
         log::info!("[BOOT] ========== 修复引导 ==========");
@@ -434,148 +467,81 @@ assign letter=S
             anyhow::bail!("{}", tr!("Windows 目录不存在: {}", windows_path));
         }
 
-        // 用户可编辑的修复引导脚本（bin\repair_boot.txt）——仅在「高级选项」开启时启用，优先于默认逻辑；
-        // 失败则回退默认逻辑。小白默认关闭，避免一份误放的 repair_boot.txt 把引导改坏。
+        let mounted_esp = if use_uefi {
+            log::info!("[BOOT] UEFI 模式：查找目标磁盘 ESP 分区");
+            Some(self.find_esp_on_same_disk(windows_partition).map_err(|error| {
+                anyhow::anyhow!(
+                    "{}",
+                    tr!("目标系统所在磁盘没有可用的 ESP: {}", error)
+                )
+            })?)
+        } else {
+            None
+        };
+        let _esp_mount_guard = mounted_esp
+            .as_deref()
+            .map(lr_core::boot_pca::TemporaryEspMountGuard::new)
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
+        let existing_esp_hint = mounted_esp.as_deref().map(|esp_letter| {
+            let esp_root = format!("{}\\", esp_letter.trim_end_matches('\\'));
+            let info = lr_core::boot_pca::inspect_esp_generation(Path::new(&esp_root));
+            if info.signature_valid {
+                info.generation
+            } else {
+                lr_core::boot_pca::PcaGeneration::Unknown
+            }
+        });
+
+        // 用户可编辑的修复引导脚本（bin\repair_boot.txt）仅在「高级选项」开启时启用。
+        // Legacy 成功后可直接完成；UEFI 命令作为前置步骤，随后仍由内置逻辑按所选 PCA
+        // 重新写入并校验，避免自定义命令绕过 Secure Boot 兼容性检查。
         let allow_custom_repair =
             crate::core::app_config::AppConfig::load().enable_advanced_options;
         let repair_script = get_bin_dir().join("repair_boot.txt");
         if allow_custom_repair && repair_script.exists() {
             log::info!("[BOOT] 检测到自定义修复引导脚本: {}", repair_script.display());
-            let esp = if use_uefi {
-                self.find_esp_on_same_disk(windows_partition)
-                    .or_else(|_| self.find_and_mount_esp())
-                    .ok()
-            } else {
-                None
-            };
             match lr_core::boot::run_repair_script(
                 &repair_script,
                 &get_bin_dir(),
                 windows_partition,
                 use_uefi,
-                esp.as_deref(),
+                mounted_esp.as_deref(),
             ) {
                 Ok(out) => {
                     log::info!("[BOOT] 自定义修复引导脚本执行完成:\n{}", out);
-                    return Ok(());
+                    if !use_uefi {
+                        return Ok(());
+                    }
+                    log::info!("[BOOT PCA] 将继续执行内置 UEFI 写入与签名验证");
                 }
                 Err(e) => log::warn!("[BOOT] 自定义修复引导脚本失败，回退默认逻辑: {}", e),
             }
         }
 
         if use_uefi {
-            // UEFI 模式：需要找到并挂载 ESP 分区
-            log::info!("[BOOT] UEFI 模式：查找 ESP 分区");
-            
-            // 首先尝试在同一磁盘上查找 ESP
-            let esp_result = self.find_esp_on_same_disk(windows_partition)
-                .or_else(|_| self.find_and_mount_esp());
-            
-            match esp_result {
-                Ok(esp_letter) => {
-                    log::info!("[BOOT] ESP 分区: {}", esp_letter);
-                    
-                    // 确保 EFI 目录存在
-                    let efi_ms_dir = format!("{}\\EFI\\Microsoft", esp_letter);
-                    let efi_boot_dir = format!("{}\\EFI\\Boot", esp_letter);
-                    
-                    // 创建必要的目录
-                    let _ = std::fs::create_dir_all(&efi_ms_dir);
-                    let _ = std::fs::create_dir_all(&efi_boot_dir);
-                    
-                    // 使用 bcdboot 写入 UEFI 引导文件
-                    // bcdboot C:\Windows /s S: /f UEFI /l zh-cn
-                    log::info!("[BOOT] 执行: bcdboot {} /s {} /f UEFI /l zh-cn", windows_path, esp_letter);
-                    let output = create_command(&self.bcdboot_path)
-                        .args([
-                            &windows_path,
-                            "/s", &esp_letter,
-                            "/f", "UEFI",
-                            "/l", "zh-cn"
-                        ])
-                        .output()?;
-                    
-                    let stdout = gbk_to_utf8(&output.stdout);
-                    let stderr = gbk_to_utf8(&output.stderr);
-                    
-                    log::info!("[BOOT] bcdboot stdout: {}", stdout);
-                    log::info!("[BOOT] bcdboot stderr: {}", stderr);
+            let esp_letter = mounted_esp
+                .as_deref()
+                .expect("UEFI repair always mounts the target-disk ESP first");
 
-                    if !output.status.success() {
-                        // 尝试使用 ALL 参数（同时创建 UEFI 和 BIOS 引导）
-                        log::info!("[BOOT] 重试：使用 ALL 模式");
-                        let output = create_command(&self.bcdboot_path)
-                            .args([
-                                &windows_path,
-                                "/s", &esp_letter,
-                                "/f", "ALL",
-                                "/l", "zh-cn"
-                            ])
-                            .output()?;
-                        
-                        let stdout = gbk_to_utf8(&output.stdout);
-                        let stderr = gbk_to_utf8(&output.stderr);
-                        log::info!("[BOOT] bcdboot (ALL) stdout: {}", stdout);
-                        log::info!("[BOOT] bcdboot (ALL) stderr: {}", stderr);
+            let firmware = lr_core::boot_pca::inspect_firmware_pca();
+            log::info!("[BOOT PCA] 固件检测: {:?}", firmware);
 
-                        if !output.status.success() {
-                            // 最后尝试不指定 /f 参数
-                            log::info!("[BOOT] 重试：不指定引导类型");
-                            let output = create_command(&self.bcdboot_path)
-                                .args([
-                                    &windows_path,
-                                    "/s", &esp_letter,
-                                    "/l", "zh-cn"
-                                ])
-                                .output()?;
-                            
-                            let stderr = gbk_to_utf8(&output.stderr);
-                            if !output.status.success() {
-                                anyhow::bail!("{}", tr!("UEFI 引导修复失败: {}", stderr));
-                            }
-                        }
-                    }
-                    
-                    // 验证引导文件是否创建成功
-                    let bootmgfw = format!("{}\\EFI\\Microsoft\\Boot\\bootmgfw.efi", esp_letter);
-                    let bootx64 = format!("{}\\EFI\\Boot\\bootx64.efi", esp_letter);
-                    
-                    if Path::new(&bootmgfw).exists() {
-                        log::info!("[BOOT] 引导文件已创建: {}", bootmgfw);
-                    } else {
-                        log::warn!("[BOOT] 警告: 未找到 bootmgfw.efi");
-                    }
-                    
-                    if Path::new(&bootx64).exists() {
-                        log::info!("[BOOT] 引导文件已创建: {}", bootx64);
-                    } else {
-                        // 复制 bootmgfw.efi 到 bootx64.efi
-                        if Path::new(&bootmgfw).exists() {
-                            let _ = std::fs::copy(&bootmgfw, &bootx64);
-                            log::info!("[BOOT] 已复制 bootmgfw.efi -> bootx64.efi");
-                        }
-                    }
-                    
-                    log::info!("[BOOT] UEFI 引导修复成功");
-                }
-                Err(e) => {
-                    log::warn!("[BOOT] 查找 ESP 失败: {}，尝试默认方式", e);
-                    
-                    // 尝试默认方式（让 bcdboot 自动处理）
-                    let output = create_command(&self.bcdboot_path)
-                        .args([&windows_path, "/f", "UEFI", "/l", "zh-cn"])
-                        .output()?;
-                    
-                    let stdout = gbk_to_utf8(&output.stdout);
-                    let stderr = gbk_to_utf8(&output.stderr);
-                    log::info!("[BOOT] bcdboot (auto) stdout: {}", stdout);
-                    log::info!("[BOOT] bcdboot (auto) stderr: {}", stderr);
-                    
-                    if !output.status.success() {
-                        anyhow::bail!("{}", tr!("引导修复失败: {}", stderr));
-                    }
-                }
-            }
+            let repair_result = lr_core::boot_pca::repair_uefi_boot(
+                Path::new(&self.bcdboot_path),
+                windows_partition,
+                esp_letter,
+                pca_mode,
+                firmware,
+                existing_esp_hint,
+            );
+            let decision = repair_result
+                .map_err(|error| anyhow::anyhow!("{}", tr!("UEFI 引导修复失败: {}", error)))?;
+            log::info!(
+                "[BOOT] UEFI 引导修复成功: {} ({})",
+                decision.generation,
+                decision.reason
+            );
         } else {
             // Legacy/BIOS 模式——照搬 DSI：bootmgr/BCD 写到【活动的 System 分区】，而不是 Windows 分区。
             // System+Windows 拆分布局时引导分区≠Windows 分区（之前直接拿 Windows 分区写引导，导致开机 0x7B）；
@@ -676,8 +642,9 @@ assign letter=S
         log::info!("[BOOT] ========== 写入 XP UEFI/GPT 引导 ==========");
         let esp = self
             .find_esp_on_same_disk(windows_partition)
-            .or_else(|_| self.find_and_mount_esp())
             .map_err(|e| anyhow::anyhow!("{}", tr!("未找到 ESP，无法写 UEFI 引导: {}", e)))?;
+        let _esp_mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&esp)
+            .map_err(anyhow::Error::msg)?;
         log::info!("[BOOT] 使用 ESP: {}", esp);
         match lr_core::xp::write_xp_uefi_gpt_boot(
             windows_partition,

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::tr;
+use lr_core::boot_pca::BootPcaMode;
 
 /// 递归复制目录（用于把 diskpart 脚本暂存到数据分区）。
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -98,6 +99,10 @@ pub struct InstallConfig {
 
     /// 是否在释放镜像前运行 diskpart 脚本（程序目录\diskpart\ 下所有脚本）。
     pub run_diskpart_scripts: bool,
+    /// 引导模式：0=自动，1=UEFI，2=Legacy。
+    pub boot_mode: u8,
+    /// UEFI Windows Boot Manager 签名选择。
+    pub boot_pca_mode: BootPcaMode,
 }
 
 impl InstallConfig {
@@ -442,6 +447,8 @@ IsGho={}
 WimEngine={}
 IsXp={}
 RunDiskpartScripts={}
+BootMode={}
+BootPcaMode={}
 Language={}
 
 [Advanced]
@@ -483,6 +490,8 @@ XpInjectNvmeDriver={}
             config.wim_engine,
             config.is_xp,
             config.run_diskpart_scripts,
+            config.boot_mode,
+            config.boot_pca_mode.as_config_value(),
             crate::utils::i18n::current_language(),
             config.remove_shortcut_arrow,
             config.restore_classic_context_menu,
@@ -561,6 +570,8 @@ Language={}
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "IsXp" => config.is_xp = value.parse().unwrap_or(false),
                     "RunDiskpartScripts" => config.run_diskpart_scripts = value.parse().unwrap_or(false),
+                    "BootMode" => config.boot_mode = value.parse().unwrap_or(0),
+                    "BootPcaMode" => config.boot_pca_mode = BootPcaMode::from_config_value(value),
                     "RemoveShortcutArrow" => config.remove_shortcut_arrow = value.parse().unwrap_or(false),
                     "RestoreClassicContextMenu" => config.restore_classic_context_menu = value.parse().unwrap_or(false),
                     "BypassNRO" => config.bypass_nro = value.parse().unwrap_or(false),
@@ -668,4 +679,34 @@ pub fn validate_winnt_sif(content: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_install_config_defaults_to_auto_boot_selection() {
+        let config = ConfigFileManager::deserialize_install_config(
+            "[Install]\r\nVolumeIndex=3\r\nTargetPartition=C:\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.volume_index, 3);
+        assert_eq!(config.boot_mode, 0);
+        assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
+    }
+
+    #[test]
+    fn install_config_round_trips_boot_selection() {
+        let mut source = InstallConfig::default();
+        source.boot_mode = 1;
+        source.boot_pca_mode = BootPcaMode::Pca2023;
+
+        let serialized = ConfigFileManager::serialize_install_config(&source);
+        let parsed = ConfigFileManager::deserialize_install_config(&serialized).unwrap();
+
+        assert_eq!(parsed.boot_mode, 1);
+        assert_eq!(parsed.boot_pca_mode, BootPcaMode::Pca2023);
+    }
 }

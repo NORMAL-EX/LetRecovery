@@ -12,6 +12,7 @@ use crate::download::config::ConfigManager;
 use crate::download::manager::DownloadManager;
 use crate::ui::advanced_options::AdvancedOptions;
 use crate::tr;
+use lr_core::boot_pca::{BootPcaMode, EfiSignatureInfo, FirmwarePcaInfo};
 
 // 异步加载系统/硬件信息的通道
 static ASYNC_INFO_RX: std::sync::OnceLock<Mutex<Option<mpsc::Receiver<AsyncInfoResult>>>> = std::sync::OnceLock::new();
@@ -19,6 +20,12 @@ static ASYNC_INFO_RX: std::sync::OnceLock<Mutex<Option<mpsc::Receiver<AsyncInfoR
 struct AsyncInfoResult {
     system_info: Option<SystemInfo>,
     hardware_info: Option<HardwareInfo>,
+}
+
+pub struct BootPcaDetectionResult {
+    pub target_partition: String,
+    pub existing_esp: Result<EfiSignatureInfo, String>,
+    pub firmware: FirmwarePcaInfo,
 }
 
 /// 应用面板
@@ -58,6 +65,16 @@ impl std::fmt::Display for BootModeSelection {
             BootModeSelection::Auto => write!(f, "{}", tr!("自动")),
             BootModeSelection::UEFI => write!(f, "UEFI"),
             BootModeSelection::Legacy => write!(f, "Legacy"),
+        }
+    }
+}
+
+impl BootModeSelection {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::UEFI => 1,
+            Self::Legacy => 2,
         }
     }
 }
@@ -173,6 +190,7 @@ pub struct InstallOptions {
     pub export_drivers: bool,
     pub auto_reboot: bool,
     pub boot_mode: BootModeSelection,
+    pub boot_pca_mode: BootPcaMode,
     pub advanced_options: AdvancedOptions,
     pub driver_action: DriverAction,
     /// 自定义无人值守文件绝对路径（空=使用内置生成）
@@ -208,6 +226,8 @@ pub struct InstallPrefs {
     #[serde(default)]
     pub boot_mode: BootModeSelection,
     #[serde(default)]
+    pub boot_pca_mode: BootPcaMode,
+    #[serde(default)]
     pub driver_action: DriverAction,
     #[serde(default)]
     pub advanced_options: AdvancedOptions,
@@ -227,6 +247,7 @@ impl Default for InstallPrefs {
             auto_reboot: true,
             run_diskpart_scripts: false,
             boot_mode: BootModeSelection::Auto,
+            boot_pca_mode: BootPcaMode::Auto,
             driver_action: DriverAction::AutoImport,
             advanced_options: AdvancedOptions::default(),
         }
@@ -283,6 +304,13 @@ pub struct App {
     pub export_drivers: bool,
     pub auto_reboot: bool,
     pub selected_boot_mode: BootModeSelection,
+    pub selected_boot_pca_mode: BootPcaMode,
+    pub boot_pca_detection_target: String,
+    pub boot_pca_detection_loading: bool,
+    pub boot_pca_existing_esp: Option<EfiSignatureInfo>,
+    pub boot_pca_detection_error: Option<String>,
+    pub boot_pca_firmware: Option<FirmwarePcaInfo>,
+    pub boot_pca_detection_rx: Option<Receiver<BootPcaDetectionResult>>,
     pub driver_action: DriverAction,
     /// 安装前运行 diskpart 脚本（系统安装页复选框；受「高级选项」总开关 enable_advanced_options 控制是否显示）
     pub run_diskpart_scripts: bool,
@@ -762,6 +790,13 @@ impl Default for App {
             auto_reboot: true,
             run_diskpart_scripts: false,
             selected_boot_mode: BootModeSelection::Auto,
+            selected_boot_pca_mode: BootPcaMode::Auto,
+            boot_pca_detection_target: String::new(),
+            boot_pca_detection_loading: false,
+            boot_pca_existing_esp: None,
+            boot_pca_detection_error: None,
+            boot_pca_firmware: None,
+            boot_pca_detection_rx: None,
             driver_action: DriverAction::AutoImport,
             advanced_options: AdvancedOptions::default(),
             show_advanced_options: false,
@@ -1062,6 +1097,7 @@ impl App {
             auto_reboot: self.auto_reboot,
             run_diskpart_scripts: self.run_diskpart_scripts,
             boot_mode: self.selected_boot_mode,
+            boot_pca_mode: self.selected_boot_pca_mode,
             driver_action: self.driver_action,
             advanced_options: self.advanced_options.clone(),
         }
@@ -1077,6 +1113,7 @@ impl App {
         self.auto_reboot = p.auto_reboot;
         self.run_diskpart_scripts = p.run_diskpart_scripts;
         self.selected_boot_mode = p.boot_mode;
+        self.selected_boot_pca_mode = p.boot_pca_mode;
         self.driver_action = p.driver_action;
         self.advanced_options = p.advanced_options;
     }

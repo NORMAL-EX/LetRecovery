@@ -18,10 +18,10 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
-use crate::tr;
 use crate::core::disk::DiskManager;
 use crate::core::install_config::{ConfigFileManager, InstallConfig};
 use crate::core::pe::PeManager;
+use crate::tr;
 use crate::ui::advanced_options::AdvancedOptions;
 
 fn default_volume_index() -> u32 {
@@ -195,6 +195,8 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         xp_inject_usb3_driver: advanced.xp_inject_usb3_driver,
         xp_inject_nvme_driver: advanced.xp_inject_nvme_driver,
         run_diskpart_scripts: false,
+        boot_mode: 0,
+        boot_pca_mode: lr_core::boot_pca::BootPcaMode::Auto,
     };
 
     // 7) 写安装配置（含目标盘标记；自定义无人值守 XML 会被复制进数据目录）

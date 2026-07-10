@@ -151,6 +151,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([950.0, 680.0])
             .with_min_inner_size([800.0, 600.0])
             .with_icon(icon),
+        centered: true,
         ..Default::default()
     };
 
@@ -551,7 +552,25 @@ fn execute_pe_install(
     log::info!("[PE INSTALL] Step 4: 修复引导");
     // 修复引导
     let boot_manager = core::bcdedit::BootManager::new();
-    let use_uefi = detect_uefi_mode();
+    let use_uefi = match config.boot_mode {
+        1 => true,
+        2 => false,
+        _ => {
+            let target_style = core::disk::DiskManager::get_partitions()
+                .ok()
+                .and_then(|partitions| {
+                    partitions
+                        .into_iter()
+                        .find(|partition| partition.letter.eq_ignore_ascii_case(target_partition))
+                        .map(|partition| partition.partition_style)
+                });
+            match target_style {
+                Some(core::disk::PartitionStyle::GPT) => true,
+                Some(core::disk::PartitionStyle::MBR) => false,
+                _ => detect_uefi_mode(),
+            }
+        }
+    };
     // XP/2003 判定：配置标记 或 释放后缺少 \Windows\Boot（仅 Vista+ 才有）
     let is_xp = config.is_xp
         || !std::path::Path::new(&format!("{}\\Windows\\Boot", target_partition)).exists();
@@ -567,7 +586,7 @@ fn execute_pe_install(
             boot_manager.write_xp_boot(target_partition)?;
         }
     } else {
-        boot_manager.repair_boot_advanced(target_partition, use_uefi)?;
+        boot_manager.repair_boot_advanced(target_partition, use_uefi, config.boot_pca_mode)?;
     }
 
     log::info!("[PE INSTALL] Step 5: 应用高级选项");

@@ -9,6 +9,7 @@
 
 pub mod bl_passthrough;
 pub mod boot;
+pub mod boot_pca;
 pub mod command;
 pub mod diskpart;
 pub mod driver;

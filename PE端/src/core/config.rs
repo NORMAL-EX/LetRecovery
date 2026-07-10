@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use lr_core::boot_pca::BootPcaMode;
 use std::path::Path;
 
 /// 驱动操作模式
@@ -114,6 +115,11 @@ pub struct InstallConfig {
 
     /// 是否在释放镜像前运行 diskpart 脚本（数据分区暂存的 diskpart 目录）。
     pub run_diskpart_scripts: bool,
+
+    /// 引导模式：0=自动，1=UEFI，2=Legacy。
+    pub boot_mode: u8,
+    /// UEFI Windows Boot Manager 签名选择。
+    pub boot_pca_mode: BootPcaMode,
 
     /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
@@ -600,6 +606,8 @@ impl ConfigFileManager {
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "IsXp" => config.is_xp = value.parse().unwrap_or(false),
                     "RunDiskpartScripts" => config.run_diskpart_scripts = value.parse().unwrap_or(false),
+                    "BootMode" => config.boot_mode = value.parse().unwrap_or(0),
+                    "BootPcaMode" => config.boot_pca_mode = BootPcaMode::from_config_value(value),
                     "Language" => config.language = value.to_string(),
                     "InstallCabPackages" => config.install_cab_packages = value.parse().unwrap_or(false),
                     "RemoveShortcutArrow" => {
@@ -678,6 +686,34 @@ impl ConfigFileManager {
         }
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_install_config_defaults_to_auto_boot_selection() {
+        let config = ConfigFileManager::deserialize_install_config(
+            "[Install]\r\nVolumeIndex=4\r\nTargetPartition=C:\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.volume_index, 4);
+        assert_eq!(config.boot_mode, 0);
+        assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
+    }
+
+    #[test]
+    fn reads_explicit_pca2023_selection_from_normal_endpoint() {
+        let config = ConfigFileManager::deserialize_install_config(
+            "[Install]\r\nBootMode=1\r\nBootPcaMode=pca2023\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.boot_mode, 1);
+        assert_eq!(config.boot_pca_mode, BootPcaMode::Pca2023);
     }
 }
 
