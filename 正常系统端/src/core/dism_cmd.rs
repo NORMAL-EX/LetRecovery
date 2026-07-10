@@ -983,8 +983,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an explicit Windows integration test because it inspects or creates the configured scratch directory"]
     fn test_ensure_scratch_directory() {
-        // 这个测试会根据运行环境返回不同结果
         let scratch = DismCmd::ensure_scratch_directory();
         assert!(!scratch.is_empty());
     }

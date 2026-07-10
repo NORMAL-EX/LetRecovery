@@ -29,10 +29,11 @@ mod tests {
 
     #[test]
     fn test_api_compatibility() {
-        // 确保API兼容性
-        let _: Vec<BitLockerPartition> = get_bitlocker_partitions();
-        let _: Vec<BitLockerPartition> = get_locked_bitlocker_partitions();
-        let _: bool = has_bitlocker_partitions();
-        let _: bool = has_locked_bitlocker_partitions();
+        // Compile-time API check only. Calling these functions would inspect the host's
+        // real BitLocker state, which is outside the deterministic unit-test boundary.
+        let _: fn() -> Vec<BitLockerPartition> = get_bitlocker_partitions;
+        let _: fn() -> Vec<BitLockerPartition> = get_locked_bitlocker_partitions;
+        let _: fn() -> bool = has_bitlocker_partitions;
+        let _: fn() -> bool = has_locked_bitlocker_partitions;
     }
 }

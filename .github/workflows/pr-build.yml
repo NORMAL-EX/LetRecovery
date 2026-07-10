@@ -22,6 +22,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Pin reproducible build timestamp
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
       - name: Install Rust 1.88 toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,18 +45,17 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
 
       # 编译所有测试目标（含 #[cfg(test)]），把“测试代码编不过”也变成阻塞失败。
-      # cargo check/build 不编译测试，此前测试目标的编译错误只会在非阻塞 clippy 里暴露。
+      # 测试专用 feature 只让测试二进制以 asInvoker 启动；release 构建会主动拒绝该 feature。
       - name: Compile all test targets
-        run: cargo test --workspace --no-run --locked
+        run: cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
 
-      # 运行确定性的纯逻辑单元测试（不触碰真实磁盘 / BitLocker / PE 环境）：
-      #   lr-core 全部（镜像 XML 解析）、PE端 account_fix（离线 SAM 改密）、正常端 fveapi（恢复密钥/错误码）
+      # 运行两端完整的确定性单元测试。依赖真实 Windows 主机状态的测试必须显式 #[ignore]，
+      # CI 不使用 --ignored，也不执行真实磁盘、BitLocker、DISM、BCD 或注册表写入操作。
       - name: Run pure-logic unit tests
         run: |
           cargo test -p lr-core --locked
-          cargo test -p letrecovery-pe account_fix --locked
-          cargo test -p LetRecovery fveapi --locked
-          cargo test -p LetRecovery download::config::tests --locked
+          cargo test -p letrecovery-pe --locked --features non-elevated-tests
+          cargo test -p LetRecovery --locked --features non-elevated-tests
 
   website:
     name: Build 官网

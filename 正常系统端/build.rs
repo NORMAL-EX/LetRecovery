@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+
     // 注：libwim-15.dll 已内置于共享库 lr-core，运行时自动释放到 exe 目录，
     // 这里不再需要从 vendor 复制。
 
@@ -12,6 +14,11 @@ fn main() {
     // 仅在 Windows 上设置资源
     #[cfg(windows)]
     {
+        let non_elevated_tests = std::env::var_os("CARGO_FEATURE_NON_ELEVATED_TESTS").is_some();
+        if non_elevated_tests && std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!("non-elevated-tests must never be enabled for release builds");
+        }
+
         let mut res = winres::WindowsResource::new();
 
         // 设置程序图标
@@ -34,9 +41,9 @@ fn main() {
         res.set_version_info(winres::VersionInfo::FILEVERSION, ver_u64);
         res.set_version_info(winres::VersionInfo::PRODUCTVERSION, ver_u64);
 
-        // 请求管理员权限
-        res.set_manifest(
-            r#"
+        // 正式程序请求管理员权限；纯测试特性使用 asInvoker，避免测试 EXE
+        // 在无交互 CI/本地终端中因 UAC 清单而无法启动。
+        let manifest = r#"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -68,12 +75,16 @@ fn main() {
         </dependentAssembly>
     </dependency>
 </assembly>
-"#,
-        );
+"#;
+        let manifest = if non_elevated_tests {
+            manifest.replace("requireAdministrator", "asInvoker")
+        } else {
+            manifest.to_string()
+        };
+        res.set_manifest(&manifest);
 
-        if let Err(e) = res.compile() {
-            eprintln!("Warning: Failed to compile Windows resources: {}", e);
-        }
+        res.compile()
+            .expect("failed to compile required Windows resources and elevation manifest");
     }
 
     // 非 Windows 平台也要消除未使用变量告警
@@ -83,12 +94,27 @@ fn main() {
 
 /// 取当前 UTC 日期 (年, 月, 日)，无第三方依赖。
 fn build_date() -> (i64, u32, u32) {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let secs = build_timestamp();
     let days = secs.div_euclid(86400);
     civil_from_days(days)
+}
+
+fn build_timestamp() -> i64 {
+    if let Some(value) = std::env::var_os("SOURCE_DATE_EPOCH") {
+        let value = value
+            .to_str()
+            .expect("SOURCE_DATE_EPOCH must contain ASCII decimal digits");
+        let timestamp = value
+            .parse::<i64>()
+            .expect("SOURCE_DATE_EPOCH must be a valid Unix timestamp");
+        assert!(timestamp >= 0, "SOURCE_DATE_EPOCH must not be negative");
+        return timestamp;
+    }
+
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// 天数(自 1970-01-01) -> (年, 月, 日)，Howard Hinnant 算法。

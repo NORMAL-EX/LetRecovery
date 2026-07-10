@@ -1357,9 +1357,20 @@ fn determine_volume_status(output: &str) -> VolumeStatus {
         return VolumeStatus::NotEncrypted;
     }
 
-    // 检查是否锁定
-    let is_locked = (output_lower.contains("lock status") && output_lower.contains("locked"))
-        || (output_lower.contains("锁定状态") && output_lower.contains("已锁定"));
+    // 只检查 Lock Status 字段的值。不能对整段输出搜索 `locked`，因为
+    // `unlocked` 本身也包含该子串，会把已解锁卷误判为锁定。
+    let is_locked = output.lines().any(|line| {
+        let line_lower = line.trim().to_lowercase();
+        let Some((key, value)) = line_lower
+            .split_once(':')
+            .or_else(|| line_lower.split_once('：'))
+        else {
+            return false;
+        };
+
+        (key.trim() == "lock status" && value.trim().starts_with("locked"))
+            || (key.trim() == "锁定状态" && value.trim().starts_with("已锁定"))
+    });
 
     // 检查是否已加密
     let is_encrypted = output_lower.contains("fully encrypted")
@@ -1635,6 +1646,26 @@ Volume D: []
 "#;
         assert_eq!(
             determine_volume_status(english_unlocked),
+            VolumeStatus::EncryptedUnlocked
+        );
+
+        let chinese_locked = r#"
+卷 D: []
+    转换状态:            已完全加密
+    锁定状态:            已锁定
+"#;
+        assert_eq!(
+            determine_volume_status(chinese_locked),
+            VolumeStatus::EncryptedLocked
+        );
+
+        let chinese_unlocked = r#"
+卷 D: []
+    转换状态：            已完全加密
+    锁定状态：            已解锁
+"#;
+        assert_eq!(
+            determine_volume_status(chinese_unlocked),
             VolumeStatus::EncryptedUnlocked
         );
 

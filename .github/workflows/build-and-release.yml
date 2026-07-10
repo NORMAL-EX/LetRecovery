@@ -28,6 +28,10 @@ jobs:
         with:
           ref: ${{ inputs.branch || github.ref }}
 
+      - name: Pin reproducible build timestamp
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
       - name: Setup Rust 1.88
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,11 +52,10 @@ jobs:
           cargo fmt --all --check
           cargo check --workspace --all-targets --locked
           cargo clippy --workspace --all-targets --locked -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
-          cargo test --workspace --no-run --locked
+          cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
           cargo test -p lr-core --locked
-          cargo test -p letrecovery-pe account_fix --locked
-          cargo test -p LetRecovery fveapi --locked
-          cargo test -p LetRecovery download::config::tests --locked
+          cargo test -p letrecovery-pe --locked --features non-elevated-tests
+          cargo test -p LetRecovery --locked --features non-elevated-tests
 
       - name: Build system-side exe (LetRecovery.exe)
         shell: bash

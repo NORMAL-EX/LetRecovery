@@ -10,6 +10,7 @@ use crate::core::install_config::{ConfigFileManager, InstallConfig};
 use crate::tr;
 use crate::ui::advanced_options::AdvancedOptions;
 use crate::ui::pe_preparation::require_verified_cached_pe;
+use lr_core::command::{CommandExecutor, SystemCommandExecutor};
 
 impl App {
     pub fn show_install_progress(&mut self, ui: &mut egui::Ui) {
@@ -1374,8 +1375,6 @@ fn ensure_mbr_disk_signature(disk: u32) -> Result<String, String> {
 
 /// 格式化分区（用 diskpart，而不是 format.com）
 fn format_partition(partition: &str, volume_label: Option<&str>) -> anyhow::Result<()> {
-    use crate::utils::cmd::create_command;
-
     let label = volume_label.filter(|label| !label.trim().is_empty());
     let spec = lr_core::format_command::FormatCommandSpec::new(partition, "NTFS", label)
         .map_err(|error| anyhow::anyhow!("无效的格式化参数: {error}"))?;
@@ -1398,16 +1397,18 @@ fn format_partition(partition: &str, volume_label: Option<&str>) -> anyhow::Resu
         _ => "format fs=ntfs quick override".to_string(),
     };
     let script = format!("select volume {letter}\r\n{format_cmd}\r\nexit\r\n");
-    let tmp = std::env::temp_dir().join("lr_xp_format.txt");
-    std::fs::write(&tmp, script.as_bytes())?;
-    let tmp_str = tmp.to_string_lossy().into_owned();
-    let output = create_command("diskpart")
-        .args(["/s", tmp_str.as_str()])
-        .output()?;
-    let _ = std::fs::remove_file(&tmp);
+    let script_file = lr_core::scoped_temp_file::ScopedTempFile::create_in(
+        &std::env::temp_dir(),
+        "lr_xp_format",
+        "txt",
+        script.as_bytes(),
+    )?;
+    let tmp_str = script_file.path().to_string_lossy().into_owned();
+    let request = lr_core::command::CommandRequest::new("diskpart").args(["/s", tmp_str.as_str()]);
+    let output = SystemCommandExecutor.execute(&request)?;
 
-    let stdout = crate::utils::encoding::gbk_to_utf8(&output.stdout);
-    let stderr = crate::utils::encoding::gbk_to_utf8(&output.stderr);
+    let stdout = crate::utils::encoding::gbk_to_utf8(output.stdout());
+    let stderr = crate::utils::encoding::gbk_to_utf8(output.stderr());
     log::info!("[FORMAT] diskpart stdout:\n{}", stdout);
     log::info!("[FORMAT] diskpart stderr:\n{}", stderr);
 
@@ -1447,30 +1448,6 @@ fn format_failure_hint() -> String {
     tr!("可能原因:\n- 目标盘质量较差或已损坏（坏盘/扩容盘/掉盘）\n- 磁盘存在坏道、I/O 错误或 CRC 错误\n- 数据线、USB 口、硬盘盒或供电不稳定\n- 分区被占用、写保护或分区表异常")
 }
 
-fn format_output_is_success(stdout: &str) -> bool {
-    let lower = stdout.to_lowercase();
-    stdout.contains("格式化完成")
-        || stdout.contains("格式化已完成")
-        || lower.contains("format complete")
-        || lower.contains("formatting is complete")
-        || lower.contains("successfully formatted")
-}
-
-fn format_output_has_error(status_success: bool, stdout: &str, stderr: &str) -> bool {
-    let combined = format!("{}\n{}", stdout, stderr);
-    let lower = combined.to_lowercase();
-    !status_success
-        || combined.contains("无法")
-        || combined.contains("错误")
-        || combined.contains("失败")
-        || combined.contains("拒绝")
-        || lower.contains("error")
-        || lower.contains("failed")
-        || lower.contains("denied")
-        || lower.contains("i/o device error")
-        || lower.contains("cyclic redundancy check")
-}
-
 fn format_partition_with_format_command(
     letter: &str,
     volume_label: Option<&str>,
@@ -1482,18 +1459,18 @@ fn format_partition_with_format_command(
         .map_err(|error| tr!("无效的格式化参数: {}", error))?
         .with_force_dismount(true);
     let drive = spec.drive().to_string();
-    let args = spec.args();
     let format_exe = lr_core::format_command::system_format_executable();
 
     log::warn!("[FORMAT] DiskPart 失败，尝试 fallback: format {}", drive);
 
-    let output = crate::utils::cmd::create_command(&format_exe)
-        .args(&args)
-        .output()
+    let request = spec.command_request(&format_exe);
+    log::info!("[FORMAT] fallback 命令: {}", request.preview());
+    let output = SystemCommandExecutor
+        .execute(&request)
         .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
-    let stdout = crate::utils::encoding::gbk_to_utf8(&output.stdout);
-    let stderr = crate::utils::encoding::gbk_to_utf8(&output.stderr);
+    let stdout = crate::utils::encoding::gbk_to_utf8(output.stdout());
+    let stderr = crate::utils::encoding::gbk_to_utf8(output.stderr());
     let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
 
     log::info!("[FORMAT] fallback format stdout:\n{}", stdout);
@@ -1501,8 +1478,8 @@ fn format_partition_with_format_command(
         log::warn!("[FORMAT] fallback format stderr:\n{}", stderr);
     }
 
-    if format_output_is_success(&stdout)
-        && !format_output_has_error(output.status.success(), &stdout, &stderr)
+    if lr_core::format_command::output_indicates_success(&stdout)
+        && !lr_core::format_command::output_indicates_error(output.succeeded(), &stdout, &stderr)
     {
         log::info!("[FORMAT] fallback format {} 成功", drive);
         Ok(())

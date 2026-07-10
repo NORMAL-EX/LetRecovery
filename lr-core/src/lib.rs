@@ -23,6 +23,7 @@ pub mod image_meta;
 pub mod reboot;
 pub mod registry;
 pub mod sam;
+pub mod scoped_temp_file;
 pub mod wim_engine;
 pub mod wimgapi;
 pub mod wimlib;

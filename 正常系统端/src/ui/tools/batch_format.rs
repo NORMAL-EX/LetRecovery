@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use crate::tr;
+use lr_core::command::{CommandExecutor, SystemCommandExecutor};
 use lr_core::format_command::{system_format_executable, FormatCommandSpec};
 
 #[cfg(windows)]
@@ -194,7 +195,6 @@ fn get_partition_info(_drive: &str) -> Option<FormatablePartition> {
 /// 使用 format.com 格式化分区
 #[cfg(windows)]
 pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<(), String> {
-    use crate::utils::cmd::create_command;
     use crate::utils::encoding::gbk_to_utf8;
 
     let fs = if file_system.is_empty() {
@@ -208,7 +208,6 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
     let spec = FormatCommandSpec::new(letter, fs, Some(vol_label))
         .map_err(|error| tr!("无效的格式化参数: {}", error))?;
     let drive = spec.drive().to_string();
-    let args = spec.args();
     let format_exe = system_format_executable();
 
     log::info!(
@@ -218,29 +217,27 @@ pub fn format_partition(letter: &str, label: &str, file_system: &str) -> Result<
         vol_label
     );
 
-    log::info!("执行程序: {} 参数: {:?}", format_exe.display(), args);
+    let request = spec.command_request(&format_exe);
+    log::info!("执行格式化命令: {}", request.preview());
 
-    let output = create_command(&format_exe)
-        .args(&args)
-        .output()
+    let output = SystemCommandExecutor
+        .execute(&request)
         .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
-    let stdout = gbk_to_utf8(&output.stdout);
-    let stderr = gbk_to_utf8(&output.stderr);
+    let stdout = gbk_to_utf8(output.stdout());
+    let stderr = gbk_to_utf8(output.stderr());
 
     log::info!("format 输出:\n{}", stdout);
     if !stderr.is_empty() {
         log::warn!("format 错误输出:\n{}", stderr);
     }
 
-    // 检查执行结果
-    let stdout_lower = stdout.to_lowercase();
-    let success_indicators = ["格式化完成", "format complete", "已完成", "complete"];
-    let has_success_indicator = success_indicators
-        .iter()
-        .any(|s| stdout_lower.contains(&s.to_lowercase()));
+    // A non-zero exit or explicit error text wins over any completion text.
+    let has_success_indicator = lr_core::format_command::output_indicates_success(&stdout);
+    let has_error_indicator =
+        lr_core::format_command::output_indicates_error(output.succeeded(), &stdout, &stderr);
 
-    if output.status.success() || has_success_indicator {
+    if (output.succeeded() || has_success_indicator) && !has_error_indicator {
         log::info!("分区 {} 格式化成功", drive);
         Ok(())
     } else {
@@ -274,7 +271,6 @@ pub fn format_partition_with_progress<F>(
 where
     F: Fn(u8, &str) + Send + 'static,
 {
-    use crate::utils::cmd::create_command;
     use crate::utils::encoding::gbk_to_utf8;
 
     let fs = if file_system.is_empty() {
@@ -286,7 +282,6 @@ where
     let spec = FormatCommandSpec::new(letter, fs, Some(vol_label))
         .map_err(|error| tr!("无效的格式化参数: {}", error))?;
     let drive = spec.drive().to_string();
-    let args = spec.args();
     let format_exe = system_format_executable();
 
     log::info!(
@@ -300,28 +295,26 @@ where
 
     progress_callback(10, &tr!("启动格式化进程..."));
 
-    log::info!("执行程序: {} 参数: {:?}", format_exe.display(), args);
+    let request = spec.command_request(&format_exe);
+    log::info!("执行格式化命令: {}", request.preview());
 
     progress_callback(20, &tr!("正在格式化..."));
 
-    let output = create_command(&format_exe)
-        .args(&args)
-        .output()
+    let output = SystemCommandExecutor
+        .execute(&request)
         .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
-    let stdout = gbk_to_utf8(&output.stdout);
-    let stderr = gbk_to_utf8(&output.stderr);
+    let stdout = gbk_to_utf8(output.stdout());
+    let stderr = gbk_to_utf8(output.stderr());
 
     log::info!("format 输出:\n{}", stdout);
 
-    // 检查结果
-    let stdout_lower = stdout.to_lowercase();
-    let success_indicators = ["格式化完成", "format complete", "已完成", "complete"];
-    let has_success_indicator = success_indicators
-        .iter()
-        .any(|s| stdout_lower.contains(&s.to_lowercase()));
+    // A non-zero exit or explicit error text wins over any completion text.
+    let has_success_indicator = lr_core::format_command::output_indicates_success(&stdout);
+    let has_error_indicator =
+        lr_core::format_command::output_indicates_error(output.succeeded(), &stdout, &stderr);
 
-    if output.status.success() || has_success_indicator {
+    if (output.succeeded() || has_success_indicator) && !has_error_indicator {
         progress_callback(100, &tr!("分区 {} 格式化完成", drive));
         log::info!("分区 {} 格式化成功", drive);
         Ok(())

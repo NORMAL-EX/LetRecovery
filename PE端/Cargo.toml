@@ -8,6 +8,11 @@ repository.workspace = true
 authors = ["NORMAL-EX"]
 description = "LetRecovery PE安装助手"
 
+[features]
+# Test harnesses must not trigger a UAC prompt. build.rs rejects this feature
+# for release builds so production binaries always require elevation.
+non-elevated-tests = []
+
 [dependencies]
 # GUI
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }

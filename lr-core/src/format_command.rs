@@ -3,6 +3,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::command::CommandRequest;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileSystem {
     Ntfs,
@@ -125,6 +127,11 @@ impl FormatCommandSpec {
         args.push("/Y".to_string());
         args
     }
+
+    /// Build a direct process request with one OS argument per format option.
+    pub fn command_request<S: AsRef<std::ffi::OsStr>>(&self, program: S) -> CommandRequest {
+        CommandRequest::new(program).args(self.args())
+    }
 }
 
 fn normalize_drive(value: &str) -> Result<String, FormatCommandError> {
@@ -191,9 +198,40 @@ pub fn system_format_executable() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("format.com"))
 }
 
+/// `format.com` has localized output and is not consistent about exit codes on
+/// every Windows/WinPE build. Require an explicit completion sentence when a
+/// caller uses output as a success signal; progress text alone is insufficient.
+pub fn output_indicates_success(stdout: &str) -> bool {
+    let lower = stdout.to_lowercase();
+    stdout.contains("格式化完成")
+        || stdout.contains("格式化已完成")
+        || lower.contains("format complete")
+        || lower.contains("formatting is complete")
+        || lower.contains("successfully formatted")
+}
+
+/// Return true for a failed exit status or a localized error marker in either
+/// output stream. Callers should combine this with `output_indicates_success`
+/// and fail closed when both success and error text are present.
+pub fn output_indicates_error(status_success: bool, stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{}\n{}", stdout, stderr);
+    let lower = combined.to_lowercase();
+    !status_success
+        || combined.contains("无法")
+        || combined.contains("错误")
+        || combined.contains("失败")
+        || combined.contains("拒绝")
+        || lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("denied")
+        || lower.contains("i/o device error")
+        || lower.contains("cyclic redundancy check")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::{CommandExecutor, DryRunCommandExecutor};
 
     #[test]
     fn normalizes_drive_and_builds_stable_arguments() {
@@ -202,6 +240,9 @@ mod tests {
             .with_force_dismount(true);
         assert_eq!(spec.drive(), "D:");
         assert_eq!(spec.args(), ["D:", "/FS:NTFS", "/V:Data", "/Q", "/X", "/Y"]);
+        let request = spec.command_request("format.com");
+        assert_eq!(request.arguments().len(), 6);
+        assert_eq!(request.arguments()[2], std::ffi::OsStr::new("/V:Data"));
     }
 
     #[test]
@@ -225,6 +266,16 @@ mod tests {
     }
 
     #[test]
+    fn format_request_supports_non_executing_preview() {
+        let spec = FormatCommandSpec::new("D:", "NTFS", Some("数据盘")).unwrap();
+        let request = spec.command_request("format.com");
+        let executor = DryRunCommandExecutor::default();
+
+        assert!(executor.execute(&request).unwrap().succeeded());
+        assert_eq!(executor.requests().unwrap(), vec![request]);
+    }
+
+    #[test]
     fn cmd_wrapper_rejects_shell_metacharacters() {
         assert!(validate_cmd_wrapper_label("Data & whoami").is_err());
         assert!(validate_cmd_wrapper_label("普通卷标").is_ok());
@@ -239,6 +290,21 @@ mod tests {
         assert!(matches!(
             FormatCommandSpec::new("D:", "FAT32", Some("123456789012")),
             Err(FormatCommandError::LabelTooLong { maximum: 11 })
+        ));
+    }
+
+    #[test]
+    fn output_assessment_requires_completion_and_rejects_errors() {
+        assert!(output_indicates_success("格式化已完成。"));
+        assert!(output_indicates_success("Formatting is complete."));
+        assert!(!output_indicates_success("42 percent completed"));
+
+        assert!(!output_indicates_error(true, "格式化已完成。", ""));
+        assert!(output_indicates_error(false, "格式化已完成。", ""));
+        assert!(output_indicates_error(
+            true,
+            "Formatting is complete.",
+            "I/O device error"
         ));
     }
 }

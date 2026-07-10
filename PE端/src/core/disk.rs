@@ -1,4 +1,5 @@
 use anyhow::Result;
+use lr_core::command::{CommandExecutor, CommandRequest, SystemCommandExecutor};
 use std::path::{Path, PathBuf};
 use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{
@@ -77,30 +78,6 @@ impl DiskManager {
         )
     }
 
-    fn format_output_is_success(stdout: &str) -> bool {
-        let lower = stdout.to_lowercase();
-        stdout.contains("格式化完成")
-            || stdout.contains("格式化已完成")
-            || lower.contains("format complete")
-            || lower.contains("formatting is complete")
-            || lower.contains("successfully formatted")
-    }
-
-    fn format_output_has_error(status_success: bool, stdout: &str, stderr: &str) -> bool {
-        let combined = format!("{}\n{}", stdout, stderr);
-        let lower = combined.to_lowercase();
-        !status_success
-            || combined.contains("无法")
-            || combined.contains("错误")
-            || combined.contains("失败")
-            || combined.contains("拒绝")
-            || lower.contains("error")
-            || lower.contains("failed")
-            || lower.contains("denied")
-            || lower.contains("i/o device error")
-            || lower.contains("cyclic redundancy check")
-    }
-
     fn format_partition_with_format_command(
         drive: &str,
         volume_label: &str,
@@ -117,13 +94,15 @@ impl DiskManager {
         cmd_args.extend(args.iter().map(String::as_str));
         log::warn!("[FORMAT] DiskPart 失败，尝试 PE fallback: format {}", drive);
 
-        let output = new_command("cmd")
-            .args(&cmd_args)
-            .output()
+        // Keep the legacy WinPE shell wrapper: direct format.com may finish the
+        // format but never exit under CREATE_NO_WINDOW on affected PE images.
+        let request = CommandRequest::new("cmd").args(&cmd_args);
+        let output = SystemCommandExecutor
+            .execute(&request)
             .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
 
-        let stdout = gbk_to_utf8(&output.stdout);
-        let stderr = gbk_to_utf8(&output.stderr);
+        let stdout = gbk_to_utf8(output.stdout());
+        let stderr = gbk_to_utf8(output.stderr());
         let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
 
         log::info!("[FORMAT] fallback format stdout:\n{}", stdout);
@@ -131,8 +110,12 @@ impl DiskManager {
             log::warn!("[FORMAT] fallback format stderr:\n{}", stderr);
         }
 
-        if Self::format_output_is_success(&stdout)
-            && !Self::format_output_has_error(output.status.success(), &stdout, &stderr)
+        if lr_core::format_command::output_indicates_success(&stdout)
+            && !lr_core::format_command::output_indicates_error(
+                output.succeeded(),
+                &stdout,
+                &stderr,
+            )
         {
             log::info!("[FORMAT] fallback format {} 成功", drive);
             Ok(stdout)
@@ -428,23 +411,24 @@ impl DiskManager {
         log::info!("执行命令: {}", cmd_args);
 
         let temp_dir = Self::reliable_temp_dir();
-        let script_path = temp_dir.join("lr_format_part.txt");
-        std::fs::write(&script_path, script.as_bytes())?;
-
-        let script_path_str = script_path
+        let script_file = lr_core::scoped_temp_file::ScopedTempFile::create_in(
+            &temp_dir,
+            "lr_format_part",
+            "txt",
+            script.as_bytes(),
+        )?;
+        let script_path_str = script_file
+            .path()
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("temporary diskpart script path is not UTF-8"))?;
 
         let diskpart_path = get_diskpart_path();
 
-        let output = new_command(&diskpart_path)
-            .args(["/s", script_path_str])
-            .output()?;
+        let request = CommandRequest::new(&diskpart_path).args(["/s", script_path_str]);
+        let output = SystemCommandExecutor.execute(&request)?;
 
-        let _ = std::fs::remove_file(&script_path);
-
-        let stdout = gbk_to_utf8(&output.stdout);
-        let stderr = gbk_to_utf8(&output.stderr);
+        let stdout = gbk_to_utf8(output.stdout());
+        let stderr = gbk_to_utf8(output.stderr());
 
         log::info!("format 输出:\n{}", stdout);
         if !stderr.is_empty() {
@@ -458,7 +442,7 @@ impl DiskManager {
         let combined_lower = combined.to_lowercase();
         let has_success_indicator = stdout.contains("\u{6210}\u{529f}\u{683c}\u{5f0f}\u{5316}")
             || stdout_lower.contains("successfully formatted");
-        let has_error_indicator = !output.status.success()
+        let has_error_indicator = !output.succeeded()
             || stdout.contains("无法")
             || stdout.contains("错误")
             || stdout.contains("失败")
@@ -491,7 +475,7 @@ impl DiskManager {
                 Err(format_detail) => {
                     log::warn!("[FORMAT] fallback format 也失败: {}", format_detail);
                     let hint = Self::format_failure_hint();
-                    let error_msg = if output.status.success() {
+                    let error_msg = if output.succeeded() {
                         tr!(
                             "格式化失败。\n{}\n\nDiskPart 输出:\n{}\n\nformat 输出:\n{}",
                             hint,
@@ -502,8 +486,7 @@ impl DiskManager {
                         tr!(
                             "格式化失败，diskpart 退出码 {}。\n{}\n\nDiskPart 输出:\n{}\n\nformat 输出:\n{}",
                             output
-                                .status
-                                .code()
+                                .exit_code()
                                 .map(|c| c.to_string())
                                 .unwrap_or_else(|| tr!("未知")),
                             hint,

@@ -1494,6 +1494,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires an explicit Windows integration test because it reads host drive-letter state"]
     fn test_get_used_drive_letters() {
         let letters = get_used_drive_letters();
         // C: 应该总是存在

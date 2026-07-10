@@ -516,6 +516,7 @@ fn execute_pe_install(
     data_dir: &str,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
+    use lr_core::command::{CommandExecutor, CommandRequest, SystemCommandExecutor};
 
     log::info!("[PE INSTALL] Step 1: 格式化分区");
     // 格式化目标分区
@@ -524,14 +525,22 @@ fn execute_pe_install(
     let args = spec.args();
     let mut cmd_args = vec!["/d", "/s", "/c", "format.com"];
     cmd_args.extend(args.iter().map(String::as_str));
-    let output = utils::cmd::create_command("cmd")
-        .args(&cmd_args)
-        .output()
+    // WinPE compatibility path: retain cmd.exe because some PE format.com builds
+    // do not exit when invoked directly with CREATE_NO_WINDOW.
+    let request = CommandRequest::new("cmd").args(&cmd_args);
+    let output = SystemCommandExecutor
+        .execute(&request)
         .context("执行格式化命令失败")?;
+    let stdout = utils::encoding::gbk_to_utf8(output.stdout());
+    let stderr = utils::encoding::gbk_to_utf8(output.stderr());
 
-    if !output.status.success() {
-        let stderr = utils::encoding::gbk_to_utf8(&output.stderr);
-        anyhow::bail!("格式化分区失败: {}", stderr);
+    if lr_core::format_command::output_indicates_error(output.succeeded(), &stdout, &stderr) {
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        anyhow::bail!("格式化分区失败: {detail}");
     }
 
     log::info!("[PE INSTALL] Step 2: 释放镜像");

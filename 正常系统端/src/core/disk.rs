@@ -4,6 +4,7 @@ use crate::utils::cmd::create_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
 use anyhow::Result;
+use lr_core::command::{CommandExecutor, SystemCommandExecutor};
 use std::path::Path;
 
 #[cfg(windows)]
@@ -368,19 +369,29 @@ impl DiskManager {
     pub fn format_partition(partition: &str) -> Result<String> {
         let spec = lr_core::format_command::FormatCommandSpec::new(partition, "NTFS", None)
             .map_err(|error| anyhow::anyhow!("无效的格式化参数: {error}"))?;
-        let args = spec.args();
         let bin_dir = get_bin_dir();
         let format_exe = if Self::is_pe_environment() {
-            bin_dir.join("format.com").to_string_lossy().to_string()
+            bin_dir.join("format.com")
         } else {
             lr_core::format_command::system_format_executable()
-                .to_string_lossy()
-                .to_string()
         };
 
-        let output = create_command(&format_exe).args(&args).output()?;
+        let request = spec.command_request(&format_exe);
+        log::info!("执行格式化命令: {}", request.preview());
+        let output = SystemCommandExecutor.execute(&request)?;
+        let stdout = gbk_to_utf8(output.stdout());
+        let stderr = gbk_to_utf8(output.stderr());
 
-        Ok(gbk_to_utf8(&output.stdout))
+        if lr_core::format_command::output_indicates_error(output.succeeded(), &stdout, &stderr) {
+            let detail = if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            };
+            anyhow::bail!("格式化分区失败: {detail}");
+        }
+
+        Ok(stdout)
     }
 
     /// 从指定分区缩小并创建新分区
