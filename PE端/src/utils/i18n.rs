@@ -314,7 +314,8 @@ pub fn translate_with_args(text: &str, args: &[String]) -> String {
 /// // 带参数：模板用 `{}` 占位，先翻译再按顺序填参
 /// let formatted = tr!("欢迎使用 {}", "LetRecovery");
 /// // 带格式说明的值需先预格式化为字符串再传入
-/// let size = tr!("已用 {} GB", format!("{:.1}", 12.34_f64));
+/// let formatted_size = format!("{:.1}", 12.34_f64);
+/// let size = tr!("已用 {} GB", formatted_size);
 /// ```
 #[macro_export]
 macro_rules! tr {
@@ -381,9 +382,7 @@ mod tests {
     fn test_tr_macro_with_args() {
         init("zh-CN");
         assert_eq!(tr!("欢迎使用 {}", "LetRecovery"), "欢迎使用 LetRecovery");
-        assert_eq!(
-            tr!("已用 {} GB", format!("{:.1}", 12.34_f64)),
-            "已用 12.3 GB"
-        );
+        let formatted_size = format!("{:.1}", 12.34_f64);
+        assert_eq!(tr!("已用 {} GB", formatted_size), "已用 12.3 GB");
     }
 }
