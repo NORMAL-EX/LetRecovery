@@ -35,8 +35,11 @@ impl App {
                 ui.add_space(10.0);
 
                 // 硬件信息显示区域
+                let hardware_fill = ui.visuals().faint_bg_color;
+                let hardware_stroke = ui.visuals().widgets.noninteractive.bg_stroke;
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(40, 40, 40))
+                    .fill(hardware_fill)
+                    .stroke(hardware_stroke)
                     .inner_margin(10.0)
                     .corner_radius(5.0)
                     .show(ui, |ui| {
@@ -57,14 +60,13 @@ impl App {
                                 ui.horizontal(|ui| {
                                     ui.label(tr!("显卡{}型号:", i + 1));
                                     if gpu.is_nvidia {
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(118, 185, 0),
-                                            &display_name,
-                                        );
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(118, 185, 0),
-                                            "(NVIDIA)",
-                                        );
+                                        let nvidia_color = if ui.visuals().dark_mode {
+                                            egui::Color32::from_rgb(118, 185, 0)
+                                        } else {
+                                            egui::Color32::from_rgb(56, 108, 0)
+                                        };
+                                        ui.colored_label(nvidia_color, &display_name);
+                                        ui.colored_label(nvidia_color, "(NVIDIA)");
                                     } else {
                                         ui.label(&display_name);
                                     }
@@ -186,12 +188,21 @@ impl App {
                 }
 
                 // 警告信息
+                let warning_fill = if ui.visuals().dark_mode {
+                    egui::Color32::from_rgb(60, 40, 20)
+                } else {
+                    egui::Color32::from_rgb(255, 247, 230)
+                };
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(60, 40, 20))
+                    .fill(warning_fill)
+                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
                     .inner_margin(10.0)
                     .corner_radius(5.0)
                     .show(ui, |ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 200, 100), tr!("注意事项:"));
+                        ui.colored_label(
+                            crate::ui::warning_text_color(ui.visuals().dark_mode),
+                            tr!("注意事项:"),
+                        );
                         ui.label(tr!("1. 卸载驱动后可能需要重启系统"));
                         ui.label(tr!("2. 卸载后显示可能切换到基本显示适配器"));
                         ui.label(tr!("3. 建议在卸载前备份重要数据"));
