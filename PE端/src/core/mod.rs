@@ -8,5 +8,6 @@ pub mod dism_exe;
 pub mod driver;
 pub mod expand_move;
 pub mod ghost;
+pub mod pca_preflight;
 pub mod registry;
 pub mod system_utils;

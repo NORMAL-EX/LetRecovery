@@ -461,6 +461,32 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             log::info!("[PE安装/CLI] 镜像校验通过");
         }
 
+        // Keep CLI installs on the same fail-closed path as the PE GUI. This
+        // check is read-only and runs before formatting the selected volume.
+        let staged_pca_compat =
+            match core::pca_preflight::staged_config(&config, std::path::Path::new(&data_dir)) {
+                Ok(staged) => staged,
+                Err(error) => {
+                    show_error_message(&error);
+                    return Ok(());
+                }
+            };
+        let pca_compat_package = match core::pca_preflight::verify_before_disk_write(
+            &image_path,
+            config.volume_index,
+            config.is_gho,
+            config.is_xp,
+            config.boot_mode != 2,
+            config.boot_pca_mode,
+            staged_pca_compat.as_ref(),
+        ) {
+            Ok(package) => package,
+            Err(error) => {
+                show_error_message(&error);
+                return Ok(());
+            }
+        };
+
         // Step 1: 格式化分区
         log::info!("[PE INSTALL] Step 1: 格式化分区");
         if let Err(e) = DiskManager::format_partition(&target_partition) {
@@ -561,6 +587,21 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             }
         } else {
             log::info!("[PE INSTALL] 跳过CAB更新包安装");
+        }
+
+        if let Some(package) = pca_compat_package.as_ref() {
+            log::info!(
+                "[PE INSTALL] 为 Windows build {} / architecture {} 注入 PCA2023 BootEx",
+                package.target().build,
+                package.target().architecture
+            );
+            if let Err(error) =
+                package.inject_into_offline_windows(std::path::Path::new(&apply_dir))
+            {
+                log::error!("[PE INSTALL] PCA2023 兼容包注入失败: {error}");
+                show_error_message(&tr!("升级 PCA2023 引导文件失败：{}", error));
+                return Ok(());
+            }
         }
 
         // Step 5: 修复引导

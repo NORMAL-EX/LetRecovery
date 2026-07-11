@@ -313,6 +313,31 @@ impl App {
         std::thread::spawn(move || {
             log::info!("[INSTALL THREAD] 安装线程启动");
 
+            // PCA compatibility must be proven before custom DiskPart scripts
+            // or formatting can mutate the target disk. Auto may become UEFI
+            // after a partitioning script, so only explicit Legacy skips it.
+            let pca_compat_package = if options.repair_boot {
+                let is_gho = image_path.to_ascii_lowercase().ends_with(".gho")
+                    || image_path.to_ascii_lowercase().ends_with(".ghs");
+                let may_use_uefi = options.boot_mode != BootModeSelection::Legacy;
+                match crate::core::pca_preflight::verify_before_disk_write(
+                    &image_path,
+                    volume_index,
+                    is_gho,
+                    options.is_xp || options.is_xp_i386,
+                    may_use_uefi,
+                    options.boot_pca_mode,
+                ) {
+                    Ok(package) => package,
+                    Err(error) => {
+                        send_error(&progress_tx, &error);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
             // 跑完 diskpart 脚本后，target_partition / partition_style 可能要按 disk:partition 重定位刷新。
             let mut target_partition = target_partition;
             let mut partition_style = partition_style;
@@ -619,6 +644,23 @@ impl App {
             let is_xp = options.is_xp
                 || !std::path::Path::new(&format!("{}\\Windows\\Boot", target_partition)).exists();
 
+            if let Some(package) = pca_compat_package.as_ref() {
+                log::info!(
+                    "[INSTALL STEP 4.5] 为 Windows build {} / architecture {} 注入 PCA2023 BootEx",
+                    package.target().build,
+                    package.target().architecture
+                );
+                send_step(&progress_tx, 5, &tr!("正在升级 PCA2023 引导文件"), 10);
+                let target_root = format!("{}\\", target_partition);
+                if let Err(error) =
+                    package.inject_into_offline_windows(std::path::Path::new(&target_root))
+                {
+                    log::error!("[INSTALL STEP 4.5] PCA2023 兼容包注入失败: {error}");
+                    send_error(&progress_tx, &tr!("升级 PCA2023 引导文件失败：{}", error));
+                    return;
+                }
+            }
+
             // Step 5: 修复引导
             send_step(&progress_tx, 5, &tr!("修复引导"), 0);
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -701,7 +743,11 @@ impl App {
                             }
                         }
                     }
-                    Err(e) => log::error!("[INSTALL STEP 5] 引导修复失败: {}", e),
+                    Err(e) => {
+                        log::error!("[INSTALL STEP 5] 引导修复失败: {}", e);
+                        send_error(&progress_tx, &tr!("修复引导失败: {}", e));
+                        return;
+                    }
                 }
                 send_step(&progress_tx, 5, &tr!("修复引导"), 100);
             } else {
@@ -801,6 +847,29 @@ impl App {
             };
 
             log::info!("[INSTALL PE STEP 1] PE文件可用: {}", pe_path);
+
+            let pca_compat_package = if options.repair_boot {
+                let is_gho = image_path.to_ascii_lowercase().ends_with(".gho")
+                    || image_path.to_ascii_lowercase().ends_with(".ghs");
+                let may_use_uefi = options.boot_mode != BootModeSelection::Legacy;
+                match crate::core::pca_preflight::verify_before_disk_write(
+                    &image_path,
+                    volume_index,
+                    is_gho,
+                    options.is_xp || options.is_xp_i386,
+                    may_use_uefi,
+                    options.boot_pca_mode,
+                ) {
+                    Ok(package) => package,
+                    Err(error) => {
+                        send_error(&progress_tx, &error);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
             send_step(&progress_tx, 1, &tr!("检查PE环境"), 100);
             std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -843,6 +912,23 @@ impl App {
 
             let data_dir = ConfigFileManager::get_data_dir(&data_partition);
             std::fs::create_dir_all(&data_dir).ok();
+
+            let pca_compat_metadata = if let Some(package) = pca_compat_package.as_ref() {
+                let staged_path = std::path::Path::new(&data_dir)
+                    .join(lr_core::pca_compat::STAGED_PACKAGE_RELATIVE_PATH);
+                if let Err(error) = package.persist_to(&staged_path) {
+                    log::error!("[INSTALL PE STEP 3] 暂存 PCA2023 兼容包失败: {error}");
+                    send_error(&progress_tx, &tr!("保存 PCA2023 兼容包失败：{}", error));
+                    return;
+                }
+                Some((
+                    package.sha256().to_string(),
+                    package.image_index(),
+                    package.target(),
+                ))
+            } else {
+                None
+            };
 
             // 根据driver_action决定是否导出驱动
             let should_export = matches!(
@@ -1051,6 +1137,26 @@ impl App {
                 run_diskpart_scripts: options.run_diskpart_scripts,
                 boot_mode: options.boot_mode.as_u8(),
                 boot_pca_mode: options.boot_pca_mode,
+                pca_compat_package: pca_compat_metadata
+                    .as_ref()
+                    .map(|_| lr_core::pca_compat::STAGED_PACKAGE_RELATIVE_PATH.to_string())
+                    .unwrap_or_default(),
+                pca_compat_sha256: pca_compat_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.0.clone())
+                    .unwrap_or_default(),
+                pca_compat_image_index: pca_compat_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.1)
+                    .unwrap_or(0),
+                pca_compat_target_build: pca_compat_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.2.build)
+                    .unwrap_or(0),
+                pca_compat_target_architecture: pca_compat_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.2.architecture)
+                    .unwrap_or(0),
             };
 
             match ConfigFileManager::write_install_config(

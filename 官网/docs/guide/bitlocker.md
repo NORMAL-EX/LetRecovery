@@ -34,6 +34,4 @@ PE 端读取 `X:\LR_BitLockerKeys.txt`，用每个密钥逐一尝试解锁每个
 
 ::: tip Secure Boot 与随包 PE
 LetRecovery 通过目标机自带的 **Windows 启动管理器（bootmgfw）** 引导 WinPE，而非自带引导器，因此在开启 Secure Boot 的机器上也能用。
-
-更进一步：当 Secure Boot 开启、且主机系统的 `winload.efi` 含 2023 证书、且与 PE 内核版本匹配（`10.0.19041.` 系）时，程序会**尽力**用主机的双签名（2011+2023）`winload.efi` 覆盖 PE 的对应文件，从而让 PE 在已吊销 2011 证书（CVE-2023-24932 DBX 更新）的机器上也能启动。这是**尽力而为**的优化，满足上述条件才触发。
 :::

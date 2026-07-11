@@ -1,6 +1,6 @@
 //! Collision-resistant temporary regular files with best-effort cleanup.
 
-use std::fs::{remove_file, OpenOptions};
+use std::fs::{remove_file, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +25,24 @@ impl ScopedTempFile {
         extension: &str,
         contents: &[u8],
     ) -> io::Result<Self> {
+        let (guard, mut file) = Self::create_writer_in(directory, prefix, extension)?;
+        if let Err(error) = file.write_all(contents).and_then(|_| file.flush()) {
+            drop(file);
+            drop(guard);
+            return Err(error);
+        }
+        drop(file);
+        Ok(guard)
+    }
+
+    /// Allocate a unique temporary file and return both its cleanup guard and
+    /// writable handle. Callers can stream large payloads without buffering
+    /// them in memory; dropping the guard removes partial files on failure.
+    pub fn create_writer_in(
+        directory: &Path,
+        prefix: &str,
+        extension: &str,
+    ) -> io::Result<(Self, File)> {
         validate_name_component(prefix, "prefix")?;
         validate_name_component(extension, "extension")?;
 
@@ -32,20 +50,13 @@ impl ScopedTempFile {
             let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
             let file_name = format!("{prefix}-{}-{id}.{extension}", std::process::id());
             let path = directory.join(file_name);
-            let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            let file = match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             };
 
-            let guard = Self { path };
-            if let Err(error) = file.write_all(contents).and_then(|_| file.flush()) {
-                drop(file);
-                drop(guard);
-                return Err(error);
-            }
-            drop(file);
-            return Ok(guard);
+            return Ok((Self { path }, file));
         }
 
         Err(io::Error::new(
@@ -119,6 +130,21 @@ mod tests {
             ScopedTempFile::create_in(&directory, "../script", "txt", b"unsafe").unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn writer_api_cleans_partial_streams() {
+        let directory = test_directory();
+        std::fs::create_dir(&directory).unwrap();
+        let (guard, mut writer) =
+            ScopedTempFile::create_writer_in(&directory, "download", "wim").unwrap();
+        writer.write_all(b"partial").unwrap();
+        writer.flush().unwrap();
+        let path = guard.path().to_path_buf();
+        drop(writer);
+        drop(guard);
+        assert!(!path.exists());
         std::fs::remove_dir(directory).unwrap();
     }
 }

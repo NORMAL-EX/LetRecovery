@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::command::new_command;
+use crate::command::{new_command, CommandExecutor, CommandRequest, SystemCommandExecutor};
 use crate::encoding::gbk_to_utf8;
 
 /// Pick an unused drive letter for a temporary ESP mount.
@@ -417,7 +417,7 @@ pub fn repair_uefi_boot(
         decision.reason,
         esp_arg
     );
-    run_bcdboot(bcdboot_path, &windows_arg, &esp_arg, decision.generation)?;
+    let write_mode = run_bcdboot(bcdboot_path, &windows_arg, &esp_arg, decision.generation)?;
 
     let primary = esp_root
         .join("EFI")
@@ -433,19 +433,68 @@ pub fn repair_uefi_boot(
         return Err(format!("bcdboot 返回成功，但未生成 BCD: {}", bcd.display()));
     }
 
+    if write_mode == BcdbootWriteMode::ManualBootexCopy {
+        let bootex_dir = windows_dir.join("Boot").join("EFI_EX");
+        let bootex_source = bootex_dir.join("bootmgfw_EX.efi");
+        let source_info = inspect_efi_signature(&bootex_source);
+        validate_signature_generation(&source_info, PcaGeneration::Pca2023)?;
+
+        let bootmgr_source = bootex_dir.join("bootmgr_EX.efi");
+        let bootmgr_destination = esp_root
+            .join("EFI")
+            .join("Microsoft")
+            .join("Boot")
+            .join("bootmgr.efi");
+        if bootmgr_source.is_file() {
+            replace_file_with_signed_copy(&bootmgr_source, &bootmgr_destination, None)?;
+        } else {
+            log::info!("[BOOT PCA] 当前 BootEx 资源不含可选 bootmgr_EX.efi，保留现有文件");
+        }
+
+        deploy_bootex_fonts(
+            &windows_dir.join("Boot").join("FONTS_EX"),
+            &esp_root
+                .join("EFI")
+                .join("Microsoft")
+                .join("Boot")
+                .join("Fonts"),
+        )?;
+
+        let boot_stl_source = windows_dir.join("Boot").join("EFI").join("boot.stl");
+        let boot_stl_destination = esp_root
+            .join("EFI")
+            .join("Microsoft")
+            .join("Boot")
+            .join("boot.stl");
+        copy_optional_file_if_missing(&boot_stl_source, &boot_stl_destination)?;
+
+        // Switch the firmware entry only after every supporting resource has
+        // been prepared. A preceding failure therefore leaves the known-good
+        // BCDBoot output as the active boot manager.
+        replace_file_with_verified_copy(&bootex_source, &primary, PcaGeneration::Pca2023)?;
+        log::info!("[BOOT PCA] 当前 bcdboot 不支持 /bootex，已部署并验证完整 BootEx 兼容资源");
+    }
+
     let primary_info = inspect_efi_signature(&primary);
     validate_signature_generation(&primary_info, decision.generation)?;
 
     let fallback_dir = esp_root.join("EFI").join("Boot");
     std::fs::create_dir_all(&fallback_dir)
         .map_err(|e| format!("创建 EFI fallback 目录失败: {e}"))?;
-    let fallback = fallback_dir.join("bootx64.efi");
+    let fallback_name = efi_fallback_name(&primary)?;
+    let fallback = fallback_dir.join(fallback_name);
     std::fs::copy(&primary, &fallback)
-        .map_err(|e| format!("复制 bootmgfw.efi 到 bootx64.efi 失败: {e}"))?;
+        .map_err(|e| format!("复制 bootmgfw.efi 到 {fallback_name} 失败: {e}"))?;
     let fallback_info = inspect_efi_signature(&fallback);
     validate_signature_generation(&fallback_info, decision.generation)?;
 
     Ok(decision)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BcdbootWriteMode {
+    Native,
+    ManualBootexCopy,
 }
 
 fn run_bcdboot(
@@ -453,17 +502,32 @@ fn run_bcdboot(
     windows_arg: &str,
     esp_arg: &str,
     generation: PcaGeneration,
-) -> Result<(), String> {
+) -> Result<BcdbootWriteMode, String> {
+    run_bcdboot_with_executor(
+        &SystemCommandExecutor,
+        bcdboot_path,
+        windows_arg,
+        esp_arg,
+        generation,
+    )
+}
+
+fn run_bcdboot_with_executor<E: CommandExecutor + ?Sized>(
+    executor: &E,
+    bcdboot_path: &Path,
+    windows_arg: &str,
+    esp_arg: &str,
+    generation: PcaGeneration,
+) -> Result<BcdbootWriteMode, String> {
     let mut offline_error = None;
     for offline in [true, false] {
         let args = bcdboot_args(windows_arg, esp_arg, generation, offline);
-
-        let output = new_command(bcdboot_path)
-            .args(&args)
-            .output()
+        let request = CommandRequest::new(bcdboot_path).args(&args);
+        let output = executor
+            .execute(&request)
             .map_err(|e| format!("启动 bcdboot 失败: {e}"))?;
-        let stdout = gbk_to_utf8(&output.stdout);
-        let stderr = gbk_to_utf8(&output.stderr);
+        let stdout = gbk_to_utf8(output.stdout());
+        let stderr = gbk_to_utf8(output.stderr());
         log::info!(
             "[BOOT PCA] bcdboot {} stdout: {}",
             if offline { "offline" } else { "compat" },
@@ -474,11 +538,11 @@ fn run_bcdboot(
             if offline { "offline" } else { "compat" },
             stderr
         );
-        if output.status.success() {
-            return Ok(());
+        if output.succeeded() {
+            return Ok(BcdbootWriteMode::Native);
         }
 
-        let error = format!("退出码 {:?}: {}", output.status.code(), stderr.trim());
+        let error = format!("退出码 {:?}: {}", output.exit_code(), stderr.trim());
         if offline {
             log::warn!(
                 "[BOOT PCA] bcdboot /offline 失败，将保持 {} 代际并使用兼容命令重试: {}",
@@ -486,17 +550,183 @@ fn run_bcdboot(
                 error
             );
             offline_error = Some(error);
-        } else {
+        } else if generation != PcaGeneration::Pca2023 {
             return Err(format!(
                 "bcdboot 写入 {} 引导失败（/offline: {}；兼容重试: {}）",
                 generation,
                 offline_error.as_deref().unwrap_or("未执行"),
                 error
             ));
+        } else {
+            let standard_args = bcdboot_args(windows_arg, esp_arg, PcaGeneration::Pca2011, false);
+            let standard_request = CommandRequest::new(bcdboot_path).args(&standard_args);
+            let standard = executor
+                .execute(&standard_request)
+                .map_err(|e| format!("启动 bcdboot 兼容回退失败: {e}"))?;
+            let standard_stdout = gbk_to_utf8(standard.stdout());
+            let standard_stderr = gbk_to_utf8(standard.stderr());
+            log::info!("[BOOT PCA] bcdboot 兼容回退 stdout: {}", standard_stdout);
+            log::info!("[BOOT PCA] bcdboot 兼容回退 stderr: {}", standard_stderr);
+            if standard.succeeded() {
+                return Ok(BcdbootWriteMode::ManualBootexCopy);
+            }
+            return Err(format!(
+                "bcdboot 写入 PCA2023 引导失败（/offline: {}；/bootex: {}；普通回退退出码 {:?}: {}）",
+                offline_error.as_deref().unwrap_or("未执行"),
+                error,
+                standard.exit_code(),
+                standard_stderr.trim()
+            ));
         }
     }
 
     Err(format!("bcdboot 写入 {} 引导失败", generation))
+}
+
+fn replace_file_with_verified_copy(
+    source: &Path,
+    destination: &Path,
+    expected: PcaGeneration,
+) -> Result<(), String> {
+    replace_file_with_signed_copy(source, destination, Some(expected))
+}
+
+fn replace_file_with_signed_copy(
+    source: &Path,
+    destination: &Path,
+    expected: Option<PcaGeneration>,
+) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("目标 EFI 文件没有父目录: {}", destination.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("创建 EFI 目录失败: {e}"))?;
+    let temporary = destination.with_extension("efi.lr-pca.tmp");
+    let backup = destination.with_extension("efi.lr-pca.bak");
+    let _ = std::fs::remove_file(&temporary);
+    let _ = std::fs::remove_file(&backup);
+
+    std::fs::copy(source, &temporary).map_err(|e| format!("暂存 BootEx 文件失败: {e}"))?;
+    let temporary_info = inspect_efi_signature(&temporary);
+    let validation = match expected {
+        Some(generation) => validate_signature_generation(&temporary_info, generation),
+        None if temporary_info.signature_valid => Ok(()),
+        None => Err(format!(
+            "EFI 文件签名无效: {}",
+            temporary_info.error.as_deref().unwrap_or("签名验证失败")
+        )),
+    };
+    if let Err(error) = validation {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+
+    if destination.exists() {
+        std::fs::rename(destination, &backup).map_err(|e| format!("备份现有 EFI 文件失败: {e}"))?;
+    }
+    if let Err(error) = std::fs::rename(&temporary, destination) {
+        if backup.exists() {
+            let _ = std::fs::rename(&backup, destination);
+        }
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("替换 EFI 文件失败: {error}"));
+    }
+    let _ = std::fs::remove_file(&backup);
+    Ok(())
+}
+
+fn deploy_bootex_fonts(source: &Path, destination: &Path) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(source).map_err(|error| format!("读取 BootEx 字体目录失败: {error}"))?;
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("创建 ESP 字体目录失败: {error}"))?;
+    let mut copied = 0usize;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("读取 BootEx 字体失败: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("读取 BootEx 字体类型失败: {error}"))?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "BootEx 字体文件名不是有效 Unicode".to_string())?;
+        let Some(target_name) = bootex_font_destination_name(&name) else {
+            continue;
+        };
+        std::fs::copy(entry.path(), destination.join(target_name))
+            .map_err(|error| format!("复制 BootEx 字体 {name} 失败: {error}"))?;
+        copied += 1;
+    }
+    if copied == 0 {
+        return Err("BootEx 字体目录中没有 *_EX.ttf 文件".to_string());
+    }
+    Ok(())
+}
+
+fn bootex_font_destination_name(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    if !lower.ends_with("_ex.ttf") || name.len() <= "_EX.ttf".len() {
+        return None;
+    }
+    Some(format!("{}.ttf", &name[..name.len() - "_EX.ttf".len()]))
+}
+
+fn copy_optional_file_if_missing(source: &Path, destination: &Path) -> Result<(), String> {
+    if destination.is_file() {
+        return Ok(());
+    }
+    if !source.is_file() {
+        log::info!(
+            "[BOOT PCA] 可选 BootEx 资源不存在，保留现有文件: {}",
+            source.display()
+        );
+        return Ok(());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("BootEx 目标没有父目录: {}", destination.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("创建 BootEx 目标目录失败: {error}"))?;
+    std::fs::copy(source, destination)
+        .map_err(|error| format!("复制 {} 失败: {error}", source.display()))?;
+    Ok(())
+}
+
+fn efi_fallback_name(path: &Path) -> Result<&'static str, String> {
+    let architecture = inspect_efi_architecture(path)
+        .ok_or_else(|| format!("无法识别 EFI 文件架构: {}", path.display()))?;
+    match architecture {
+        0 => Ok("bootia32.efi"),
+        9 => Ok("bootx64.efi"),
+        12 => Ok("bootaa64.efi"),
+        _ => Err(format!("不支持的 EFI 文件架构: {architecture}")),
+    }
+}
+
+/// Return the WIM architecture code used by an EFI PE image.
+pub fn inspect_efi_architecture(path: &Path) -> Option<u16> {
+    let data = std::fs::read(path).ok()?;
+    efi_architecture_from_pe(&data)
+}
+
+fn efi_architecture_from_pe(data: &[u8]) -> Option<u16> {
+    if data.len() < 0x40 || &data[..2] != b"MZ" {
+        return None;
+    }
+    let pe_offset = u32::from_le_bytes(data.get(0x3c..0x40)?.try_into().ok()?) as usize;
+    let header = data.get(pe_offset..pe_offset.checked_add(6)?)?;
+    if &header[..4] != b"PE\0\0" {
+        return None;
+    }
+    let machine = u16::from_le_bytes([header[4], header[5]]);
+    match machine {
+        0x014c => Some(0),
+        0x8664 => Some(9),
+        0xaa64 => Some(12),
+        _ => None,
+    }
 }
 
 fn bcdboot_args<'a>(
@@ -1047,7 +1277,40 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::Mutex;
+
     use super::*;
+
+    struct SequenceExecutor {
+        outcomes: Mutex<VecDeque<crate::command::CommandOutcome>>,
+        requests: Mutex<Vec<CommandRequest>>,
+    }
+
+    impl SequenceExecutor {
+        fn new(outcomes: Vec<crate::command::CommandOutcome>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<CommandRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandExecutor for SequenceExecutor {
+        fn execute(&self, request: &CommandRequest) -> io::Result<crate::command::CommandOutcome> {
+            self.requests.lock().unwrap().push(request.clone());
+            self.outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| io::Error::other("no modeled bcdboot outcome remains"))
+        }
+    }
 
     fn signature(generation: PcaGeneration) -> EfiSignatureInfo {
         EfiSignatureInfo {
@@ -1187,6 +1450,77 @@ mod tests {
         let offline_2023 = bcdboot_args("W:\\Windows", "S:", PcaGeneration::Pca2023, true);
         assert!(offline_2023.contains(&"/offline"));
         assert!(offline_2023.contains(&"/bootex"));
+    }
+
+    #[test]
+    fn maps_bootex_font_names_without_accepting_unrelated_files() {
+        assert_eq!(
+            bootex_font_destination_name("segoe_slboot_EX.ttf").as_deref(),
+            Some("segoe_slboot.ttf")
+        );
+        assert!(bootex_font_destination_name("normal.ttf").is_none());
+        assert!(bootex_font_destination_name("_EX.ttf").is_none());
+    }
+
+    #[test]
+    fn derives_the_uefi_fallback_name_from_the_pe_machine() {
+        fn image(machine: u16) -> Vec<u8> {
+            let mut bytes = vec![0u8; 0x86];
+            bytes[..2].copy_from_slice(b"MZ");
+            bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+            bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+            bytes[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+            bytes
+        }
+        assert_eq!(efi_architecture_from_pe(&image(0x014c)), Some(0));
+        assert_eq!(efi_architecture_from_pe(&image(0x8664)), Some(9));
+        assert_eq!(efi_architecture_from_pe(&image(0xaa64)), Some(12));
+        assert_eq!(efi_architecture_from_pe(&image(0xffff)), None);
+    }
+
+    #[test]
+    fn old_bcdboot_falls_back_to_standard_layout_before_manual_bootex_copy() {
+        let failure = || {
+            crate::command::CommandOutcome::new(
+                Some(87),
+                Vec::new(),
+                b"unsupported option".to_vec(),
+            )
+        };
+        let executor = SequenceExecutor::new(vec![
+            failure(),
+            failure(),
+            crate::command::CommandOutcome::success(),
+        ]);
+
+        let mode = run_bcdboot_with_executor(
+            &executor,
+            Path::new("bcdboot.exe"),
+            "W:\\Windows",
+            "S:",
+            PcaGeneration::Pca2023,
+        )
+        .unwrap();
+
+        assert_eq!(mode, BcdbootWriteMode::ManualBootexCopy);
+        let requests = executor.requests();
+        assert_eq!(requests.len(), 3);
+        let arguments = |index: usize| {
+            requests[index]
+                .arguments()
+                .iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let first = arguments(0);
+        assert!(first.iter().any(|arg| arg == "/offline"));
+        assert!(first.iter().any(|arg| arg == "/bootex"));
+        let second = arguments(1);
+        assert!(!second.iter().any(|arg| arg == "/offline"));
+        assert!(second.iter().any(|arg| arg == "/bootex"));
+        let third = arguments(2);
+        assert!(!third.iter().any(|arg| arg == "/offline"));
+        assert!(!third.iter().any(|arg| arg == "/bootex"));
     }
 
     #[cfg(windows)]

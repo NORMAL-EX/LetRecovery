@@ -34,6 +34,4 @@ The [Toolbox](/guide/toolbox) includes **BitLocker management**:
 
 ::: tip Secure Boot and the bundled PE
 LetRecovery boots WinPE through the target machine's own **Windows Boot Manager (bootmgfw)** rather than bundling its own bootloader, so it also works on machines with Secure Boot enabled.
-
-Going further: when Secure Boot is enabled, the host system's `winload.efi` contains the 2023 certificate, and it matches the PE kernel version (the `10.0.19041.` series), the program will **make a best effort** to overwrite PE's corresponding file with the host's dual-signed (2011+2023) `winload.efi`, so that PE can boot even on machines where the 2011 certificate has been revoked (the CVE-2023-24932 DBX update). This is a **best-effort** optimization that triggers only when the above conditions are met.
 :::

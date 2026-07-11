@@ -109,6 +109,18 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
     log::info!("[CLI INSTALL] 镜像: {}", spec.image_path);
     log::info!("[CLI INSTALL] PE: {}", spec.pe_path);
 
+    // The CLI follows the same fail-closed path as the GUI. Prepare any
+    // required compatibility package before selecting or creating storage.
+    let pca_compat_package = crate::core::pca_preflight::verify_before_disk_write(
+        &spec.image_path,
+        spec.volume_index,
+        is_gho,
+        false,
+        true,
+        lr_core::boot_pca::BootPcaMode::Auto,
+    )
+    .map_err(|error| anyhow!(error))?;
+
     // 4) 数据分区（暂存配置 + 镜像）
     let image_size = std::fs::metadata(&spec.image_path)
         .map(|m| m.len())
@@ -135,6 +147,20 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
     // 5) 把镜像放进数据目录（InstallConfig.image_path 存相对文件名）
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
     std::fs::create_dir_all(&data_dir).with_context(|| tr!("创建数据目录失败: {}", data_dir))?;
+    let pca_compat_metadata = if let Some(package) = pca_compat_package.as_ref() {
+        let staged_path =
+            std::path::Path::new(&data_dir).join(lr_core::pca_compat::STAGED_PACKAGE_RELATIVE_PATH);
+        package
+            .persist_to(&staged_path)
+            .map_err(|error| anyhow!(tr!("保存 PCA2023 兼容包失败：{}", error)))?;
+        Some((
+            package.sha256().to_string(),
+            package.image_index(),
+            package.target(),
+        ))
+    } else {
+        None
+    };
     let image_filename = std::path::Path::new(&spec.image_path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -199,6 +225,26 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         run_diskpart_scripts: false,
         boot_mode: 0,
         boot_pca_mode: lr_core::boot_pca::BootPcaMode::Auto,
+        pca_compat_package: pca_compat_metadata
+            .as_ref()
+            .map(|_| lr_core::pca_compat::STAGED_PACKAGE_RELATIVE_PATH.to_string())
+            .unwrap_or_default(),
+        pca_compat_sha256: pca_compat_metadata
+            .as_ref()
+            .map(|metadata| metadata.0.clone())
+            .unwrap_or_default(),
+        pca_compat_image_index: pca_compat_metadata
+            .as_ref()
+            .map(|metadata| metadata.1)
+            .unwrap_or(0),
+        pca_compat_target_build: pca_compat_metadata
+            .as_ref()
+            .map(|metadata| metadata.2.build)
+            .unwrap_or(0),
+        pca_compat_target_architecture: pca_compat_metadata
+            .as_ref()
+            .map(|metadata| metadata.2.architecture)
+            .unwrap_or(0),
     };
 
     // 7) 写安装配置（含目标盘标记；自定义无人值守 XML 会被复制进数据目录）

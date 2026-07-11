@@ -21,6 +21,8 @@ pub mod fveapi;
 pub mod hash;
 pub mod image_meta;
 pub mod operation;
+pub mod pca_compat;
+pub mod pca_preflight;
 pub mod reboot;
 pub mod registry;
 pub mod sam;

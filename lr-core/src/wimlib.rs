@@ -1031,6 +1031,12 @@ impl WimlibManager {
         path_in_image: &str,
     ) -> Result<bool, String> {
         let wim = self.open(image_file)?;
+        if image_file.to_ascii_lowercase().ends_with(".swm") {
+            if let Err(error) = self.reference_swm(wim, image_file) {
+                unsafe { (self.free_wim)(wim) };
+                return Err(error);
+            }
+        }
         let wpath = to_wide(path_in_image);
         let rc = unsafe {
             (self.iterate_dir_tree)(
@@ -1066,6 +1072,12 @@ impl WimlibManager {
         paths: &[&str],
     ) -> Result<bool, String> {
         let wim = self.open(image_file)?;
+        if image_file.to_ascii_lowercase().ends_with(".swm") {
+            if let Err(error) = self.reference_swm(wim, image_file) {
+                unsafe { (self.free_wim)(wim) };
+                return Err(error);
+            }
+        }
         let mut found = false;
         for p in paths {
             let wpath = to_wide(p);
@@ -1102,6 +1114,12 @@ impl WimlibManager {
         paths: &[&str],
     ) -> Result<(), String> {
         let wim = self.open(image_file)?;
+        if image_file.to_ascii_lowercase().ends_with(".swm") {
+            if let Err(error) = self.reference_swm(wim, image_file) {
+                unsafe { (self.free_wim)(wim) };
+                return Err(error);
+            }
+        }
         let wtarget = to_wide(target_dir);
         let wpaths: Vec<Vec<u16>> = paths.iter().map(|p| to_wide(p)).collect();
         let ptrs: Vec<*const u16> = wpaths.iter().map(|v| v.as_ptr()).collect();

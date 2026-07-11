@@ -15,6 +15,7 @@ pub mod image_verify;
 pub mod install_config;
 pub mod iso;
 pub mod nvidia_driver;
+pub mod pca_preflight;
 pub mod pe;
 pub mod quick_partition;
 pub mod registry;

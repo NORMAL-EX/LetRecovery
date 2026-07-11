@@ -523,7 +523,14 @@ impl App {
             });
         }
 
-        self.show_boot_pca_controls(ui);
+        if self.selected_image_has_unsupported_architecture() {
+            ui.colored_label(
+                egui::Color32::RED,
+                tr!("所选系统镜像的架构不受支持；LetRecovery 仅支持 x64 和 x86 系统镜像"),
+            );
+        } else {
+            self.show_boot_pca_controls(ui);
+        }
 
         // PE选择（仅在需要通过PE安装时显示）
         if show_pe_selector {
@@ -685,6 +692,41 @@ impl App {
             .unwrap_or(false)
     }
 
+    fn selected_image_supports_pca(&self) -> bool {
+        if self.xp_i386_source.is_some()
+            || self.local_image_path.to_ascii_lowercase().ends_with(".gho")
+            || self.local_image_path.to_ascii_lowercase().ends_with(".ghs")
+        {
+            return false;
+        }
+        self.selected_volume
+            .and_then(|index| self.image_volumes.get(index))
+            .is_some_and(|image| {
+                lr_core::pca_preflight::supports_pca_selection(
+                    image.major_version,
+                    image.architecture,
+                )
+            })
+    }
+
+    fn selected_image_has_unsupported_architecture(&self) -> bool {
+        self.selected_volume
+            .and_then(|index| self.image_volumes.get(index))
+            .is_some_and(|image| {
+                image
+                    .architecture
+                    .is_some_and(|architecture| !matches!(architecture, 0 | 9))
+            })
+    }
+
+    fn effective_boot_pca_mode(&self) -> BootPcaMode {
+        if self.selected_image_supports_pca() {
+            self.selected_boot_pca_mode
+        } else {
+            BootPcaMode::Auto
+        }
+    }
+
     fn update_boot_pca_detection(&mut self) {
         if let Some(receiver) = self.boot_pca_detection_rx.take() {
             match receiver.try_recv() {
@@ -722,7 +764,11 @@ impl App {
         let target_partition = self
             .selected_partition
             .and_then(|index| self.partitions.get(index))
-            .filter(|_| self.repair_boot && self.selected_target_uses_uefi())
+            .filter(|_| {
+                self.repair_boot
+                    && self.selected_target_uses_uefi()
+                    && self.selected_image_supports_pca()
+            })
             .map(|partition| partition.letter.clone());
         let Some(target_partition) = target_partition else {
             self.boot_pca_detection_target.clear();
@@ -763,7 +809,10 @@ impl App {
     }
 
     fn show_boot_pca_controls(&mut self, ui: &mut egui::Ui) {
-        if !self.repair_boot || !self.selected_target_uses_uefi() {
+        if !self.repair_boot
+            || !self.selected_target_uses_uefi()
+            || !self.selected_image_supports_pca()
+        {
             return;
         }
 
@@ -845,7 +894,7 @@ impl App {
         } else if self.selected_boot_pca_mode == BootPcaMode::Pca2023 {
             ui.colored_label(
                 egui::Color32::from_rgb(30, 144, 255),
-                tr!("将使用目标 Windows 中的 PCA2023 BootEx 文件；安装后会验证 EFI 签名。"),
+                tr!("将使用 PCA2023 BootEx；旧镜像缺少时会使用内置离线资源补齐，并在安装后验证 EFI 签名。"),
             );
         } else if self.selected_boot_pca_mode == BootPcaMode::Pca2011 {
             ui.colored_label(
@@ -905,6 +954,14 @@ impl App {
     }
 
     fn boot_pca_selection_error(&self) -> Option<String> {
+        if self.selected_image_has_unsupported_architecture() {
+            return Some(tr!(
+                "所选系统镜像的架构不受支持；LetRecovery 仅支持 x64 和 x86 系统镜像"
+            ));
+        }
+        if !self.selected_image_supports_pca() {
+            return None;
+        }
         if !self.repair_boot || !self.selected_target_uses_uefi() {
             return None;
         }
@@ -1688,7 +1745,7 @@ impl App {
             ),
             auto_reboot: self.auto_reboot,
             boot_mode: self.selected_boot_mode,
-            boot_pca_mode: self.selected_boot_pca_mode,
+            boot_pca_mode: self.effective_boot_pca_mode(),
             advanced_options: self.advanced_options.clone(),
             driver_action: self.driver_action,
             custom_unattend_path: if self.unattended_install {

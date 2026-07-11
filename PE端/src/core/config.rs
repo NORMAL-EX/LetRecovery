@@ -120,6 +120,16 @@ pub struct InstallConfig {
     pub boot_mode: u8,
     /// UEFI Windows Boot Manager 签名选择。
     pub boot_pca_mode: BootPcaMode,
+    /// PCA2023 兼容包在数据目录中的安全相对路径；空表示不需要。
+    pub pca_compat_package: String,
+    /// 暂存兼容包的 SHA-256。
+    pub pca_compat_sha256: String,
+    /// 兼容包内要提取的 WIM 卷索引。
+    pub pca_compat_image_index: u32,
+    /// 兼容包绑定的目标 Windows build。
+    pub pca_compat_target_build: u32,
+    /// 兼容包绑定的目标 WIM architecture 值。
+    pub pca_compat_target_architecture: u16,
 
     /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
@@ -616,6 +626,17 @@ impl ConfigFileManager {
                     }
                     "BootMode" => config.boot_mode = value.parse().unwrap_or(0),
                     "BootPcaMode" => config.boot_pca_mode = BootPcaMode::from_config_value(value),
+                    "PcaCompatPackage" => config.pca_compat_package = value.to_string(),
+                    "PcaCompatSha256" => config.pca_compat_sha256 = value.to_string(),
+                    "PcaCompatImageIndex" => {
+                        config.pca_compat_image_index = value.parse().unwrap_or(0)
+                    }
+                    "PcaCompatTargetBuild" => {
+                        config.pca_compat_target_build = value.parse().unwrap_or(0)
+                    }
+                    "PcaCompatTargetArchitecture" => {
+                        config.pca_compat_target_architecture = value.parse().unwrap_or(0)
+                    }
                     "Language" => config.language = value.to_string(),
                     "InstallCabPackages" => {
                         config.install_cab_packages = value.parse().unwrap_or(false)
@@ -725,17 +746,27 @@ mod tests {
         assert_eq!(config.volume_index, 4);
         assert_eq!(config.boot_mode, 0);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
+        assert!(config.pca_compat_package.is_empty());
+        assert_eq!(config.pca_compat_image_index, 0);
     }
 
     #[test]
     fn reads_explicit_pca2023_selection_from_normal_endpoint() {
-        let config = ConfigFileManager::deserialize_install_config(
+        let config = ConfigFileManager::deserialize_install_config(concat!(
             "[Install]\r\nBootMode=1\r\nBootPcaMode=pca2023\r\n",
-        )
+            "PcaCompatPackage=pca_compat\\package.wim\r\n",
+            "PcaCompatSha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n",
+            "PcaCompatImageIndex=1\r\nPcaCompatTargetBuild=19045\r\n",
+            "PcaCompatTargetArchitecture=9\r\n"
+        ))
         .unwrap();
 
         assert_eq!(config.boot_mode, 1);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Pca2023);
+        assert_eq!(config.pca_compat_package, "pca_compat\\package.wim");
+        assert_eq!(config.pca_compat_image_index, 1);
+        assert_eq!(config.pca_compat_target_build, 19045);
+        assert_eq!(config.pca_compat_target_architecture, 9);
     }
 }
 

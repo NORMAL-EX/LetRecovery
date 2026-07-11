@@ -344,6 +344,32 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         log::info!("[PE安装] GHO 镜像，跳过 wimlib 校验");
     }
 
+    // Auto mode can become UEFI after a partitioning script, so preflight all
+    // modes except explicit Legacy before the first target-disk mutation.
+    let staged_pca_compat =
+        match crate::core::pca_preflight::staged_config(&config, std::path::Path::new(&data_dir)) {
+            Ok(staged) => staged,
+            Err(error) => {
+                let _ = tx.send(WorkerMessage::Failed(error));
+                return;
+            }
+        };
+    let pca_compat_package = match crate::core::pca_preflight::verify_before_disk_write(
+        &image_path,
+        config.volume_index,
+        config.is_gho,
+        config.is_xp,
+        config.boot_mode != 2,
+        config.boot_pca_mode,
+        staged_pca_compat.as_ref(),
+    ) {
+        Ok(package) => package,
+        Err(error) => {
+            let _ = tx.send(WorkerMessage::Failed(error));
+            return;
+        }
+    };
+
     // 装机前运行 diskpart 脚本（分区准备）——来自数据目录暂存的 diskpart\
     if config.run_diskpart_scripts {
         let _ = tx.send(WorkerMessage::SetStatus(tr!("正在运行 Diskpart 脚本...")));
@@ -597,6 +623,25 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         log::info!("未启用CAB更新包安装");
     }
     let _ = tx.send(WorkerMessage::SetProgress(100));
+
+    if let Some(package) = pca_compat_package.as_ref() {
+        let _ = tx.send(WorkerMessage::SetStatus(tr!(
+            "正在升级 PCA2023 引导文件..."
+        )));
+        log::info!(
+            "[PE安装] 为 Windows build {} / architecture {} 注入 PCA2023 BootEx",
+            package.target().build,
+            package.target().architecture
+        );
+        if let Err(error) = package.inject_into_offline_windows(std::path::Path::new(&apply_dir)) {
+            log::error!("[PE安装] PCA2023 兼容包注入失败: {error}");
+            let _ = tx.send(WorkerMessage::Failed(tr!(
+                "升级 PCA2023 引导文件失败：{}",
+                error
+            )));
+            return;
+        }
+    }
 
     // Step 5: 修复引导
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::RepairBoot));

@@ -40,6 +40,10 @@ pub struct ImageInfo {
     pub major_version: Option<u16>,
     /// Windows 次版本号 (如 Win7 为 1，对应版本 6.1)
     pub minor_version: Option<u16>,
+    /// Windows 构建号（WIM XML VERSION/BUILD）。
+    pub build: Option<u32>,
+    /// WIM 架构代码（0=x86，9=amd64，12=arm64）。
+    pub architecture: Option<u16>,
     /// 镜像类型 (标准安装/整盘备份/PE等)
     pub image_type: lr_core::image_meta::WimImageType,
     /// 是否已验证可安装
@@ -582,6 +586,8 @@ impl Dism {
                                 installation_type: img.installation_type,
                                 major_version: img.major_version,
                                 minor_version: img.minor_version,
+                                build: img.build,
+                                architecture: img.architecture,
                                 image_type: img.image_type,
                                 verified_installable: img.verified_installable,
                             })
@@ -850,6 +856,8 @@ impl Dism {
                             installation_type,
                             major_version,
                             minor_version,
+                            build: None,
+                            architecture: None,
                             image_type,
                             verified_installable: false,
                         });

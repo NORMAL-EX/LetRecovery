@@ -103,6 +103,16 @@ pub struct InstallConfig {
     pub boot_mode: u8,
     /// UEFI Windows Boot Manager 签名选择。
     pub boot_pca_mode: BootPcaMode,
+    /// PCA2023 兼容包在数据目录中的安全相对路径；空表示不需要。
+    pub pca_compat_package: String,
+    /// 暂存兼容包的 SHA-256。
+    pub pca_compat_sha256: String,
+    /// 兼容包内要提取的 WIM 卷索引。
+    pub pca_compat_image_index: u32,
+    /// 兼容包绑定的目标 Windows build。
+    pub pca_compat_target_build: u32,
+    /// 兼容包绑定的目标 WIM architecture 值。
+    pub pca_compat_target_architecture: u16,
 }
 
 impl InstallConfig {
@@ -464,6 +474,11 @@ IsXp={}
 RunDiskpartScripts={}
 BootMode={}
 BootPcaMode={}
+PcaCompatPackage={}
+PcaCompatSha256={}
+PcaCompatImageIndex={}
+PcaCompatTargetBuild={}
+PcaCompatTargetArchitecture={}
 Language={}
 
 [Advanced]
@@ -507,6 +522,11 @@ XpInjectNvmeDriver={}
             config.run_diskpart_scripts,
             config.boot_mode,
             config.boot_pca_mode.as_config_value(),
+            config.pca_compat_package,
+            config.pca_compat_sha256,
+            config.pca_compat_image_index,
+            config.pca_compat_target_build,
+            config.pca_compat_target_architecture,
             crate::utils::i18n::current_language(),
             config.remove_shortcut_arrow,
             config.restore_classic_context_menu,
@@ -589,6 +609,17 @@ Language={}
                     }
                     "BootMode" => config.boot_mode = value.parse().unwrap_or(0),
                     "BootPcaMode" => config.boot_pca_mode = BootPcaMode::from_config_value(value),
+                    "PcaCompatPackage" => config.pca_compat_package = value.to_string(),
+                    "PcaCompatSha256" => config.pca_compat_sha256 = value.to_string(),
+                    "PcaCompatImageIndex" => {
+                        config.pca_compat_image_index = value.parse().unwrap_or(0)
+                    }
+                    "PcaCompatTargetBuild" => {
+                        config.pca_compat_target_build = value.parse().unwrap_or(0)
+                    }
+                    "PcaCompatTargetArchitecture" => {
+                        config.pca_compat_target_architecture = value.parse().unwrap_or(0)
+                    }
                     "RemoveShortcutArrow" => {
                         config.remove_shortcut_arrow = value.parse().unwrap_or(false)
                     }
@@ -743,6 +774,11 @@ mod tests {
         let source = InstallConfig {
             boot_mode: 1,
             boot_pca_mode: BootPcaMode::Pca2023,
+            pca_compat_package: "pca_compat\\package.wim".to_string(),
+            pca_compat_sha256: "a".repeat(64),
+            pca_compat_image_index: 1,
+            pca_compat_target_build: 19045,
+            pca_compat_target_architecture: 9,
             ..InstallConfig::default()
         };
 
@@ -751,5 +787,10 @@ mod tests {
 
         assert_eq!(parsed.boot_mode, 1);
         assert_eq!(parsed.boot_pca_mode, BootPcaMode::Pca2023);
+        assert_eq!(parsed.pca_compat_package, "pca_compat\\package.wim");
+        assert_eq!(parsed.pca_compat_sha256, "a".repeat(64));
+        assert_eq!(parsed.pca_compat_image_index, 1);
+        assert_eq!(parsed.pca_compat_target_build, 19045);
+        assert_eq!(parsed.pca_compat_target_architecture, 9);
     }
 }

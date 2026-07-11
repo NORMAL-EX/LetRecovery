@@ -50,6 +50,10 @@ pub struct ImageInfo {
     pub major_version: Option<u16>,
     /// Windows 次版本号
     pub minor_version: Option<u16>,
+    /// Windows 构建号（WIM XML VERSION/BUILD）。
+    pub build: Option<u32>,
+    /// WIM 架构代码（0=x86, 9=amd64, 12=arm64）。
+    pub architecture: Option<u16>,
     /// 镜像类型
     pub image_type: WimImageType,
     /// 是否已验证可安装
@@ -110,6 +114,8 @@ fn parse_image_info_roxml(xml: &str) -> Option<Vec<ImageInfo>> {
         let description = node_text(image, "DESCRIPTION").unwrap_or_default();
         let major_version = node_text(image, "MAJOR").and_then(|s| s.parse::<u16>().ok());
         let minor_version = node_text(image, "MINOR").and_then(|s| s.parse::<u16>().ok());
+        let build = node_text(image, "BUILD").and_then(|s| s.parse::<u32>().ok());
+        let architecture = node_text(image, "ARCH").and_then(|s| s.parse::<u16>().ok());
         let name = build_image_name_node(image, &description, index);
 
         images.push(ImageInfo {
@@ -120,6 +126,8 @@ fn parse_image_info_roxml(xml: &str) -> Option<Vec<ImageInfo>> {
             description,
             major_version,
             minor_version,
+            build,
+            architecture,
             image_type: WimImageType::Unknown,
             verified_installable: false,
         });
@@ -249,6 +257,18 @@ fn extract_version_number(image_block: &str, tag: &str) -> Option<u16> {
         .and_then(|s| s.parse::<u16>().ok())
 }
 
+fn extract_version_number_u32(image_block: &str, tag: &str) -> Option<u32> {
+    extract_xml_tag(image_block, "VERSION")
+        .and_then(|version_block| extract_xml_tag(&version_block, tag))
+        .or_else(|| {
+            extract_xml_tag(image_block, "WINDOWS")
+                .and_then(|win_block| extract_xml_tag(&win_block, "VERSION"))
+                .and_then(|ver_block| extract_xml_tag(&ver_block, tag))
+        })
+        .or_else(|| extract_xml_tag(image_block, tag))
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
 fn parse_image_info_fallback(xml: &str) -> Vec<ImageInfo> {
     let mut images = Vec::new();
 
@@ -290,6 +310,11 @@ fn parse_image_info_fallback(xml: &str) -> Vec<ImageInfo> {
         let description = extract_xml_tag(image_block, "DESCRIPTION").unwrap_or_default();
         let major_version = extract_version_number(image_block, "MAJOR");
         let minor_version = extract_version_number(image_block, "MINOR");
+        let build = extract_version_number_u32(image_block, "BUILD");
+        let architecture = extract_xml_tag(image_block, "WINDOWS")
+            .and_then(|windows| extract_xml_tag(&windows, "ARCH"))
+            .or_else(|| extract_xml_tag(image_block, "ARCH"))
+            .and_then(|value| value.parse::<u16>().ok());
         let name = build_image_name(image_block, &description, parsed_index);
 
         images.push(ImageInfo {
@@ -300,6 +325,8 @@ fn parse_image_info_fallback(xml: &str) -> Vec<ImageInfo> {
             description,
             major_version,
             minor_version,
+            build,
+            architecture,
             image_type: WimImageType::Unknown,
             verified_installable: false,
         });
@@ -412,6 +439,8 @@ mod tests {
         assert_eq!(v[0].name, "Windows 10 Pro");
         assert_eq!(v[0].installation_type, "Client");
         assert_eq!(v[0].major_version, Some(10));
+        assert_eq!(v[0].build, Some(19045));
+        assert_eq!(v[0].architecture, Some(9));
         assert_eq!(v[0].size_bytes, 4_000_000_000);
         assert_eq!(v[0].image_type, WimImageType::StandardInstall);
     }
@@ -537,6 +566,8 @@ mod tests {
             description: String::new(),
             major_version: major,
             minor_version: None,
+            build: None,
+            architecture: None,
             image_type: WimImageType::Unknown,
             verified_installable: false,
         };
