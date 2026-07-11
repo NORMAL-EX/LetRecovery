@@ -42,7 +42,9 @@ jobs:
         run: cargo check --workspace --all-targets --locked
 
       - name: Cargo clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings
+        # Rust 1.88 reports this style-only lint differently from newer supported toolchains.
+        # Keep every behavioral warning blocking while avoiding a version-dependent rewrite.
+        run: cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings -A clippy::uninlined_format_args
 
       # 编译所有测试目标（含 #[cfg(test)]），把“测试代码编不过”也变成阻塞失败。
       # 测试专用 feature 只让测试二进制以 asInvoker 启动；release 构建会主动拒绝该 feature。

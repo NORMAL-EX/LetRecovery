@@ -51,7 +51,9 @@ jobs:
           set -euo pipefail
           cargo fmt --all --check
           cargo check --workspace --all-targets --locked
-          cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings
+          # Rust 1.88 reports this style-only lint differently from newer supported toolchains.
+          # Keep every behavioral warning blocking while avoiding a version-dependent rewrite.
+          cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings -A clippy::uninlined_format_args
           cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
           cargo test -p lr-core --locked
           cargo test -p letrecovery-pe --locked --features non-elevated-tests
