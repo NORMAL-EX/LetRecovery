@@ -10,11 +10,13 @@ pub fn create_command<S: AsRef<OsStr>>(program: S) -> Command {
 
 /// 执行命令并在 debug 模式下输出调试信息
 pub fn run_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Result<Output> {
-    let program_str = program.as_ref().to_string_lossy();
-
     #[cfg(debug_assertions)]
     {
-        log::debug!("[CMD] {} {}", program_str, args.join(" "));
+        log::debug!(
+            "[CMD] {} {}",
+            program.as_ref().to_string_lossy(),
+            args.join(" ")
+        );
     }
 
     let output = create_command(program).args(args).output()?;
@@ -39,11 +41,13 @@ pub fn run_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Resul
 
 /// 执行命令并spawn（不等待结果）
 pub fn spawn_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Result<Child> {
-    let program_str = program.as_ref().to_string_lossy();
-
     #[cfg(debug_assertions)]
     {
-        log::debug!("[SPAWN] {} {}", program_str, args.join(" "));
+        log::debug!(
+            "[SPAWN] {} {}",
+            program.as_ref().to_string_lossy(),
+            args.join(" ")
+        );
     }
 
     create_command(program).args(args).spawn()
@@ -60,11 +64,13 @@ pub fn run_command_with_args<S: AsRef<OsStr>>(
     program: S,
     args: Vec<String>,
 ) -> std::io::Result<Output> {
-    let program_str = program.as_ref().to_string_lossy();
-
     #[cfg(debug_assertions)]
     {
-        log::debug!("[CMD] {} {}", program_str, args.join(" "));
+        log::debug!(
+            "[CMD] {} {}",
+            program.as_ref().to_string_lossy(),
+            args.join(" ")
+        );
     }
 
     let output = create_command(program).args(&args).output()?;
@@ -89,11 +95,13 @@ pub fn run_command_with_args<S: AsRef<OsStr>>(
 
 /// 执行带 Stdio 管道的命令（用于 DISM 等需要实时输出的场景）
 pub fn spawn_command_piped<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Result<Child> {
-    let program_str = program.as_ref().to_string_lossy();
-
     #[cfg(debug_assertions)]
     {
-        log::debug!("[SPAWN PIPED] {} {}", program_str, args.join(" "));
+        log::debug!(
+            "[SPAWN PIPED] {} {}",
+            program.as_ref().to_string_lossy(),
+            args.join(" ")
+        );
     }
 
     create_command(program)
