@@ -395,7 +395,10 @@ jobs:
             throw "WIM not found: $wimPath"
           }
 
-          $md5 = (Get-FileHash -LiteralPath $wimPath -Algorithm MD5).Hash.ToUpperInvariant()
+          $wim = Get-Item -LiteralPath $wimPath
+          $md5 = (Get-FileHash -LiteralPath $wim.FullName -Algorithm MD5).Hash.ToUpperInvariant()
+          $wimSha256 = (Get-FileHash -LiteralPath $wim.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+          $wimSizeBytes = $wim.Length.ToString([System.Globalization.CultureInfo]::InvariantCulture)
           $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
           $rand = [guid]::NewGuid().ToString("N")
           $version = "v0.0.0"
@@ -406,7 +409,7 @@ jobs:
             return -join ($bytes | ForEach-Object { $_.ToString("x2") })
           }
 
-          $payloadText = $env:LETRECOVERY_PE_URL + "`n" + $env:LETRECOVERY_PE_NAME + "`n" + $env:LETRECOVERY_PE_FILENAME + "`n" + $md5
+          $payloadText = $env:LETRECOVERY_PE_URL + "`n" + $env:LETRECOVERY_PE_NAME + "`n" + $env:LETRECOVERY_PE_FILENAME + "`n" + $md5 + "`n" + $wimSha256 + "`n" + $wimSizeBytes
           $sha256 = [System.Security.Cryptography.SHA256]::Create()
           try {
             $payloadHash = Convert-BytesToHexLower ($sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($payloadText)))
@@ -436,6 +439,8 @@ jobs:
             lr_pe_name = $env:LETRECOVERY_PE_NAME
             lr_pe_filename = $env:LETRECOVERY_PE_FILENAME
             lr_pe_md5 = $md5
+            lr_pe_sha256 = $wimSha256
+            lr_pe_size_bytes = $wimSizeBytes
           }
 
           $json = $body | ConvertTo-Json -Compress
@@ -462,7 +467,7 @@ jobs:
               body = f.read()
 
           request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-          context = ssl._create_unverified_context()
+          context = ssl.create_default_context()
           try:
               with urllib.request.urlopen(request, context=context, timeout=60) as response:
                   sys.stdout.buffer.write(response.read())

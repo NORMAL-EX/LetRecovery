@@ -6,7 +6,7 @@
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
+use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, InvalidateRect, HFONT};
 use windows::Win32::UI::Controls::{
     LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_GETNEXTITEM,
     LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETBKCOLOR, LVM_SETCOLUMNWIDTH,
@@ -235,8 +235,8 @@ impl NativeQuickPartitionDialog {
     pub unsafe fn show_modeless(&mut self) {
         self.layout();
         self.shell.show_modeless();
-        // Keep the native auto-radio fallback active after the shell's final descendant theme
-        // pass.  Several Windows 11 dark-theme builds otherwise restore a black caption.
+        // Reassert the shared Inno radio painter after the shell's final descendant theme pass;
+        // USER32 still owns grouping, keyboard input and accessibility for both partition styles.
         self.apply_font_and_theme();
     }
 
@@ -530,6 +530,10 @@ impl NativeQuickPartitionDialog {
         let selected = self.state.selected_row.is_some();
         let _ = EnableWindow(self.controls.size, selected);
         let _ = EnableWindow(self.controls.apply_size, selected);
+        // Disabled/enabled transitions can leave USER32's previous one-pixel bottom edge cached
+        // until another input message.  Repaint only this owner-drawn button, without erasing the
+        // row behind it, so all four Inno edges are present in the same frame.
+        let _ = InvalidateRect(self.controls.apply_size, None, false);
         let _ = EnableWindow(
             self.controls.delete,
             matches!(self.state.selected_row, Some(EditorRow::Planned(_))),

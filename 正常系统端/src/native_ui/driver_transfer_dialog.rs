@@ -170,8 +170,8 @@ impl NativeDriverTransferDialog {
         self.refresh_controls();
         self.layout();
         self.shell.show_modeless();
-        // Reassert the native auto-radio dark fallback after the shell prepares descendants;
-        // this keeps both captions on the dialog palette without owner-drawing the controls.
+        // Reassert the shared Inno radio painter after the shell prepares descendants; USER32
+        // continues to own grouping, keyboard input and accessibility for both transfer modes.
         self.apply_theme(Palette::system());
     }
 

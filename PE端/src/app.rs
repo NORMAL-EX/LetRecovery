@@ -394,9 +394,19 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     log::info!("目标分区: {}", config.target_partition);
     log::info!("镜像文件: {}", config.image_path);
 
-    // 构建完整镜像路径
+    // Resolve only a single staged file name. A modified INI must not be able to escape the
+    // LetRecovery data directory before image verification or disk writes.
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-    let image_path = format!("{}\\{}", data_dir, config.image_path);
+    let image_path = match ConfigFileManager::resolve_staged_file(&data_dir, &config.image_path) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(error) => {
+            let _ = tx.send(WorkerMessage::Failed(tr!(
+                "安装配置中的镜像文件名无效: {}",
+                error
+            )));
+            return;
+        }
+    };
 
     if !std::path::Path::new(&image_path).exists() {
         let _ = tx.send(WorkerMessage::Failed(tr!("镜像文件不存在: {}", image_path)));
@@ -801,9 +811,21 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             let _ = tx.send(WorkerMessage::SetStatus(tr!(
                 "正在应用自定义无人值守配置..."
             )));
-            let src = format!("{}\\{}", data_dir, config.custom_unattend_file);
-            match apply_custom_unattend(&target_partition, &src) {
-                Ok(_) => log::info!("[UNATTEND] 已应用自定义无人值守文件: {}", src),
+            let src = match ConfigFileManager::resolve_staged_file(
+                &data_dir,
+                &config.custom_unattend_file,
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = tx.send(WorkerMessage::Failed(tr!(
+                        "自定义无人值守文件名无效: {}",
+                        error
+                    )));
+                    return;
+                }
+            };
+            match apply_custom_unattend(&target_partition, &src.to_string_lossy()) {
+                Ok(_) => log::info!("[UNATTEND] 已应用自定义无人值守文件: {}", src.display()),
                 Err(e) => log::warn!("应用自定义无人值守文件失败: {}", e),
             }
         } else {
@@ -888,7 +910,7 @@ fn apply_custom_unattend(target_partition: &str, src: &str) -> anyhow::Result<()
     Ok(())
 }
 
-fn generate_unattend_xml(
+pub(crate) fn generate_unattend_xml(
     target_partition: &str,
     config: &crate::core::config::InstallConfig,
 ) -> anyhow::Result<()> {
@@ -897,9 +919,9 @@ fn generate_unattend_xml(
     use std::path::Path;
 
     let username = if config.custom_username.is_empty() {
-        "User".to_string()
+        escape_xml_text("User")
     } else {
-        config.custom_username.clone()
+        escape_xml_text(&config.custom_username)
     };
 
     let scripts_dir = get_scripts_dir_name();
@@ -1012,6 +1034,15 @@ fn generate_unattend_xml(
     }
 
     Ok(())
+}
+
+fn escape_xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// 生成 Windows 7 专用的无人值守配置

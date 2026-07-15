@@ -5,7 +5,9 @@
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
+use windows::Win32::Graphics::Gdi::{
+    CreateFontW, DeleteObject, RedrawWindow, HFONT, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -236,7 +238,19 @@ impl NativePasswordResetDialog {
             None
         };
         self.state.message.clear();
-        self.render_state();
+        // Selection is already committed by the native ListBox.  Do not refit or move the dialog
+        // here: doing so during LBN_SELCHANGE visibly shifted the first clicked row and exposed
+        // the system-blue intermediate selection before our Inno row palette repainted it.
+        self.shell
+            .set_primary_enabled(self.request().is_ok() && !self.state.loading);
+        set_text(self.controls.status, "");
+        let _ = ShowWindow(self.controls.status, SW_HIDE);
+        let _ = RedrawWindow(
+            self.controls.account_list,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+        );
     }
 
     pub unsafe fn show_modeless(&mut self) {

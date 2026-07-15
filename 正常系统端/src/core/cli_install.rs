@@ -47,6 +47,10 @@ struct CliInstallSpec {
     /// 是否 GHO；缺省按扩展名自动判断。
     #[serde(default)]
     is_gho: Option<bool>,
+    /// Whether the selected image is an XP/2003 image. Older JSON remains compatible and
+    /// defaults to false.
+    #[serde(default)]
+    is_xp: bool,
     /// 驱动处理：0=不处理 1=仅备份 2=自动导入（默认 0）。
     #[serde(default)]
     driver_action_mode: u8,
@@ -115,7 +119,7 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         &spec.image_path,
         spec.volume_index,
         is_gho,
-        false,
+        spec.is_xp,
         true,
         lr_core::boot_pca::BootPcaMode::Auto,
     )
@@ -217,9 +221,7 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         win7_fix_acpi_bsod: advanced.win7_fix_acpi_bsod,
         win7_fix_storage_bsod: advanced.win7_fix_storage_bsod,
         wim_engine: lr_core::active_engine().as_u8(),
-        // CLI 不强制标记 XP；PE 端会按「释放后系统缺少 \Windows\Boot」兜底识别 XP，
-        // 并据此写 XP 引导 + 注入下列驱动（GUI 路径则显式设置 is_xp）。
-        is_xp: false,
+        is_xp: spec.is_xp,
         xp_inject_usb3_driver: advanced.xp_inject_usb3_driver,
         xp_inject_nvme_driver: advanced.xp_inject_nvme_driver,
         run_diskpart_scripts: false,

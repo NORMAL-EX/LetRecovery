@@ -1,6 +1,7 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-changed=assets/icon.png");
+    println!("cargo:rerun-if-changed=assets/win11_button_theme");
 
     // 注：libwim-15.dll 已内置于共享库 lr-core，运行时自动释放到 exe 目录，
     // 这里不再需要从 vendor 复制。
@@ -15,6 +16,7 @@ fn main() {
     // 仅在 Windows 上设置资源
     #[cfg(windows)]
     {
+        generate_win11_button_theme();
         let non_elevated_tests = std::env::var_os("CARGO_FEATURE_NON_ELEVATED_TESTS").is_some();
         if non_elevated_tests && std::env::var("PROFILE").as_deref() == Ok("release") {
             panic!("non-elevated-tests must never be enabled for release builds");
@@ -95,6 +97,54 @@ fn main() {
     // 非 Windows 平台也要消除未使用变量告警
     #[cfg(not(windows))]
     let _ = numeric_version;
+}
+
+/// Converts the Win11 UxTheme renders captured from the fixed `Aero.msstyles` reference into a
+/// compile-time BGRA table.  The runtime therefore draws the same checkbox/radio pixels on Win10
+/// and Win11 without decoding PNG files or asking the host OS for a different BUTTON theme.
+#[cfg(windows)]
+fn generate_win11_button_theme() {
+    use std::fmt::Write as _;
+
+    const DPIS: [u32; 4] = [96, 120, 144, 192];
+    const MODES: [(&str, bool); 2] = [("light", false), ("dark", true)];
+    const KINDS: [&str; 2] = ["checkbox", "radio"];
+
+    let mut source = String::from(
+        "// Generated from assets/win11_button_theme by build.rs; do not edit by hand.\n\
+         static WIN11_BUTTON_THEME_GLYPHS: [EmbeddedButtonGlyph; 128] = [\n",
+    );
+    for (mode, _dark) in MODES {
+        for dpi in DPIS {
+            for kind in KINDS {
+                for state in 1..=8 {
+                    let path = format!("assets/win11_button_theme/{mode}-{dpi}-{kind}-{state}.png");
+                    let rgba = image::open(&path)
+                        .unwrap_or_else(|error| panic!("failed to open {path}: {error}"))
+                        .into_rgba8();
+                    let (width, height) = rgba.dimensions();
+                    let mut bgra = Vec::with_capacity(rgba.as_raw().len());
+                    for pixel in rgba.as_raw().chunks_exact(4) {
+                        bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+                    }
+                    write!(
+                        source,
+                        "    EmbeddedButtonGlyph {{ width: {width}, height: {height}, bgra: &["
+                    )
+                    .expect("write generated button theme header");
+                    for byte in bgra {
+                        write!(source, "{byte},").expect("write generated button theme pixel");
+                    }
+                    source.push_str("] },\n");
+                }
+            }
+        }
+    }
+    source.push_str("];\n");
+
+    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"))
+        .join("win11_button_theme.rs");
+    std::fs::write(output, source).expect("write generated Win11 button theme table");
 }
 
 #[cfg(windows)]

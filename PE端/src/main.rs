@@ -475,9 +475,18 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
         log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
 
-        // 构建完整镜像路径
+        // Resolve only a single staged file name. A modified INI must not be able to escape the
+        // LetRecovery data directory before image verification or disk writes.
         let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-        let image_path = format!("{}\\{}", data_dir, config.image_path);
+        let image_path = match ConfigFileManager::resolve_staged_file(&data_dir, &config.image_path)
+        {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(error) => {
+                log::error!("[PE INSTALL] 错误: {error}");
+                show_error_message(&tr!("安装配置中的镜像文件名无效: {}", error));
+                return Ok(());
+            }
+        };
 
         if !std::path::Path::new(&image_path).exists() {
             log::error!("[PE INSTALL] 错误: 镜像文件不存在: {}", image_path);
@@ -530,9 +539,21 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             }
         };
 
+        if config.run_diskpart_scripts {
+            log::info!("[PE INSTALL] Step 0.5: 运行 Diskpart 脚本");
+            let scripts_dir = std::path::Path::new(&data_dir).join("diskpart");
+            if let Err(error) = lr_core::diskpart::run_scripts_in_dir(&scripts_dir) {
+                log::error!("[PE INSTALL] Diskpart 脚本执行失败: {error}");
+                show_error_message(&tr!("Diskpart 脚本执行失败: {}", error));
+                return Ok(());
+            }
+        }
+
         // Step 1: 格式化分区
         log::info!("[PE INSTALL] Step 1: 格式化分区");
-        if let Err(e) = DiskManager::format_partition(&target_partition) {
+        let volume_label =
+            (!config.volume_label.is_empty()).then_some(config.volume_label.as_str());
+        if let Err(e) = DiskManager::format_partition_with_label(&target_partition, volume_label) {
             log::error!("[PE INSTALL] 格式化失败: {}", e);
             show_error_message(&tr!("格式化分区失败: {}", e));
             return Ok(());
@@ -706,7 +727,17 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             if !config.custom_unattend_file.is_empty() {
                 // 用户自定义无人值守文件：直接复制到目标系统
                 let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-                let src = format!("{}\\{}", data_dir, config.custom_unattend_file);
+                let src = match ConfigFileManager::resolve_staged_file(
+                    &data_dir,
+                    &config.custom_unattend_file,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        log::error!("[PE INSTALL] 自定义无人值守文件名无效: {error}");
+                        show_error_message(&tr!("自定义无人值守文件名无效: {}", error));
+                        return Ok(());
+                    }
+                };
                 match std::fs::read(&src) {
                     Ok(content) => {
                         let panther_dir = format!("{}\\Windows\\Panther", target_partition);
@@ -718,12 +749,12 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
                             let _ =
                                 std::fs::write(format!("{}\\unattend.xml", sysprep_dir), &content);
                         }
-                        log::info!("[PE INSTALL] 已应用自定义无人值守文件: {}", src);
+                        log::info!("[PE INSTALL] 已应用自定义无人值守文件: {}", src.display());
                     }
                     Err(e) => log::error!("[PE INSTALL] 读取自定义无人值守文件失败: {}", e),
                 }
             } else {
-                let _ = generate_unattend_xml(&target_partition, &config.custom_username);
+                let _ = app::generate_unattend_xml(&target_partition, &config);
             }
         }
 
@@ -896,74 +927,6 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             ])
             .spawn();
     }
-
-    Ok(())
-}
-
-/// 生成无人值守XML
-fn generate_unattend_xml(target_partition: &str, username: &str) -> anyhow::Result<()> {
-    let username = if username.is_empty() {
-        "User"
-    } else {
-        username
-    };
-
-    let xml_content = format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-    <settings pass="windowsPE">
-        <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-            <UserData>
-                <ProductKey>
-                    <WillShowUI>OnError</WillShowUI>
-                </ProductKey>
-                <AcceptEula>true</AcceptEula>
-            </UserData>
-        </component>
-    </settings>
-    <settings pass="oobeSystem">
-        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <OOBE>
-                <HideEULAPage>true</HideEULAPage>
-                <HideLocalAccountScreen>true</HideLocalAccountScreen>
-                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
-                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
-                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-                <ProtectYourPC>3</ProtectYourPC>
-            </OOBE>
-            <UserAccounts>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value></Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local User</Description>
-                        <DisplayName>{}</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>{}</Name>
-                    </LocalAccount>
-                </LocalAccounts>
-            </UserAccounts>
-            <AutoLogon>
-                <Password>
-                    <Value></Value>
-                    <PlainText>true</PlainText>
-                </Password>
-                <Enabled>true</Enabled>
-                <Username>{}</Username>
-            </AutoLogon>
-        </component>
-    </settings>
-</unattend>"#,
-        username, username, username
-    );
-
-    let panther_dir = format!("{}\\Windows\\Panther", target_partition);
-    std::fs::create_dir_all(&panther_dir)?;
-
-    let unattend_path = format!("{}\\unattend.xml", panther_dir);
-    std::fs::write(&unattend_path, &xml_content)?;
 
     Ok(())
 }

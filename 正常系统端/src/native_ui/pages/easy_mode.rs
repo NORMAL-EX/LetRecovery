@@ -17,6 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::download::PageRect;
 use crate::core::native_easy_mode_controller::EasyModeView;
 use crate::native_ui::controls::{child, wide};
+use crate::native_ui::layout::measured_button_width;
 use crate::native_ui::theme::{apply_control_theme, NativeControlKind, Palette};
 
 pub const ID_EASY_ENABLED: u16 = 5_700;
@@ -25,6 +26,10 @@ pub const ID_EASY_SYSTEM: u16 = 5_702;
 pub const ID_EASY_VOLUME: u16 = 5_703;
 pub const ID_EASY_INSTALL: u16 = 5_704;
 const SS_CENTER_STYLE: i32 = 0x0000_0001;
+
+fn right_aligned_control_x(left: i32, available_width: i32, control_width: i32) -> i32 {
+    left + (available_width.max(0) - control_width.max(0)).max(0)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EasyModeCommand {
@@ -57,6 +62,9 @@ pub struct EasyModePage {
     pub description: HWND,
     pub install: HWND,
     loading_text: String,
+    dismiss_tip_text: String,
+    install_text: String,
+    font: HFONT,
     systems: Vec<String>,
     volumes: Vec<String>,
     logo_visible: bool,
@@ -128,6 +136,9 @@ impl EasyModePage {
             description,
             install,
             loading_text: labels.loading.to_string(),
+            dismiss_tip_text: labels.dismiss_tip.to_string(),
+            install_text: labels.install.to_string(),
+            font,
             systems: Vec::new(),
             volumes: Vec::new(),
             logo_visible: false,
@@ -231,6 +242,8 @@ impl EasyModePage {
         set_text(self.volume_label, labels.volume);
         set_text(self.install, labels.install);
         self.loading_text = labels.loading.to_owned();
+        self.dismiss_tip_text = labels.dismiss_tip.to_owned();
+        self.install_text = labels.install.to_owned();
     }
 
     pub unsafe fn layout(&self, rect: PageRect, dpi: u32) {
@@ -241,8 +254,17 @@ impl EasyModePage {
         let gap = s(if compact { 4 } else { 8 });
         let label_height = s(if compact { 18 } else { 22 });
         let control_height = s(if compact { 26 } else { 30 });
-        let button_width = s(132).min(width);
-        let tip_button_width = s(72).min(width);
+        let button_width =
+            measured_button_width(self.install, self.font, &self.install_text, dpi, s(110))
+                .min(width);
+        let tip_button_width = measured_button_width(
+            self.dismiss_tip,
+            self.font,
+            &self.dismiss_tip_text,
+            dpi,
+            s(75),
+        )
+        .min((width / 2).max(0));
         let tip_height = s(if compact { 30 } else { 42 });
         let logo_size = if height < s(390) { s(52) } else { s(68) }.min(width);
         // Easy mode is disabled from the About page. Once active, the install page must
@@ -316,7 +338,7 @@ impl EasyModePage {
         );
         let _ = MoveWindow(
             self.install,
-            rect.x,
+            right_aligned_control_x(rect.x, width, button_width),
             install_y,
             button_width,
             control_height,
@@ -419,6 +441,13 @@ unsafe fn set_text(control: HWND, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_button_stays_on_the_right_at_supported_widths() {
+        assert_eq!(right_aligned_control_x(20, 900, 150), 770);
+        assert_eq!(right_aligned_control_x(20, 320, 150), 190);
+        assert_eq!(right_aligned_control_x(20, 100, 100), 20);
+    }
 
     #[test]
     fn command_ids_are_stable_and_isolated() {

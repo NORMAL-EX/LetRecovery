@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, InvalidateRect, MonitorFromWindow, RedrawWindow, ReleaseDC, SelectObject,
     SetBkColor, SetBkMode, SetTextColor, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
     DT_VCENTER, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, RDW_ALLCHILDREN,
-    RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
+    RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, HDITEMW, HDI_TEXT, ODT_HEADER};
@@ -30,16 +30,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_USERDATA, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE,
     WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DPICHANGED,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY,
-    WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_THEMECHANGED, WNDCLASSEXW,
-    WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT,
-    WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::controls::{child, draw_inno_button, wide, ButtonRole, InnoMetrics};
 use super::layout::{measure_text, LayoutMetrics};
 use super::theme::{
-    apply_control_theme, apply_list_view_theme, Brushes, NativeControlKind, Palette,
+    apply_control_theme, apply_list_view_theme, apply_progress_theme, apply_trackbar_theme,
+    Brushes, NativeControlKind, Palette,
 };
 
 const DIALOG_CLASS: PCWSTR = w!("LetRecovery.Native.InnoDialog");
@@ -715,6 +716,10 @@ unsafe extern "system" fn prepare_dialog_descendant(hwnd: HWND, lparam: LPARAM) 
         apply_control_theme(hwnd, context.palette, NativeControlKind::List);
     } else if class_name.eq_ignore_ascii_case("Button") {
         apply_control_theme(hwnd, context.palette, NativeControlKind::General);
+    } else if class_name.eq_ignore_ascii_case("msctls_progress32") {
+        apply_progress_theme(hwnd, context.palette);
+    } else if class_name.eq_ignore_ascii_case("msctls_trackbar32") {
+        apply_trackbar_theme(hwnd, context.palette);
     }
     let _ = InvalidateRect(hwnd, None, false);
     BOOL(1)
@@ -849,11 +854,26 @@ unsafe extern "system" fn dialog_proc(
             }
             LRESULT(0)
         }
-        WM_SETTINGCHANGE | WM_THEMECHANGED => {
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
             if let Some(state) = state {
+                // Existing UxTheme handles become stale on WM_THEMECHANGED.  Freeze the complete
+                // dialog while replacing brushes and descendant theme classes so a modeless tool
+                // never shows half of each palette during an online system-theme switch.
+                let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
                 state.palette = Palette::system();
                 state.brushes = Brushes::new(state.palette);
                 state.apply_theme();
+                // Reapplying an existing subclass updates its palette reference data. Walk every
+                // live descendant in the same frozen frame so fields, ComboLBox popups, reports,
+                // choices, progress bars and sliders cannot retain their creation-time theme.
+                prepare_dialog_descendants(state);
+                let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
+                let _ = RedrawWindow(
+                    hwnd,
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                );
             }
             LRESULT(0)
         }
@@ -880,7 +900,7 @@ unsafe extern "system" fn dialog_proc(
             }
             LRESULT(0)
         }
-        WM_NOTIFY => {
+        WM_NOTIFY | WM_HSCROLL => {
             if let Some(state) = state {
                 if !state.owner.is_invalid() {
                     return SendMessageW(state.owner, message, wparam, lparam);
@@ -954,7 +974,7 @@ unsafe extern "system" fn content_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
-        WM_COMMAND | WM_NOTIFY | WM_DRAWITEM | WM_CTLCOLORBTN | WM_CTLCOLORSTATIC
+        WM_COMMAND | WM_NOTIFY | WM_DRAWITEM | WM_HSCROLL | WM_CTLCOLORBTN | WM_CTLCOLORSTATIC
         | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
             SendMessageW(GetParent(hwnd).unwrap_or_default(), message, wparam, lparam)
         }

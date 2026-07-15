@@ -359,11 +359,6 @@ impl DiskManager {
         PartitionStyle::Unknown
     }
 
-    /// 格式化指定分区
-    pub fn format_partition(partition: &str) -> Result<String> {
-        Self::format_partition_with_label(partition, None)
-    }
-
     /// 格式化指定分区（带卷标）
     ///
     /// 使用 cmd /c format 进行格式化，因为直接调用 format.com 在 CREATE_NO_WINDOW 模式下

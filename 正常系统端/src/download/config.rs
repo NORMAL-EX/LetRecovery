@@ -330,8 +330,12 @@ impl ConfigManager {
     }
 
     /// 解析系统列表
-    /// 格式: URL,显示名称,Win11/Win10
+    /// v3 使用 JSON 数组；v2 继续兼容 URL,显示名称,Win11/Win10 文本。
     pub fn parse_system_list(content: &str) -> Vec<OnlineSystem> {
+        if let Ok(systems) = serde_json::from_str::<Vec<OnlineSystem>>(content) {
+            return systems;
+        }
+
         content
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
@@ -357,8 +361,12 @@ impl ConfigManager {
     }
 
     /// 解析 PE 列表
-    /// 格式: URL,显示名称,文件名[,MD5[,SHA256]]
+    /// v3 使用 JSON 数组；v2 继续兼容 URL,显示名称,文件名[,MD5[,SHA256]] 文本。
     pub fn parse_pe_list(content: &str) -> Vec<OnlinePE> {
+        if let Ok(pe_list) = serde_json::from_str::<Vec<OnlinePE>>(content) {
+            return pe_list;
+        }
+
         content
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))

@@ -58,7 +58,7 @@ pub fn restart_as_admin() -> Result<()> {
         .join(" ");
     let params_wide: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
 
-    unsafe {
+    let result = unsafe {
         ShellExecuteW(
             None,
             PCWSTR(operation.as_ptr()),
@@ -66,6 +66,15 @@ pub fn restart_as_admin() -> Result<()> {
             PCWSTR(params_wide.as_ptr()),
             PCWSTR::null(),
             SW_SHOWNORMAL,
+        )
+    };
+
+    // ShellExecuteW returns an HINSTANCE-compatible error code in the range 0..=32.
+    // Do not terminate the current process when elevation was cancelled or failed.
+    if result.0 as isize <= 32 {
+        anyhow::bail!(
+            "ShellExecuteW(runas) failed with code {}",
+            result.0 as isize
         );
     }
 

@@ -8,7 +8,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush,
     DeleteDC, DeleteObject, DrawTextW, FillRect, GetBrushOrgEx, GetTextExtentPoint32W, GetWindowDC,
-    InvalidateRect, ReleaseDC, RoundRect, SelectObject, SetBkMode, SetBrushOrgEx,
+    InvalidateRect, LineTo, MoveToEx, ReleaseDC, RoundRect, SelectObject, SetBkMode, SetBrushOrgEx,
     SetStretchBltMode, SetTextColor, StretchBlt, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HALFTONE, HDC, HFONT, HGDIOBJ, PEN_STYLE, SRCCOPY,
     STRETCH_BLT_MODE, TRANSPARENT,
@@ -1009,6 +1009,12 @@ unsafe fn draw_combo_item(combo: HWND, item: &DRAWITEMSTRUCT, palette: Palette) 
         selection_visual(palette, selected, hot)
     };
     fill_solid_rect(item.hDC, &item.rcItem, visual.fill);
+    if closed_field {
+        // PE images carry different USER32/UxTheme generations. Keep the stock ComboBox popup,
+        // selection, keyboard and accessibility semantics, but replace only the closed chevron
+        // with mirrored high-resolution strokes so one arm cannot be truncated by integer joins.
+        draw_combo_closed_chevron(combo, palette);
+    }
 
     let mut index = if item.itemID == u32::MAX {
         SendMessageW(combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0
@@ -1051,6 +1057,113 @@ unsafe fn draw_combo_item(combo: HWND, item: &DRAWITEMSTRUCT, palette: Palette) 
     if let Some(old_font) = old_font {
         let _ = SelectObject(item.hDC, old_font);
     }
+}
+
+unsafe fn draw_combo_closed_chevron(combo: HWND, palette: Palette) {
+    let mut window = RECT::default();
+    let mut info = COMBOBOXINFO {
+        cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+        ..Default::default()
+    };
+    if GetWindowRect(combo, &mut window).is_err() || GetComboBoxInfo(combo, &mut info).is_err() {
+        return;
+    }
+    let width = (window.right - window.left).max(0);
+    let height = (window.bottom - window.top).max(0);
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let dpi = GetDpiForWindow(combo).max(96);
+    let arrow_width = (info.rcButton.right - info.rcButton.left)
+        .abs()
+        .max(scale_for_dpi(17, dpi))
+        .min((width / 2).max(1));
+    let button = RECT {
+        left: width - arrow_width,
+        top: 1,
+        right: width - 1,
+        bottom: height - 1,
+    };
+    let button_width = (button.right - button.left).max(0);
+    let button_height = (button.bottom - button.top).max(0);
+    if button_width <= 0 || button_height <= 0 {
+        return;
+    }
+
+    let dc = GetWindowDC(combo);
+    if dc.is_invalid() {
+        return;
+    }
+    const SUPERSAMPLE: i32 = 4;
+    let memory_dc = CreateCompatibleDC(dc);
+    let bitmap = CreateCompatibleBitmap(
+        dc,
+        button_width.saturating_mul(SUPERSAMPLE),
+        button_height.saturating_mul(SUPERSAMPLE),
+    );
+    if memory_dc.is_invalid() || bitmap.is_invalid() {
+        if !memory_dc.is_invalid() {
+            let _ = DeleteDC(memory_dc);
+        }
+        if !bitmap.is_invalid() {
+            let _ = DeleteObject(bitmap);
+        }
+        let _ = ReleaseDC(combo, dc);
+        return;
+    }
+    let old_bitmap = SelectObject(memory_dc, bitmap);
+    let background = CreateSolidBrush(palette.edit);
+    if !background.is_invalid() {
+        let high_rect = RECT {
+            left: 0,
+            top: 0,
+            right: button_width.saturating_mul(SUPERSAMPLE),
+            bottom: button_height.saturating_mul(SUPERSAMPLE),
+        };
+        let _ = FillRect(memory_dc, &high_rect, background);
+        let _ = DeleteObject(background);
+    }
+
+    let colour = if IsWindowEnabled(combo).as_bool() {
+        palette.text_secondary
+    } else {
+        palette.text_disabled
+    };
+    let pen = CreatePen(PEN_STYLE(0), SUPERSAMPLE, colour);
+    if !pen.is_invalid() {
+        let old_pen = SelectObject(memory_dc, pen);
+        let center_x = button_width.saturating_mul(SUPERSAMPLE) / 2;
+        let center_y = button_height.saturating_mul(SUPERSAMPLE) / 2;
+        let half = scale_for_dpi(3, dpi).max(2).saturating_mul(SUPERSAMPLE);
+        let rise = scale_for_dpi(1, dpi).max(1).saturating_mul(SUPERSAMPLE);
+        let drop = scale_for_dpi(2, dpi).max(1).saturating_mul(SUPERSAMPLE);
+        let _ = MoveToEx(memory_dc, center_x - half, center_y - rise, None);
+        let _ = LineTo(memory_dc, center_x, center_y + drop);
+        // Start the second arm independently at the mirrored endpoint. This avoids a GDI join
+        // pixel making the slash shorter than the backslash at 125%-200% DPI.
+        let _ = MoveToEx(memory_dc, center_x + half, center_y - rise, None);
+        let _ = LineTo(memory_dc, center_x, center_y + drop);
+        let _ = SelectObject(memory_dc, old_pen);
+        let _ = DeleteObject(pen);
+    }
+    let _ = SetStretchBltMode(dc, HALFTONE);
+    let _ = StretchBlt(
+        dc,
+        button.left,
+        button.top,
+        button_width,
+        button_height,
+        memory_dc,
+        0,
+        0,
+        button_width.saturating_mul(SUPERSAMPLE),
+        button_height.saturating_mul(SUPERSAMPLE),
+        SRCCOPY,
+    );
+    let _ = SelectObject(memory_dc, old_bitmap);
+    let _ = DeleteObject(bitmap);
+    let _ = DeleteDC(memory_dc);
+    let _ = ReleaseDC(combo, dc);
 }
 
 unsafe extern "system" fn combo_popup_subclass(

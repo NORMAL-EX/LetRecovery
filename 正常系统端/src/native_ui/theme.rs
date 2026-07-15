@@ -1,15 +1,17 @@
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush,
-    DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetWindowDC, InvalidateRect, LineTo,
-    MoveToEx, RedrawWindow, ReleaseDC, RoundRect, SelectObject, SetBkMode, SetTextColor,
-    DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE,
-    RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE, SRCCOPY, TRANSPARENT,
+    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
+    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC,
+    GetTextMetricsW, GetWindowDC, InvalidateRect, LineTo, MoveToEx, RedrawWindow, ReleaseDC,
+    RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor,
+    StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_END_ELLIPSIS,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HALFTONE, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE,
+    RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     GetComboBoxInfo, SetWindowTheme, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT,
@@ -21,20 +23,24 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, IsWindowEnabled, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+#[cfg(test)]
+use windows::Win32::UI::WindowsAndMessaging::WS_VSCROLL;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetClientRect, GetParent, GetPropW, GetWindowLongPtrW, GetWindowRect,
-    RemovePropW, SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_CAPTURECHANGED,
-    WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETFOCUS,
-    WM_SIZE, WM_THEMECHANGED, WS_BORDER, WS_EX_CLIENTEDGE,
+    GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetPropW, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, RemovePropW, SendMessageW,
+    SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret, GWL_EXSTYLE, GWL_STYLE,
+    NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY,
+    WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE,
+    WM_THEMECHANGED, WS_BORDER, WS_EX_CLIENTEDGE,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 use super::controls::{
     button_visual, draw_antialiased_control_frame, draw_progress, fill_round_rect_antialiased,
-    rounded_control_frame_geometry, ButtonRole, ControlState, ProgressRole,
+    rounded_control_frame_geometry, ButtonRole, ControlState, InnoMetrics, ProgressRole,
 };
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
@@ -59,6 +65,9 @@ pub struct Palette {
     pub separator: COLORREF,
     pub accent_fill: COLORREF,
     pub accent_border: COLORREF,
+    /// Highlighted Next/install action, selected navigation entry and selected report/list row.
+    pub highlight_fill: COLORREF,
+    pub highlight_border: COLORREF,
     /// Inno Modern Windows 11 task progress and checked-state accent.
     pub progress: COLORREF,
 }
@@ -79,6 +88,8 @@ impl Palette {
         separator: rgb(222, 222, 222),
         accent_fill: rgb(0, 95, 184),
         accent_border: rgb(0, 96, 184),
+        highlight_fill: rgb(0, 95, 184),
+        highlight_border: rgb(0, 96, 184),
         progress: rgb(113, 199, 132),
     };
 
@@ -97,6 +108,9 @@ impl Palette {
         separator: rgb(81, 81, 81),
         accent_fill: rgb(49, 72, 83),
         accent_border: rgb(66, 149, 192),
+        // User-audited Windows 11 selection colour from the supplied RGB sample.
+        highlight_fill: rgb(76, 194, 255),
+        highlight_border: rgb(76, 194, 255),
         progress: rgb(113, 199, 132),
     };
 
@@ -179,35 +193,96 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
     let class_name = control_class_name(control);
     let is_edit = is_edit_class(&class_name);
     let is_combo = is_combo_class(&class_name);
-    if palette.dark && is_auto_radio_button(&class_name, GetWindowLongPtrW(control, GWL_STYLE)) {
-        // The undocumented DarkMode_Explorer radio renderer still paints its caption black on
-        // several Windows 11 builds.  With visual-style painting disabled for this one control
-        // type, the normal WM_CTLCOLORBTN path owns the caption and therefore uses the dialog's
-        // verified light-on-dark palette; auto-radio grouping and keyboard behaviour are intact.
-        // Empty strings disable themed painting for this HWND. Passing null would merely reset
-        // it to the process theme and lets the same black-caption renderer come back.
-        let _ = SetWindowTheme(control, w!(""), w!(""));
-        let _ = InvalidateRect(control, None, true);
+    let control_style = GetWindowLongPtrW(control, GWL_STYLE);
+    if is_auto_checkbox(&class_name, control_style) {
+        // Inno's themed checkbox state table is the Windows BUTTON theme: BP_CHECKBOX/CBS_*.
+        // Keep USER32's state machine, keyboard handling, accessibility and BN_CLICKED semantics,
+        // while the subclass asks UxTheme for the actual current Windows 11 glyph for every state.
+        // Do not disable the theme here: the previous hand-drawn replacement is what produced the
+        // coarse check mark and visibly different Win10/Win11 geometry reported by the user.
+        let _ = SetWindowSubclass(
+            control,
+            Some(check_box_subclass),
+            CHECK_BOX_SUBCLASS_ID,
+            usize::from(palette.dark),
+        );
+        let _ = InvalidateRect(control, None, false);
+    } else if is_auto_radio_button(&class_name, control_style) {
+        // Radio buttons use the same Windows BUTTON theme, with BP_RADIOBUTTON/RBS_* states.
+        // This also removes the extra focus ring created by the former custom ellipse renderer.
+        let _ = SetWindowSubclass(
+            control,
+            Some(radio_button_subclass),
+            RADIO_BUTTON_SUBCLASS_ID,
+            usize::from(palette.dark),
+        );
+        let _ = InvalidateRect(control, None, false);
     }
     if is_edit && is_single_line_edit(control) {
-        // Match the real Windows 11 property-page Edit supplied by the user:
-        // style 0x50010080 has no WS_BORDER, while ex-style 0x00000204 includes
-        // WS_EX_CLIENTEDGE.  The v6 theme then owns the recessed surface and focus underline.
-        apply_property_page_edit_style(control);
+        // Keep the native Edit text/caret/selection/IME and accessibility.  Reserve a small
+        // non-client band for the deterministic field frame so USER32's rectangular client paint
+        // can never overwrite the rounded corners during typing, focus or caret updates.
+        let _ = SetWindowTheme(control, w!(""), w!(""));
+        apply_borderless_style(control);
         let _ = RemoveWindowSubclass(
             control,
             Some(rounded_control_subclass),
             ROUNDED_CONTROL_SUBCLASS_ID,
         );
-    } else if is_edit {
-        apply_single_border_style(control);
-    } else if is_combo && matches!(kind, NativeControlKind::Field) {
+        let _ = SetWindowSubclass(
+            control,
+            Some(single_line_edit_subclass),
+            SINGLE_LINE_EDIT_SUBCLASS_ID,
+            usize::from(palette.dark),
+        );
+        let _ = SetWindowPos(
+            control,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let _ = RedrawWindow(
+            control,
+            None,
+            None,
+            RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+        );
+    } else if is_edit
+        && matches!(kind, NativeControlKind::ScrollableField)
+        && is_read_only_edit(control)
+    {
+        // A fixed report is still a native multiline EDIT so USER32 keeps text selection,
+        // keyboard navigation and its WS_VSCROLL scrollbar.  Only remove the competing square
+        // non-client edge and paint the same deterministic rounded frame used by list surfaces.
         apply_borderless_style(control);
         let _ = SetWindowSubclass(
             control,
             Some(rounded_control_subclass),
             ROUNDED_CONTROL_SUBCLASS_ID,
             usize::from(palette.dark),
+        );
+        let _ = InvalidateRect(control, None, false);
+    } else if is_edit {
+        apply_single_border_style(control);
+    } else if is_combo && matches!(kind, NativeControlKind::Field) {
+        // The closed selection field is fully painted by rounded_control_subclass. Leaving the
+        // active UxTheme renderer enabled lets its hover timer briefly compose a rectangular frame
+        // before our rounded overlay. Disable that renderer on the closed HWND only; the separate
+        // ComboLBox popup is themed below and remains entirely native.
+        let _ = SetWindowTheme(control, w!(""), w!(""));
+        apply_borderless_style(control);
+        let _ = SetWindowSubclass(
+            control,
+            Some(rounded_control_subclass),
+            ROUNDED_CONTROL_SUBCLASS_ID,
+            usize::from(palette.dark),
+        );
+        set_combo_selection_field_height(
+            control,
+            InnoMetrics::for_dpi(GetDpiForWindow(control).max(96)).field_height,
         );
         let _ = InvalidateRect(control, None, false);
     } else if matches!(kind, NativeControlKind::List) && is_list_box(control) {
@@ -310,23 +385,30 @@ fn is_auto_radio_button(class_name: &str, style: isize) -> bool {
     class_name.eq_ignore_ascii_case("Button") && button_style_is_auto_radio(style)
 }
 
+const fn button_style_is_auto_checkbox(style: isize) -> bool {
+    const BUTTON_TYPE_MASK: isize = 0x000f;
+    const BS_AUTOCHECKBOX_VALUE: isize = 0x0003;
+    style & BUTTON_TYPE_MASK == BS_AUTOCHECKBOX_VALUE
+}
+
+fn is_auto_checkbox(class_name: &str, style: isize) -> bool {
+    class_name.eq_ignore_ascii_case("Button") && button_style_is_auto_checkbox(style)
+}
+
 unsafe fn is_single_line_edit(control: HWND) -> bool {
     const ES_MULTILINE: isize = 0x0004;
     GetWindowLongPtrW(control, GWL_STYLE) & ES_MULTILINE == 0
+}
+
+unsafe fn is_read_only_edit(control: HWND) -> bool {
+    const ES_READONLY: isize = 0x0800;
+    GetWindowLongPtrW(control, GWL_STYLE) & ES_READONLY != 0
 }
 
 fn borderless_style_bits(style: isize, ex_style: isize) -> (isize, isize) {
     (
         style & !(WS_BORDER.0 as isize),
         ex_style & !(WS_EX_CLIENTEDGE.0 as isize),
-    )
-}
-
-fn property_page_edit_style_bits(style: isize, ex_style: isize) -> (isize, isize) {
-    const WS_EX_NOPARENTNOTIFY_VALUE: isize = 0x0000_0004;
-    (
-        style & !(WS_BORDER.0 as isize),
-        ex_style | WS_EX_CLIENTEDGE.0 as isize | WS_EX_NOPARENTNOTIFY_VALUE,
     )
 }
 
@@ -341,13 +423,6 @@ unsafe fn apply_borderless_style(control: HWND) {
     let style = GetWindowLongPtrW(control, GWL_STYLE);
     let ex_style = GetWindowLongPtrW(control, GWL_EXSTYLE);
     let (style, ex_style) = borderless_style_bits(style, ex_style);
-    apply_control_frame_styles(control, style, ex_style);
-}
-
-unsafe fn apply_property_page_edit_style(control: HWND) {
-    let style = GetWindowLongPtrW(control, GWL_STYLE);
-    let ex_style = GetWindowLongPtrW(control, GWL_EXSTYLE);
-    let (style, ex_style) = property_page_edit_style_bits(style, ex_style);
     apply_control_frame_styles(control, style, ex_style);
 }
 
@@ -471,12 +546,49 @@ const LIST_VIEW_SUBCLASS_ID: usize = 0x4c52_4c56;
 const LIST_VIEW_PARENT_SUBCLASS_ID: usize = 0x4c52_4c50;
 const PROGRESS_SUBCLASS_ID: usize = 0x4c52_5052;
 const TRACKBAR_SUBCLASS_ID: usize = 0x4c52_5442;
+const CHECK_BOX_SUBCLASS_ID: usize = 0x4c52_4342;
+const RADIO_BUTTON_SUBCLASS_ID: usize = 0x4c52_5242;
 const ROUNDED_CONTROL_SUBCLASS_ID: usize = 0x4c52_5243;
+const SINGLE_LINE_EDIT_SUBCLASS_ID: usize = 0x4c52_4544;
 const LIST_BOX_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoListBox.HotItem");
 const ROUNDED_CONTROL_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoControl.Hot");
+const COMBO_CARET_HIDDEN_PROPERTY: PCWSTR = w!("LetRecovery.InnoCombo.CaretHidden");
+const RADIO_BUTTON_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoRadio.Hot");
+const CHECK_BOX_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoCheck.Hot");
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02a3;
 const WM_NCMOUSEMOVE_MESSAGE: u32 = 0x00a0;
 const WM_NCMOUSELEAVE_MESSAGE: u32 = 0x02a2;
+
+/// Messages whose USER32/comctl32 default handling may repaint a native non-client scrollbar.
+/// The rounded frame must be overlaid only after that handling finishes; otherwise the scrollbar
+/// hover animation can restore square right-hand corners until the next full control repaint.
+const fn native_scrollbar_may_repaint_frame(message: u32) -> bool {
+    matches!(
+        message,
+        0x00a1 // WM_NCLBUTTONDOWN
+            | 0x00a2 // WM_NCLBUTTONUP
+            | 0x00a3 // WM_NCLBUTTONDBLCLK
+            | 0x0113 // WM_TIMER (UxTheme scrollbar hover animation)
+            | 0x0114 // WM_HSCROLL
+            | 0x0115 // WM_VSCROLL
+            | 0x020a // WM_MOUSEWHEEL
+            | 0x020e // WM_MOUSEHWHEEL
+            | 0x02a0 // WM_NCMOUSEHOVER
+    )
+}
+
+/// Messages that change the visible ListView origin.  Comctl32 normally scrolls these by moving
+/// existing client pixels and invalidating only the newly exposed strip.  Our rounded frame is an
+/// overlay, so allowing that optimisation to reuse it copies frame pixels into item rows.
+const fn list_view_scrolls_client_pixels(message: u32) -> bool {
+    matches!(
+        message,
+        0x0114 // WM_HSCROLL
+            | 0x0115 // WM_VSCROLL
+            | 0x020a // WM_MOUSEWHEEL
+            | 0x020e // WM_MOUSEHWHEEL
+    )
+}
 
 const fn palette_from_reference(reference_data: usize) -> Palette {
     if reference_data != 0 {
@@ -492,6 +604,15 @@ unsafe fn redraw_control_frame(control: HWND) {
         None,
         None,
         RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE,
+    );
+}
+
+unsafe fn redraw_button_now(control: HWND) {
+    let _ = RedrawWindow(
+        control,
+        None,
+        None,
+        RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
     );
 }
 
@@ -521,6 +642,427 @@ unsafe fn clear_hot_tracking(hwnd: HWND, property: PCWSTR) {
     if RemovePropW(hwnd, property).is_ok_and(|handle| !handle.is_invalid()) {
         redraw_control_frame(hwnd);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CheckBoxGeometry {
+    glyph: RECT,
+    text: RECT,
+}
+
+fn check_box_geometry(width: i32, height: i32, dpi: u32) -> Option<CheckBoxGeometry> {
+    let width = width.max(0);
+    let height = height.max(0);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let size = scale(13, dpi).max(1).min(width).min(height);
+    let top = (height - size) / 2;
+    Some(CheckBoxGeometry {
+        glyph: RECT {
+            left: 0,
+            top,
+            right: size,
+            bottom: top + size,
+        },
+        text: RECT {
+            left: (size + scale(5, dpi)).min(width),
+            top: 0,
+            right: width,
+            bottom: height,
+        },
+    })
+}
+
+unsafe extern "system" fn check_box_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    const BM_GETCHECK_MESSAGE: u32 = 0x00f0;
+    const BM_SETCHECK_MESSAGE: u32 = 0x00f1;
+    const BM_GETSTATE_MESSAGE: u32 = 0x00f2;
+    const BST_CHECKED_VALUE: isize = 0x0001;
+    const BST_PUSHED_VALUE: isize = 0x0004;
+
+    match message {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            let checked = SendMessageW(hwnd, BM_GETCHECK_MESSAGE, WPARAM(0), LPARAM(0)).0
+                == BST_CHECKED_VALUE;
+            let button_state = SendMessageW(hwnd, BM_GETSTATE_MESSAGE, WPARAM(0), LPARAM(0)).0;
+            paint_check_box(
+                hwnd,
+                palette_from_reference(reference_data),
+                ControlState {
+                    hot: !GetPropW(hwnd, CHECK_BOX_HOT_PROPERTY).is_invalid(),
+                    pressed: button_state & BST_PUSHED_VALUE != 0,
+                    disabled: !IsWindowEnabled(hwnd).as_bool(),
+                    focused: GetFocus() == hwnd,
+                },
+                checked,
+            );
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            ensure_hot_tracking(hwnd, CHECK_BOX_HOT_PROPERTY, false);
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_MOUSELEAVE_MESSAGE => {
+            clear_hot_tracking(hwnd, CHECK_BOX_HOT_PROPERTY);
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_KEYDOWN
+        | WM_KEYUP | WM_CAPTURECHANGED | WM_THEMECHANGED | WM_SETTEXT | BM_SETCHECK_MESSAGE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if message == WM_ENABLE && wparam.0 == 0 {
+                let _ = RemovePropW(hwnd, CHECK_BOX_HOT_PROPERTY);
+            }
+            redraw_button_now(hwnd);
+            result
+        }
+        WM_CANCELMODE => {
+            let _ = RemovePropW(hwnd, CHECK_BOX_HOT_PROPERTY);
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let _ = InvalidateRect(hwnd, None, false);
+            result
+        }
+        WM_NCDESTROY => {
+            let _ = RemovePropW(hwnd, CHECK_BOX_HOT_PROPERTY);
+            let _ = RemoveWindowSubclass(hwnd, Some(check_box_subclass), CHECK_BOX_SUBCLASS_ID);
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn paint_check_box(hwnd: HWND, palette: Palette, state: ControlState, checked: bool) {
+    paint_embedded_windows11_button(hwnd, palette, state, checked, ThemedButtonKind::CheckBox);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThemedButtonKind {
+    CheckBox,
+    RadioButton,
+}
+
+#[derive(Clone, Copy)]
+struct EmbeddedButtonGlyph {
+    width: i32,
+    height: i32,
+    bgra: &'static [u8],
+}
+
+include!(concat!(env!("OUT_DIR"), "/win11_button_theme.rs"));
+
+const fn embedded_theme_dpi_index(dpi: u32) -> usize {
+    if dpi < 108 {
+        0
+    } else if dpi < 132 {
+        1
+    } else if dpi < 168 {
+        2
+    } else {
+        3
+    }
+}
+
+const fn themed_button_state(state: ControlState, checked: bool) -> usize {
+    let base = if checked { 4 } else { 0 };
+    base + if state.disabled {
+        3
+    } else if state.pressed {
+        2
+    } else if state.hot {
+        1
+    } else {
+        0
+    }
+}
+
+fn embedded_button_glyph(
+    dark: bool,
+    dpi: u32,
+    kind: ThemedButtonKind,
+    state: ControlState,
+    checked: bool,
+) -> &'static EmbeddedButtonGlyph {
+    let mode = usize::from(dark);
+    let dpi = embedded_theme_dpi_index(dpi);
+    let kind = match kind {
+        ThemedButtonKind::CheckBox => 0,
+        ThemedButtonKind::RadioButton => 1,
+    };
+    let state = themed_button_state(state, checked);
+    &WIN11_BUTTON_THEME_GLYPHS[(((mode * 4 + dpi) * 2 + kind) * 8) + state]
+}
+
+unsafe fn draw_embedded_button_glyph(
+    dc: HDC,
+    rect: RECT,
+    glyph: &EmbeddedButtonGlyph,
+    background: COLORREF,
+) {
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    if width == 0 || height == 0 || glyph.width <= 0 || glyph.height <= 0 {
+        return;
+    }
+    let background = background.0;
+    let background_red = background & 0xff;
+    let background_green = (background >> 8) & 0xff;
+    let background_blue = (background >> 16) & 0xff;
+    let mut composed = Vec::with_capacity(glyph.bgra.len());
+    for pixel in glyph.bgra.chunks_exact(4) {
+        let alpha = u32::from(pixel[3]);
+        let inverse = 255 - alpha;
+        // UxTheme's buffered BUTTON renders are premultiplied BGRA. Multiplying the stored RGB a
+        // second time darkens the partially covered corner pixels, which is why an unchecked box
+        // showed four dark feet on a light page. Fully transparent PNG pixels carry an arbitrary
+        // white RGB value, so treat alpha=0 as the destination background explicitly.
+        let compose = |source: u8, destination: u32| {
+            if alpha == 0 {
+                destination
+            } else {
+                (u32::from(source) + (destination * inverse + 127) / 255).min(255)
+            }
+        };
+        let blue = compose(pixel[0], background_blue);
+        let green = compose(pixel[1], background_green);
+        let red = compose(pixel[2], background_red);
+        composed.extend_from_slice(&[blue as u8, green as u8, red as u8, 255]);
+    }
+
+    let bitmap = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: glyph.width,
+            // Negative height declares the generated BGRA rows as top-down.
+            biHeight: -glyph.height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: (glyph.width * glyph.height * 4) as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    if width == glyph.width && height == glyph.height {
+        // Every supported DPI bucket is generated at its final physical size.  Use the
+        // non-scaling DIB path so GDI cannot sample the transparent corner texels back into the
+        // rounded Win11 glyph (which showed up as four dark pixels on a light page).
+        let _ = SetDIBitsToDevice(
+            dc,
+            rect.left,
+            rect.top,
+            width as u32,
+            height as u32,
+            0,
+            0,
+            0,
+            glyph.height as u32,
+            composed.as_ptr().cast(),
+            &bitmap,
+            DIB_RGB_COLORS,
+        );
+    } else {
+        let _ = SetStretchBltMode(dc, HALFTONE);
+        let _ = StretchDIBits(
+            dc,
+            rect.left,
+            rect.top,
+            width,
+            height,
+            0,
+            0,
+            glyph.width,
+            glyph.height,
+            Some(composed.as_ptr().cast()),
+            &bitmap,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        );
+    }
+}
+
+/// USER32 continues to own the real check/radio state machine, keyboard handling, accessibility
+/// and BN_CLICKED semantics.  Only the visible glyph is replaced with pixels rendered once from
+/// the fixed Windows 11 `Aero.msstyles` reference through UxTheme.  That makes Win10 and Win11 use
+/// the same normal/hot/pressed/disabled visuals instead of silently selecting different host themes.
+unsafe fn paint_embedded_windows11_button(
+    hwnd: HWND,
+    palette: Palette,
+    state: ControlState,
+    checked: bool,
+    kind: ThemedButtonKind,
+) {
+    let mut paint = PAINTSTRUCT::default();
+    let dc = BeginPaint(hwnd, &mut paint);
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    fill(dc, &client, palette.window);
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let width = (client.right - client.left).max(0);
+    let height = (client.bottom - client.top).max(0);
+    if width == 0 || height == 0 {
+        let _ = EndPaint(hwnd, &paint);
+        return;
+    }
+
+    let (glyph_rect, caption_rect) = match kind {
+        ThemedButtonKind::CheckBox => {
+            let Some(geometry) = check_box_geometry(width, height, dpi) else {
+                let _ = EndPaint(hwnd, &paint);
+                return;
+            };
+            (geometry.glyph, geometry.text)
+        }
+        ThemedButtonKind::RadioButton => {
+            let Some(geometry) = radio_geometry(width, height, dpi) else {
+                let _ = EndPaint(hwnd, &paint);
+                return;
+            };
+            (geometry.glyph, geometry.text)
+        }
+    };
+    draw_embedded_button_glyph(
+        dc,
+        glyph_rect,
+        embedded_button_glyph(palette.dark, dpi, kind, state, checked),
+        palette.window,
+    );
+
+    let text_length = GetWindowTextLengthW(hwnd).max(0) as usize;
+    if text_length > 0 && caption_rect.right > caption_rect.left {
+        let mut text = vec![0u16; text_length + 1];
+        let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
+        text.truncate(copied);
+        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+        let old_font = (font.0 != 0)
+            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let _ = SetTextColor(
+            dc,
+            if state.disabled {
+                palette.text_disabled
+            } else {
+                palette.text
+            },
+        );
+        let mut text_rect = caption_rect;
+        let _ = DrawTextW(
+            dc,
+            &mut text,
+            &mut text_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+        if let Some(old_font) = old_font {
+            let _ = SelectObject(dc, old_font);
+        }
+    }
+    let _ = EndPaint(hwnd, &paint);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RadioGeometry {
+    glyph: RECT,
+    text: RECT,
+}
+
+/// Computes the complete radio geometry from the real client rectangle. The separate left/right
+/// halves keep odd, DPI-scaled glyphs centred without allowing the last pixel to escape the HWND.
+fn radio_geometry(width: i32, height: i32, dpi: u32) -> Option<RadioGeometry> {
+    let width = width.max(0);
+    let height = height.max(0);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    // The fixed Inno reference is roughly 19-20 physical pixels at 150% scaling.  A 13px
+    // logical baseline matches that footprint; 18px made the glyph a conspicuous 27px disc.
+    let preferred = scale(13, dpi).max(1);
+    let glyph_size = preferred.min(height).min(width);
+    let glyph_top = (height - glyph_size) / 2;
+    let glyph = RECT {
+        left: 0,
+        top: glyph_top,
+        right: glyph_size,
+        bottom: glyph_top + glyph_size,
+    };
+    let text_left = (glyph.right + scale(5, dpi)).min(width);
+    Some(RadioGeometry {
+        glyph,
+        text: RECT {
+            left: text_left,
+            top: 0,
+            right: width,
+            bottom: height,
+        },
+    })
+}
+
+unsafe extern "system" fn radio_button_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    const BM_GETCHECK_MESSAGE: u32 = 0x00f0;
+    const BM_SETCHECK_MESSAGE: u32 = 0x00f1;
+    const BM_GETSTATE_MESSAGE: u32 = 0x00f2;
+    const BST_CHECKED_VALUE: isize = 0x0001;
+    const BST_PUSHED_VALUE: isize = 0x0004;
+    const WM_MOUSELEAVE_LOCAL: u32 = 0x02a3;
+
+    match message {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            let palette = palette_from_reference(reference_data);
+            let checked = SendMessageW(hwnd, BM_GETCHECK_MESSAGE, WPARAM(0), LPARAM(0)).0
+                == BST_CHECKED_VALUE;
+            let button_state = SendMessageW(hwnd, BM_GETSTATE_MESSAGE, WPARAM(0), LPARAM(0)).0;
+            let state = ControlState {
+                hot: !GetPropW(hwnd, RADIO_BUTTON_HOT_PROPERTY).is_invalid(),
+                pressed: button_state & BST_PUSHED_VALUE != 0,
+                disabled: !IsWindowEnabled(hwnd).as_bool(),
+                focused: GetFocus() == hwnd,
+            };
+            paint_radio_button(hwnd, palette, state, checked);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            ensure_hot_tracking(hwnd, RADIO_BUTTON_HOT_PROPERTY, false);
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_MOUSELEAVE_LOCAL => {
+            clear_hot_tracking(hwnd, RADIO_BUTTON_HOT_PROPERTY);
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_KEYDOWN
+        | WM_KEYUP | WM_CAPTURECHANGED | WM_THEMECHANGED | WM_SETTEXT | BM_SETCHECK_MESSAGE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if message == WM_ENABLE && wparam.0 == 0 {
+                let _ = RemovePropW(hwnd, RADIO_BUTTON_HOT_PROPERTY);
+            }
+            redraw_button_now(hwnd);
+            result
+        }
+        WM_NCDESTROY => {
+            let _ = RemovePropW(hwnd, RADIO_BUTTON_HOT_PROPERTY);
+            let _ =
+                RemoveWindowSubclass(hwnd, Some(radio_button_subclass), RADIO_BUTTON_SUBCLASS_ID);
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn paint_radio_button(hwnd: HWND, palette: Palette, state: ControlState, checked: bool) {
+    paint_embedded_windows11_button(hwnd, palette, state, checked, ThemedButtonKind::RadioButton);
 }
 
 unsafe extern "system" fn header_subclass(
@@ -620,12 +1162,15 @@ unsafe fn paint_header(hwnd: HWND, palette: Palette) {
         let _ = SelectObject(dc, old_font);
     }
     // The header is a child of the report and can repaint after the report itself (for example on
-    // hover). Reapply the report's top corners in this same paint transaction so it cannot expose
-    // a square header edge over the rounded list frame.
-    if let Ok(list) = GetParent(hwnd) {
-        draw_rounded_control_frame_to_dc(dc, list, palette, palette.button);
-    }
+    // hover or horizontal scrolling).  Never draw the ListView-sized frame into the header DC:
+    // both HWNDs use different coordinate spaces and the header's scroll clipping would turn that
+    // misplaced frame into a second rounded end beside the last visible column.  Finish the header
+    // transaction first, then reassert the one authoritative frame on the ListView's own window DC.
+    let list = GetParent(hwnd).ok();
     let _ = EndPaint(hwnd, &paint);
+    if let Some(list) = list {
+        paint_rounded_control_frame(list, palette);
+    }
 }
 
 unsafe extern "system" fn list_view_subclass(
@@ -680,6 +1225,22 @@ unsafe extern "system" fn list_view_subclass(
             paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
             result
         }
+        message if native_scrollbar_may_repaint_frame(message) => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if list_view_scrolls_client_pixels(message) {
+                // Repaint the complete report after USER32/comctl32 finishes the scroll.  The
+                // control already uses LVS_EX_DOUBLEBUFFER and WM_ERASEBKGND fills the active
+                // palette, so this clears stale row/frame pixels without a white intermediate
+                // frame.  Painting only the exposed strip is what produced the repeated lines.
+                let _ = InvalidateRect(hwnd, None, true);
+                let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+            }
+            // Keep the native scrollbar and its accessibility/interaction semantics.  Only the
+            // deterministic outer frame is painted last so hover and scroll animation cannot
+            // expose square corners or class-brush pixels in either theme.
+            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            result
+        }
         WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             // Comctl32 can restore class-default colours while changing enabled/theme state.
@@ -701,6 +1262,126 @@ const fn list_view_needs_empty_body_paint(item_count: isize) -> bool {
     item_count == 0
 }
 
+unsafe fn inset_edit_client_rect(hwnd: HWND, rect: &mut RECT, dpi: u32) {
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    let Some(geometry) = rounded_control_frame_geometry(width, height, dpi.max(96)) else {
+        return;
+    };
+    // A native Edit always paints a rectangular client background. Keep that rectangle out of
+    // the complete left/right arc area; otherwise its later WM_PAINT covers the antialiased corner
+    // pixels that were produced during WM_NCPAINT. Vertically only the real one-pixel frame band is
+    // reserved so the native text/caret retains the full single-line height and stays centred.
+    if width > geometry.radius.saturating_mul(2) {
+        rect.left += geometry.radius;
+        rect.right -= geometry.radius;
+    }
+    if height > geometry.side_band.saturating_mul(2) {
+        // A borderless single-line Edit anchors its text at the top of the client rectangle; merely
+        // centring the HWND does not vertically centre the glyphs.  Derive the real YaHei line
+        // height and centre a native Edit client band around it. USER32 still owns the text,
+        // selection, caret and IME, and no EM_SETRECT/multiline emulation is involved.
+        let dc = GetWindowDC(hwnd);
+        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+        let old_font = (!dc.0.is_null() && font.0 != 0)
+            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
+        let mut text_metrics = windows::Win32::Graphics::Gdi::TEXTMETRICW::default();
+        let measured = !dc.0.is_null() && GetTextMetricsW(dc, &mut text_metrics).as_bool();
+        if let Some(old_font) = old_font {
+            let _ = SelectObject(dc, old_font);
+        }
+        if !dc.0.is_null() {
+            let _ = ReleaseDC(hwnd, dc);
+        }
+        let minimum_band = geometry.side_band.saturating_mul(2);
+        let desired_height = if measured {
+            (text_metrics.tmHeight + scale(2, dpi)).clamp(minimum_band.max(1), height)
+        } else {
+            height.saturating_sub(minimum_band).max(1)
+        };
+        // Put an odd spare pixel above the native text band. Integer truncation here makes the
+        // glyph/caret sit one pixel too high inside the 23px Windows field at 96 DPI.
+        // tmInternalLeading is whitespace reserved above the visible glyphs.  Centering the raw
+        // tmHeight rectangle therefore leaves Chinese/Latin glyphs visibly high even though the
+        // caret rectangle itself is centred. Compensate only within the available non-client
+        // slack; USER32 still draws the native text, caret, selection and IME composition.
+        let available_slack = height.saturating_sub(desired_height);
+        let visual_leading = if measured {
+            // YaHei's internal leading is only partly visible above its actual glyph bounds.
+            // Applying half of it over-corrects the baseline and leaves a visibly thinner lower
+            // inset. One quarter matches the rasterized glyph box while retaining a centred caret.
+            (text_metrics.tmInternalLeading.max(0) + 3) / 4
+        } else {
+            0
+        };
+        let top_inset = ((available_slack + 1) / 2 + visual_leading).min(available_slack);
+        rect.top += top_inset;
+        rect.bottom = rect.top + desired_height;
+    }
+}
+
+unsafe extern "system" fn single_line_edit_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    match message {
+        WM_NCCALCSIZE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if lparam.0 != 0 {
+                if wparam.0 != 0 {
+                    let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
+                    inset_edit_client_rect(hwnd, &mut params.rgrc[0], GetDpiForWindow(hwnd));
+                } else {
+                    let rect = &mut *(lparam.0 as *mut RECT);
+                    inset_edit_client_rect(hwnd, rect, GetDpiForWindow(hwnd));
+                }
+            }
+            result
+        }
+        WM_NCPAINT => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            result
+        }
+        WM_MOUSEMOVE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            ensure_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY, false);
+            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            result
+        }
+        WM_MOUSELEAVE_MESSAGE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            clear_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY);
+            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            result
+        }
+        WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let _ = RedrawWindow(
+                hwnd,
+                None,
+                None,
+                RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+            );
+            result
+        }
+        WM_NCDESTROY => {
+            let _ = RemovePropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY);
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(single_line_edit_subclass),
+                SINGLE_LINE_EDIT_SUBCLASS_ID,
+            );
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
+    }
+}
+
 unsafe extern "system" fn rounded_control_subclass(
     hwnd: HWND,
     message: u32,
@@ -712,6 +1393,10 @@ unsafe extern "system" fn rounded_control_subclass(
     const CB_SHOWDROPDOWN: u32 = 0x014f;
     match message {
         WM_PAINT => {
+            if is_drop_down_list(hwnd) {
+                paint_combo_closed(hwnd, palette_from_reference(reference_data));
+                return LRESULT(0);
+            }
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             if is_list_box(hwnd) {
                 paint_list_box_rows(hwnd, palette_from_reference(reference_data));
@@ -724,44 +1409,116 @@ unsafe extern "system" fn rounded_control_subclass(
             paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
             result
         }
+        WM_SETCURSOR if is_drop_down_list(hwnd) => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            ensure_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY, false);
+            redraw_button_now(hwnd);
+            result
+        }
         WM_MOUSEMOVE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
             if is_list_box(hwnd) {
                 update_list_box_hot_item(hwnd, lparam);
             }
             ensure_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY, false);
-            DefSubclassProc(hwnd, message, wparam, lparam)
+            if is_drop_down_list(hwnd) {
+                redraw_button_now(hwnd);
+            } else {
+                paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            }
+            result
         }
         WM_NCMOUSEMOVE_MESSAGE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
             ensure_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY, true);
-            DefSubclassProc(hwnd, message, wparam, lparam)
+            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            result
         }
         WM_MOUSELEAVE_MESSAGE | WM_NCMOUSELEAVE_MESSAGE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
             if is_list_box(hwnd) {
                 clear_list_box_hot_item(hwnd);
             }
             clear_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY);
-            DefSubclassProc(hwnd, message, wparam, lparam)
-        }
-        WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
-            let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            let _ = InvalidateRect(hwnd, None, false);
+            if is_drop_down_list(hwnd) {
+                redraw_button_now(hwnd);
+            } else {
+                paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            }
             result
         }
-        CB_SHOWDROPDOWN if wparam.0 != 0 => {
+        message if native_scrollbar_may_repaint_frame(message) => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if is_drop_down_list(hwnd) {
+                redraw_button_now(hwnd);
+            } else {
+                paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            }
+            result
+        }
+        WM_SETFOCUS if is_drop_down_list(hwnd) => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            // USER32 creates and shows a caret when a CBS_DROPDOWNLIST receives focus. The closed
+            // field is read-only and fully painted by this subclass, so that caret has no editing
+            // meaning and otherwise appears as a one-frame vertical line after a click.
+            if GetPropW(hwnd, COMBO_CARET_HIDDEN_PROPERTY).is_invalid()
+                && HideCaret(hwnd).is_ok()
+                && SetPropW(
+                    hwnd,
+                    COMBO_CARET_HIDDEN_PROPERTY,
+                    HANDLE(std::ptr::dangling_mut()),
+                )
+                .is_err()
+            {
+                let _ = ShowCaret(hwnd);
+            }
+            redraw_button_now(hwnd);
+            result
+        }
+        WM_KILLFOCUS if is_drop_down_list(hwnd) => {
+            if RemovePropW(hwnd, COMBO_CARET_HIDDEN_PROPERTY)
+                .is_ok_and(|handle| !handle.is_invalid())
+            {
+                let _ = ShowCaret(hwnd);
+            }
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            redraw_button_now(hwnd);
+            result
+        }
+        WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED | WM_LBUTTONDOWN
+        | WM_LBUTTONUP => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if is_drop_down_list(hwnd) {
+                redraw_button_now(hwnd);
+            } else {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            result
+        }
+        CB_SHOWDROPDOWN => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             let mut info = COMBOBOXINFO {
                 cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
                 ..Default::default()
             };
-            if GetComboBoxInfo(hwnd, &mut info).is_ok() && !info.hwndList.0.is_null() {
+            if wparam.0 != 0
+                && GetComboBoxInfo(hwnd, &mut info).is_ok()
+                && !info.hwndList.0.is_null()
+            {
                 apply_combo_popup_native_chrome(
                     info.hwndList,
                     palette_from_reference(reference_data),
                 );
             }
+            let _ = InvalidateRect(hwnd, None, false);
             result
         }
         WM_NCDESTROY => {
+            if RemovePropW(hwnd, COMBO_CARET_HIDDEN_PROPERTY)
+                .is_ok_and(|handle| !handle.is_invalid())
+            {
+                let _ = ShowCaret(hwnd);
+            }
             let _ = RemovePropW(hwnd, LIST_BOX_HOT_PROPERTY);
             let _ = RemovePropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY);
             let _ = RemoveWindowSubclass(
@@ -786,8 +1543,343 @@ unsafe fn paint_rounded_control_frame(hwnd: HWND, palette: Palette) {
     } else {
         palette.edit
     };
+    if is_edit_class(&class_name) && is_single_line_edit(hwnd) {
+        paint_single_line_edit_nonclient_bands(dc, hwnd, interior);
+    }
     draw_rounded_control_frame_to_dc(dc, hwnd, palette, interior);
     let _ = ReleaseDC(hwnd, dc);
+}
+
+unsafe fn paint_single_line_edit_nonclient_bands(dc: HDC, hwnd: HWND, interior: COLORREF) {
+    let mut window = RECT::default();
+    if GetWindowRect(hwnd, &mut window).is_err() {
+        return;
+    }
+    let width = (window.right - window.left).max(0);
+    let height = (window.bottom - window.top).max(0);
+    if rounded_control_frame_geometry(width, height, GetDpiForWindow(hwnd).max(96)).is_none() {
+        return;
+    }
+    let mut client = RECT::default();
+    if GetClientRect(hwnd, &mut client).is_err() {
+        return;
+    }
+    let mut client_top_left = POINT {
+        x: client.left,
+        y: client.top,
+    };
+    let mut client_bottom_right = POINT {
+        x: client.right,
+        y: client.bottom,
+    };
+    if !ClientToScreen(hwnd, &mut client_top_left).as_bool()
+        || !ClientToScreen(hwnd, &mut client_bottom_right).as_bool()
+    {
+        return;
+    }
+    let client_left = (client_top_left.x - window.left).clamp(0, width);
+    let client_top = (client_top_left.y - window.top).clamp(0, height);
+    let client_right = (client_bottom_right.x - window.left).clamp(client_left, width);
+    let client_bottom = (client_bottom_right.y - window.top).clamp(client_top, height);
+
+    // WM_NCCALCSIZE deliberately reserves all four bands around the native Edit client: the side
+    // bands protect the rounded corners, while the top and bottom bands vertically centre the real
+    // USER32 text/caret. Paint every reserved pixel before the antialiased frame. Filling only the
+    // side bands leaves DefSubclassProc's host-theme colour in the top/bottom bands, which appears
+    // as a pair of bright inner lines in dark mode.
+    let brush = CreateSolidBrush(interior);
+    if brush.0.is_null() {
+        return;
+    }
+    let _ = FillRect(
+        dc,
+        &RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: client_top,
+        },
+        brush,
+    );
+    let _ = FillRect(
+        dc,
+        &RECT {
+            left: 0,
+            top: client_bottom,
+            right: width,
+            bottom: height,
+        },
+        brush,
+    );
+    let _ = FillRect(
+        dc,
+        &RECT {
+            left: 0,
+            top: client_top,
+            right: client_left,
+            bottom: client_bottom,
+        },
+        brush,
+    );
+    let _ = FillRect(
+        dc,
+        &RECT {
+            left: client_right,
+            top: client_top,
+            right: width,
+            bottom: client_bottom,
+        },
+        brush,
+    );
+    let _ = DeleteObject(brush);
+}
+
+unsafe fn is_drop_down_list(hwnd: HWND) -> bool {
+    const COMBO_TYPE_MASK: isize = 0x0003;
+    const CBS_DROPDOWNLIST_VALUE: isize = 0x0003;
+    is_combo_class(&control_class_name(hwnd))
+        && GetWindowLongPtrW(hwnd, GWL_STYLE) & COMBO_TYPE_MASK == CBS_DROPDOWNLIST_VALUE
+}
+
+/// Sets the closed selection field to the shared Inno control baseline.  This is deliberately
+/// independent from the native popup row height: Microsoft documents the selection field as
+/// component 1 for CB_SETITEMHEIGHT, while popup items remain component 0.
+unsafe fn set_combo_selection_field_height(hwnd: HWND, height: i32) {
+    const CB_SETITEMHEIGHT: u32 = 0x0153;
+    const SELECTION_FIELD: usize = 1;
+    const CB_ERR: isize = -1;
+
+    if height <= 0 {
+        return;
+    }
+    let result = SendMessageW(
+        hwnd,
+        CB_SETITEMHEIGHT,
+        WPARAM(SELECTION_FIELD),
+        LPARAM(height as isize),
+    );
+    if result.0 != CB_ERR {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Returns the height of the visible, closed selection field of a stock drop-down list.
+///
+/// A ComboBox HWND may retain the full drop-list height passed to `MoveWindow`; using that HWND
+/// height for either layout or painting makes the closed field jump upward and can leave a tall
+/// stale rectangle behind it. `COMBOBOXINFO` exposes the actual selection/button rectangles that
+/// USER32 calculated from the current font, DPI and common-controls implementation.
+pub(crate) unsafe fn combo_closed_height(hwnd: HWND, fallback: i32) -> i32 {
+    let mut info = COMBOBOXINFO {
+        cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+        ..Default::default()
+    };
+    if GetComboBoxInfo(hwnd, &mut info).is_err() {
+        return fallback.max(1);
+    }
+    let top = info.rcItem.top.min(info.rcButton.top);
+    let bottom = info.rcItem.bottom.max(info.rcButton.bottom);
+    let measured = bottom.saturating_sub(top);
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    if measured <= 0 {
+        fallback.max(1)
+    } else {
+        // USER32 may report the host OS default height for one message cycle while a new font,
+        // DPI, or theme is being applied. Never let that transient value shrink the shared Inno
+        // baseline; the full-frame painter is intentionally unclipped and draws the final height.
+        measured.max(fallback).clamp(scale(18, dpi), scale(36, dpi))
+    }
+}
+
+/// Paints the complete closed CBS_DROPDOWNLIST in one WM_PAINT transaction. USER32 continues to own
+/// hit testing, selection, keyboard navigation, accessibility and the separate native popup. The
+/// closed HWND never calls its default WM_PAINT renderer, so a Windows 10/11 UxTheme animation cannot
+/// briefly compose a rectangular frame underneath the rounded Inno field.
+unsafe fn paint_combo_closed(hwnd: HWND, palette: Palette) {
+    let mut paint = PAINTSTRUCT::default();
+    let _ = BeginPaint(hwnd, &mut paint);
+    let _ = EndPaint(hwnd, &paint);
+
+    // BeginPaint clips its HDC to the current update region. Hover/focus changes can invalidate only
+    // the selection or arrow half, so painting the complete compatibility surface through that HDC
+    // leaves the other half stale and can omit part of an edge. Validate the update above, then
+    // publish the whole closed client through an unclipped client DC and its frame through an
+    // unclipped window DC.
+    let dc = GetDC(hwnd);
+    if !dc.is_invalid() {
+        paint_combo_closed_to_dc(hwnd, palette, dc);
+        let _ = ReleaseDC(hwnd, dc);
+    }
+    paint_rounded_control_frame(hwnd, palette);
+}
+
+unsafe fn paint_combo_closed_to_dc(hwnd: HWND, palette: Palette, dc: HDC) {
+    const CB_GETCURSEL: u32 = 0x0147;
+    const CB_GETLBTEXT: u32 = 0x0148;
+    const CB_GETLBTEXTLEN: u32 = 0x0149;
+    const CB_GETDROPPEDSTATE: u32 = 0x0157;
+    const CB_ERR: isize = -1;
+    const STATE_SYSTEM_PRESSED: u32 = 0x0000_0008;
+
+    let mut info = COMBOBOXINFO {
+        cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+        ..Default::default()
+    };
+    if GetComboBoxInfo(hwnd, &mut info).is_err() {
+        return;
+    }
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let mut client = RECT::default();
+    if GetClientRect(hwnd, &mut client).is_err() {
+        return;
+    }
+    // For CBS_DROPDOWNLIST, GetClientRect/GetWindowRect can describe the complete expanded list
+    // height supplied to CreateWindow/MoveWindow. Only paint the actual closed selection field
+    // calculated by USER32 for the installed font and DPI; a fixed top crop shifts the field and
+    // its text upward on systems whose native closed height is larger than our logical baseline.
+    let available_height = (client.bottom - client.top).max(1);
+    client.bottom = client.top
+        + combo_closed_height(hwnd, InnoMetrics::for_dpi(dpi).field_height).min(available_height);
+    // The native arrow width is stable, but COMBOBOXINFO rectangle origins differ across the
+    // USER32 implementations we support. Rebuild client-local rectangles from the actual HWND
+    // so the compatibility surface always covers the complete closed control.
+    let arrow_width = (info.rcButton.right - info.rcButton.left)
+        .max(scale(17, dpi))
+        .min((client.right - client.left).max(0) / 2);
+    let button = RECT {
+        left: client.right - arrow_width,
+        top: client.top + scale(1, dpi),
+        right: client.right - scale(1, dpi),
+        bottom: client.bottom - scale(1, dpi),
+    };
+    let field = RECT {
+        left: client.left + scale(1, dpi),
+        top: client.top + scale(1, dpi),
+        right: button.left,
+        bottom: client.bottom - scale(1, dpi),
+    };
+    if field.right <= field.left || field.bottom <= field.top {
+        return;
+    }
+
+    // USER32 themes the arrow button on hover, while this compatibility overlay owns only the
+    // selection field. Use the same control-wide hot state here so the middle can never remain
+    // white/idle beside a highlighted arrow on Windows 10.
+    let pointer_inside = {
+        let mut pointer = POINT::default();
+        let mut window = RECT::default();
+        GetCursorPos(&mut pointer).is_ok()
+            && GetWindowRect(hwnd, &mut window).is_ok()
+            && pointer.x >= window.left
+            && pointer.x < window.right
+            && pointer.y >= window.top
+            && pointer.y < window.bottom
+    };
+    let hot = pointer_inside || !GetPropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY).is_invalid();
+    let dropped = info.stateButton.0 & STATE_SYSTEM_PRESSED != 0
+        || SendMessageW(hwnd, CB_GETDROPPEDSTATE, WPARAM(0), LPARAM(0)).0 != 0;
+    let surface = if dropped {
+        if palette.dark {
+            palette.button_pressed
+        } else {
+            // Sampled from the Common Controls 6.0 Windows 11 pressed ComboBox arrow surface.
+            rgb(204, 228, 247)
+        }
+    } else if hot && IsWindowEnabled(hwnd).as_bool() {
+        if palette.dark {
+            palette.button_hot
+        } else {
+            // Keep the selection field identical to the native v6 arrow hover surface instead of
+            // the nearly indistinguishable generic #F9F9F9 command-button hover colour.
+            rgb(229, 241, 251)
+        }
+    } else {
+        palette.button
+    };
+    fill(dc, &field, surface);
+    fill(dc, &button, surface);
+
+    // Keep the popup itself native. Only the closed chevron is repainted so its hot/pressed
+    // feedback changes in the same frame as the selection field, without UxTheme transition lag.
+    let arrow_pen = CreatePen(
+        PEN_STYLE(0),
+        scale(1, dpi).max(1),
+        if IsWindowEnabled(hwnd).as_bool() {
+            palette.text_secondary
+        } else {
+            palette.text_disabled
+        },
+    );
+    if !arrow_pen.is_invalid() {
+        let old_pen = SelectObject(dc, arrow_pen);
+        let center_x = (button.left + button.right) / 2;
+        let center_y = (button.top + button.bottom) / 2;
+        let half = scale(3, dpi).max(2);
+        let _ = MoveToEx(dc, center_x - half, center_y - scale(1, dpi), None);
+        let _ = LineTo(dc, center_x, center_y + scale(2, dpi));
+        let _ = LineTo(dc, center_x + half, center_y - scale(1, dpi));
+        let _ = SelectObject(dc, old_pen);
+        let _ = DeleteObject(arrow_pen);
+    }
+
+    let selected = SendMessageW(hwnd, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    if selected != CB_ERR {
+        let length = SendMessageW(hwnd, CB_GETLBTEXTLEN, WPARAM(selected as usize), LPARAM(0)).0;
+        if length >= 0 {
+            let mut text = vec![0u16; length as usize + 1];
+            let copied = SendMessageW(
+                hwnd,
+                CB_GETLBTEXT,
+                WPARAM(selected as usize),
+                LPARAM(text.as_mut_ptr() as isize),
+            )
+            .0
+            .max(0) as usize;
+            text.truncate(copied.min(text.len()));
+            let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+            let old_font = (font.0 != 0).then(|| {
+                SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _))
+            });
+            let _ = SetBkMode(dc, TRANSPARENT);
+            let _ = SetTextColor(
+                dc,
+                if IsWindowEnabled(hwnd).as_bool() {
+                    palette.text
+                } else {
+                    palette.text_disabled
+                },
+            );
+            let mut text_rect = field;
+            text_rect.left += scale(6, dpi);
+            text_rect.right -= scale(3, dpi);
+            let mut text_metrics = windows::Win32::Graphics::Gdi::TEXTMETRICW::default();
+            let measured = GetTextMetricsW(dc, &mut text_metrics).as_bool();
+            if measured {
+                let available = (text_rect.bottom - text_rect.top).max(0);
+                let text_height = text_metrics.tmHeight.clamp(1, available.max(1));
+                let spare = available.saturating_sub(text_height);
+                text_rect.top += (spare + 1) / 2;
+                text_rect.bottom = text_rect.top + text_height;
+            }
+            let flags = if measured {
+                DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX
+            } else {
+                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX
+            };
+            let _ = DrawTextW(dc, &mut text, &mut text_rect, flags);
+            if let Some(old_font) = old_font {
+                let _ = SelectObject(dc, old_font);
+            }
+        }
+    }
 }
 
 unsafe fn draw_rounded_control_frame_to_dc(
@@ -800,19 +1892,30 @@ unsafe fn draw_rounded_control_frame_to_dc(
     if GetWindowRect(hwnd, &mut window).is_err() {
         return;
     }
+    let class_name = control_class_name(hwnd);
+    let full_height = (window.bottom - window.top).max(0);
+    let visible_height = if is_combo_class(&class_name) && is_drop_down_list(hwnd) {
+        combo_closed_height(
+            hwnd,
+            InnoMetrics::for_dpi(GetDpiForWindow(hwnd).max(96)).field_height,
+        )
+        .min(full_height)
+    } else {
+        full_height
+    };
     let rect = RECT {
         left: 0,
         top: 0,
         right: (window.right - window.left).max(0),
-        bottom: (window.bottom - window.top).max(0),
+        bottom: visible_height,
     };
     let Some(geometry) =
         rounded_control_frame_geometry(rect.right, rect.bottom, GetDpiForWindow(hwnd).max(96))
     else {
         return;
     };
-    let class_name = control_class_name(hwnd);
-    let interactive_field = is_combo_class(&class_name);
+    let interactive_field =
+        is_combo_class(&class_name) || (is_edit_class(&class_name) && is_single_line_edit(hwnd));
     let hot = !GetPropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY).is_invalid();
     let focused = GetFocus() == hwnd;
     let border = if !IsWindowEnabled(hwnd).as_bool() {
@@ -1384,73 +2487,200 @@ unsafe fn paint_trackbar(hwnd: HWND, palette: Palette) {
     };
     fill(memory_dc, &local, palette.window);
     let dpi = GetDpiForWindow(hwnd).max(96);
-    let thumb_width = scale(14, dpi).max(10);
-    let thumb_height = scale(22, dpi).min(height);
-    let left = thumb_width / 2;
-    let right = (width - thumb_width / 2).max(left);
-    let center = height / 2;
     let minimum = SendMessageW(hwnd, 0x0401, WPARAM(0), LPARAM(0)).0 as i64;
     let maximum = SendMessageW(hwnd, 0x0402, WPARAM(0), LPARAM(0)).0 as i64;
     let position = SendMessageW(hwnd, 0x0400, WPARAM(0), LPARAM(0)).0 as i64;
-    let span = (maximum - minimum).max(1);
-    let x = left + (((right - left) as i64 * (position - minimum).clamp(0, span)) / span) as i32;
-    let channel = RECT {
-        left,
-        top: center - scale(3, dpi),
-        right,
-        bottom: center + scale(3, dpi),
+    let Some(geometry) = trackbar_geometry(width, height, dpi, minimum, maximum, position) else {
+        let _ = BitBlt(dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
+        let _ = SelectObject(memory_dc, old_bitmap);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(memory_dc);
+        let _ = EndPaint(hwnd, &paint);
+        return;
     };
-    let channel_radius = ((channel.bottom - channel.top) / 2).max(2);
+    let enabled = IsWindowEnabled(hwnd).as_bool();
+    let visual = trackbar_visual(palette, enabled);
+    let channel = geometry.channel.as_rect();
     fill_round_rect_antialiased(
         memory_dc,
         channel,
-        channel_radius,
-        palette.edit,
-        palette.border,
-        palette.window,
+        geometry.channel_radius,
+        visual.track_fill,
+        visual.track_border,
+        visual.background,
     );
-    let selected = RECT {
-        right: x,
-        ..channel
-    };
+    // The progress fill stays inside the channel's final outline.  The previous paint path drew a
+    // second rounded control over the complete channel and could erase the outer stroke at the
+    // split or maximum endpoint.  Keeping the fill inside a DPI-scaled inset makes the right-hand
+    // track line stable in both themes and across repeated drag paints.
+    let selected = geometry
+        .channel
+        .inset(geometry.channel_border)
+        .with_right(geometry.position_x);
     if selected.right > selected.left {
         fill_round_rect_antialiased(
             memory_dc,
-            selected,
-            channel_radius,
-            palette.progress,
-            palette.progress,
-            palette.edit,
+            selected.as_rect(),
+            ((selected.bottom - selected.top) / 2).max(1),
+            visual.progress,
+            visual.progress,
+            visual.track_fill,
         );
     }
-    let thumb = RECT {
-        left: x - thumb_width / 2,
-        top: center - thumb_height / 2,
-        right: x + (thumb_width + 1) / 2,
-        bottom: center + (thumb_height + 1) / 2,
-    };
-    let enabled = IsWindowEnabled(hwnd).as_bool();
     fill_round_rect_antialiased(
         memory_dc,
-        thumb,
-        (thumb_width / 2).max(3),
-        if enabled {
-            palette.button
-        } else {
-            palette.window
-        },
-        if enabled {
-            palette.text_secondary
-        } else {
-            palette.text_disabled
-        },
-        palette.window,
+        geometry.thumb.as_rect(),
+        geometry.thumb_radius,
+        visual.thumb_fill,
+        visual.thumb_border,
+        visual.background,
     );
     let _ = BitBlt(dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
     let _ = SelectObject(memory_dc, old_bitmap);
     let _ = DeleteObject(bitmap);
     let _ = DeleteDC(memory_dc);
     let _ = EndPaint(hwnd, &paint);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrackbarRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl TrackbarRect {
+    const fn as_rect(self) -> RECT {
+        RECT {
+            left: self.left,
+            top: self.top,
+            right: self.right,
+            bottom: self.bottom,
+        }
+    }
+
+    fn inset(self, value: i32) -> Self {
+        let value = value.max(0);
+        let horizontal = value.min((self.right - self.left).max(0) / 2);
+        let vertical = value.min((self.bottom - self.top).max(0) / 2);
+        Self {
+            left: self.left + horizontal,
+            top: self.top + vertical,
+            right: self.right - horizontal,
+            bottom: self.bottom - vertical,
+        }
+    }
+
+    fn with_right(mut self, right: i32) -> Self {
+        self.right = right.clamp(self.left, self.right);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrackbarGeometry {
+    channel: TrackbarRect,
+    thumb: TrackbarRect,
+    position_x: i32,
+    channel_radius: i32,
+    channel_border: i32,
+    thumb_radius: i32,
+}
+
+fn trackbar_geometry(
+    width: i32,
+    height: i32,
+    dpi: u32,
+    minimum: i64,
+    maximum: i64,
+    position: i64,
+) -> Option<TrackbarGeometry> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let thumb_width = scale(14, dpi).max(10).min(width);
+    let thumb_height = scale(22, dpi).max(1).min(height);
+    // Split odd dimensions asymmetrically so the exclusive right/bottom edge remains inside the
+    // client area at 125%, 150% and other DPI values that produce odd-sized thumbs.
+    let thumb_left_half = thumb_width / 2;
+    let thumb_right_half = thumb_width - thumb_left_half;
+    let thumb_top_half = thumb_height / 2;
+    let thumb_bottom_half = thumb_height - thumb_top_half;
+    let endpoint_left = thumb_left_half;
+    let endpoint_right = (width - thumb_right_half).max(endpoint_left);
+    let span = (maximum - minimum).max(1);
+    let position_x = endpoint_left
+        + (((endpoint_right - endpoint_left) as i64 * (position - minimum).clamp(0, span)) / span)
+            as i32;
+    let center_y = height / 2;
+    let channel_half_height = scale(3, dpi).max(2).min((height / 2).max(1));
+    let channel = TrackbarRect {
+        left: endpoint_left,
+        top: (center_y - channel_half_height).max(0),
+        // RECT uses an exclusive right edge. Include the maximum endpoint so its rounded cap and
+        // outline are not clipped one pixel before the thumb centre.
+        right: (endpoint_right + 1).min(width),
+        bottom: (center_y + channel_half_height).min(height),
+    };
+    let thumb = TrackbarRect {
+        left: position_x - thumb_left_half,
+        top: center_y - thumb_top_half,
+        right: position_x + thumb_right_half,
+        bottom: center_y + thumb_bottom_half,
+    };
+    Some(TrackbarGeometry {
+        channel,
+        thumb,
+        position_x,
+        channel_radius: ((channel.bottom - channel.top) / 2).max(1),
+        channel_border: scale(1, dpi).max(1),
+        thumb_radius: (thumb_width / 2).max(3).min((thumb_height / 2).max(1)),
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrackbarVisual {
+    background: COLORREF,
+    track_fill: COLORREF,
+    track_border: COLORREF,
+    progress: COLORREF,
+    thumb_fill: COLORREF,
+    thumb_border: COLORREF,
+}
+
+fn trackbar_visual(palette: Palette, enabled: bool) -> TrackbarVisual {
+    TrackbarVisual {
+        background: palette.window,
+        // A white edit-field trough made the light track look unthemed.  Inno's restrained light
+        // channel is closer to the pressed-button/separator pair, while dark mode keeps its deep
+        // edit surface and visible border.
+        track_fill: if palette.dark {
+            palette.edit
+        } else {
+            palette.button_pressed
+        },
+        track_border: if palette.dark {
+            palette.border
+        } else {
+            palette.separator
+        },
+        progress: if enabled {
+            palette.progress
+        } else {
+            palette.separator
+        },
+        thumb_fill: if enabled {
+            palette.button
+        } else {
+            palette.window
+        },
+        thumb_border: if enabled {
+            palette.text_secondary
+        } else {
+            palette.text_disabled
+        },
+    }
 }
 
 fn scale(value: i32, dpi: u32) -> i32 {
@@ -1546,6 +2776,8 @@ mod tests {
         assert_eq!(Palette::DARK.edit, rgb(31, 31, 31));
         assert_eq!(Palette::DARK.separator, rgb(81, 81, 81));
         assert_eq!(Palette::DARK.accent_border, rgb(66, 149, 192));
+        assert_eq!(Palette::DARK.highlight_fill, rgb(76, 194, 255));
+        assert_eq!(Palette::DARK.highlight_border, rgb(76, 194, 255));
     }
 
     #[test]
@@ -1573,7 +2805,86 @@ mod tests {
     }
 
     #[test]
-    fn field_styles_keep_property_page_edit_and_remove_competing_rounded_edges() {
+    fn trackbar_geometry_keeps_minimum_and_maximum_endpoints_inside_the_client() {
+        for dpi in [96, 120, 144, 192] {
+            let minimum = trackbar_geometry(801, 34, dpi, 10, 90, 10).unwrap();
+            let maximum = trackbar_geometry(801, 34, dpi, 10, 90, 90).unwrap();
+
+            for geometry in [minimum, maximum] {
+                assert!(geometry.channel.left >= 0);
+                assert!(geometry.channel.right <= 801);
+                assert!(geometry.channel.top >= 0);
+                assert!(geometry.channel.bottom <= 34);
+                assert!(geometry.thumb.left >= 0);
+                assert!(geometry.thumb.right <= 801);
+                assert!(geometry.thumb.top >= 0);
+                assert!(geometry.thumb.bottom <= 34);
+                assert!(geometry.channel.right > geometry.channel.left);
+                assert!(geometry.thumb.right > geometry.thumb.left);
+
+                let inner = geometry.channel.inset(geometry.channel_border);
+                let selected = inner.with_right(geometry.position_x);
+                assert!(selected.left >= geometry.channel.left + geometry.channel_border);
+                assert!(selected.right <= geometry.channel.right - geometry.channel_border);
+            }
+
+            let minimum_inner = minimum.channel.inset(minimum.channel_border);
+            let maximum_inner = maximum.channel.inset(maximum.channel_border);
+            assert_eq!(
+                minimum_inner.with_right(minimum.position_x).right,
+                minimum_inner.left
+            );
+            assert_eq!(
+                maximum_inner.with_right(maximum.position_x).right,
+                maximum_inner.right
+            );
+        }
+    }
+
+    #[test]
+    fn trackbar_geometry_clamps_positions_and_handles_tiny_surfaces() {
+        let below = trackbar_geometry(300, 24, 96, 20, 40, -100).unwrap();
+        let above = trackbar_geometry(300, 24, 96, 20, 40, 999).unwrap();
+        assert_eq!(below.position_x, below.channel.left);
+        assert_eq!(above.position_x, above.channel.right - 1);
+        assert!(trackbar_geometry(0, 24, 96, 0, 1, 0).is_none());
+        assert!(trackbar_geometry(300, 0, 96, 0, 1, 0).is_none());
+
+        let tiny = trackbar_geometry(1, 1, 144, 0, 0, 0).unwrap();
+        assert_eq!(
+            tiny.thumb,
+            TrackbarRect {
+                left: 0,
+                top: 0,
+                right: 1,
+                bottom: 1
+            }
+        );
+        assert!(tiny.channel.top >= 0 && tiny.channel.bottom <= 1);
+    }
+
+    #[test]
+    fn trackbar_visuals_are_theme_specific_and_idempotent() {
+        let light = trackbar_visual(Palette::LIGHT, true);
+        let dark = trackbar_visual(Palette::DARK, true);
+        assert_eq!(light, trackbar_visual(Palette::LIGHT, true));
+        assert_eq!(dark, trackbar_visual(Palette::DARK, true));
+        assert_eq!(light.track_fill, Palette::LIGHT.button_pressed);
+        assert_eq!(light.track_border, Palette::LIGHT.separator);
+        assert_ne!(light.track_fill, Palette::LIGHT.edit);
+        assert_ne!(light.track_fill, Palette::LIGHT.window);
+        assert_eq!(dark.track_fill, Palette::DARK.edit);
+        assert_eq!(dark.track_border, Palette::DARK.border);
+        assert_eq!(light.progress, Palette::LIGHT.progress);
+        assert_eq!(dark.progress, Palette::DARK.progress);
+
+        let disabled = trackbar_visual(Palette::DARK, false);
+        assert_eq!(disabled.progress, Palette::DARK.separator);
+        assert_eq!(disabled.thumb_border, Palette::DARK.text_disabled);
+    }
+
+    #[test]
+    fn field_styles_remove_competing_native_edges() {
         assert!(is_edit_class("Edit"));
         assert!(is_edit_class("EDIT"));
         assert!(!is_edit_class("ComboBox"));
@@ -1586,16 +2897,27 @@ mod tests {
         assert_eq!(ex_style & WS_EX_CLIENTEDGE.0 as isize, 0);
         assert_ne!(ex_style & 0x2000, 0);
 
-        let (edit_style, edit_ex_style) =
-            property_page_edit_style_bits(0x1000 | WS_BORDER.0 as isize, 0x0004);
-        assert_eq!(edit_style & WS_BORDER.0 as isize, 0);
-        assert_ne!(edit_ex_style & WS_EX_CLIENTEDGE.0 as isize, 0);
-        assert_ne!(edit_ex_style & 0x0004, 0);
-
         let (list_style, list_ex_style) =
             single_border_style_bits(0x1000, WS_EX_CLIENTEDGE.0 as isize | 0x2000);
         assert_ne!(list_style & WS_BORDER.0 as isize, 0);
         assert_eq!(list_ex_style & WS_EX_CLIENTEDGE.0 as isize, 0);
+
+        let (scrollable_style, _) =
+            borderless_style_bits(WS_BORDER.0 as isize | WS_VSCROLL.0 as isize, 0);
+        assert_eq!(scrollable_style & WS_BORDER.0 as isize, 0);
+        assert_ne!(scrollable_style & WS_VSCROLL.0 as isize, 0);
+    }
+
+    #[test]
+    fn native_scrollbar_messages_require_the_rounded_frame_to_be_painted_last() {
+        for message in [
+            0x00a1, 0x00a2, 0x00a3, 0x0113, 0x0114, 0x0115, 0x020a, 0x020e, 0x02a0,
+        ] {
+            assert!(native_scrollbar_may_repaint_frame(message));
+        }
+        for message in [WM_SETTEXT, WM_ENABLE, WM_SIZE, WM_PAINT] {
+            assert!(!native_scrollbar_may_repaint_frame(message));
+        }
     }
 
     #[test]
@@ -1618,6 +2940,7 @@ mod tests {
             list_view_row_colors(Palette::DARK, true),
             (dark_nav.text, dark_nav.fill)
         );
+        assert_eq!(dark_nav.fill, rgb(76, 194, 255));
         assert_eq!(
             list_view_row_colors(Palette::LIGHT, true),
             (light_nav.text, light_nav.fill)
@@ -1658,9 +2981,14 @@ mod tests {
             list_view_row_colors(Palette::DARK, false),
             (Palette::DARK.text, Palette::DARK.edit)
         );
+        let selected = button_visual(
+            Palette::DARK,
+            ButtonRole::Navigation { selected: true },
+            ControlState::default(),
+        );
         assert_eq!(
             list_view_row_colors(Palette::DARK, true),
-            (Palette::DARK.text, Palette::DARK.accent_fill)
+            (selected.text, selected.fill)
         );
     }
 
@@ -1681,11 +3009,94 @@ mod tests {
     }
 
     #[test]
-    fn dark_radio_fallback_is_limited_to_real_auto_radio_buttons() {
+    fn shared_radio_painter_is_limited_to_real_auto_radio_buttons() {
         assert!(button_style_is_auto_radio(0x0009));
         assert!(button_style_is_auto_radio(0x5001_0009));
         assert!(!button_style_is_auto_radio(0x0003)); // auto checkbox
         assert!(!is_auto_radio_button("Static", 0x0009));
         assert!(is_auto_radio_button("BUTTON", 0x0009));
+    }
+
+    #[test]
+    fn radio_geometry_is_centered_and_bounded_at_supported_dpi() {
+        for dpi in [96, 120, 144, 192] {
+            let width = scale(300, dpi);
+            let height = scale(24, dpi);
+            let geometry = radio_geometry(width, height, dpi).unwrap();
+            let glyph_size = geometry.glyph.right - geometry.glyph.left;
+            assert_eq!(glyph_size, scale(13, dpi));
+            assert_eq!(geometry.glyph.bottom - geometry.glyph.top, glyph_size);
+            assert_eq!(geometry.glyph.top, (height - glyph_size) / 2);
+            assert!(geometry.glyph.left >= 0 && geometry.glyph.right <= width);
+            assert!(geometry.glyph.top >= 0 && geometry.glyph.bottom <= height);
+            assert_eq!(geometry.text.left, geometry.glyph.right + scale(5, dpi));
+            assert_eq!(geometry.text.right, width);
+        }
+    }
+
+    #[test]
+    fn radio_geometry_fails_closed_for_empty_and_clamps_tiny_controls() {
+        assert_eq!(radio_geometry(0, 24, 96), None);
+        assert_eq!(radio_geometry(100, 0, 96), None);
+        let geometry = radio_geometry(7, 5, 192).unwrap();
+        assert_eq!(geometry.glyph.right, 5);
+        assert_eq!(geometry.glyph.bottom, 5);
+        assert!(geometry.text.left <= 7);
+    }
+
+    #[test]
+    fn embedded_win11_button_theme_maps_all_states_and_dpi_buckets() {
+        let normal = ControlState {
+            hot: false,
+            pressed: false,
+            disabled: false,
+            focused: false,
+        };
+        assert_eq!(embedded_theme_dpi_index(96), 0);
+        assert_eq!(embedded_theme_dpi_index(120), 1);
+        assert_eq!(embedded_theme_dpi_index(144), 2);
+        assert_eq!(embedded_theme_dpi_index(192), 3);
+        assert_eq!(themed_button_state(normal, false), 0);
+        assert_eq!(themed_button_state(normal, true), 4);
+        assert_eq!(
+            themed_button_state(
+                ControlState {
+                    hot: true,
+                    ..normal
+                },
+                true
+            ),
+            5
+        );
+        assert_eq!(
+            themed_button_state(
+                ControlState {
+                    pressed: true,
+                    ..normal
+                },
+                true
+            ),
+            6
+        );
+        assert_eq!(
+            themed_button_state(
+                ControlState {
+                    disabled: true,
+                    ..normal
+                },
+                true
+            ),
+            7
+        );
+        for dark in [false, true] {
+            for dpi in [96, 120, 144, 192] {
+                for kind in [ThemedButtonKind::CheckBox, ThemedButtonKind::RadioButton] {
+                    let glyph = embedded_button_glyph(dark, dpi, kind, normal, true);
+                    assert_eq!(glyph.width, scale(13, dpi));
+                    assert_eq!(glyph.height, scale(13, dpi));
+                    assert_eq!(glyph.bgra.len(), (glyph.width * glyph.height * 4) as usize);
+                }
+            }
+        }
     }
 }

@@ -16,6 +16,25 @@ use crate::tr;
 use crate::utils::cmd::create_command;
 use crate::utils::path::get_bin_dir;
 
+fn generate_rpc_secret() -> Result<String> {
+    use windows::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_ALG_HANDLE, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+
+    let mut bytes = [0u8; 32];
+    let status = unsafe {
+        BCryptGenRandom(
+            BCRYPT_ALG_HANDLE::default(),
+            &mut bytes,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status.is_err() {
+        anyhow::bail!("BCryptGenRandom failed: 0x{:08X}", status.0 as u32);
+    }
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// 全局aria2管理器（延迟初始化）
 static GLOBAL_ARIA2: OnceLock<Arc<TokioMutex<Option<Aria2Manager>>>> = OnceLock::new();
 
@@ -125,6 +144,8 @@ impl Aria2Manager {
 
         log::info!("[aria2] 正在启动 aria2c 进程...");
         let start_time = std::time::Instant::now();
+        let rpc_secret = generate_rpc_secret()?;
+        let rpc_secret_arg = format!("--rpc-secret={rpc_secret}");
 
         // 启动 aria2c 进程，启用 RPC
         let connection_args = aria2_connection_args(download_threads);
@@ -133,7 +154,7 @@ impl Aria2Manager {
                 "--daemon=true",
                 "--enable-rpc=true",
                 "--rpc-listen-port=6800",
-                "--rpc-allow-origin-all=true",
+                "--rpc-listen-all=false",
                 "--max-concurrent-downloads=5",
                 "--min-split-size=1M",
                 "--file-allocation=none",
@@ -141,6 +162,7 @@ impl Aria2Manager {
                 "--auto-file-renaming=false",
                 "--allow-overwrite=true",
             ])
+            .arg(&rpc_secret_arg)
             .args(&connection_args)
             .spawn()?;
 
@@ -155,7 +177,8 @@ impl Aria2Manager {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         for i in 0..20 {
-            match aria2_ws::Client::connect("ws://127.0.0.1:6800/jsonrpc", None).await {
+            match aria2_ws::Client::connect("ws://127.0.0.1:6800/jsonrpc", Some(&rpc_secret)).await
+            {
                 Ok(c) => {
                     client = Some(c);
                     let elapsed = start_time.elapsed();

@@ -112,6 +112,10 @@ impl Default for AppConfig {
     }
 }
 
+const fn advanced_options_allowed(requested: bool, easy_mode_enabled: bool) -> bool {
+    requested && !easy_mode_enabled
+}
+
 impl AppConfig {
     /// 获取配置文件路径
     fn get_config_path() -> PathBuf {
@@ -183,12 +187,20 @@ impl AppConfig {
 
     fn normalized(mut self) -> Self {
         self.download_threads = normalize_download_threads(self.download_threads);
+        // Easy mode deliberately exposes a reduced, fixed installation policy.  Old config files
+        // can contain both switches after upgrading from builds where the two settings were
+        // independent; normalize that impossible UI state before any page is created.
+        self.enable_advanced_options =
+            advanced_options_allowed(self.enable_advanced_options, self.easy_mode_enabled);
         self
     }
 
     /// 设置小白模式状态并保存
     pub fn set_easy_mode(&mut self, enabled: bool) {
         self.easy_mode_enabled = enabled;
+        if enabled {
+            self.enable_advanced_options = false;
+        }
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }
@@ -249,7 +261,9 @@ impl AppConfig {
 
     /// 设置「高级选项」总开关并保存
     pub fn set_advanced_options(&mut self, enabled: bool) {
-        self.enable_advanced_options = enabled;
+        // The disabled About-page checkbox is the first line of defence, but keep the persisted
+        // invariant here as well so keyboard notifications or a stale caller cannot enable both.
+        self.enable_advanced_options = advanced_options_allowed(enabled, self.easy_mode_enabled);
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }
@@ -347,5 +361,22 @@ mod tests {
         assert_eq!(config.download_threads, 20);
         config = config.normalized();
         assert_eq!(config.download_threads, 16);
+    }
+
+    #[test]
+    fn easy_mode_normalizes_legacy_advanced_option_conflict() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"easy_mode_enabled":true,"enable_advanced_options":true}"#)
+                .unwrap();
+        let normalized = config.normalized();
+        assert!(normalized.easy_mode_enabled);
+        assert!(!normalized.enable_advanced_options);
+    }
+
+    #[test]
+    fn advanced_options_cannot_be_enabled_while_easy_mode_is_active() {
+        assert!(!advanced_options_allowed(true, true));
+        assert!(advanced_options_allowed(true, false));
+        assert!(!advanced_options_allowed(false, false));
     }
 }

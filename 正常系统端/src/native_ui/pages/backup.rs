@@ -3,6 +3,8 @@
 //! This module only presents and collects backup intent. Starting a backup remains the
 //! controller's responsibility so a window notification can never directly perform disk I/O.
 
+use std::cell::RefCell;
+
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Controls::{
@@ -20,7 +22,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::super::controls::{child, wide};
-use super::super::theme::{apply_control_theme, apply_list_view_theme, NativeControlKind, Palette};
+use super::super::layout::{centered_control_y_ceil, LayoutMetrics};
+use super::super::theme::{
+    apply_control_theme, apply_list_view_theme, combo_closed_height, NativeControlKind, Palette,
+};
 use crate::core::install_config::BackupConfig;
 
 pub const ID_SOURCE_LIST: u16 = 410;
@@ -93,6 +98,30 @@ impl Default for BackupPageState {
             description: String::new(),
             incremental: false,
         }
+    }
+}
+
+/// Builds the two generated backup fields in the language that is active at the time of use.
+///
+/// The timestamp is supplied by the caller so switching the interface language does not make an
+/// otherwise untouched backup look like a newly-created task.
+pub fn localized_backup_defaults(timestamp: &str) -> (String, String) {
+    (
+        crate::tr!("系统备份_{}", timestamp),
+        crate::tr!("使用 LetRecovery 创建的系统备份"),
+    )
+}
+
+/// Replaces generated text after a language switch, while preserving anything the user typed.
+fn relocalize_generated_value(
+    current: String,
+    previous_generated: &str,
+    next_generated: &str,
+) -> String {
+    if current == previous_generated {
+        next_generated.to_owned()
+    } else {
+        current
     }
 }
 
@@ -258,6 +287,9 @@ pub struct BackupPageHandles {
 pub struct BackupPage {
     handles: BackupPageHandles,
     pe_count: usize,
+    default_timestamp: String,
+    generated_name: RefCell<String>,
+    generated_description: RefCell<String>,
 }
 
 impl BackupPage {
@@ -267,6 +299,7 @@ impl BackupPage {
         partitions: &[BackupPartitionRow],
         pe_labels: &[String],
         initial: &BackupPageState,
+        default_timestamp: &str,
     ) -> windows::core::Result<Self> {
         let source_label = child(
             parent,
@@ -399,6 +432,9 @@ impl BackupPage {
                 pe,
             },
             pe_count: pe_labels.len(),
+            default_timestamp: default_timestamp.to_owned(),
+            generated_name: RefCell::new(initial.name.clone()),
+            generated_description: RefCell::new(initial.description.clone()),
         };
         page.populate_partitions(partitions, initial.source_partition, true, true);
         page.update_source_warning(
@@ -457,6 +493,30 @@ impl BackupPage {
         set_text(h.description_label, &crate::tr!("备份描述:"));
         set_text(h.incremental, &crate::tr!("增量备份 (追加到现有镜像)"));
         set_text(h.pe_label, &crate::tr!("PE 环境:"));
+
+        // Generated defaults follow the selected interface language. Each field is considered
+        // independently so editing only the description does not freeze the generated name (or
+        // vice versa). Values that no longer equal the previous generated text are user-owned and
+        // must never be overwritten by a language switch.
+        let (next_name, next_description) = localized_backup_defaults(&self.default_timestamp);
+        let current_name = read_text(h.name);
+        let current_description = read_text(h.description);
+        let previous_name = self.generated_name.borrow().clone();
+        let previous_description = self.generated_description.borrow().clone();
+        set_text(
+            h.name,
+            &relocalize_generated_value(current_name, &previous_name, &next_name),
+        );
+        set_text(
+            h.description,
+            &relocalize_generated_value(
+                current_description,
+                &previous_description,
+                &next_description,
+            ),
+        );
+        *self.generated_name.borrow_mut() = next_name;
+        *self.generated_description.borrow_mut() = next_description;
 
         let selected = SendMessageW(h.format, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
         let _ = SendMessageW(h.format, CB_RESETCONTENT, WPARAM(0), LPARAM(0));
@@ -569,7 +629,8 @@ impl BackupPage {
         .iter()
         .any(|label| label.chars().count() > 7);
         let label_width = s(if translated_labels_are_long { 116 } else { 76 }).min(width / 3);
-        let row_height = s(24);
+        let metrics = LayoutMetrics::for_dpi(dpi);
+        let row_height = metrics.field_height.max(metrics.button_height);
         let table_top = top + s(26);
         let table_height = s(132);
 
@@ -585,12 +646,21 @@ impl BackupPage {
         }
 
         let format_top = table_top + table_height + s(12);
-        move_control(h.format_label, left, format_top + s(3), label_width, s(20));
+        let format_closed_height = combo_closed_height(h.format, metrics.field_height);
+        let format_row_height = format_closed_height.max(metrics.field_height);
+        let label_y = centered_control_y_ceil(format_top, format_row_height, metrics.label_height);
+        move_control(
+            h.format_label,
+            left,
+            label_y,
+            label_width,
+            metrics.label_height,
+        );
         let format_width = s(132).min((width - label_width).max(0));
         move_control(
             h.format,
             left + label_width,
-            format_top,
+            centered_control_y_ceil(format_top, format_row_height, format_closed_height),
             format_width,
             s(180),
         );
@@ -598,27 +668,27 @@ impl BackupPage {
         move_control(
             h.format_hint,
             left + detail_x,
-            format_top + s(3),
+            label_y,
             width - detail_x,
-            s(20),
+            metrics.label_height,
         );
         let swm_label_width = s(72).min((width - detail_x) / 2);
         move_control(
             h.swm_size_label,
             left + detail_x,
-            format_top + s(3),
+            label_y,
             swm_label_width,
-            s(20),
+            metrics.label_height,
         );
         move_control(
             h.swm_size,
             left + detail_x + swm_label_width,
-            format_top,
+            centered_control_y_ceil(format_top, format_row_height, row_height),
             width - detail_x - swm_label_width,
             row_height,
         );
 
-        let save_top = format_top + s(34);
+        let save_top = format_top + format_row_height + s(10);
         let browse_width = s(76).min(width / 4);
         move_control(h.save_label, left, save_top + s(3), label_width, s(20));
         move_control(
@@ -678,11 +748,19 @@ impl BackupPage {
             s(20),
         );
         let pe_top = options_top + s(32);
-        move_control(h.pe_label, left, pe_top + s(3), label_width, s(20));
+        let pe_closed_height = combo_closed_height(h.pe, metrics.field_height);
+        let pe_row_height = pe_closed_height.max(metrics.field_height);
+        move_control(
+            h.pe_label,
+            left,
+            centered_control_y_ceil(pe_top, pe_row_height, metrics.label_height),
+            label_width,
+            metrics.label_height,
+        );
         move_control(
             h.pe,
             left + label_width,
-            pe_top,
+            centered_control_y_ceil(pe_top, pe_row_height, pe_closed_height),
             (width - label_width).min(s(320)).max(0),
             s(180),
         );
@@ -1045,6 +1123,34 @@ mod tests {
         assert_eq!(state.format, BackupFormat::Wim);
         assert_eq!(state.swm_split_size_mb, 4096);
         assert!(!state.incremental);
+    }
+
+    #[test]
+    fn generated_backup_fields_keep_one_timestamp_and_relocalize_independently() {
+        let timestamp = "20260714_174715";
+        let (name, description) = localized_backup_defaults(timestamp);
+        assert!(name.ends_with(timestamp));
+
+        assert_eq!(
+            relocalize_generated_value(name.clone(), &name, "System Backup_20260714_174715"),
+            "System Backup_20260714_174715"
+        );
+        assert_eq!(
+            relocalize_generated_value(
+                "My backup".to_owned(),
+                &name,
+                "System Backup_20260714_174715"
+            ),
+            "My backup"
+        );
+        assert_eq!(
+            relocalize_generated_value(
+                "My description".to_owned(),
+                &description,
+                "System backup created with LetRecovery"
+            ),
+            "My description"
+        );
     }
 
     #[test]

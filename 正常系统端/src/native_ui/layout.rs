@@ -9,6 +9,7 @@ use windows::Win32::Graphics::Gdi::{
     DrawTextW, GetDC, ReleaseDC, SelectObject, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
     DT_WORDBREAK, HFONT,
 };
+use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
 use super::controls::InnoMetrics;
 
@@ -149,6 +150,33 @@ pub fn scale(value: i32, dpi: u32) -> i32 {
     ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32
 }
 
+/// Returns the control's actual on-screen height. This matters for stock ComboBox controls:
+/// `MoveWindow` receives the complete drop-down height, while USER32 independently chooses the
+/// closed field height from the installed font and visual style.
+pub unsafe fn control_height(control: HWND) -> Option<i32> {
+    let mut rect = RECT::default();
+    GetWindowRect(control, &mut rect)
+        .ok()
+        .map(|_| rect.bottom - rect.top)
+        .filter(|height| *height > 0)
+}
+
+/// Centers an item of `item_height` inside a logical row without language- or DPI-specific
+/// offsets. All values are already physical pixels.
+pub fn centered_control_y(row_top: i32, row_height: i32, item_height: i32) -> i32 {
+    row_top + (row_height.saturating_sub(item_height).max(0) / 2)
+}
+
+/// Centers an item while assigning an odd spare pixel to the top edge.
+///
+/// USER32 single-line fields and GDI text both otherwise leave that pixel below the item, which
+/// makes a 23px field look one pixel higher than the neighbouring 24px control on 96-DPI layouts.
+/// Keep this opt-in for mixed-height field rows instead of changing the geometry of every control.
+pub fn centered_control_y_ceil(row_top: i32, row_height: i32, item_height: i32) -> i32 {
+    let spare = row_height.saturating_sub(item_height).max(0);
+    row_top + (spare + 1) / 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +206,12 @@ mod tests {
         assert_eq!(preferred_list_height(0, 96, 3, 8), 90);
         assert_eq!(preferred_list_height(5, 96, 3, 8), 134);
         assert_eq!(preferred_list_height(80, 96, 3, 8), 200);
+    }
+
+    #[test]
+    fn mixed_height_field_rows_put_the_odd_pixel_above_the_field() {
+        assert_eq!(centered_control_y(100, 24, 23), 100);
+        assert_eq!(centered_control_y_ceil(100, 24, 23), 101);
+        assert_eq!(centered_control_y_ceil(100, 24, 24), 100);
     }
 }

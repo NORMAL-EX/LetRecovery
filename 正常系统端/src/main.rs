@@ -58,16 +58,6 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if args.contains(&"/PEINSTALL".to_string()) || args.contains(&"--pe-install".to_string()) {
-        log::info!("检测到PE安装模式，执行自动安装...");
-        return run_pe_install();
-    }
-
-    if args.contains(&"/PEBACKUP".to_string()) || args.contains(&"--pe-backup".to_string()) {
-        log::info!("检测到PE备份模式，执行自动备份...");
-        return run_pe_backup();
-    }
-
     // 开发 UI 测试构建必须保持 asInvoker，避免每次视觉迭代都弹 UAC。
     // build.rs 已拒绝 release + non-elevated-tests，因此正式产物仍强制管理员权限。
     #[cfg(not(feature = "non-elevated-tests"))]
@@ -77,6 +67,7 @@ fn main() -> anyhow::Result<()> {
             if let Err(e) = utils::privilege::restart_as_admin() {
                 log::error!("提升权限失败: {}", e);
                 log::error!("需要管理员权限运行此程序");
+                show_error_message(&format!("无法获取管理员权限：{e}"));
             }
             return Ok(());
         }
@@ -85,6 +76,18 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "non-elevated-tests")]
     log::warn!("开发 UI 测试构建：已跳过管理员检测和自动提权");
+
+    // Legacy PE automation remains supported, but it must obey the same elevation boundary as
+    // every other disk-mutating command-line entry.
+    if args.contains(&"/PEINSTALL".to_string()) || args.contains(&"--pe-install".to_string()) {
+        log::info!("检测到PE安装模式，执行自动安装...");
+        return run_pe_install();
+    }
+
+    if args.contains(&"/PEBACKUP".to_string()) || args.contains(&"--pe-backup".to_string()) {
+        log::info!("检测到PE备份模式，执行自动备份...");
+        return run_pe_backup();
+    }
 
     // 命令行无人值守安装：--install --config <install.json> [--advanced <advanced.json>]
     // 放在确认管理员权限之后、GUI 初始化之前；不进 GUI，准备好后（默认）重启进 PE 完成安装。
@@ -373,40 +376,35 @@ fn run_pe_install() -> anyhow::Result<()> {
 
     log::info!("[PE INSTALL] ========== PE自动安装模式 ==========");
 
-    // 查找配置文件所在分区
-    let data_partition = match ConfigFileManager::find_data_partition() {
-        Some(p) => p,
-        None => {
-            log::error!("[PE INSTALL] 错误: 未找到安装配置文件");
-            show_error_message("未找到安装配置文件，无法继续安装。");
+    let (data_partition, target_partition, config) = match ConfigFileManager::find_install_task() {
+        Ok(task) => task,
+        Err(error) => {
+            log::error!("[PE INSTALL] 无法确认安装任务: {error}");
+            show_error_message(&format!("无法确认本次安装任务: {error}"));
             return Ok(());
         }
     };
 
     log::info!("[PE INSTALL] 数据分区: {}", data_partition);
 
-    // 读取安装配置
-    let config = match ConfigFileManager::read_install_config(&data_partition) {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("[PE INSTALL] 错误: 读取配置失败: {}", e);
-            show_error_message(&format!("读取安装配置失败: {}", e));
-            return Ok(());
-        }
-    };
-
     log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
     log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
 
-    // 查找安装标记分区
-    let target_partition = match ConfigFileManager::find_install_marker_partition() {
-        Some(p) => p,
-        None => config.target_partition.clone(),
-    };
+    // The staged image is a single file name. Reject absolute paths and traversal from a
+    // modified/stale INI before any image verification or target-volume write can begin.
+    if let Err(error) = lr_core::download_integrity::validate_download_filename(&config.image_path)
+    {
+        log::error!("[PE INSTALL] 错误: 无效的镜像文件名: {error}");
+        show_error_message(&format!("安装配置中的镜像文件名无效: {error}"));
+        return Ok(());
+    }
 
     // 构建完整镜像路径
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-    let image_path = format!("{}\\{}", data_dir, config.image_path);
+    let image_path = std::path::Path::new(&data_dir)
+        .join(&config.image_path)
+        .to_string_lossy()
+        .into_owned();
 
     if !std::path::Path::new(&image_path).exists() {
         log::error!("[PE INSTALL] 错误: 镜像文件不存在: {}", image_path);
@@ -515,6 +513,12 @@ fn execute_pe_install(
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use lr_core::command::{CommandExecutor, CommandRequest, SystemCommandExecutor};
+
+    log::info!("[PE INSTALL] Step 0: 格式化前校验镜像");
+    let verification = core::image_verify::ImageVerifier::new().verify(image_path, None);
+    if verification.status != core::image_verify::VerifyStatus::Valid {
+        anyhow::bail!("镜像校验失败，未格式化目标分区: {}", verification.message);
+    }
 
     log::info!("[PE INSTALL] Step 1: 格式化分区");
     // 格式化目标分区
@@ -783,6 +787,7 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
     } else {
         username
     };
+    let username = escape_xml_text(username);
 
     // 检测目标系统架构
     let arch = get_system_architecture(target_partition);
@@ -880,6 +885,15 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
     std::fs::write(&unattend_path, &xml_content)?;
 
     Ok(())
+}
+
+fn escape_xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// 显示错误消息框

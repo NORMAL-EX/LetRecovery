@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use lr_core::boot_pca::BootPcaMode;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 驱动操作模式
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -227,8 +227,27 @@ impl ConfigFileManager {
     /// 临时数据目录名
     const DATA_DIR: &'static str = "LetRecovery_Data";
 
-    fn scan_letters() -> &'static [char] {
-        &['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']
+    fn scan_letters() -> impl Iterator<Item = char> {
+        let system_drive = std::env::var("SystemDrive")
+            .ok()
+            .and_then(|value| {
+                value
+                    .chars()
+                    .find(|character| character.is_ascii_alphabetic())
+            })
+            .map(|character| character.to_ascii_uppercase());
+        (b'A'..=b'Z')
+            .map(char::from)
+            .filter(move |letter| Some(*letter) != system_drive)
+    }
+
+    /// Resolve a file staged by the desktop client without allowing an INI value to escape the
+    /// LetRecovery data directory. Staged images and custom unattend files are single files, not
+    /// arbitrary relative paths.
+    pub fn resolve_staged_file(data_dir: &str, file_name: &str) -> Result<PathBuf> {
+        lr_core::download_integrity::validate_download_filename(file_name)
+            .map_err(|error| anyhow::anyhow!("无效的暂存文件名 {file_name:?}: {error}"))?;
+        Ok(Path::new(data_dir).join(file_name))
     }
 
     fn normalize_partition(partition: &str) -> String {
@@ -374,7 +393,7 @@ impl ConfigFileManager {
         reason = "legacy marker lookup retained for custom PE integrations"
     )]
     pub fn find_install_marker_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let marker_path = format!("{}:\\{}", letter, Self::INSTALL_MARKER);
             if Path::new(&marker_path).exists() {
                 log::info!("找到安装标记分区: {}:", letter);
@@ -386,7 +405,7 @@ impl ConfigFileManager {
 
     /// 查找包含备份标记文件的分区
     pub fn find_backup_marker_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let marker_path = format!("{}:\\{}", letter, Self::BACKUP_MARKER);
             if Path::new(&marker_path).exists() {
                 log::info!("找到备份标记分区: {}:", letter);
@@ -398,7 +417,7 @@ impl ConfigFileManager {
 
     /// 查找包含扩容标记文件的分区
     pub fn find_expand_marker_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let marker_path = format!("{}:\\{}", letter, Self::EXPAND_MARKER);
             if Path::new(&marker_path).exists() {
                 log::info!("找到扩容标记分区: {}:", letter);
@@ -410,7 +429,7 @@ impl ConfigFileManager {
 
     /// 查找包含配置文件的数据分区
     pub fn find_data_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let config_path = format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::INSTALL_CONFIG);
             if Path::new(&config_path).exists() {
                 log::info!("找到安装配置分区: {}:", letter);

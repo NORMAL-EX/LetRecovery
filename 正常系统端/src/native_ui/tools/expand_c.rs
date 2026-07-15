@@ -102,6 +102,19 @@ impl ExpandCDialogState {
         self.analysis = analysis;
     }
 
+    /// Synchronizes the typed target with the native trackbar's absolute tenth-GB position.
+    ///
+    /// `TBM_GETPOS` reports the value configured by `TBM_SETRANGEMIN/MAX`, not an offset from
+    /// zero. Clamp defensively to the analyzed range so an early/default notification cannot turn
+    /// a 300 GB minimum into 0 GB while controls are being initialized.
+    fn apply_slider_position(&mut self, position_tenths: i32) {
+        let minimum = tenth_gb(self.min_target_mb());
+        let maximum = tenth_gb(self.analysis.max_size_mb).max(minimum);
+        let position_tenths = position_tenths.clamp(minimum, maximum);
+        self.target_size_mb = mb_from_tenth_gb(position_tenths);
+        self.target_size_text = format!("{:.1}", f64::from(position_tenths) / 10.0);
+    }
+
     pub fn request(&self) -> Result<ExpandCRequest, ExpandCValidationError> {
         if self.loading || self.executing || !self.analysis.found || !self.analysis.can_expand {
             return Err(ExpandCValidationError::AnalysisUnavailable);
@@ -313,6 +326,7 @@ impl NativeExpandCDialog {
 
     /// Called by the host for `EN_CHANGE` from the target-size editor.
     pub unsafe fn handle_target_edit_changed(&mut self) {
+        let previous_movement = self.requires_partition_move();
         self.state.target_size_text = read_text(self.controls.target_edit);
         if let Ok(gb) = self.state.target_size_text.trim().parse::<f64>() {
             if gb.is_finite() && gb > 0.0 {
@@ -321,19 +335,25 @@ impl NativeExpandCDialog {
             }
         }
         self.render_dynamic_state();
-        self.layout();
+        if previous_movement != self.requires_partition_move() {
+            self.layout();
+            self.redraw_complete();
+        }
     }
 
     /// Called by the host for `WM_HSCROLL` from the target-size trackbar.
     pub unsafe fn handle_slider_changed(&mut self) {
-        let tenths = SendMessageW(self.controls.slider, TBM_GETPOS, WPARAM(0), LPARAM(0)).0;
-        if tenths >= 0 {
-            self.state.target_size_mb = tenths as u64 * 1024 / 10;
-            self.state.target_size_text = format!("{:.1}", tenths as f64 / 10.0);
-            set_text(self.controls.target_edit, &self.state.target_size_text);
-        }
+        let previous_movement = self.requires_partition_move();
+        let position_tenths = SendMessageW(self.controls.slider, TBM_GETPOS, WPARAM(0), LPARAM(0))
+            .0
+            .clamp(i32::MIN as isize, i32::MAX as isize) as i32;
+        self.state.apply_slider_position(position_tenths);
+        set_text(self.controls.target_edit, &self.state.target_size_text);
         self.render_dynamic_state();
-        self.layout();
+        if previous_movement != self.requires_partition_move() {
+            self.layout();
+            self.redraw_complete();
+        }
     }
 
     pub unsafe fn show_modeless(&mut self) {
@@ -588,11 +608,16 @@ impl NativeExpandCDialog {
         } else {
             String::new()
         };
-        set_text(self.controls.move_warning, &warning);
-        let _ = ShowWindow(
-            self.controls.move_warning,
-            if movement { SW_SHOW } else { SW_HIDE },
-        );
+        if read_text(self.controls.move_warning) != warning {
+            set_text(self.controls.move_warning, &warning);
+        }
+        let currently_visible = IsWindowVisible(self.controls.move_warning).as_bool();
+        if currently_visible != movement {
+            let _ = ShowWindow(
+                self.controls.move_warning,
+                if movement { SW_SHOW } else { SW_HIDE },
+            );
+        }
         let status = if !self.state.message.is_empty() {
             self.state.message.clone()
         } else if !self.state.analysis.reason.is_empty() {
@@ -602,6 +627,13 @@ impl NativeExpandCDialog {
         };
         set_text(self.controls.status, &status);
         self.shell.set_primary_enabled(request.is_ok());
+    }
+
+    fn requires_partition_move(&self) -> bool {
+        self.state
+            .request()
+            .as_ref()
+            .is_ok_and(|request| request.requires_partition_move)
     }
 
     unsafe fn apply_font_and_theme(&self) {
@@ -795,6 +827,14 @@ fn tenth_gb(value_mb: u64) -> i32 {
         .min(i32::MAX as u64) as i32
 }
 
+fn mb_from_tenth_gb(position_tenths: i32) -> u64 {
+    u64::try_from(position_tenths)
+        .unwrap_or(0)
+        .saturating_mul(1024)
+        .saturating_add(5)
+        / 10
+}
+
 fn format_gb(value_mb: u64) -> String {
     format!("{} GB", format_gb_value(value_mb))
 }
@@ -908,5 +948,33 @@ mod tests {
 
         let completely_empty = ExpandConditionalLayout::calculate_measured(200, 6, 0, 0, 0);
         assert_eq!(completely_empty.content_height, 200);
+    }
+
+    #[test]
+    fn slider_position_is_absolute_and_clamped_to_the_analyzed_range() {
+        let mut state = available();
+        state.apply_slider_position(1_150);
+        assert_eq!(state.target_size_text, "115.0");
+        assert_eq!(state.target_size_mb, 115 * 1024);
+
+        // A spurious/default zero notification must not collapse a 100 GB minimum to zero.
+        state.apply_slider_position(0);
+        assert_eq!(state.target_size_text, "100.0");
+        assert_eq!(state.target_size_mb, 100 * 1024);
+
+        state.apply_slider_position(99_999);
+        assert_eq!(state.target_size_text, "160.0");
+        assert_eq!(state.target_size_mb, 160 * 1024);
+    }
+
+    #[test]
+    fn tenth_gb_mapping_is_monotonic_and_round_trips_every_slider_step() {
+        let mut previous_mb = 0;
+        for position in 1_000..=1_600 {
+            let megabytes = mb_from_tenth_gb(position);
+            assert!(megabytes >= previous_mb);
+            assert_eq!(tenth_gb(megabytes), position);
+            previous_mb = megabytes;
+        }
     }
 }

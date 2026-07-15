@@ -37,22 +37,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, MINMAXINFO, MSG,
     SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO,
-    WM_HSCROLL, WM_MOUSEWHEEL, WM_NCCREATE, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON,
-    WM_SETTINGCHANGE, WM_SIZE, WM_THEMECHANGED, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW,
-    WS_TABSTOP, WS_VISIBLE,
+    WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCCREATE, WM_NOTIFY, WM_PAINT, WM_SETFONT,
+    WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
+    WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::controls::{center_single_line_edit_in_row, child, draw_inno_button, wide, ButtonRole};
 use super::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
 use super::driver_transfer_dialog::NativeDriverTransferDialog;
-use super::layout::{measure_text, measured_button_width, LayoutMetrics};
+use super::layout::{centered_control_y_ceil, measure_text, measured_button_width, LayoutMetrics};
 use super::pages::advanced::{
     AdvancedBrowseTarget, AdvancedPage, AdvancedPageContext, AdvancedPageIntent,
 };
-use super::pages::backup::{BackupPage, BackupPageState, BackupPartitionRow};
+use super::pages::backup::{
+    localized_backup_defaults, BackupPage, BackupPageState, BackupPartitionRow,
+};
 use super::pages::download::{
     DownloadIntent, DownloadLabels, DownloadPage, DownloadTab, PageRect, ID_RESOURCE_LIST,
 };
@@ -138,11 +140,39 @@ const WM_HARDWARE_INFO_READY: u32 = 0x8001;
 const WM_IMAGE_INFO_READY: u32 = 0x8002;
 const WM_PCA_FIRMWARE_READY: u32 = 0x8003;
 const WM_PCA_TARGET_READY: u32 = 0x8004;
+const WM_TOOL_WORKER_READY: u32 = 0x8005;
 const BACKUP_TIMER_ID: usize = 1;
 const DOWNLOAD_TIMER_ID: usize = 2;
 const INSTALL_TIMER_ID: usize = 3;
 const TOOL_DIALOG_TIMER_ID: usize = 4;
 const CATALOGUE_TIMER_ID: usize = 5;
+const HARDWARE_COPY_TIMER_ID: usize = 6;
+const INSTALL_VOLUME_LAYOUT_TIMER_ID: usize = 7;
+const INSTALL_VOLUME_LAYOUT_TICK_MS: u32 = 40;
+const INSTALL_VOLUME_LAYOUT_FRAMES: u8 = 3;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HardwareCopyFeedback {
+    active: bool,
+}
+
+impl HardwareCopyFeedback {
+    fn start(&mut self) {
+        self.active = true;
+    }
+
+    fn expire(&mut self) {
+        self.active = false;
+    }
+
+    const fn caption_key(self) -> &'static str {
+        if self.active {
+            "已复制"
+        } else {
+            "复制信息"
+        }
+    }
+}
 
 enum InstallWorkerMessage {
     Event(InstallExecutionEvent),
@@ -440,15 +470,59 @@ fn command_bar_layout(
     CommandBarLayout { x, left_edge }
 }
 
+fn centered_command_button_x(content_left: i32, content_width: i32, button_width: i32) -> i32 {
+    content_left + (content_width - button_width).max(0) / 2
+}
+
+/// Returns the top of the installation partition heading relative to the image row.
+///
+/// The optional image-volume row must be a true zero-height row while no WIM volume
+/// inventory is available. Keeping this geometry pure makes both visibility states
+/// deterministic and avoids exposing an intermediate blank slot during repaint.
+fn install_partition_heading_y(image_row_y: i32, dpi: u32, row_expansion: i32) -> i32 {
+    image_row_y + (32 + row_expansion.clamp(0, 34)) * dpi as i32 / 96
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InstallVolumeLayoutTransition {
+    start: i32,
+    target: i32,
+    frame: u8,
+}
+
+impl InstallVolumeLayoutTransition {
+    fn new(start: i32, visible: bool) -> Self {
+        Self {
+            start: start.clamp(0, 34),
+            target: if visible { 34 } else { 0 },
+            frame: 0,
+        }
+    }
+
+    fn expansion(self) -> i32 {
+        let distance = self.target - self.start;
+        self.start + distance * i32::from(self.frame) / i32::from(INSTALL_VOLUME_LAYOUT_FRAMES)
+    }
+
+    fn advance(&mut self) -> bool {
+        self.frame = self
+            .frame
+            .saturating_add(1)
+            .min(INSTALL_VOLUME_LAYOUT_FRAMES);
+        self.frame == INSTALL_VOLUME_LAYOUT_FRAMES
+    }
+}
+
 #[cfg(test)]
 mod layout_tests {
     use super::{
-        bitlocker_gate_completion, command_bar_layout, command_button_role,
-        confirmed_tool_backend_request, download_failure_message, initial_mutating_tool_state,
-        minimum_window_size, pca_target_error_blocks, pca_target_probe_required,
-        pca_target_result_is_current, pca_target_uses_uefi, preferred_window_size,
-        tool_backend_result_succeeded, BitLockerGateCompletion, PcaTargetContext, PcaTargetKey,
-        PcaTargetMessage,
+        bitlocker_gate_completion, centered_command_button_x, command_bar_layout,
+        command_button_role, confirmed_tool_backend_request, download_failure_message,
+        initial_mutating_tool_state, install_partition_heading_y, minimum_window_size,
+        pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
+        pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
+        tool_backend_result_succeeded, BitLockerGateCompletion, Page, PcaTargetContext,
+        PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_executor::{DownloadFailureStage, DownloadWorkerError};
@@ -501,6 +575,65 @@ mod layout_tests {
             assert_eq!(copy_x - (save_x + scale(136)), scale(8));
             assert_eq!(copy_x + scale(136), scale(1_000));
         }
+    }
+
+    #[test]
+    fn advanced_save_and_return_is_centered_without_changing_normal_command_packing() {
+        assert_eq!(centered_command_button_x(272, 960, 136), 684);
+        assert_eq!(centered_command_button_x(41, 501, 100), 241);
+        assert_eq!(centered_command_button_x(20, 60, 96), 20);
+
+        let normal = command_bar_layout(1_232, 8, 136, [true, true, true]);
+        assert_eq!(normal.x, [Some(808), Some(952), Some(1_096)]);
+    }
+
+    #[test]
+    fn returning_to_install_requests_live_primary_state_recalculation() {
+        assert_eq!(
+            primary_state_refresh_for_page(Page::Install),
+            PrimaryStateRefresh::Install
+        );
+        assert_eq!(
+            primary_state_refresh_for_page(Page::Backup),
+            PrimaryStateRefresh::Backup
+        );
+        for page in [Page::Download, Page::Tools, Page::Hardware, Page::About] {
+            assert_eq!(
+                primary_state_refresh_for_page(page),
+                PrimaryStateRefresh::None
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_image_volume_row_has_zero_layout_occupancy_at_supported_dpi() {
+        for dpi in [96, 120, 144, 192] {
+            let image_y = 40 * dpi as i32 / 96;
+            let hidden = install_partition_heading_y(image_y, dpi, 0);
+            let visible = install_partition_heading_y(image_y, dpi, 34);
+
+            assert_eq!(hidden, image_y + 32 * dpi as i32 / 96);
+            assert_eq!(visible - hidden, 34 * dpi as i32 / 96);
+        }
+    }
+
+    #[test]
+    fn image_volume_layout_transition_is_short_linear_and_interruptible() {
+        let mut showing = super::InstallVolumeLayoutTransition::new(0, true);
+        assert_eq!(showing.expansion(), 0);
+        assert!(!showing.advance());
+        assert_eq!(showing.expansion(), 11);
+        assert!(!showing.advance());
+        assert_eq!(showing.expansion(), 22);
+
+        let mut interrupted = super::InstallVolumeLayoutTransition::new(showing.expansion(), false);
+        assert_eq!(interrupted.expansion(), 22);
+        assert!(!interrupted.advance());
+        assert_eq!(interrupted.expansion(), 15);
+        assert!(!interrupted.advance());
+        assert_eq!(interrupted.expansion(), 8);
+        assert!(interrupted.advance());
+        assert_eq!(interrupted.expansion(), 0);
     }
 
     #[test]
@@ -895,7 +1028,7 @@ const fn command_button_role(id: u16) -> ButtonRole {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Install,
     Backup,
@@ -903,6 +1036,21 @@ enum Page {
     Tools,
     Hardware,
     About,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimaryStateRefresh {
+    Install,
+    Backup,
+    None,
+}
+
+const fn primary_state_refresh_for_page(page: Page) -> PrimaryStateRefresh {
+    match page {
+        Page::Install => PrimaryStateRefresh::Install,
+        Page::Backup => PrimaryStateRefresh::Backup,
+        Page::Download | Page::Tools | Page::Hardware | Page::About => PrimaryStateRefresh::None,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -954,6 +1102,8 @@ struct NativeWindow {
     app_config: crate::core::app_config::AppConfig,
     partitions: Vec<crate::core::disk::Partition>,
     image_volumes: Vec<crate::core::dism::ImageInfo>,
+    install_volume_row_presented: bool,
+    install_volume_layout_transition: Option<InstallVolumeLayoutTransition>,
     effective_image_path: Option<String>,
     xp_i386_source: Option<String>,
     mounted_iso: Option<std::path::PathBuf>,
@@ -983,6 +1133,7 @@ struct NativeWindow {
     pending_bitlocker_gate: Option<PendingBitLockerGate>,
     tools_page: Option<ToolsPage>,
     hardware_page: Option<HardwareInfoPage>,
+    hardware_copy_feedback: HardwareCopyFeedback,
     about_page: Option<AboutPage>,
     advanced_page: Option<AdvancedPage>,
     progress_page: Option<ProgressPage>,
@@ -1118,6 +1269,8 @@ impl NativeWindow {
             app_config,
             partitions,
             image_volumes: Vec::new(),
+            install_volume_row_presented: false,
+            install_volume_layout_transition: None,
             effective_image_path: None,
             xp_i386_source: None,
             mounted_iso: None,
@@ -1146,6 +1299,7 @@ impl NativeWindow {
             pending_bitlocker_gate: None,
             tools_page: None,
             hardware_page: None,
+            hardware_copy_feedback: HardwareCopyFeedback::default(),
             about_page: None,
             advanced_page: None,
             progress_page: None,
@@ -1344,7 +1498,9 @@ impl NativeWindow {
         )?;
         let image_label = child(hwnd, w!("STATIC"), &crate::tr!("系统镜像:"), 0, 302)?;
         let image_edit = CreateWindowExW(
-            WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0 | 0x0000_0004),
+            // Keep the native Edit text/caret/IME, but never create a second square CLIENTEDGE
+            // behind the deterministic Windows 11 field frame.
+            WINDOW_EX_STYLE(0x0000_0004),
             w!("EDIT"),
             w!(""),
             WINDOW_STYLE((WS_CHILD | WS_VISIBLE | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32),
@@ -1440,7 +1596,16 @@ impl NativeWindow {
             0,
             309,
         )?;
-        let driver_label = child(hwnd, w!("STATIC"), &crate::tr!("驱动:"), 0, 304)?;
+        // SS_CENTERIMAGE keeps this inline field label on the same visual baseline as the
+        // checkbox captions and the closed ComboBox in every DPI bucket.
+        const SS_CENTERIMAGE_VALUE: i32 = 0x0000_0200;
+        let driver_label = child(
+            hwnd,
+            w!("STATIC"),
+            &crate::tr!("驱动:"),
+            SS_CENTERIMAGE_VALUE,
+            304,
+        )?;
         let driver = child(
             hwnd,
             w!("COMBOBOX"),
@@ -1478,7 +1643,13 @@ impl NativeWindow {
         ] {
             let _ = SendMessageW(checkbox, 0x00F1, WPARAM(usize::from(checked)), LPARAM(0));
         }
-        let boot_label = child(hwnd, w!("STATIC"), &crate::tr!("引导模式:"), 0, 305)?;
+        let boot_label = child(
+            hwnd,
+            w!("STATIC"),
+            &crate::tr!("引导模式:"),
+            SS_CENTERIMAGE_VALUE,
+            305,
+        )?;
         let boot_mode = child(
             hwnd,
             w!("COMBOBOX"),
@@ -1822,9 +1993,11 @@ impl NativeWindow {
                 is_system_partition: partition.is_system_partition,
             })
             .collect();
+        let backup_timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+        let (backup_name, backup_description) = localized_backup_defaults(&backup_timestamp);
         let backup_initial = BackupPageState {
-            name: crate::tr!("系统备份_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")),
-            description: crate::tr!("使用 LetRecovery 创建的系统备份"),
+            name: backup_name,
+            description: backup_description,
             ..BackupPageState::default()
         };
         let backup_pe_labels: Vec<String> = self
@@ -1832,7 +2005,13 @@ impl NativeWindow {
             .into_iter()
             .map(|pe| pe.display_name)
             .collect();
-        let backup = BackupPage::create(hwnd, &backup_rows, &backup_pe_labels, &backup_initial)?;
+        let backup = BackupPage::create(
+            hwnd,
+            &backup_rows,
+            &backup_pe_labels,
+            &backup_initial,
+            &backup_timestamp,
+        )?;
         backup.apply_font(self.font);
         backup.apply_theme(self.palette);
         self.backup_page = Some(backup);
@@ -2035,6 +2214,15 @@ impl NativeWindow {
         ]) {
             let _ = SetWindowTheme(control, control_theme, PCWSTR::null());
         }
+        // The main installation check boxes are created directly by this window rather than by a
+        // page object with its own `apply_theme` method.  Merely assigning Explorer/DarkExplorer
+        // leaves Windows 10 drawing a light glyph and black caption in dark mode.  Route these
+        // controls through the shared deterministic checkbox renderer just like the backup and
+        // easy-mode pages do.  Reapplying this on a system-theme change also refreshes the
+        // subclass palette reference without changing USER32's checkbox behaviour.
+        for checkbox in [h.format, h.boot, h.unattend, h.reboot, h.run_diskpart] {
+            theme::apply_control_theme(checkbox, self.palette, theme::NativeControlKind::General);
+        }
         for field in [
             h.image_edit,
             h.image_volume,
@@ -2105,13 +2293,20 @@ impl NativeWindow {
 
     unsafe fn refresh_system_theme(&mut self, hwnd: HWND) {
         let palette = theme::Palette::system();
-        if palette.dark == self.palette.dark {
-            return;
-        }
+        // WM_THEMECHANGED invalidates cached UxTheme handles even when the light/dark bit did not
+        // change.  Reapply the complete control tree every time, but keep the visible transition
+        // atomic so pages and their scrollbars cannot expose a mixture of old and new colours.
+        let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
         self.palette = palette;
         self.brushes = Brushes::new(palette);
         self.apply_native_dark_theme(hwnd);
-        let _ = InvalidateRect(hwnd, None, true);
+        let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
     }
 
     unsafe fn populate_partitions(&self, list: HWND, add_columns: bool) {
@@ -2331,6 +2526,7 @@ impl NativeWindow {
             true,
         );
         let y = header + self.scale(14);
+        let metrics = LayoutMetrics::for_dpi(self.dpi);
         let compact_chinese = self
             .app_config
             .language
@@ -2338,48 +2534,66 @@ impl NativeWindow {
             .starts_with("zh");
         let label_width = self.scale(if compact_chinese { 68 } else { 108 });
         let browse_width = self.scale(80);
+        let image_row_height = metrics.field_height.max(self.scale(24));
         let _ = MoveWindow(
             h.image_label,
             content_left,
-            y + self.scale(3),
+            centered_control_y_ceil(y, image_row_height, metrics.label_height),
             label_width,
-            self.scale(20),
+            metrics.label_height,
             true,
         );
         let _ = MoveWindow(
             h.image_edit,
             content_left + label_width,
-            y,
+            centered_control_y_ceil(y, image_row_height, metrics.field_height),
             (content_width - label_width - browse_width - self.scale(10)).max(0),
-            self.scale(24),
+            metrics.field_height,
             true,
         );
         let _ = MoveWindow(
             h.browse,
             content_right - browse_width,
-            y,
+            centered_control_y_ceil(y, image_row_height, self.scale(24)),
             browse_width,
             self.scale(24),
             true,
         );
         let volume_y = y + self.scale(32);
+        let volume_closed_height = theme::combo_closed_height(h.image_volume, metrics.field_height);
+        let volume_row_height = volume_closed_height.max(metrics.label_height);
         let _ = MoveWindow(
             h.image_volume_label,
             content_left,
-            volume_y + self.scale(2),
+            centered_control_y_ceil(volume_y, volume_row_height, metrics.label_height),
             label_width,
-            self.scale(22),
+            metrics.label_height,
             true,
         );
         let _ = MoveWindow(
             h.image_volume,
             content_left + label_width,
-            volume_y,
+            centered_control_y_ceil(volume_y, volume_row_height, volume_closed_height),
             (content_width - label_width).clamp(0, self.scale(420)),
             self.scale(180),
             true,
         );
-        let table_label_y = y + self.scale(66);
+        let image_volume_layout_active = self.page == Page::Install
+            && !self.app_config.easy_mode_enabled
+            && !self.advanced_visible
+            && !self.progress_visible;
+        let volume_row_expansion = if image_volume_layout_active {
+            self.install_volume_layout_transition
+                .map(InstallVolumeLayoutTransition::expansion)
+                .unwrap_or(if self.install_volume_row_presented {
+                    34
+                } else {
+                    0
+                })
+        } else {
+            0
+        };
+        let table_label_y = install_partition_heading_y(y, self.dpi, volume_row_expansion);
         let _ = MoveWindow(
             h.partitions_label,
             content_left,
@@ -2404,71 +2618,84 @@ impl NativeWindow {
         );
         let options_y = table_y + table_height + self.scale(12);
         let second_y = options_y + self.scale(34);
-        let very_compact_options = content_width < self.scale(470);
+        let check_width = |control: HWND| {
+            measure_text(hwnd, self.font, &get_text(control), None).width + self.scale(26)
+        };
+        let format_width = check_width(h.format);
+        let boot_width = check_width(h.boot);
+        let unattended_width = check_width(h.unattend);
+        let reboot_width = check_width(h.reboot).max(self.scale(72));
+        let driver_label_width =
+            measure_text(hwnd, self.font, &get_text(h.driver_label), None).width + self.scale(2);
+        let driver_width = self.scale(116);
+        let required_option_width = format_width
+            + boot_width
+            + unattended_width
+            + reboot_width
+            + driver_label_width
+            + driver_width
+            + metrics.control_gap * 5
+            + metrics.tight_gap;
+        let very_compact_options = content_width < required_option_width;
+        let driver_closed_height = theme::combo_closed_height(h.driver, metrics.field_height);
+        let option_row_height = driver_closed_height.max(self.scale(24));
+        let check_y = centered_control_y_ceil(options_y, option_row_height, self.scale(24));
         let _ = MoveWindow(
             h.format,
             content_left,
-            options_y,
-            self.scale(104),
+            check_y,
+            format_width,
             self.scale(24),
             true,
         );
-        let _ = MoveWindow(
-            h.boot,
-            content_left + self.scale(112),
-            options_y,
-            self.scale(88),
-            self.scale(24),
-            true,
-        );
+        let boot_x = content_left + format_width + metrics.control_gap;
+        let _ = MoveWindow(h.boot, boot_x, check_y, boot_width, self.scale(24), true);
+        let unattended_x = boot_x + boot_width + metrics.control_gap;
         let _ = MoveWindow(
             h.unattend,
-            content_left + self.scale(208),
-            options_y,
-            self.scale(88),
+            unattended_x,
+            check_y,
+            unattended_width,
             self.scale(24),
             true,
         );
-        let metrics = LayoutMetrics::for_dpi(self.dpi);
-        let driver_label_width =
-            measure_text(hwnd, self.font, &crate::tr!("驱动:"), None).width + self.scale(2);
         let driver_x = if very_compact_options {
             content_left
         } else {
-            content_left + self.scale(304)
+            unattended_x + unattended_width + metrics.control_gap
         };
         let driver_y = if very_compact_options {
             second_y + self.scale(34)
         } else {
             options_y
         };
-        let reboot_width = (measure_text(hwnd, self.font, &crate::tr!("立即重启"), None).width
-            + self.scale(26))
-        .max(self.scale(72));
         let driver_field_x = driver_x + driver_label_width + metrics.tight_gap;
+        // Checkbox controls include an 8px visual tail after their caption.  Add the same tail
+        // after the driver field so the field-to-Restart glyph distance matches the preceding
+        // checkbox-to-checkbox rhythm instead of appearing cramped in a wide window.
+        let reboot_gap = metrics.control_gap + self.scale(8);
         let driver_width = if very_compact_options {
             (content_width - driver_label_width - metrics.tight_gap).max(0)
         } else {
-            self.scale(116)
-                .min((content_right - driver_field_x - metrics.control_gap - reboot_width).max(0))
+            driver_width.min((content_right - driver_field_x - reboot_gap - reboot_width).max(0))
         };
         let reboot_x = if very_compact_options {
             content_right - reboot_width
         } else {
-            driver_field_x + driver_width + metrics.control_gap
+            driver_field_x + driver_width + reboot_gap
         };
         let _ = MoveWindow(
             h.driver_label,
             driver_x,
-            driver_y + self.scale(3),
+            centered_control_y_ceil(driver_y, option_row_height, metrics.label_height),
             driver_label_width,
-            self.scale(20),
+            metrics.label_height,
             true,
         );
         let _ = MoveWindow(
             h.driver,
             driver_field_x,
-            driver_y,
+            centered_control_y_ceil(driver_y, option_row_height, driver_closed_height),
             driver_width,
             self.scale(180),
             true,
@@ -2476,18 +2703,20 @@ impl NativeWindow {
         let _ = MoveWindow(
             h.reboot,
             reboot_x,
-            options_y,
+            check_y,
             reboot_width,
             self.scale(24),
             true,
         );
         let boot_label_width = self.scale(if compact_chinese { 60 } else { 76 });
+        let boot_mode_closed_height = theme::combo_closed_height(h.boot_mode, metrics.field_height);
+        let second_row_height = boot_mode_closed_height.max(self.scale(24));
         let _ = MoveWindow(
             h.boot_label,
             content_left,
-            second_y + self.scale(3),
+            centered_control_y_ceil(second_y, second_row_height, metrics.label_height),
             boot_label_width,
-            self.scale(20),
+            metrics.label_height,
             true,
         );
         let boot_mode_x = content_left + boot_label_width + self.scale(4);
@@ -2495,11 +2724,12 @@ impl NativeWindow {
         let _ = MoveWindow(
             h.boot_mode,
             boot_mode_x,
-            second_y,
+            centered_control_y_ceil(second_y, second_row_height, boot_mode_closed_height),
             boot_mode_width,
             self.scale(180),
             true,
         );
+        let unattended_enabled = SendMessageW(h.unattend, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
         let unattend_browse_width = self.scale(if compact_chinese { 132 } else { 180 });
         let unattend_clear_width = self.scale(if compact_chinese { 58 } else { 76 });
         let unattend_x = boot_mode_x + boot_mode_width + self.scale(12);
@@ -2565,28 +2795,30 @@ impl NativeWindow {
         };
         let pe_label_width = self.scale(if compact_chinese { 60 } else { 84 });
         let pe_x = content_left;
+        let pe_closed_height = theme::combo_closed_height(h.pe, metrics.field_height);
+        let pe_row_height = pe_closed_height.max(metrics.label_height);
         let _ = MoveWindow(
             h.pe_label,
             pe_x,
-            third_y + self.scale(3),
+            centered_control_y_ceil(third_y, pe_row_height, metrics.label_height),
             pe_label_width,
-            self.scale(20),
+            metrics.label_height,
             true,
         );
         let _ = MoveWindow(
             h.pe,
             pe_x + pe_label_width + self.scale(4),
-            third_y,
+            centered_control_y_ceil(third_y, pe_row_height, pe_closed_height),
             (content_right - pe_x - pe_label_width - self.scale(4)).clamp(0, self.scale(300)),
             self.scale(180),
             true,
         );
-        let pca_y = if self.install_pe_selector_should_be_visible() {
+        let pe_selector_visible = self.install_pe_selector_should_be_visible();
+        let pca_y = if pe_selector_visible {
             third_y + self.scale(34)
         } else {
             third_y
         };
-        let advanced_row_y = pca_y;
         let open_width = measured_button_width(
             hwnd,
             self.font,
@@ -2603,9 +2835,30 @@ impl NativeWindow {
         );
         let run_width = measure_text(hwnd, self.font, &crate::tr!("运行Diskpart脚本"), None).width
             + self.scale(26);
+        let advanced_inline_x = unattend_x;
+        let advanced_inline_width =
+            run_width + metrics.tight_gap + open_width + metrics.control_gap + edit_width;
+        // The unattended file controls are conditional. Once the checkbox is cleared, repack the
+        // following advanced actions into the released part of the boot-mode row instead of
+        // retaining an invisible browse/hint slot. Keep a separate row when the translated labels
+        // do not fit or when the PE selector already owns the next conditional layout branch.
+        let advanced_follows_boot = !unattended_enabled
+            && self.app_config.enable_advanced_options
+            && !pe_selector_visible
+            && advanced_inline_x + advanced_inline_width <= content_right;
+        let advanced_row_x = if advanced_follows_boot {
+            advanced_inline_x
+        } else {
+            content_left
+        };
+        let advanced_row_y = if advanced_follows_boot {
+            second_y
+        } else {
+            pca_y
+        };
         let _ = MoveWindow(
             h.run_diskpart,
-            content_left,
+            advanced_row_x,
             advanced_row_y,
             run_width,
             self.scale(24),
@@ -2613,14 +2866,14 @@ impl NativeWindow {
         );
         let _ = MoveWindow(
             h.open_diskpart_dir,
-            content_left + run_width + metrics.tight_gap,
+            advanced_row_x + run_width + metrics.tight_gap,
             advanced_row_y,
             open_width,
             self.scale(24),
             true,
         );
         let edit_x =
-            content_left + run_width + metrics.tight_gap + open_width + metrics.control_gap;
+            advanced_row_x + run_width + metrics.tight_gap + open_width + metrics.control_gap;
         let _ = MoveWindow(
             h.edit_boot_commands,
             edit_x,
@@ -2633,25 +2886,32 @@ impl NativeWindow {
         // scan line: DiskPart, its adjacent directory action, boot-command editing, then the
         // image-dependent PCA selector at the end. When the actions are disabled, the PCA selector
         // naturally starts at the left edge instead of reserving invisible gaps.
-        let pca_x = if self.app_config.enable_advanced_options {
+        let pca_row_y = if advanced_follows_boot {
+            third_y
+        } else {
+            advanced_row_y
+        };
+        let pca_x = if self.app_config.enable_advanced_options && !advanced_follows_boot {
             edit_x + edit_width + self.scale(16)
         } else {
             content_left
         };
         let pca_label_width = self.scale(if compact_chinese { 72 } else { 98 });
+        let pca_closed_height = theme::combo_closed_height(h.pca_mode, metrics.field_height);
+        let pca_row_height = pca_closed_height.max(metrics.label_height);
         let _ = MoveWindow(
             h.pca_label,
             pca_x,
-            advanced_row_y + self.scale(3),
+            centered_control_y_ceil(pca_row_y, pca_row_height, metrics.label_height),
             pca_label_width.min((content_right - pca_x).max(0)),
-            self.scale(20),
+            metrics.label_height,
             true,
         );
         let pca_combo_x = pca_x + pca_label_width + self.scale(4);
         let _ = MoveWindow(
             h.pca_mode,
             pca_combo_x,
-            advanced_row_y,
+            centered_control_y_ceil(pca_row_y, pca_row_height, pca_closed_height),
             self.scale(144).min((content_right - pca_combo_x).max(0)),
             self.scale(180),
             true,
@@ -2686,7 +2946,11 @@ impl NativeWindow {
             command_button_width,
             command_visibility,
         );
-        let advanced_x = command_layout.x[0].unwrap_or(content_right);
+        let advanced_x = if self.advanced_visible {
+            centered_command_button_x(content_left, content_width, command_button_width)
+        } else {
+            command_layout.x[0].unwrap_or(content_right)
+        };
         let refresh_x = command_layout.x[1].unwrap_or(content_right);
         let primary_x = command_layout.x[2].unwrap_or(content_right);
         let _ = MoveWindow(
@@ -2763,12 +3027,118 @@ impl NativeWindow {
         }
     }
 
+    fn install_page_content_visible(&self) -> bool {
+        self.page == Page::Install
+            && !self.app_config.easy_mode_enabled
+            && !self.advanced_visible
+            && !self.progress_visible
+    }
+
+    unsafe fn redraw_install_volume_layout_frame(&self, hwnd: HWND, row_visibility: Option<bool>) {
+        let redraw_was_suspended = IsWindowVisible(hwnd).as_bool();
+        if redraw_was_suspended {
+            let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
+        }
+        if let (Some(handles), Some(visible)) = (self.handles, row_visibility) {
+            let command = if visible { SW_SHOW } else { SW_HIDE };
+            let _ = ShowWindow(handles.image_volume_label, command);
+            let _ = ShowWindow(handles.image_volume, command);
+        }
+        self.layout(hwnd);
+        if redraw_was_suspended {
+            let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
+            let _ = RedrawWindow(
+                hwnd,
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            );
+        } else {
+            let _ = InvalidateRect(hwnd, None, false);
+        }
+    }
+
+    /// Reveals or collapses the optional image-volume row with three deterministic linear frames.
+    /// The row itself remains hidden while space is moving, so it cannot overlap the partition
+    /// list; no focus, selection or business state is changed by this transition.
+    unsafe fn set_install_volume_row_visible(&mut self, hwnd: HWND, visible: bool) {
+        let Some(_) = self.handles else {
+            return;
+        };
+        let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
+        let current_expansion = self
+            .install_volume_layout_transition
+            .map(InstallVolumeLayoutTransition::expansion)
+            .unwrap_or(if self.install_volume_row_presented {
+                34
+            } else {
+                0
+            });
+        let target_expansion = if visible { 34 } else { 0 };
+        let can_animate = self.install_page_content_visible()
+            && IsWindowVisible(hwnd).as_bool()
+            && current_expansion != target_expansion;
+
+        if !can_animate {
+            self.install_volume_layout_transition = None;
+            self.install_volume_row_presented = visible;
+            self.redraw_install_volume_layout_frame(
+                hwnd,
+                Some(visible && self.install_page_content_visible()),
+            );
+            return;
+        }
+
+        // Keep the row itself out of the z-order while the reserved space moves. It is shown only
+        // in the final atomic frame, preventing transient overlap and native ComboBox focus churn.
+        self.install_volume_layout_transition = Some(InstallVolumeLayoutTransition::new(
+            current_expansion,
+            visible,
+        ));
+        self.redraw_install_volume_layout_frame(hwnd, Some(false));
+        let _ = SetTimer(
+            hwnd,
+            INSTALL_VOLUME_LAYOUT_TIMER_ID,
+            INSTALL_VOLUME_LAYOUT_TICK_MS,
+            None,
+        );
+    }
+
+    unsafe fn advance_install_volume_layout(&mut self, hwnd: HWND) {
+        let Some(mut transition) = self.install_volume_layout_transition else {
+            let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
+            return;
+        };
+        let complete = transition.advance();
+        self.install_volume_layout_transition = Some(transition);
+        if complete {
+            let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
+            self.install_volume_row_presented = transition.target != 0;
+            self.install_volume_layout_transition = None;
+            self.redraw_install_volume_layout_frame(
+                hwnd,
+                Some(self.install_volume_row_presented && self.install_page_content_visible()),
+            );
+        } else {
+            self.redraw_install_volume_layout_frame(hwnd, None);
+        }
+    }
+
     unsafe fn select_page(&mut self, hwnd: HWND, page: Page) {
         self.select_page_impl(hwnd, page, true);
     }
 
     unsafe fn select_page_impl(&mut self, hwnd: HWND, page: Page, manage_redraw: bool) {
         let Some(h) = self.handles else { return };
+        // Navigation and advanced-page switches settle any in-flight three-frame transition. The
+        // target is derived from the already accepted image inventory, never from focus/selection.
+        let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
+        self.install_volume_layout_transition = None;
+        self.install_volume_row_presented = !self.image_volumes.is_empty();
+        if page != Page::Hardware {
+            let _ = KillTimer(hwnd, HARDWARE_COPY_TIMER_ID);
+            self.hardware_copy_feedback.expire();
+        }
         // A page switch changes the visibility and geometry of dozens of child windows.  Letting
         // every ShowWindow call paint immediately exposes intermediate layouts as flashes.  Only
         // suspend an already-visible top-level window: WM_SETREDRAW(TRUE) would otherwise make an
@@ -2925,8 +3295,10 @@ impl NativeWindow {
                 windows::Win32::UI::WindowsAndMessaging::SW_HIDE
             },
         );
-        if page == Page::Backup {
-            self.update_backup_primary_state();
+        match primary_state_refresh_for_page(page) {
+            PrimaryStateRefresh::Install => self.update_install_primary_state(),
+            PrimaryStateRefresh::Backup => self.update_backup_primary_state(),
+            PrimaryStateRefresh::None => {}
         }
         // Visibility is page-dependent, so geometry must be recalculated after ShowWindow has
         // established the final command set. Without this call, navigation retained the previous
@@ -3084,6 +3456,15 @@ impl NativeWindow {
             return;
         }
 
+        // The same owner-draw button is reused at a different position as “Save and return”.
+        // Clear the hot/pressed state left by the click before moving it; otherwise the old
+        // pointer position does not generate WM_MOUSELEAVE until the user moves the mouse and
+        // the stale button surface can cover the first frame at its new position.
+        let _ = SendMessageW(h.advanced, WM_CANCELMODE, WPARAM(0), LPARAM(0));
+        let redraw_was_suspended = IsWindowVisible(hwnd).as_bool();
+        if redraw_was_suspended {
+            let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
+        }
         self.advanced_visible = true;
         if let Some(advanced) = &self.advanced_page {
             let ssid = self
@@ -3137,7 +3518,15 @@ impl NativeWindow {
         // The advanced page leaves only “Save and return” in the global command bar. Repack it
         // after hiding the normal Install commands rather than retaining the three-button layout.
         self.layout(hwnd);
-        let _ = InvalidateRect(hwnd, None, true);
+        if redraw_was_suspended {
+            let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
+        }
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
     }
 
     unsafe fn update_install_primary_state(&self) {
@@ -3617,8 +4006,7 @@ impl NativeWindow {
         self.clear_pca_target_detection();
         self.update_advanced_install_context();
         let _ = SendMessageW(h.image_volume, 0x014B, WPARAM(0), LPARAM(0));
-        let _ = ShowWindow(h.image_volume_label, SW_HIDE);
-        let _ = ShowWindow(h.image_volume, SW_HIDE);
+        self.set_install_volume_row_visible(hwnd, false);
         let _ = EnableWindow(h.primary, false);
         set_text(h.status, &crate::tr!("正在读取系统镜像卷..."));
         self.image_request_generation = self.image_request_generation.wrapping_add(1);
@@ -3907,7 +4295,11 @@ impl NativeWindow {
                         }
                         let url = match lr_core::download_integrity::validate_download_url(
                             &intent.download_url,
-                            self.app_config.allow_insecure_http_downloads,
+                            // Easy-mode entries are loaded only from LetRecovery's fixed HTTPS
+                            // service. That service still publishes historical Microsoft HTTP
+                            // payload URLs, so give those verbatim catalogue entries the same
+                            // scoped compatibility exception as the normal download controller.
+                            true,
                         ) {
                             Ok(url) => url.into_string(),
                             Err(error) => {
@@ -4232,7 +4624,7 @@ impl NativeWindow {
                 Ok(mut dialog) => {
                     dialog.show_modeless();
                     self.partition_copy_dialog = Some(dialog);
-                    self.start_partition_copy_inventory(generation);
+                    self.start_partition_copy_inventory(hwnd, generation);
                     let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
                 }
                 Err(error) => log::error!("创建分区对拷对话框失败: {error}"),
@@ -4760,8 +5152,9 @@ impl NativeWindow {
         });
     }
 
-    fn start_partition_copy_inventory(&self, generation: u64) {
+    fn start_partition_copy_inventory(&self, hwnd: HWND, generation: u64) {
         let sender = self.tool_worker_sender.clone();
+        let window = hwnd.0 as usize;
         std::thread::spawn(move || {
             let result = crate::core::native_partition_copy::read_inventory()
                 .map(|items| {
@@ -4771,8 +5164,19 @@ impl NativeWindow {
                         .collect()
                 })
                 .map_err(|error| error.to_string());
-            let _ = sender
-                .send(ToolWorkerMessage::PartitionCopyInventoryCompleted { generation, result });
+            if sender
+                .send(ToolWorkerMessage::PartitionCopyInventoryCompleted { generation, result })
+                .is_ok()
+            {
+                unsafe {
+                    let _ = PostMessageW(
+                        HWND(window as *mut _),
+                        WM_TOOL_WORKER_READY,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
         });
     }
 
@@ -5904,6 +6308,65 @@ impl NativeWindow {
             .find(|dialog| dialog.owns_content_action(control))
             .and_then(|dialog| dialog.handle_content_action(command_id));
         match intent {
+            Some(ToolDialogIntent::BrowseGhoImage) => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter(crate::tr!("Ghost 镜像"), &["gho", "ghs"])
+                    .pick_file()
+                {
+                    if let Some(dialog) = self
+                        .tool_dialogs
+                        .iter_mut()
+                        .find(|dialog| dialog.kind() == ToolDialogKind::ReadGhoPassword)
+                    {
+                        dialog.set_gho_password_state(&super::tool_dialogs::GhoPasswordState {
+                            path: path.to_string_lossy().into_owned(),
+                            ..Default::default()
+                        });
+                        dialog.show_modeless();
+                    }
+                }
+                true
+            }
+            Some(ToolDialogIntent::BrowseImageForVerification) => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter(
+                        crate::tr!("系统镜像"),
+                        &["wim", "esd", "swm", "gho", "ghs", "iso"],
+                    )
+                    .pick_file()
+                {
+                    if let Some(dialog) = self
+                        .tool_dialogs
+                        .iter_mut()
+                        .find(|dialog| dialog.kind() == ToolDialogKind::VerifyImage)
+                    {
+                        dialog.set_image_verification_state(
+                            &super::tool_dialogs::ImageVerificationState {
+                                path: path.to_string_lossy().into_owned(),
+                                ..Default::default()
+                            },
+                        );
+                        dialog.show_modeless();
+                    }
+                }
+                true
+            }
+            Some(ToolDialogIntent::BrowseFileForHash) => {
+                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                    if let Some(dialog) = self
+                        .tool_dialogs
+                        .iter_mut()
+                        .find(|dialog| dialog.kind() == ToolDialogKind::VerifyFileHash)
+                    {
+                        dialog.set_file_hash_state(&super::tool_dialogs::FileHashState {
+                            path: path.to_string_lossy().into_owned(),
+                            ..Default::default()
+                        });
+                        dialog.show_modeless();
+                    }
+                }
+                true
+            }
             Some(ToolDialogIntent::CopyGhoPassword { password }) => {
                 if let Err(error) = clipboard_win::set_clipboard_string(&password) {
                     log::warn!("复制 GHO 密码到剪贴板失败: {error}");
@@ -6381,7 +6844,7 @@ impl NativeWindow {
             }
             Some(PartitionCopyDialogIntent::RefreshInventory) => {
                 self.partition_copy_generation = self.partition_copy_generation.wrapping_add(1);
-                self.start_partition_copy_inventory(self.partition_copy_generation);
+                self.start_partition_copy_inventory(hwnd, self.partition_copy_generation);
             }
             Some(PartitionCopyDialogIntent::RequestConfirmation(request)) => {
                 let spec = DialogSpec {
@@ -8080,6 +8543,12 @@ impl NativeWindow {
                 if let Some(page) = &self.hardware_page {
                     if let Err(error) = clipboard_win::set_clipboard_string(&page.report_text()) {
                         log::warn!("复制硬件信息失败: {error}");
+                    } else if let Some(handles) = self.handles {
+                        self.hardware_copy_feedback.start();
+                        set_text(handles.primary, &crate::tr!("已复制"));
+                        let _ = KillTimer(hwnd, HARDWARE_COPY_TIMER_ID);
+                        let _ = SetTimer(hwnd, HARDWARE_COPY_TIMER_ID, 3_000, None);
+                        let _ = InvalidateRect(handles.primary, None, false);
                     }
                 }
             }
@@ -8764,9 +9233,15 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
-        WM_SETTINGCHANGE | WM_THEMECHANGED => {
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
             if let Some(state) = state {
                 state.refresh_system_theme(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_TOOL_WORKER_READY => {
+            if let Some(state) = state {
+                state.poll_tool_dialogs(hwnd);
             }
             LRESULT(0)
         }
@@ -8903,22 +9378,13 @@ unsafe extern "system" fn window_proc(
                                 SendMessageW(handles.image_volume, 0x014E, WPARAM(0), LPARAM(0));
                             state.update_storage_driver_default();
                             state.update_advanced_install_context();
-                            let install_page_visible = state.page == Page::Install
-                                && !state.app_config.easy_mode_enabled
-                                && !state.advanced_visible
-                                && !state.progress_visible;
-                            let command = if install_page_visible {
-                                SW_SHOW
-                            } else {
-                                SW_HIDE
-                            };
-                            let _ = ShowWindow(handles.image_volume_label, command);
-                            let _ = ShowWindow(handles.image_volume, command);
                             set_text(
                                 handles.status,
                                 &crate::tr!("系统镜像读取完成，请选择目标分区。"),
                             );
                         }
+                        let has_image_volume_row = !state.image_volumes.is_empty();
+                        state.set_install_volume_row_visible(hwnd, has_image_volume_row);
                         state.refresh_source_unattend();
                         state.update_unattend_conflict();
                         state.request_pca_target_detection(hwnd);
@@ -8931,8 +9397,7 @@ unsafe extern "system" fn window_proc(
                         state.update_advanced_install_context();
                         state.source_has_unattend = false;
                         state.apply_unattend_default();
-                        let _ = ShowWindow(handles.image_volume_label, SW_HIDE);
-                        let _ = ShowWindow(handles.image_volume, SW_HIDE);
+                        state.set_install_volume_row_visible(hwnd, false);
                         set_text(handles.status, &crate::tr!("读取系统镜像失败：{}", error));
                         let _ = EnableWindow(handles.primary, false);
                     }
@@ -9222,6 +9687,7 @@ unsafe extern "system" fn window_proc(
                         state.update_advanced_install_context();
                         state.update_unattend_controls_visibility();
                         state.update_install_primary_state();
+                        state.redraw_install_volume_layout_frame(hwnd, None);
                     }
                     ID_UNATTEND_BROWSE => state.browse_for_unattend(),
                     ID_UNATTEND_CLEAR => state.clear_custom_unattend(),
@@ -9280,6 +9746,7 @@ unsafe extern "system" fn window_proc(
                                     state
                                         .easy_controller
                                         .apply(EasyModeAction::SetEnabled(enabled));
+                                    page.set_easy_mode_state(enabled, true);
                                     if let Some(easy) = &mut state.easy_page {
                                         easy.update(&state.easy_controller.view());
                                         // The About page remains active here. `update` may show
@@ -9391,6 +9858,17 @@ unsafe extern "system" fn window_proc(
                     state.poll_tool_dialogs(hwnd);
                 } else if wparam.0 == CATALOGUE_TIMER_ID {
                     state.poll_catalogue_messages(hwnd);
+                } else if wparam.0 == HARDWARE_COPY_TIMER_ID {
+                    let _ = KillTimer(hwnd, HARDWARE_COPY_TIMER_ID);
+                    state.hardware_copy_feedback.expire();
+                    if state.page == Page::Hardware {
+                        if let Some(handles) = state.handles {
+                            set_text(handles.primary, &crate::tr!("复制信息"));
+                            let _ = InvalidateRect(handles.primary, None, false);
+                        }
+                    }
+                } else if wparam.0 == INSTALL_VOLUME_LAYOUT_TIMER_ID {
+                    state.advance_install_volume_layout(hwnd);
                 }
                 if state.close_after_task && !state.has_active_long_task() {
                     let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -9582,6 +10060,8 @@ unsafe extern "system" fn window_proc(
             let _ = KillTimer(hwnd, INSTALL_TIMER_ID);
             let _ = KillTimer(hwnd, TOOL_DIALOG_TIMER_ID);
             let _ = KillTimer(hwnd, CATALOGUE_TIMER_ID);
+            let _ = KillTimer(hwnd, HARDWARE_COPY_TIMER_ID);
+            let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -10236,4 +10716,19 @@ unsafe fn draw_line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF
     let _ = LineTo(dc, x2, y2);
     let _ = SelectObject(dc, old);
     let _ = DeleteObject(pen);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HardwareCopyFeedback;
+
+    #[test]
+    fn hardware_copy_feedback_expires_back_to_the_normal_caption() {
+        let mut feedback = HardwareCopyFeedback::default();
+        assert_eq!(feedback.caption_key(), "复制信息");
+        feedback.start();
+        assert_eq!(feedback.caption_key(), "已复制");
+        feedback.expire();
+        assert_eq!(feedback.caption_key(), "复制信息");
+    }
 }

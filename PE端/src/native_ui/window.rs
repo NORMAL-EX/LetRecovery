@@ -6,7 +6,7 @@ use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_D
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, DeleteObject, EndPaint, FillRect, GetMonitorInfoW, MonitorFromWindow, SetBkColor,
     SetBkMode, SetTextColor, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    PAINTSTRUCT, TRANSPARENT,
+    PAINTSTRUCT, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -24,13 +24,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_USERDATA, HMENU, IDC_ARROW, MINMAXINFO, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN,
     SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
     WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SIZE,
-    WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SETTINGCHANGE,
+    WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use super::controls::{
-    create_control, create_ui_font, create_ui_font_for_role, draw_inno_button,
-    measured_button_width, wide, NativeControlKind, UiFontRole,
+    apply_theme as apply_control_theme, create_control, create_ui_font, create_ui_font_for_role,
+    draw_inno_button, measured_button_width, wide, NativeControlKind, UiFontRole,
 };
 use super::layout::{clamp_rect_to_work_area, shell_geometry, PixelRect};
 use super::state::{NativeWindowState, WorkflowKind};
@@ -138,6 +139,28 @@ impl NativeShell {
         self.title_font = create_ui_font_for_role(dpi.max(96), 12, UiFontRole::Heading);
         self.apply_fonts();
         self.layout(hwnd);
+    }
+
+    unsafe fn refresh_theme(&mut self, hwnd: HWND) {
+        // WinPE normally keeps a fixed mode, but a shell or deployment can still broadcast a
+        // theme/settings change. Rebuild cached brushes and refresh every live child in one frame;
+        // WM_THEMECHANGED must be honoured even when the explicit PE mode itself is unchanged.
+        let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
+        self.theme = ThemeContext::detect(GetDpiForWindow(hwnd).max(96));
+        self.brushes = ThemeBrushes::new(self.theme.palette);
+        apply_title_bar_theme(hwnd, self.theme.mode);
+        for control in [self.primary, self.cancel] {
+            if !control.0.is_null() {
+                apply_control_theme(control, NativeControlKind::Button, self.theme.palette);
+            }
+        }
+        let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
+        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
     }
 
     unsafe fn layout(&self, hwnd: HWND) {
@@ -494,6 +517,12 @@ unsafe extern "system" fn window_proc(
                 );
                 clamp_window_to_work_area(hwnd);
                 shell.refresh_dpi(hwnd, GetDpiForWindow(hwnd));
+            }
+            LRESULT(0)
+        }
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+            if let Some(shell) = shell {
+                shell.refresh_theme(hwnd);
             }
             LRESULT(0)
         }

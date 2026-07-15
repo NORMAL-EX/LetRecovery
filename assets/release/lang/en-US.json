@@ -1487,6 +1487,7 @@
     "读取系统镜像失败：{}": "Failed to read the system image: {}",
     "读取硬件信息失败，请稍后重试。": "Failed to read hardware information. Try again later.",
     "复制信息": "Copy information",
+    "已复制": "Copied",
     "复制自定义文件目录": "Copy a custom files folder",
     "高压缩率，文件体积更小": "Higher compression for a smaller file",
     "管理 BitLocker": "Manage BitLocker",

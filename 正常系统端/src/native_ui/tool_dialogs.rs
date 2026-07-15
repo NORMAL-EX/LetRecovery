@@ -19,8 +19,9 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetDlgItem, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, MoveWindow,
-    SendMessageW, SetWindowTextW, ShowWindow, BS_PUSHBUTTON, ES_AUTOHSCROLL, ES_AUTOVSCROLL,
-    ES_MULTILINE, ES_READONLY, SW_HIDE, SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP, WS_VSCROLL,
+    SendMessageW, SetWindowTextW, ShowWindow, BS_OWNERDRAW, BS_PUSHBUTTON, ES_AUTOHSCROLL,
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, SW_HIDE, SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP,
+    WS_VSCROLL,
 };
 
 use super::controls::{child, wide};
@@ -33,8 +34,8 @@ use super::theme::{apply_control_theme, apply_list_view_theme, NativeControlKind
 
 const ID_FIRST_TOOL_DIALOG_CONTROL: u16 = 63_100;
 const ID_TOOL_DIALOG_ACTION: u16 = ID_FIRST_TOOL_DIALOG_CONTROL + 5;
+const ID_TOOL_DIALOG_BROWSE: u16 = ID_FIRST_TOOL_DIALOG_CONTROL + 6;
 const ID_STANDARD_DIALOG_PRIMARY: i32 = 61_002;
-const ID_STANDARD_DIALOG_SECONDARY: i32 = 61_003;
 const ID_STANDARD_DIALOG_CANCEL: i32 = 61_004;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +111,7 @@ struct ToolControls {
     second_label: HWND,
     second_edit: HWND,
     report: HWND,
+    browse_button: HWND,
     action_button: HWND,
 }
 
@@ -174,11 +176,15 @@ impl NativeToolDialog {
     }
 
     pub fn owns_content_action(&self, control: HWND) -> bool {
-        !self.controls.action_button.is_invalid() && control == self.controls.action_button
+        (!self.controls.action_button.is_invalid() && control == self.controls.action_button)
+            || (!self.controls.browse_button.is_invalid() && control == self.controls.browse_button)
     }
 
     /// Host hook for the dedicated GHO-copy or image-cancel content button.
     pub fn handle_content_action(&self, command_id: u16) -> Option<ToolDialogIntent> {
+        if command_id == ID_TOOL_DIALOG_BROWSE {
+            return browse_intent(self.kind);
+        }
         if command_id != ID_TOOL_DIALOG_ACTION {
             return None;
         }
@@ -213,6 +219,9 @@ impl NativeToolDialog {
         // CFD/DarkMode_CFD, while reports use Explorer/DarkMode_Explorer so their client area
         // and native scrollbar follow the same light/dark palette.
         self.apply_font_and_theme();
+        // `DialogShell::show_modeless` performs a final descendant/theme pass immediately before
+        // showing the window. Restore the dedicated content-row Browse geometry after that pass.
+        self.layout();
     }
 
     pub unsafe fn take_intent(&mut self) -> Option<ToolDialogIntent> {
@@ -242,24 +251,18 @@ impl NativeToolDialog {
                     path: get_text(self.controls.first_edit),
                 }
             }
-            (ToolDialogKind::ReadGhoPassword, DialogResult::Secondary) => {
-                ToolDialogIntent::BrowseGhoImage
-            }
+            (ToolDialogKind::ReadGhoPassword, DialogResult::Secondary) => ToolDialogIntent::Close,
             (ToolDialogKind::VerifyImage, DialogResult::Primary) => ToolDialogIntent::VerifyImage {
                 path: get_text(self.controls.first_edit),
             },
-            (ToolDialogKind::VerifyImage, DialogResult::Secondary) => {
-                ToolDialogIntent::BrowseImageForVerification
-            }
+            (ToolDialogKind::VerifyImage, DialogResult::Secondary) => ToolDialogIntent::Close,
             (ToolDialogKind::VerifyFileHash, DialogResult::Primary) => {
                 ToolDialogIntent::VerifyFileHash {
                     path: get_text(self.controls.first_edit),
                     expected: get_text(self.controls.second_edit),
                 }
             }
-            (ToolDialogKind::VerifyFileHash, DialogResult::Secondary) => {
-                ToolDialogIntent::BrowseFileForHash
-            }
+            (ToolDialogKind::VerifyFileHash, DialogResult::Secondary) => ToolDialogIntent::Close,
         }
     }
 
@@ -396,6 +399,11 @@ impl NativeToolDialog {
             palette,
             NativeControlKind::General,
         );
+        apply_valid_theme(
+            self.controls.browse_button,
+            palette,
+            NativeControlKind::General,
+        );
         if self.kind == ToolDialogKind::SoftwareList {
             let _ = apply_list_view_theme(self.controls.report, palette);
             for (message, color) in [
@@ -491,17 +499,15 @@ impl NativeToolDialog {
         let label_size = measure_text(self.shell.hwnd(), self.font, &get_text(label), None);
         let label_height = label_size.height.max(metrics.label_height);
         let browse = if has_browse {
-            GetDlgItem(self.shell.hwnd(), ID_STANDARD_DIALOG_SECONDARY)
-                .ok()
-                .map(|button| {
-                    measured_button_width(
-                        self.shell.hwnd(),
-                        self.font,
-                        &get_text(button),
-                        dpi,
-                        scale(75, dpi),
-                    )
-                })
+            (!self.controls.browse_button.is_invalid()).then(|| {
+                measured_button_width(
+                    self.shell.hwnd(),
+                    self.font,
+                    &get_text(self.controls.browse_button),
+                    dpi,
+                    scale(75, dpi),
+                )
+            })
         } else {
             None
         };
@@ -656,21 +662,17 @@ impl NativeToolDialog {
         }
     }
 
-    /// Browse remains a standard dialog result, but visually belongs to the path row.  Moving the
-    /// existing shell button preserves keyboard/default-button semantics and the established host
-    /// intent mapping without adding a second command path.
+    /// Browse is a content-row command: unlike a standard shell result it must not hide the dialog
+    /// before the host opens the file picker and refills the selected path.
     unsafe fn move_browse_button_next_to_edit(&self, bounds: ControlBounds) {
-        let Ok(button) = GetDlgItem(self.shell.hwnd(), ID_STANDARD_DIALOG_SECONDARY) else {
+        let button = self.controls.browse_button;
+        if button.is_invalid() {
             return;
-        };
-        let Some(content_rect) = child_rect_in_parent(self.shell.content(), self.shell.hwnd())
-        else {
-            return;
-        };
+        }
         let _ = MoveWindow(
             button,
-            content_rect.left + bounds.x,
-            content_rect.top + bounds.y,
+            bounds.x,
+            bounds.y,
             bounds.width,
             bounds.height,
             true,
@@ -715,15 +717,25 @@ impl NativeToolDialog {
         (rect.right - rect.left).max(0)
     }
 
-    fn all_controls(&self) -> [HWND; 6] {
+    fn all_controls(&self) -> [HWND; 7] {
         [
             self.controls.first_label,
             self.controls.first_edit,
             self.controls.second_label,
             self.controls.second_edit,
             self.controls.report,
+            self.controls.browse_button,
             self.controls.action_button,
         ]
+    }
+}
+
+fn browse_intent(kind: ToolDialogKind) -> Option<ToolDialogIntent> {
+    match kind {
+        ToolDialogKind::ReadGhoPassword => Some(ToolDialogIntent::BrowseGhoImage),
+        ToolDialogKind::VerifyImage => Some(ToolDialogIntent::BrowseImageForVerification),
+        ToolDialogKind::VerifyFileHash => Some(ToolDialogIntent::BrowseFileForHash),
+        ToolDialogKind::NetworkInformation | ToolDialogKind::SoftwareList => None,
     }
 }
 
@@ -825,7 +837,7 @@ fn dialog_spec(kind: ToolDialogKind) -> DialogSpec {
             height: 350,
             buttons: DialogButtons {
                 primary: crate::tr!("读取"),
-                secondary: Some(crate::tr!("浏览…")),
+                secondary: None,
                 cancel: Some(crate::tr!("关闭")),
             },
         },
@@ -837,7 +849,7 @@ fn dialog_spec(kind: ToolDialogKind) -> DialogSpec {
             height: 400,
             buttons: DialogButtons {
                 primary: crate::tr!("开始校验"),
-                secondary: Some(crate::tr!("浏览…")),
+                secondary: None,
                 cancel: Some(crate::tr!("关闭")),
             },
         },
@@ -849,7 +861,7 @@ fn dialog_spec(kind: ToolDialogKind) -> DialogSpec {
             height: 420,
             buttons: DialogButtons {
                 primary: crate::tr!("开始校验"),
-                secondary: Some(crate::tr!("浏览…")),
+                secondary: None,
                 cancel: Some(crate::tr!("关闭")),
             },
         },
@@ -883,6 +895,13 @@ unsafe fn create_controls(
         };
         controls.first_label = child(parent, w!("STATIC"), &label, 0, control_id(0))?;
         controls.first_edit = child(parent, w!("EDIT"), "", edit_style, control_id(1))?;
+        controls.browse_button = child(
+            parent,
+            w!("BUTTON"),
+            &crate::tr!("浏览…"),
+            content_command_button_style(),
+            ID_TOOL_DIALOG_BROWSE,
+        )?;
     }
     if kind == ToolDialogKind::SoftwareList {
         controls.first_label = child(
@@ -1121,6 +1140,12 @@ fn report_line_count(report: &str) -> usize {
     }
 }
 
+/// Dedicated row commands must use the same owner-drawn Inno button path as dialog commands.
+/// Their command routing remains content-owned so activating Browse never hides the dialog.
+fn content_command_button_style() -> i32 {
+    BS_OWNERDRAW | WS_TABSTOP.0 as i32
+}
+
 fn software_export_button_geometry(
     client_width: i32,
     dpi: u32,
@@ -1315,11 +1340,34 @@ mod tests {
             ToolDialogKind::VerifyImage,
             ToolDialogKind::VerifyFileHash,
         ] {
-            assert_eq!(
-                dialog_spec(kind).buttons.secondary,
-                Some(crate::tr!("浏览…"))
-            );
+            assert!(dialog_spec(kind).buttons.secondary.is_none());
         }
+    }
+
+    #[test]
+    fn file_tools_use_a_non_closing_content_browse_command() {
+        for kind in [
+            ToolDialogKind::ReadGhoPassword,
+            ToolDialogKind::VerifyImage,
+            ToolDialogKind::VerifyFileHash,
+        ] {
+            assert!(dialog_spec(kind).buttons.secondary.is_none());
+        }
+        assert_eq!(
+            browse_intent(ToolDialogKind::ReadGhoPassword),
+            Some(ToolDialogIntent::BrowseGhoImage)
+        );
+        assert_eq!(
+            browse_intent(ToolDialogKind::VerifyImage),
+            Some(ToolDialogIntent::BrowseImageForVerification)
+        );
+        assert_eq!(
+            browse_intent(ToolDialogKind::VerifyFileHash),
+            Some(ToolDialogIntent::BrowseFileForHash)
+        );
+        assert_eq!(browse_intent(ToolDialogKind::NetworkInformation), None);
+        assert_eq!(content_command_button_style() & 0x0f, BS_OWNERDRAW);
+        assert_ne!(content_command_button_style() & WS_TABSTOP.0 as i32, 0);
     }
 
     #[test]

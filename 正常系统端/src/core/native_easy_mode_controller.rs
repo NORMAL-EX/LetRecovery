@@ -170,11 +170,37 @@ impl NativeEasyModeController {
             self.selected_system = None;
             self.selected_volume = None;
         }
+        self.ensure_default_selection();
+    }
+
+    fn ensure_default_selection(&mut self) {
+        if !self.enabled || self.loading || !self.catalogue_available {
+            return;
+        }
+        if self.selected_system.is_none() && !self.systems.is_empty() {
+            self.selected_system = Some(0);
+        }
+        let Some(system) = self
+            .selected_system
+            .and_then(|index| self.systems.get(index))
+        else {
+            self.selected_volume = None;
+            return;
+        };
+        if self
+            .selected_volume
+            .is_none_or(|index| index >= system.volumes.len())
+        {
+            self.selected_volume = (!system.volumes.is_empty()).then_some(0);
+        }
     }
 
     pub fn apply(&mut self, action: EasyModeAction) {
         match action {
-            EasyModeAction::SetEnabled(enabled) => self.enabled = enabled,
+            EasyModeAction::SetEnabled(enabled) => {
+                self.enabled = enabled;
+                self.ensure_default_selection();
+            }
             EasyModeAction::DismissSettingsTip => self.settings_tip_dismissed = true,
             EasyModeAction::SelectSystem(index) if index < self.systems.len() => {
                 self.selected_system = Some(index);
@@ -348,6 +374,30 @@ mod tests {
         assert_eq!(view.selected_volume, Some(0));
         assert_eq!(view.logo, Some(EasyLogoSource::EmbeddedWindows11));
         assert!(view.can_install);
+    }
+
+    #[test]
+    fn enabled_catalogue_defaults_are_real_controller_selections() {
+        let mut controller = NativeEasyModeController::new(true, false);
+        let config = catalogue();
+        controller.set_catalogue(Some(&config), false);
+        let view = controller.view();
+        assert_eq!(view.selected_system, Some(0));
+        assert_eq!(view.selected_volume, Some(0));
+        assert!(view.can_install);
+        assert!(controller
+            .start_install_intent(Some(0), Path::new("downloads"), None)
+            .is_ok());
+    }
+
+    #[test]
+    fn enabling_after_catalogue_load_selects_the_first_installable_volume() {
+        let mut controller = NativeEasyModeController::new(false, false);
+        let config = catalogue();
+        controller.set_catalogue(Some(&config), false);
+        assert!(!controller.view().can_install);
+        controller.apply(EasyModeAction::SetEnabled(true));
+        assert!(controller.view().can_install);
     }
 
     #[test]

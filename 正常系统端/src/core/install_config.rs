@@ -312,6 +312,12 @@ pub struct ExpandConfig {
 /// 配置文件管理器
 pub struct ConfigFileManager;
 
+#[derive(Debug, Clone)]
+struct InstallMarker {
+    partition: String,
+    session_id: String,
+}
+
 impl ConfigFileManager {
     /// 标记文件名
     const INSTALL_MARKER: &'static str = "LetRecovery_Install.marker";
@@ -330,6 +336,37 @@ impl ConfigFileManager {
     /// 临时数据目录名
     const DATA_DIR: &'static str = "LetRecovery_Data";
 
+    fn scan_letters() -> impl Iterator<Item = char> {
+        (b'A'..=b'Z').map(char::from)
+    }
+
+    fn validate_ini_value(field: &str, value: &str) -> Result<()> {
+        if value
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n' | '\0'))
+        {
+            anyhow::bail!("{field} contains a line break or NUL character");
+        }
+        Ok(())
+    }
+
+    fn validate_install_ini_values(config: &InstallConfig) -> Result<()> {
+        for (field, value) in [
+            ("SessionId", config.session_id.as_str()),
+            ("OriginalGUID", config.original_guid.as_str()),
+            ("TargetPartition", config.target_partition.as_str()),
+            ("ImagePath", config.image_path.as_str()),
+            ("PcaCompatPackage", config.pca_compat_package.as_str()),
+            ("PcaCompatSha256", config.pca_compat_sha256.as_str()),
+            ("CustomUsername", config.custom_username.as_str()),
+            ("VolumeLabel", config.volume_label.as_str()),
+            ("CustomUnattendFile", config.custom_unattend_path.as_str()),
+        ] {
+            Self::validate_ini_value(field, value)?;
+        }
+        Ok(())
+    }
+
     /// 自动创建分区的标志文件名（与 disk.rs 中的常量保持一致）
     const AUTO_CREATED_PARTITION_MARKER: &'static str = "LetRecovery_AutoCreated.marker";
 
@@ -341,9 +378,109 @@ impl ConfigFileManager {
         format!("LR{:x}{:x}", nanos, std::process::id())
     }
 
+    fn normalize_partition(partition: &str) -> String {
+        partition
+            .chars()
+            .find(|character| character.is_ascii_alphabetic())
+            .map(|letter| format!("{}:", letter.to_ascii_uppercase()))
+            .unwrap_or_default()
+    }
+
+    fn read_marker_value(content: &str, key: &str) -> String {
+        content
+            .lines()
+            .filter_map(|line| line.trim().split_once('='))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    fn collect_install_markers() -> Vec<InstallMarker> {
+        Self::scan_letters()
+            .filter_map(|letter| {
+                let partition = format!("{}:", letter);
+                let marker_path = format!("{}\\{}", partition, Self::INSTALL_MARKER);
+                let content = std::fs::read_to_string(marker_path).ok()?;
+                Some(InstallMarker {
+                    partition,
+                    session_id: Self::read_marker_value(&content, "SessionId"),
+                })
+            })
+            .collect()
+    }
+
+    fn collect_install_configs() -> Result<Vec<(String, InstallConfig)>> {
+        let mut configs = Vec::new();
+        for letter in Self::scan_letters() {
+            let partition = format!("{}:", letter);
+            let config_path = format!(
+                "{}\\{}\\{}",
+                partition,
+                Self::DATA_DIR,
+                Self::INSTALL_CONFIG
+            );
+            if Path::new(&config_path).exists() {
+                configs.push((partition.clone(), Self::read_install_config(&partition)?));
+            }
+        }
+        Ok(configs)
+    }
+
+    /// Binds the compatibility PE entry to exactly one marker/config pair. Old handoffs without a
+    /// SessionId remain accepted only when there is one unambiguous marker and one config.
+    pub fn find_install_task() -> Result<(String, String, InstallConfig)> {
+        let markers = Self::collect_install_markers();
+        let configs = Self::collect_install_configs()?;
+        if markers.is_empty() || configs.is_empty() {
+            anyhow::bail!("未找到完整的安装标记和配置文件");
+        }
+
+        let mut exact_matches = Vec::new();
+        for marker in &markers {
+            if marker.session_id.is_empty() {
+                continue;
+            }
+            for (data_partition, config) in &configs {
+                if !config.session_id.is_empty() && config.session_id == marker.session_id {
+                    exact_matches.push((
+                        data_partition.clone(),
+                        marker.partition.clone(),
+                        config.clone(),
+                    ));
+                }
+            }
+        }
+
+        let (data_partition, target_partition, config) = if exact_matches.len() == 1 {
+            exact_matches.remove(0)
+        } else if exact_matches.len() > 1 {
+            anyhow::bail!("发现多个相同 SessionId 的安装任务，已中止");
+        } else if markers.len() == 1 && configs.len() == 1 {
+            let marker = markers.into_iter().next().expect("one marker");
+            let (data_partition, config) = configs.into_iter().next().expect("one config");
+            if !marker.session_id.is_empty()
+                && !config.session_id.is_empty()
+                && marker.session_id != config.session_id
+            {
+                anyhow::bail!("安装标记与配置的 SessionId 不一致，已中止");
+            }
+            (data_partition, marker.partition, config)
+        } else {
+            anyhow::bail!("发现多个安装标记或配置文件，无法确认本次任务，已中止");
+        };
+
+        let configured_target = Self::normalize_partition(&config.target_partition);
+        if !configured_target.is_empty() && configured_target != target_partition {
+            anyhow::bail!(
+                "安装配置目标分区({configured_target})与标记分区({target_partition})不一致，已中止"
+            );
+        }
+        Ok((data_partition, target_partition, config))
+    }
+
     /// 查找包含安装标记文件的分区
     pub fn find_install_marker_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let marker_path = format!("{}:\\{}", letter, Self::INSTALL_MARKER);
             if Path::new(&marker_path).exists() {
                 return Some(format!("{}:", letter));
@@ -354,7 +491,7 @@ impl ConfigFileManager {
 
     /// 查找包含备份标记文件的分区
     pub fn find_backup_marker_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let marker_path = format!("{}:\\{}", letter, Self::BACKUP_MARKER);
             if Path::new(&marker_path).exists() {
                 return Some(format!("{}:", letter));
@@ -365,7 +502,7 @@ impl ConfigFileManager {
 
     /// 查找包含配置文件的数据分区
     pub fn find_data_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let config_path = format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::INSTALL_CONFIG);
             if Path::new(&config_path).exists() {
                 return Some(format!("{}:", letter));
@@ -389,6 +526,9 @@ impl ConfigFileManager {
         if config.session_id.trim().is_empty() {
             config.session_id = Self::new_session_id();
         }
+        Self::validate_ini_value("target_partition", target_partition)?;
+        Self::validate_ini_value("data_partition", data_partition)?;
+        Self::validate_install_ini_values(&config)?;
 
         // 创建数据目录
         let data_dir = format!("{}\\{}", data_partition, Self::DATA_DIR);
@@ -464,6 +604,9 @@ impl ConfigFileManager {
         data_partition: &str,
         config: &ExpandConfig,
     ) -> Result<ExpandConfigTransaction> {
+        Self::validate_ini_value("target_partition", target_partition)?;
+        Self::validate_ini_value("data_partition", data_partition)?;
+        Self::validate_ini_value("TargetPartition", &config.target_partition)?;
         let data_dir = PathBuf::from(format!("{}\\{}", data_partition, Self::DATA_DIR));
         let data_dir_created = !data_dir.exists();
         std::fs::create_dir_all(&data_dir).context(tr!("创建数据目录失败"))?;
@@ -526,6 +669,16 @@ impl ConfigFileManager {
         data_partition: &str,
         config: &BackupConfig,
     ) -> Result<BackupConfigTransaction> {
+        Self::validate_ini_value("source_partition", source_partition)?;
+        Self::validate_ini_value("data_partition", data_partition)?;
+        for (field, value) in [
+            ("SavePath", config.save_path.as_str()),
+            ("Name", config.name.as_str()),
+            ("Description", config.description.as_str()),
+            ("SourcePartition", config.source_partition.as_str()),
+        ] {
+            Self::validate_ini_value(field, value)?;
+        }
         let data_dir = PathBuf::from(format!("{}\\{}", data_partition, Self::DATA_DIR));
         let data_dir_created = !data_dir.exists();
         std::fs::create_dir_all(&data_dir).context(tr!("创建数据目录失败"))?;
@@ -592,7 +745,7 @@ impl ConfigFileManager {
 
     /// 清理所有分区上的标记和配置文件
     pub fn cleanup_all_markers() {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let _ = std::fs::remove_file(format!("{}:\\{}", letter, Self::INSTALL_MARKER));
             let _ = std::fs::remove_file(format!("{}:\\{}", letter, Self::BACKUP_MARKER));
             let _ = std::fs::remove_dir_all(format!("{}:\\{}", letter, Self::DATA_DIR));

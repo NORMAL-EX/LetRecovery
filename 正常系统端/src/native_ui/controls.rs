@@ -19,10 +19,11 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetPropW, GetWindowTextLengthW, GetWindowTextW, RemovePropW, SetPropW,
-    BS_OWNERDRAW, HMENU, SWP_NOMOVE, SWP_NOSIZE, WINDOWPOS, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CANCELMODE, WM_ENABLE, WM_ERASEBKGND, WM_MOUSEMOVE, WM_NCDESTROY, WM_SHOWWINDOW,
-    WM_WINDOWPOSCHANGING, WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_VISIBLE,
+    CreateWindowExW, GetPropW, GetWindowTextLengthW, GetWindowTextW, LoadCursorW, RemovePropW,
+    SetCursor, SetPropW, BS_OWNERDRAW, HMENU, IDC_ARROW, SWP_NOMOVE, SWP_NOSIZE, WINDOWPOS,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_ENABLE, WM_ERASEBKGND, WM_MOUSEMOVE,
+    WM_NCDESTROY, WM_SETCURSOR, WM_SHOWWINDOW, WM_WINDOWPOSCHANGING, WS_BORDER, WS_CHILD,
+    WS_VISIBLE,
 };
 
 use super::theme::Palette;
@@ -58,8 +59,10 @@ impl InnoMetrics {
         let scale = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
         Self {
             button_height: scale(23),
-            // Inno's TNewEdit/TNewComboBox controls are 21 logical pixels high in the fixed DFM.
-            field_height: scale(21),
+            // Keep fields at the same 23 logical-pixel baseline as Inno's command controls. The
+            // former 21px value made a DPI-scaled stock ComboBox visibly flatter than its Win11
+            // counterpart, especially after the fixed-palette selection field was applied.
+            field_height: scale(23),
             // Wizard check/list rows use a 22px minimum; using the same baseline keeps a popup
             // readable without returning to the oversized legacy egui spacing.
             list_item_height: scale(22),
@@ -130,24 +133,24 @@ pub fn button_visual(palette: Palette, role: ButtonRole, state: ControlState) ->
     if highlighted {
         let fill = if state.pressed {
             if palette.dark {
-                rgb(39, 61, 71)
+                rgb(57, 171, 230)
             } else {
                 rgb(0, 83, 160)
             }
         } else if state.hot {
             if palette.dark {
-                rgb(54, 79, 91)
+                rgb(96, 201, 255)
             } else {
                 rgb(0, 103, 192)
             }
         } else {
-            palette.accent_fill
+            palette.highlight_fill
         };
         return ButtonVisual {
             fill,
-            border: palette.accent_border,
+            border: palette.highlight_border,
             text: if palette.dark {
-                palette.text
+                rgb(0, 0, 0)
             } else {
                 rgb(255, 255, 255)
             },
@@ -862,15 +865,17 @@ pub unsafe fn child(
         None,
     )?;
     if is_edit {
-        // CFD/DarkMode_CFD owns the complete v6 property-page field, including the recessed edge
-        // and focus treatment. No custom Edit border or client-area painter is installed.
-        let _ = SetWindowTheme(hwnd, w!("CFD"), PCWSTR::null());
         const ES_MULTILINE: u32 = 0x0004;
         if style as u32 & ES_MULTILINE == 0 {
-            // A single-line Win32 Edit does not support EM_SETRECT/EM_SETRECTNP.  Keep its native
-            // text, selection and IME layout intact and instead centre the real v6 property-page
-            // control inside whatever row height the responsive page requests.
+            // Keep USER32 text/caret/selection/IME behaviour, but disable the host's square
+            // CLIENTEDGE before first display. The shared Win11 field subclass supplies the same
+            // closed surface as ComboBox without a Win10/Win11 theme transition flash.
+            let _ = SetWindowTheme(hwnd, w!(""), w!(""));
+            // A single-line Win32 Edit does not support EM_SETRECT/EM_SETRECTNP. Keep the real
+            // control centred inside whatever row height the responsive page requests.
             center_single_line_edit_in_row(hwnd);
+        } else {
+            let _ = SetWindowTheme(hwnd, w!("Explorer"), PCWSTR::null());
         }
     }
     // The fixed Inno reference declares TNewComboBox as a plain TComboBox. Keep USER32's normal
@@ -992,6 +997,17 @@ unsafe extern "system" fn owner_draw_button_proc(
 ) -> LRESULT {
     match message {
         WM_ERASEBKGND => LRESULT(1),
+        WM_SETCURSOR => {
+            // Navigation and command buttons use the same stable native arrow as Inno.  Owning
+            // this message prevents theme/class cursor hand-offs from flashing hand/arrow while
+            // the pointer crosses the antialiased edge.
+            if let Ok(cursor) = LoadCursorW(None, IDC_ARROW) {
+                let _ = SetCursor(cursor);
+                LRESULT(1)
+            } else {
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            }
+        }
         WM_MOUSEMOVE => {
             if GetPropW(hwnd, BUTTON_HOT_PROPERTY).is_invalid() {
                 let mut tracking = TRACKMOUSEEVENT {
@@ -1063,18 +1079,15 @@ fn child_styles(is_edit: bool, _is_combo: bool, style: i32) -> (WINDOW_EX_STYLE,
     let mut control_style = (WS_CHILD | WS_VISIBLE).0 | style as u32;
     let mut extended_style = WINDOW_EX_STYLE::default();
     if is_edit {
-        // Match the Windows 11 property-page Edit handle: single-line fields have no WS_BORDER
-        // but do have WS_EX_CLIENTEDGE, leaving the v6 theme responsible for the complete native
-        // recessed field and focus treatment. Multiline reports keep their Explorer border and
-        // scrollbars instead of inheriting the single-line field chrome.
+        // Single-line fields share the deterministic Win11 frame used by ComboBox. A second
+        // WS_BORDER/CLIENTEDGE would expose a square host-theme frame around it.
         const ES_MULTILINE: u32 = 0x0004;
         if style as u32 & ES_MULTILINE == 0 {
             const WS_EX_NOPARENTNOTIFY_VALUE: u32 = 0x0000_0004;
             control_style &= !WS_BORDER.0;
-            extended_style |= WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0 | WS_EX_NOPARENTNOTIFY_VALUE);
+            extended_style |= WINDOW_EX_STYLE(WS_EX_NOPARENTNOTIFY_VALUE);
         } else {
             control_style |= WS_BORDER.0;
-            extended_style &= !WS_EX_CLIENTEDGE;
         }
     }
     (extended_style, WINDOW_STYLE(control_style))
@@ -1087,10 +1100,10 @@ mod tests {
     #[test]
     fn dpi_metrics_round_consistently() {
         assert_eq!(InnoMetrics::for_dpi(96).button_height, 23);
-        assert_eq!(InnoMetrics::for_dpi(96).field_height, 21);
+        assert_eq!(InnoMetrics::for_dpi(96).field_height, 23);
         assert_eq!(InnoMetrics::for_dpi(96).list_item_height, 22);
         assert_eq!(InnoMetrics::for_dpi(120).button_height, 29);
-        assert_eq!(InnoMetrics::for_dpi(192).field_height, 42);
+        assert_eq!(InnoMetrics::for_dpi(192).field_height, 46);
         assert_eq!(InnoMetrics::for_dpi(144).button_min_width, 113);
         assert_eq!(InnoMetrics::for_dpi(192).corner_radius, 8);
     }
@@ -1115,7 +1128,7 @@ mod tests {
 
         let (edit_ex, edit) = child_styles(true, false, 0);
         assert_eq!(edit.0 & WS_BORDER.0, 0);
-        assert_ne!(edit_ex.0 & WS_EX_CLIENTEDGE.0, 0);
+        assert_eq!(edit_ex.0 & 0x0000_0200, 0);
         assert_ne!(edit_ex.0 & 0x0000_0004, 0);
         assert_eq!(edit.0 & CBS_OWNERDRAWFIXED_VALUE, 0);
     }
@@ -1166,16 +1179,17 @@ mod tests {
     }
 
     #[test]
-    fn edit_uses_property_page_single_line_chrome_but_keeps_multiline_report_border() {
+    fn edit_uses_shared_single_line_frame_but_keeps_multiline_report_border() {
+        const WS_EX_CLIENTEDGE_VALUE: u32 = 0x0000_0200;
         let (single_ex, single) = child_styles(true, false, 0);
-        assert_ne!(single_ex.0 & WS_EX_CLIENTEDGE.0, 0);
+        assert_eq!(single_ex.0 & WS_EX_CLIENTEDGE_VALUE, 0);
         assert_eq!(single.0 & WS_BORDER.0, 0);
 
         const PASSWORD_READONLY_MULTILINE: u32 = 0x0020 | 0x0800 | 0x0004;
         let incoming = PASSWORD_READONLY_MULTILINE as i32;
         let (extended, style) = child_styles(true, false, incoming);
 
-        assert_eq!(extended.0 & WS_EX_CLIENTEDGE.0, 0);
+        assert_eq!(extended.0 & WS_EX_CLIENTEDGE_VALUE, 0);
         assert_ne!(style.0 & WS_BORDER.0, 0);
         assert_eq!(
             style.0 & PASSWORD_READONLY_MULTILINE,
@@ -1219,10 +1233,11 @@ mod tests {
     }
 
     #[test]
-    fn dark_button_roles_match_inno_reference() {
+    fn dark_highlighted_button_uses_the_audited_windows_accent() {
         let primary = button_visual(Palette::DARK, ButtonRole::Primary, ControlState::default());
-        assert_eq!(primary.fill, rgb(49, 72, 83));
-        assert_eq!(primary.border, rgb(66, 149, 192));
+        assert_eq!(primary.fill, rgb(76, 194, 255));
+        assert_eq!(primary.border, rgb(76, 194, 255));
+        assert_eq!(primary.text, rgb(0, 0, 0));
 
         let secondary = button_visual(
             Palette::DARK,

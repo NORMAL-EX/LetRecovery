@@ -201,12 +201,22 @@ impl PartitionCopyDialogState {
     }
 
     pub fn set_source(&mut self, value: Option<&str>) {
-        self.source = inventory_drive(&self.inventory, value);
+        let source = inventory_drive(&self.inventory, value);
+        self.source = source.filter(|source| {
+            self.target
+                .as_deref()
+                .is_none_or(|target| !source.eq_ignore_ascii_case(target))
+        });
         self.resume = PartitionCopyResumeState::Unchecked;
     }
 
     pub fn set_target(&mut self, value: Option<&str>) {
-        self.target = inventory_drive(&self.inventory, value);
+        let target = inventory_drive(&self.inventory, value);
+        self.target = target.filter(|target| {
+            self.source
+                .as_deref()
+                .is_none_or(|source| !target.eq_ignore_ascii_case(source))
+        });
         self.resume = PartitionCopyResumeState::Unchecked;
     }
 
@@ -407,38 +417,34 @@ impl NativePartitionCopyDialog {
     }
 
     pub unsafe fn handle_choice_changed(&mut self, control: HWND) -> Option<PartitionCopyRequest> {
-        let selected = combo_selection(control, &self.state.inventory);
         if control == self.controls.source_combo {
+            let selected =
+                combo_selection(control, &self.state.inventory, self.state.target.as_deref());
             self.state.set_source(selected.as_deref());
         } else if control == self.controls.target_combo {
+            let selected =
+                combo_selection(control, &self.state.inventory, self.state.source.as_deref());
             self.state.set_target(selected.as_deref());
         } else {
             return None;
         }
-        self.render_status();
+        self.render_state();
         self.state.request()
     }
 
     pub unsafe fn handle_list_changed(&mut self, control: HWND) -> Option<PartitionCopyRequest> {
-        let selected = selected_list_drive(control, &self.state.inventory);
         if control == self.controls.source_list {
+            let selected =
+                selected_list_drive(control, &self.state.inventory, self.state.target.as_deref());
             self.state.set_source(selected.as_deref());
-            select_combo(
-                self.controls.source_combo,
-                self.state.source.as_deref(),
-                &self.state.inventory,
-            );
         } else if control == self.controls.target_list {
+            let selected =
+                selected_list_drive(control, &self.state.inventory, self.state.source.as_deref());
             self.state.set_target(selected.as_deref());
-            select_combo(
-                self.controls.target_combo,
-                self.state.target.as_deref(),
-                &self.state.inventory,
-            );
         } else {
             return None;
         }
-        self.render_status();
+        self.render_state();
         self.state.request()
     }
 
@@ -607,14 +613,24 @@ impl NativePartitionCopyDialog {
             self.controls.source_combo,
             &self.state.inventory,
             self.state.source.as_deref(),
+            self.state.target.as_deref(),
         );
         refill_combo(
             self.controls.target_combo,
             &self.state.inventory,
             self.state.target.as_deref(),
+            self.state.source.as_deref(),
         );
-        refill_list(self.controls.source_list, &self.state.inventory);
-        refill_list(self.controls.target_list, &self.state.inventory);
+        refill_list(
+            self.controls.source_list,
+            &self.state.inventory,
+            self.state.target.as_deref(),
+        );
+        refill_list(
+            self.controls.target_list,
+            &self.state.inventory,
+            self.state.source.as_deref(),
+        );
         self.render_progress();
         self.render_status();
     }
@@ -785,21 +801,31 @@ unsafe fn refill_combo(
     combo: HWND,
     inventory: &[PartitionCopyInventoryRow],
     selected: Option<&str>,
+    excluded: Option<&str>,
 ) {
     let _ = SendMessageW(combo, CB_RESETCONTENT, WPARAM(0), LPARAM(0));
-    for row in inventory {
+    for row in inventory
+        .iter()
+        .filter(|row| !drive_matches(&row.drive, excluded))
+    {
         add_combo_item(combo, &row.drive);
     }
-    select_combo(combo, selected, inventory);
+    select_combo(combo, selected, inventory, excluded);
 }
 
 unsafe fn select_combo(
     combo: HWND,
     selected: Option<&str>,
     inventory: &[PartitionCopyInventoryRow],
+    excluded: Option<&str>,
 ) {
     let index = selected
-        .and_then(|selected| inventory.iter().position(|row| row.drive == selected))
+        .and_then(|selected| {
+            inventory
+                .iter()
+                .filter(|row| !drive_matches(&row.drive, excluded))
+                .position(|row| row.drive.eq_ignore_ascii_case(selected))
+        })
         .map_or(NO_COMBO_SELECTION, |index| index);
     let _ = SendMessageW(combo, CB_SETCURSEL, WPARAM(index), LPARAM(0));
 }
@@ -814,16 +840,43 @@ unsafe fn add_combo_item(combo: HWND, value: &str) {
     );
 }
 
-unsafe fn combo_selection(combo: HWND, inventory: &[PartitionCopyInventoryRow]) -> Option<String> {
+unsafe fn combo_selection(
+    combo: HWND,
+    inventory: &[PartitionCopyInventoryRow],
+    excluded: Option<&str>,
+) -> Option<String> {
     let index = SendMessageW(combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
-    combo_inventory_index(index, inventory.len())
-        .and_then(|index| inventory.get(index))
+    let choice_count = inventory
+        .iter()
+        .filter(|row| !drive_matches(&row.drive, excluded))
+        .count();
+    combo_inventory_index(index, choice_count)
+        .and_then(|index| inventory_choice(inventory, excluded, index))
         .map(|row| row.drive.clone())
 }
 
-unsafe fn refill_list(list: HWND, inventory: &[PartitionCopyInventoryRow]) {
+fn inventory_choice<'a>(
+    inventory: &'a [PartitionCopyInventoryRow],
+    excluded: Option<&str>,
+    index: usize,
+) -> Option<&'a PartitionCopyInventoryRow> {
+    inventory
+        .iter()
+        .filter(|row| !drive_matches(&row.drive, excluded))
+        .nth(index)
+}
+
+fn drive_matches(drive: &str, candidate: Option<&str>) -> bool {
+    candidate.is_some_and(|candidate| drive.eq_ignore_ascii_case(candidate))
+}
+
+unsafe fn refill_list(list: HWND, inventory: &[PartitionCopyInventoryRow], excluded: Option<&str>) {
     let _ = SendMessageW(list, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-    for (row, item) in inventory.iter().enumerate() {
+    for (row, item) in inventory
+        .iter()
+        .filter(|item| !drive_matches(&item.drive, excluded))
+        .enumerate()
+    {
         for (column, value) in item.columns().into_iter().enumerate() {
             let mut value = wide(value);
             let mut list_item = LVITEMW {
@@ -851,6 +904,7 @@ unsafe fn refill_list(list: HWND, inventory: &[PartitionCopyInventoryRow]) {
 unsafe fn selected_list_drive(
     list: HWND,
     inventory: &[PartitionCopyInventoryRow],
+    excluded: Option<&str>,
 ) -> Option<String> {
     let index = SendMessageW(
         list,
@@ -860,7 +914,7 @@ unsafe fn selected_list_drive(
     )
     .0;
     (index >= 0)
-        .then(|| inventory.get(index as usize).map(|row| row.drive.clone()))
+        .then(|| inventory_choice(inventory, excluded, index as usize).map(|row| row.drive.clone()))
         .flatten()
 }
 
@@ -936,12 +990,18 @@ mod tests {
     #[test]
     fn source_and_target_default_to_unselected_and_must_differ() {
         let mut state = PartitionCopyDialogState::default();
+        assert!(
+            state.loading,
+            "opening the dialog must begin with async preload state"
+        );
         state.apply_inventory(Ok(rows()));
         assert_eq!(state.source, None);
         assert_eq!(state.target, None);
         assert_eq!(state.request(), None);
         state.set_source(Some("D:"));
         state.set_target(Some("D:"));
+        assert_eq!(state.source.as_deref(), Some("D:"));
+        assert_eq!(state.target, None);
         assert_eq!(state.request(), None);
         state.set_target(Some("E:"));
         assert_eq!(
@@ -951,6 +1011,44 @@ mod tests {
                 target: "E:".into()
             })
         );
+    }
+
+    #[test]
+    fn opposite_partition_is_removed_without_shifting_inventory_mapping() {
+        let mut inventory = sanitize_inventory(rows());
+        inventory.push(PartitionCopyInventoryRow::new(
+            "F:",
+            400 * 1024,
+            100 * 1024,
+            300 * 1024,
+            "Archive",
+            false,
+        ));
+
+        assert_eq!(
+            inventory_choice(&inventory, Some("E:"), 0).map(|row| row.drive.as_str()),
+            Some("D:")
+        );
+        assert_eq!(
+            inventory_choice(&inventory, Some("E:"), 1).map(|row| row.drive.as_str()),
+            Some("F:")
+        );
+        assert!(inventory_choice(&inventory, Some("E:"), 2).is_none());
+    }
+
+    #[test]
+    fn changing_one_side_never_allows_the_same_partition_on_the_other_side() {
+        let mut state = PartitionCopyDialogState::default();
+        state.apply_inventory(Ok(rows()));
+        state.set_target(Some("E:"));
+        state.set_source(Some("E:"));
+        assert_eq!(state.source, None);
+        assert_eq!(state.target.as_deref(), Some("E:"));
+
+        state.set_source(Some("D:"));
+        state.set_target(Some("D:"));
+        assert_eq!(state.source.as_deref(), Some("D:"));
+        assert_eq!(state.target, None);
     }
 
     #[test]

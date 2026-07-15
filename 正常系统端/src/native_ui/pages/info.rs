@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::UI::Controls::{
     LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW,
@@ -19,15 +19,16 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, BS_AUTOCHECKBOX,
-    BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
-    SW_HIDE, SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP,
+    MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, BS_AUTOCHECKBOX, BS_OWNERDRAW,
+    CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, SW_HIDE, SW_SHOW,
+    WM_SETFONT, WS_BORDER, WS_TABSTOP,
 };
 
 use super::download::PageRect;
 use crate::native_ui::controls::{child, wide};
+use crate::native_ui::layout::{centered_control_y_ceil, measure_text, LayoutMetrics};
 use crate::native_ui::theme::{
-    apply_control_theme, apply_list_view_theme, NativeControlKind, Palette,
+    apply_control_theme, apply_list_view_theme, combo_closed_height, NativeControlKind, Palette,
 };
 
 pub const ID_HARDWARE_SAVE: u16 = 5_200;
@@ -44,6 +45,20 @@ const ID_ABOUT_WIM_ENGINE: u16 = 5_253;
 const ID_ABOUT_ADVANCED: u16 = 5_254;
 const ID_ABOUT_DOWNLOAD_THREADS: u16 = 5_259;
 const DOWNLOAD_THREAD_OPTIONS: [u8; 3] = [8, 16, 32];
+// Unlike SS_LEFT (zero), this stock STATIC style never wraps a single-line settings label.  A
+// clipped second line was the source of the short vertical strokes below English captions.
+const SS_LEFTNOWORDWRAP_STYLE: i32 = 0x0000_000C;
+
+fn settings_label_width(measured_widths: &[i32], available_width: i32, dpi: u32) -> i32 {
+    let padding = 8 * dpi.max(1) as i32 / 96;
+    measured_widths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or_default()
+        .saturating_add(padding)
+        .min((available_width.max(0) / 3).max(0))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InfoIntent {
@@ -768,6 +783,7 @@ pub struct AboutPage {
     pub credits: HWND,
     pub link_buttons: [HWND; 3],
     pub action_buttons: [HWND; 1],
+    font: HFONT,
     languages: RefCell<Vec<crate::utils::i18n::LanguageInfo>>,
 }
 
@@ -779,7 +795,13 @@ impl AboutPage {
         labels: &AboutLabels<'_>,
     ) -> windows::core::Result<Self> {
         let product_name = child(parent, w!("STATIC"), labels.product_name, 0, 5_212)?;
-        let version_label = child(parent, w!("STATIC"), labels.version_label, 0, 5_213)?;
+        let version_label = child(
+            parent,
+            w!("STATIC"),
+            labels.version_label,
+            SS_LEFTNOWORDWRAP_STYLE,
+            5_213,
+        )?;
         let version = child(parent, w!("STATIC"), labels.version, 0, ID_ABOUT_VERSION)?;
         let description = child(
             parent,
@@ -788,7 +810,13 @@ impl AboutPage {
             0,
             ID_ABOUT_DESCRIPTION,
         )?;
-        let language_label = child(parent, w!("STATIC"), &crate::tr!("界面语言:"), 0, 5_255)?;
+        let language_label = child(
+            parent,
+            w!("STATIC"),
+            &crate::tr!("界面语言:"),
+            SS_LEFTNOWORDWRAP_STYLE,
+            5_255,
+        )?;
         let language = child(
             parent,
             w!("COMBOBOX"),
@@ -825,7 +853,13 @@ impl AboutPage {
             ID_ABOUT_LOGGING,
         )?;
         set_checked(logging, labels.log_enabled);
-        let wim_engine_label = child(parent, w!("STATIC"), &crate::tr!("WIM 引擎:"), 0, 5_256)?;
+        let wim_engine_label = child(
+            parent,
+            w!("STATIC"),
+            &crate::tr!("WIM 引擎:"),
+            SS_LEFTNOWORDWRAP_STYLE,
+            5_256,
+        )?;
         let wim_engine = child(
             parent,
             w!("COMBOBOX"),
@@ -841,8 +875,13 @@ impl AboutPage {
             WPARAM(usize::from(labels.wim_engine == 1)),
             LPARAM(0),
         );
-        let download_threads_label =
-            child(parent, w!("STATIC"), &crate::tr!("下载线程:"), 0, 5_260)?;
+        let download_threads_label = child(
+            parent,
+            w!("STATIC"),
+            &crate::tr!("下载线程:"),
+            SS_LEFTNOWORDWRAP_STYLE,
+            5_260,
+        )?;
         let download_threads = child(
             parent,
             w!("COMBOBOX"),
@@ -873,6 +912,7 @@ impl AboutPage {
             ID_ABOUT_ADVANCED,
         )?;
         set_checked(advanced_options, labels.advanced_options_enabled);
+        let _ = EnableWindow(advanced_options, !labels.easy_mode_enabled);
         let settings_help = child(
             parent,
             w!("STATIC"),
@@ -932,6 +972,7 @@ impl AboutPage {
             credits,
             link_buttons,
             action_buttons,
+            font,
             languages: RefCell::new(Vec::new()),
         };
         page.refresh_language_choices();
@@ -984,6 +1025,15 @@ impl AboutPage {
 
     pub unsafe fn advanced_options_enabled(&self) -> bool {
         is_checked(self.advanced_options)
+    }
+
+    pub unsafe fn set_easy_mode_state(&self, enabled: bool, available: bool) {
+        set_checked(self.easy_mode, enabled);
+        let _ = EnableWindow(self.easy_mode, available);
+        if enabled {
+            set_checked(self.advanced_options, false);
+        }
+        let _ = EnableWindow(self.advanced_options, available && !enabled);
     }
 
     pub unsafe fn selected_wim_engine(&self) -> u8 {
@@ -1069,7 +1119,7 @@ impl AboutPage {
             WPARAM(selected_engine as usize),
             LPARAM(0),
         );
-        let _ = EnableWindow(self.easy_mode, easy_mode_available);
+        self.set_easy_mode_state(self.easy_mode_enabled(), easy_mode_available);
         self.refresh_language_choices();
     }
 
@@ -1077,7 +1127,8 @@ impl AboutPage {
         let s = |value: i32| value * dpi as i32 / 96;
         let width = rect.width.max(0);
         let gap = s(8);
-        let field_height = s(26);
+        let metrics = LayoutMetrics::for_dpi(dpi);
+        let field_height = metrics.field_height;
         let row_height = s(30);
         let button_layout = about_button_layout(width, dpi);
 
@@ -1124,40 +1175,66 @@ impl AboutPage {
 
         let settings_x = rect.x;
         let language_y = description_y + description_height + gap;
-        let label_width = s(92).min(width / 3);
+        let label_width = settings_label_width(
+            &[
+                measure_text(
+                    self.language_label,
+                    self.font,
+                    &crate::tr!("界面语言:"),
+                    None,
+                )
+                .width,
+                measure_text(
+                    self.wim_engine_label,
+                    self.font,
+                    &crate::tr!("WIM 引擎:"),
+                    None,
+                )
+                .width,
+                measure_text(
+                    self.download_threads_label,
+                    self.font,
+                    &crate::tr!("下载线程:"),
+                    None,
+                )
+                .width,
+            ],
+            width,
+            dpi,
+        );
         let refresh_width = s(76).min(width / 4);
         // Keep the selector close to its actual longest item instead of stretching it
         // across the page. The remaining space is intentionally left after Refresh.
         let language_width = (width - label_width - refresh_width - gap)
             .min(s(280))
             .max(0);
+        let language_closed_height = combo_closed_height(self.language, field_height);
+        let language_row_height = language_closed_height.max(field_height);
         let _ = MoveWindow(
             self.language_label,
             settings_x,
-            language_y + s(4),
+            centered_control_y_ceil(language_y, language_row_height, metrics.label_height),
             label_width,
-            s(22),
+            metrics.label_height,
             true,
         );
         let _ = MoveWindow(
             self.language,
             settings_x + label_width,
-            language_y,
+            centered_control_y_ceil(language_y, language_row_height, language_closed_height),
             language_width,
             s(220),
             true,
         );
-        let language_field_height =
-            aligned_button_height(control_height(self.language), field_height);
         let _ = MoveWindow(
             self.refresh_languages,
             settings_x + label_width + language_width + gap,
-            language_y,
+            centered_control_y_ceil(language_y, language_row_height, language_closed_height),
             refresh_width,
-            language_field_height,
+            language_closed_height,
             true,
         );
-        let easy_y = language_y + language_field_height + gap;
+        let easy_y = language_y + language_row_height + gap;
         let half = (width - gap) / 2;
         let _ = MoveWindow(self.easy_mode, settings_x, easy_y, half, s(26), true);
         let _ = MoveWindow(
@@ -1170,41 +1247,49 @@ impl AboutPage {
         );
         let engine_y = easy_y + s(26) + gap;
         let engine_width = (width - label_width).min(s(280)).max(0);
+        let engine_closed_height = combo_closed_height(self.wim_engine, field_height);
+        let engine_row_height = engine_closed_height.max(field_height);
         let _ = MoveWindow(
             self.wim_engine_label,
             settings_x,
-            engine_y + s(4),
+            centered_control_y_ceil(engine_y, engine_row_height, metrics.label_height),
             label_width,
-            s(22),
+            metrics.label_height,
             true,
         );
         let _ = MoveWindow(
             self.wim_engine,
             settings_x + label_width,
-            engine_y,
+            centered_control_y_ceil(engine_y, engine_row_height, engine_closed_height),
             engine_width,
             s(220),
             true,
         );
-        let download_threads_y = engine_y + field_height + gap;
+        let download_threads_y = engine_y + engine_row_height + gap;
         let download_threads_width = s(88).min((width - label_width).max(0));
+        let threads_closed_height = combo_closed_height(self.download_threads, field_height);
+        let threads_row_height = threads_closed_height.max(field_height);
         let _ = MoveWindow(
             self.download_threads_label,
             settings_x,
-            download_threads_y + s(4),
+            centered_control_y_ceil(download_threads_y, threads_row_height, metrics.label_height),
             label_width,
-            s(22),
+            metrics.label_height,
             true,
         );
         let _ = MoveWindow(
             self.download_threads,
             settings_x + label_width,
-            download_threads_y,
+            centered_control_y_ceil(
+                download_threads_y,
+                threads_row_height,
+                threads_closed_height,
+            ),
             download_threads_width,
             s(300),
             true,
         );
-        let advanced_y = download_threads_y + field_height + gap;
+        let advanced_y = download_threads_y + threads_row_height + gap;
         let _ = MoveWindow(
             self.advanced_options,
             settings_x,
@@ -1328,20 +1413,6 @@ impl AboutPage {
     }
 }
 
-unsafe fn control_height(control: HWND) -> Option<i32> {
-    let mut rect = RECT::default();
-    GetWindowRect(control, &mut rect)
-        .ok()
-        .map(|()| (rect.bottom - rect.top).max(0))
-        .filter(|height| *height > 0)
-}
-
-fn aligned_button_height(measured_combo_height: Option<i32>, fallback: i32) -> i32 {
-    measured_combo_height
-        .filter(|height| *height > 0)
-        .unwrap_or(fallback.max(0))
-}
-
 unsafe fn set_checked(control: HWND, checked: bool) {
     let _ = SendMessageW(control, 0x00F1, WPARAM(usize::from(checked)), LPARAM(0));
 }
@@ -1432,6 +1503,13 @@ mod tests {
     }
 
     #[test]
+    fn about_label_column_follows_the_longest_translation_without_overgrowing() {
+        assert_eq!(settings_label_width(&[72, 95, 142], 900, 96), 150);
+        assert_eq!(settings_label_width(&[72, 95, 142], 300, 96), 100);
+        assert_eq!(settings_label_width(&[144, 190, 284], 1_800, 192), 300);
+    }
+
+    #[test]
     fn hardware_columns_preserve_a_readable_value_column_on_narrow_windows() {
         let narrow = hardware_column_widths(420, 96);
         assert!(narrow[0] >= 88);
@@ -1447,13 +1525,6 @@ mod tests {
         let ordinary = hardware_column_widths(926, 96);
         assert!(ordinary[0] <= 120);
         assert!(ordinary[0] < ordinary[1]);
-    }
-
-    #[test]
-    fn language_refresh_uses_the_actual_closed_combo_height() {
-        assert_eq!(aligned_button_height(Some(31), 26), 31);
-        assert_eq!(aligned_button_height(None, 26), 26);
-        assert_eq!(aligned_button_height(Some(0), 26), 26);
     }
 
     #[test]
