@@ -7,14 +7,14 @@ use windows::Win32::Graphics::Dwm::{
     DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
-    CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GdiFlush,
-    GetTextMetricsW, GetWindowDC, InvalidateRect, LineTo, MoveToEx, RedrawWindow, ReleaseDC,
+    AlphaBlend, BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateDIBSection, CreatePen, CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint,
+    FillRect, GdiFlush, GetTextMetricsW, GetWindowDC, InvalidateRect, RedrawWindow, ReleaseDC,
     RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor,
-    SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER,
-    DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE,
-    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE,
-    RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
+    SetWindowRgn, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BLENDFUNCTION, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE,
+    RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     GetComboBoxInfo, SetWindowTheme, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT,
@@ -104,14 +104,6 @@ const fn composite_color(source: COLORREF, alpha: u8, background: COLORREF) -> C
         composite_channel(source.0 & 0xff, alpha, background.0 & 0xff) as u8,
         composite_channel((source.0 >> 8) & 0xff, alpha, (background.0 >> 8) & 0xff) as u8,
         composite_channel((source.0 >> 16) & 0xff, alpha, (background.0 >> 16) & 0xff) as u8,
-    )
-}
-
-const fn subtract_color(value: COLORREF, background: COLORREF) -> COLORREF {
-    rgb(
-        ((value.0 & 0xff) as u8).saturating_sub((background.0 & 0xff) as u8),
-        (((value.0 >> 8) & 0xff) as u8).saturating_sub(((background.0 >> 8) & 0xff) as u8),
-        (((value.0 >> 16) & 0xff) as u8).saturating_sub(((background.0 >> 16) & 0xff) as u8),
     )
 }
 
@@ -228,16 +220,11 @@ impl Palette {
         self.window.0 == 0 && self.nav.0 == 0
     }
 
-    /// GDI brushes painted into a client area covered by `DwmExtendFrameIntoClientArea` use black
-    /// as the glass key and contribute their RGB channels to the resolved backdrop. Returning the
-    /// already-resolved field colour would therefore add the Mica neutral twice (`#3c4660` becoming
-    /// `#5c6680` in the audited dark frame). Other controls publish opaque BGRA and keep `edit`.
+    /// Classic child HWNDs are not independent DWM alpha surfaces. Their Edit client is published
+    /// as one opaque BGRA frame below, so both background and text must use final theme colours.
+    /// Treating them as glass contributions makes black light-theme glyphs transparent/white.
     pub(crate) const fn edit_brush_color(self) -> COLORREF {
-        if self.uses_system_backdrop_surface() {
-            subtract_color(self.edit, self.system_backdrop_edge_fallback())
-        } else {
-            self.edit
-        }
+        self.edit
     }
 
     pub(crate) unsafe fn edit_brush_color_for(self, _control: HWND) -> COLORREF {
@@ -248,15 +235,10 @@ impl Palette {
         self.edit_brush_color()
     }
 
-    /// Black GDI text is the DWM glass key when the frame covers the full client area. Use the
-    /// same visually black contribution as the button glyph compositor so a stock Edit remains
-    /// readable without turning the child HWND into an unreliable redirected layered surface.
+    /// The atomic Edit painter repairs every output pixel to opaque BGRA after USER32 renders it,
+    /// so the ordinary theme foreground is safe even when the parent window uses Mica.
     pub(crate) const fn edit_text_color(self) -> COLORREF {
-        if self.uses_system_backdrop_surface() && !self.dark {
-            self.foreground_black()
-        } else {
-            self.text
-        }
+        self.text
     }
 
     pub(crate) unsafe fn edit_text_color_for(self, _control: HWND) -> COLORREF {
@@ -2087,15 +2069,39 @@ unsafe fn paint_single_line_edit_client_atomic(hwnd: HWND, palette: Palette) {
         && client.right > client.left
         && client.bottom > client.top;
     if client_valid {
+        let width = client.right - client.left;
+        let height = client.bottom - client.top;
         let buffer_dc = CreateCompatibleDC(target_dc);
-        let bitmap = CreateCompatibleBitmap(
-            target_dc,
-            client.right - client.left,
-            client.bottom - client.top,
-        );
-        if !buffer_dc.is_invalid() && !bitmap.is_invalid() {
+        let bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                biSizeImage: (width * height * 4) as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut::<core::ffi::c_void>();
+        let bitmap = if buffer_dc.is_invalid() {
+            None
+        } else {
+            CreateDIBSection(
+                buffer_dc,
+                &bitmap_info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                HANDLE::default(),
+                0,
+            )
+            .ok()
+        };
+        if let Some(bitmap) = bitmap {
             let old_bitmap = SelectObject(buffer_dc, bitmap);
-            let background = CreateSolidBrush(palette.edit_brush_color());
+            let background = CreateSolidBrush(palette.edit);
             let _ = FillRect(buffer_dc, &client, background);
             let _ = DeleteObject(background);
             let _ = DefSubclassProc(
@@ -2105,16 +2111,34 @@ unsafe fn paint_single_line_edit_client_atomic(hwnd: HWND, palette: Palette) {
                 LPARAM(PRF_CLIENT),
             );
             let _ = GdiFlush();
-            let _ = BitBlt(
+            // GDI leaves the alpha byte undefined/zero. On an extended DWM frame that turns the
+            // correctly black light-theme glyphs into transparent holes. The complete Edit client
+            // is an opaque resolved material surface, so repair every pixel before publishing it.
+            for pixel in std::slice::from_raw_parts_mut(
+                bits.cast::<u8>(),
+                width as usize * height as usize * 4,
+            )
+            .chunks_exact_mut(4)
+            {
+                pixel[3] = 255;
+            }
+            let _ = AlphaBlend(
                 target_dc,
                 client.left,
                 client.top,
-                client.right - client.left,
-                client.bottom - client.top,
+                width,
+                height,
                 buffer_dc,
                 0,
                 0,
-                SRCCOPY,
+                width,
+                height,
+                BLENDFUNCTION {
+                    BlendOp: AC_SRC_OVER as u8,
+                    BlendFlags: 0,
+                    SourceConstantAlpha: 255,
+                    AlphaFormat: AC_SRC_ALPHA as u8,
+                },
             );
             let _ = SelectObject(buffer_dc, old_bitmap);
         } else {
@@ -2125,7 +2149,7 @@ unsafe fn paint_single_line_edit_client_atomic(hwnd: HWND, palette: Palette) {
                 LPARAM(PRF_CLIENT),
             );
         }
-        if !bitmap.is_invalid() {
+        if let Some(bitmap) = bitmap {
             let _ = DeleteObject(bitmap);
         }
         if !buffer_dc.is_invalid() {
@@ -2971,28 +2995,75 @@ unsafe fn paint_combo_closed_bounds_to_dc(hwnd: HWND, palette: Palette, dc: HDC,
 
     // Keep the popup itself native. Only the closed chevron is repainted so its hot/pressed
     // feedback changes in the same frame as the selection field, without UxTheme transition lag.
-    let arrow_pen = CreatePen(
-        PEN_STYLE(0),
-        scale(1, dpi).max(1),
+    let glyph_width = scale(8, dpi).max(7);
+    let glyph_height = scale(5, dpi).max(5);
+    let glyph_x = (button.left + button.right - glyph_width) / 2;
+    let glyph_y = (button.top + button.bottom - glyph_height) / 2;
+    let glyph = combo_chevron_pixels(
+        glyph_width,
+        glyph_height,
         if IsWindowEnabled(hwnd).as_bool() {
             palette.text_secondary
         } else {
             palette.text_disabled
         },
     );
-    if !arrow_pen.is_invalid() {
-        let old_pen = SelectObject(dc, arrow_pen);
-        let center_x = (button.left + button.right) / 2;
-        let center_y = (button.top + button.bottom) / 2;
-        let half = scale(3, dpi).max(2);
-        let _ = MoveToEx(dc, center_x - half, center_y - scale(1, dpi), None);
-        let _ = LineTo(dc, center_x, center_y + scale(2, dpi));
-        let _ = LineTo(dc, center_x + half, center_y - scale(1, dpi));
-        let _ = SelectObject(dc, old_pen);
-        let _ = DeleteObject(arrow_pen);
-    }
+    let _ = alpha_blend_premultiplied_bgra(dc, glyph_x, glyph_y, glyph_width, glyph_height, &glyph);
 
     draw_combo_selected_text(hwnd, dc, field, palette);
+}
+
+fn combo_chevron_pixels(width: i32, height: i32, color: COLORREF) -> Vec<u8> {
+    const SAMPLES: i32 = 4;
+    let width = width.max(1);
+    let height = height.max(1);
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    let left = (0.75f64, 0.75f64);
+    let middle = (f64::from(width - 1) / 2.0, f64::from(height - 1) - 0.5);
+    let right = (f64::from(width - 1) - 0.75, 0.75f64);
+    let radius = 0.72f64;
+    for y in 0..height {
+        for x in 0..width {
+            let mut covered = 0u32;
+            for sample_y in 0..SAMPLES {
+                for sample_x in 0..SAMPLES {
+                    let px = f64::from(x) + (f64::from(sample_x) + 0.5) / f64::from(SAMPLES);
+                    let py = f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(SAMPLES);
+                    if point_segment_distance(px, py, left, middle) <= radius
+                        || point_segment_distance(px, py, middle, right) <= radius
+                    {
+                        covered += 1;
+                    }
+                }
+            }
+            let alpha = ((covered * 255 + (SAMPLES * SAMPLES / 2) as u32)
+                / (SAMPLES * SAMPLES) as u32) as u8;
+            let index = (y as usize * width as usize + x as usize) * 4;
+            pixels[index] = premultiply_channel(((color.0 >> 16) & 0xff) as u8, alpha);
+            pixels[index + 1] = premultiply_channel(((color.0 >> 8) & 0xff) as u8, alpha);
+            pixels[index + 2] = premultiply_channel((color.0 & 0xff) as u8, alpha);
+            pixels[index + 3] = alpha;
+        }
+    }
+    pixels
+}
+
+fn point_segment_distance(x: f64, y: f64, start: (f64, f64), end: (f64, f64)) -> f64 {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    let length_squared = dx * dx + dy * dy;
+    let projection = if length_squared <= f64::EPSILON {
+        0.0
+    } else {
+        (((x - start.0) * dx + (y - start.1) * dy) / length_squared).clamp(0.0, 1.0)
+    };
+    let nearest_x = start.0 + projection * dx;
+    let nearest_y = start.1 + projection * dy;
+    (x - nearest_x).hypot(y - nearest_y)
+}
+
+const fn premultiply_channel(channel: u8, alpha: u8) -> u8 {
+    ((channel as u16 * alpha as u16 + 127) / 255) as u8
 }
 
 unsafe fn draw_rounded_control_frame_to_dc(
@@ -3986,10 +4057,7 @@ mod tests {
                 }
             );
             assert_eq!(material.control_border(), material.border);
-            assert_eq!(
-                material.edit_brush_color(),
-                subtract_color(material.edit, material.system_backdrop_edge_fallback())
-            );
+            assert_eq!(material.edit_brush_color(), material.edit);
             assert_eq!(
                 material.foreground_black(),
                 if base.dark {
@@ -4027,9 +4095,27 @@ mod tests {
     fn native_edit_text_stays_visible_on_light_and_dark_material() {
         let light = Palette::LIGHT.with_system_backdrop_surface();
         let dark = Palette::DARK.with_system_backdrop_surface();
-        assert_eq!(light.edit_text_color(), light.foreground_black());
-        assert_ne!(light.edit_text_color(), COLORREF(0));
+        assert_eq!(light.edit_text_color(), Palette::LIGHT.text);
+        assert_eq!(light.edit_brush_color(), light.edit);
         assert_eq!(dark.edit_text_color(), dark.text);
+    }
+
+    #[test]
+    fn light_material_combo_chevron_has_real_alpha_and_dark_rgb() {
+        let color = Palette::LIGHT.text_secondary;
+        let pixels = combo_chevron_pixels(8, 5, color);
+        assert_eq!(pixels.len(), 8 * 5 * 4);
+        let bottom_left_alpha = pixels[((5 - 1) * 8 * 4) + 3];
+        assert_eq!(
+            bottom_left_alpha, 0,
+            "pixels outside the V silhouette must remain transparent"
+        );
+        let strongest = pixels
+            .chunks_exact(4)
+            .max_by_key(|pixel| pixel[3])
+            .expect("chevron pixels");
+        assert!(strongest[3] >= 240, "chevron needs an opaque visible core");
+        assert!(strongest[0] < 96 && strongest[1] < 96 && strongest[2] < 96);
     }
 
     #[test]

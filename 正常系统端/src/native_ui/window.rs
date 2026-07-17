@@ -1937,6 +1937,34 @@ impl NativeWindow {
             primary,
         };
         self.handles = Some(handles);
+        #[cfg(feature = "non-elevated-tests")]
+        if std::env::var_os("LETRECOVERY_UI_TEST_IMAGE_VOLUME").is_some() {
+            self.image_volumes = vec![crate::core::dism::ImageInfo {
+                index: 1,
+                name: "Windows 11 Professional (UI fixture)".to_owned(),
+                size_bytes: 8 * 1024 * 1024 * 1024,
+                installation_type: "Client".to_owned(),
+                major_version: Some(10),
+                minor_version: Some(0),
+                build: Some(26_100),
+                architecture: Some(9),
+                image_type: lr_core::image_meta::WimImageType::StandardInstall,
+                verified_installable: true,
+            }];
+            self.effective_image_path = Some(r"C:\UI-Fixture\sources\install.wim".to_owned());
+            self.install_volume_row_presented = true;
+            set_text(image_edit, r"C:\UI-Fixture\sources\install.wim");
+            let label = wide("1. Windows 11 Professional (UI fixture)");
+            let _ = SendMessageW(
+                image_volume,
+                0x0143, // CB_ADDSTRING
+                WPARAM(0),
+                LPARAM(label.as_ptr() as isize),
+            );
+            let _ = SendMessageW(image_volume, 0x014E, WPARAM(0), LPARAM(0)); // CB_SETCURSEL
+            let _ = ShowWindow(image_volume_label, SW_SHOW);
+            let _ = ShowWindow(image_volume, SW_SHOW);
+        }
         self.update_pca_combo_labels();
         self.create_secondary_pages(hwnd)?;
         self.request_pca_firmware_detection(hwnd);
@@ -3399,6 +3427,7 @@ impl NativeWindow {
 
     unsafe fn select_page_impl(&mut self, hwnd: HWND, page: Page, manage_redraw: bool) {
         let Some(h) = self.handles else { return };
+        let returning_from_advanced = self.advanced_visible;
         // Navigation and advanced-page switches settle any in-flight three-frame transition. The
         // target is derived from the already accepted image inventory, never from focus/selection.
         let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
@@ -3566,10 +3595,19 @@ impl NativeWindow {
             PrimaryStateRefresh::Backup => self.update_backup_primary_state(),
             PrimaryStateRefresh::None => {}
         }
-        // Page geometry is already stable from startup/WM_SIZE. Only the command bar depends on
-        // page visibility; relayout of every hidden page here caused the visible controls to be
-        // presented one by one and made Tools especially slow.
-        self.layout_page_switch_chrome(hwnd);
+        if returning_from_advanced {
+            // Entering Advanced repacks the shared title and command bar and hides every Install
+            // control.  Restoring visibility alone leaves the optional image-volume row at the
+            // collapsed geometry, so its ComboBox overlaps the partition heading until another
+            // option happens to request a full layout.  Normalize the complete Install geometry
+            // while the page-switch redraw transaction is still closed, then publish one frame.
+            self.layout(hwnd);
+        } else {
+            // Ordinary navigation keeps page geometry stable from startup/WM_SIZE. Only the
+            // command bar depends on page visibility; relayout of every hidden page here caused
+            // the visible controls to be presented one by one and made Tools especially slow.
+            self.layout_page_switch_chrome(hwnd);
+        }
         for nav in h.nav {
             let _ = InvalidateRect(nav, None, false);
         }
@@ -3711,12 +3749,14 @@ impl NativeWindow {
         if self.advanced_visible {
             if let Some(advanced) = &self.advanced_page {
                 advanced.read_into(&mut self.app_config.install_prefs.advanced_options);
-                advanced.show(false);
             }
             if let Err(error) = self.app_config.save() {
                 log::warn!("保存高级选项失败: {error}");
             }
-            self.advanced_visible = false;
+            // Keep `advanced_visible` true until `select_page_impl` has captured the transition
+            // source.  Clearing it here made `returning_from_advanced` permanently false, so the
+            // complete Install geometry was never restored until toggling Unattended happened to
+            // request another layout pass.
             self.select_page(hwnd, Page::Install);
             return;
         }
