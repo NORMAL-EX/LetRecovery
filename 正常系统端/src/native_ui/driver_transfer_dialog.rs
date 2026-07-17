@@ -137,7 +137,7 @@ impl NativeDriverTransferDialog {
             font,
         };
         dialog.apply_font();
-        dialog.apply_theme(Palette::system());
+        dialog.apply_theme(dialog.shell.palette());
         dialog.refresh_controls();
         dialog.layout();
         Ok(dialog)
@@ -170,9 +170,6 @@ impl NativeDriverTransferDialog {
         self.refresh_controls();
         self.layout();
         self.shell.show_modeless();
-        // Reassert the shared Inno radio painter after the shell prepares descendants; USER32
-        // continues to own grouping, keyboard input and accessibility for both transfer modes.
-        self.apply_theme(Palette::system());
     }
 
     /// Synchronizes radio, target and directory controls. Browse remains a returned intent.
@@ -212,7 +209,6 @@ impl NativeDriverTransferDialog {
                         set_text(self.controls.status, &self.state.status);
                         self.layout();
                         self.shell.show_modeless();
-                        self.apply_theme(Palette::system());
                         None
                     }
                 }

@@ -1,6 +1,9 @@
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::rc::Rc;
 use std::sync::Once;
 
 use windows::core::{w, PCWSTR};
@@ -519,6 +522,64 @@ pub(crate) unsafe fn draw_alpha_composited_text(
     let _ = DeleteDC(buffer_dc);
 }
 
+/// Publishes an already premultiplied top-down BGRA surface over a classic child-window DC.
+/// Pixels with zero alpha leave the DWM glass key untouched, which is required for circular
+/// material glyphs whose bounding DIB is necessarily rectangular.
+pub(crate) unsafe fn alpha_blend_premultiplied_bgra(
+    dc: HDC,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    pixels: &[u8],
+) -> bool {
+    if width <= 0 || height <= 0 || pixels.len() != width as usize * height as usize * 4 {
+        return false;
+    }
+    let buffer_dc = CreateCompatibleDC(dc);
+    if buffer_dc.is_invalid() {
+        return false;
+    }
+    let bitmap_info = top_down_bgra_bitmap_info(width, height);
+    let mut bits = std::ptr::null_mut::<c_void>();
+    let Ok(bitmap) = CreateDIBSection(
+        buffer_dc,
+        &bitmap_info,
+        DIB_RGB_COLORS,
+        &mut bits,
+        HANDLE::default(),
+        0,
+    ) else {
+        let _ = DeleteDC(buffer_dc);
+        return false;
+    };
+    let old_bitmap = SelectObject(buffer_dc, bitmap);
+    std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len());
+    let blended = AlphaBlend(
+        dc,
+        x,
+        y,
+        width,
+        height,
+        buffer_dc,
+        0,
+        0,
+        width,
+        height,
+        BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        },
+    )
+    .as_bool();
+    let _ = SelectObject(buffer_dc, old_bitmap);
+    let _ = DeleteObject(bitmap);
+    let _ = DeleteDC(buffer_dc);
+    blended
+}
+
 /// Draws text over a known opaque row/cell surface while preserving GDI ClearType RGB coverage.
 /// ListView custom draw must use the same opaque background contract as comctl32; transparent
 /// `DrawTextW` silently falls back to grayscale antialiasing and makes selected rows look like a
@@ -624,10 +685,8 @@ unsafe fn draw_opaque_text_fallback(
     let _ = DrawTextW(dc, &mut native_text, rect, flags);
 }
 
-/// Draws text directly over a transparent DWM material surface. Unlike the deterministic glyph
-/// mask used for opaque control bodies, UxTheme's glass compositor preserves the black-key parent
-/// surface around the glyph and therefore does not turn a STATIC control's full bounding rectangle
-/// into a visually different translucent strip.
+/// Draws a direct child label over a transparent DWM material surface. UxTheme's glass compositor
+/// preserves the material around the glyph without publishing an opaque STATIC bounding box.
 pub(crate) unsafe fn draw_backdrop_static_text(
     hwnd: HWND,
     dc: HDC,
@@ -671,6 +730,20 @@ pub(crate) unsafe fn draw_backdrop_static_text(
         let _ = SelectObject(buffer_dc, old_font);
     }
     let _ = EndBufferedPaint(buffer, true);
+}
+
+/// Nested content child windows flatten UxTheme's buffered alpha before it reaches the DWM-backed
+/// top-level dialog. Use the same deterministic premultiplied glyph mask as material buttons for
+/// those labels only; the untouched pixels remain transparent and expose the dialog Mica surface.
+pub(crate) unsafe fn draw_nested_backdrop_static_text(
+    hwnd: HWND,
+    dc: HDC,
+    text: &[u16],
+    rect: &mut RECT,
+    flags: DRAW_TEXT_FORMAT,
+    color: COLORREF,
+) {
+    draw_alpha_composited_text(hwnd, dc, text, rect, flags, color, true);
 }
 
 unsafe fn draw_text_fallback(
@@ -936,18 +1009,90 @@ unsafe fn try_fill_round_rect_material_gdi(
     fill_alpha: u8,
     border_alpha: u8,
 ) -> bool {
-    const SCALE: i32 = 4;
-    const SENTINEL: COLORREF = rgb(251, 0, 253);
     let width = (rect.right - rect.left).max(0);
     let height = (rect.bottom - rect.top).max(0);
     if width == 0 || height == 0 {
         return false;
     }
+    let key = MaterialRoundRectKey {
+        width,
+        height,
+        radius,
+        fill: fill.0,
+        border: border.0,
+        fill_alpha,
+        border_alpha,
+    };
+    let pixels = MATERIAL_ROUND_RECT_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .find_map(|(cached_key, pixels)| (*cached_key == key).then(|| Rc::clone(pixels)))
+    });
+    let pixels = if let Some(pixels) = pixels {
+        pixels
+    } else {
+        let Some(rendered) = render_material_round_rect_pixels(dc, key) else {
+            return false;
+        };
+        let rendered = Rc::new(rendered);
+        MATERIAL_ROUND_RECT_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= MATERIAL_ROUND_RECT_CACHE_LIMIT {
+                cache.pop_front();
+            }
+            cache.push_back((key, Rc::clone(&rendered)));
+        });
+        rendered
+    };
+
+    let info = top_down_bgra_bitmap_info(width, height);
+    let result = StretchDIBits(
+        dc,
+        rect.left,
+        rect.top,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height,
+        Some(pixels.as_ptr().cast()),
+        &info,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
+    result != 0 && result != u32::MAX as i32
+}
+
+const MATERIAL_ROUND_RECT_CACHE_LIMIT: usize = 48;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MaterialRoundRectKey {
+    width: i32,
+    height: i32,
+    radius: i32,
+    fill: u32,
+    border: u32,
+    fill_alpha: u8,
+    border_alpha: u8,
+}
+
+thread_local! {
+    static MATERIAL_ROUND_RECT_CACHE: RefCell<VecDeque<(MaterialRoundRectKey, Rc<Vec<u8>>)>> =
+        const { RefCell::new(VecDeque::new()) };
+}
+
+unsafe fn render_material_round_rect_pixels(dc: HDC, key: MaterialRoundRectKey) -> Option<Vec<u8>> {
+    const SCALE: i32 = 4;
+    const SENTINEL: COLORREF = rgb(251, 0, 253);
+    let width = key.width;
+    let height = key.height;
     let high_width = width.saturating_mul(SCALE);
     let high_height = height.saturating_mul(SCALE);
     let memory_dc = CreateCompatibleDC(dc);
     if memory_dc.is_invalid() {
-        return false;
+        return None;
     }
     let high_info = top_down_bgra_bitmap_info(high_width, high_height);
     let mut bits = std::ptr::null_mut::<c_void>();
@@ -960,7 +1105,7 @@ unsafe fn try_fill_round_rect_material_gdi(
         0,
     ) else {
         let _ = DeleteDC(memory_dc);
-        return false;
+        return None;
     };
     let old_bitmap = SelectObject(memory_dc, bitmap);
     let high_rect = RECT {
@@ -972,7 +1117,9 @@ unsafe fn try_fill_round_rect_material_gdi(
     let sentinel_brush = CreateSolidBrush(SENTINEL);
     let _ = FillRect(memory_dc, &high_rect, sentinel_brush);
     let _ = DeleteObject(sentinel_brush);
-    draw_high_resolution_round_rect(memory_dc, high_rect, radius, fill, border, SCALE);
+    let fill = COLORREF(key.fill);
+    let border = COLORREF(key.border);
+    draw_high_resolution_round_rect(memory_dc, high_rect, key.radius, fill, border, SCALE);
     let _ = GdiFlush();
 
     let high_len = high_width as usize * high_height as usize * 4;
@@ -1003,9 +1150,9 @@ unsafe fn try_fill_round_rect_material_gdi(
                         continue;
                     }
                     let alpha = u32::from(if sample[..3] == border_bgr {
-                        border_alpha
+                        key.border_alpha
                     } else {
-                        fill_alpha
+                        key.fill_alpha
                     });
                     channels[0] += u32::from(sample[0]) * alpha;
                     channels[1] += u32::from(sample[1]) * alpha;
@@ -1024,24 +1171,7 @@ unsafe fn try_fill_round_rect_material_gdi(
     let _ = SelectObject(memory_dc, old_bitmap);
     let _ = DeleteObject(bitmap);
     let _ = DeleteDC(memory_dc);
-
-    let info = top_down_bgra_bitmap_info(width, height);
-    let result = StretchDIBits(
-        dc,
-        rect.left,
-        rect.top,
-        width,
-        height,
-        0,
-        0,
-        width,
-        height,
-        Some(pixels.as_ptr().cast()),
-        &info,
-        DIB_RGB_COLORS,
-        SRCCOPY,
-    );
-    result != 0 && result != u32::MAX as i32
+    Some(pixels)
 }
 
 unsafe fn draw_high_resolution_round_rect(

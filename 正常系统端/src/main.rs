@@ -110,6 +110,23 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    #[cfg(feature = "non-elevated-tests")]
+    if args.iter().any(|arg| arg == "--ui-preview")
+        || std::env::var_os("LETRECOVERY_UI_SKIP_PRELOAD").is_some()
+    {
+        // Deterministic visual-regression entry: bypass single-instance state and vendor
+        // WMI/SetupAPI providers, but retain the real config, native controls and message loop.
+        // This branch is absent from release builds and the dangerous CLI guard has already run.
+        native_ui::run(Arc::new(PreloadedConfig {
+            app_config: app_config.clone(),
+            remote_config: None,
+            system_info: None,
+            hardware_info: None,
+            partitions: Vec::new(),
+        }))?;
+        return Ok(());
+    }
+
     #[cfg(not(feature = "non-elevated-tests"))]
     // 检查依赖文件完整性
     if let Err(missing_files) = check_dependencies() {

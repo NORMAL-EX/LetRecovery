@@ -44,6 +44,7 @@ const ID_ABOUT_LOGGING: u16 = 5_252;
 const ID_ABOUT_WIM_ENGINE: u16 = 5_253;
 const ID_ABOUT_ADVANCED: u16 = 5_254;
 const ID_ABOUT_DOWNLOAD_THREADS: u16 = 5_259;
+const ID_ABOUT_EXPERIMENTAL_MICA: u16 = 5_261;
 const DOWNLOAD_THREAD_OPTIONS: [u8; 3] = [8, 16, 32];
 // Unlike SS_LEFT (zero), this stock STATIC style never wraps a single-line settings label.  A
 // clipped second line was the source of the short vertical strokes below English captions.
@@ -71,6 +72,7 @@ pub enum InfoIntent {
     SelectWimEngine,
     SelectDownloadThreads,
     ToggleAdvancedOptions,
+    ToggleExperimentalMica,
     OpenLogDirectory,
 }
 
@@ -134,6 +136,7 @@ pub struct AboutLabels<'a> {
     pub wim_engine: u8,
     pub download_threads: u8,
     pub advanced_options_enabled: bool,
+    pub experimental_mica_enabled: bool,
 }
 
 pub struct HardwareInfoPage {
@@ -779,6 +782,7 @@ pub struct AboutPage {
     pub download_threads_label: HWND,
     pub download_threads: HWND,
     pub advanced_options: HWND,
+    pub experimental_mica: HWND,
     pub settings_help: HWND,
     pub credits: HWND,
     pub link_buttons: [HWND; 3],
@@ -913,6 +917,14 @@ impl AboutPage {
         )?;
         set_checked(advanced_options, labels.advanced_options_enabled);
         let _ = EnableWindow(advanced_options, !labels.easy_mode_enabled);
+        let experimental_mica = child(
+            parent,
+            w!("BUTTON"),
+            &crate::tr!("启用 Mica（实验性）"),
+            BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
+            ID_ABOUT_EXPERIMENTAL_MICA,
+        )?;
+        set_checked(experimental_mica, labels.experimental_mica_enabled);
         let settings_help = child(
             parent,
             w!("STATIC"),
@@ -968,6 +980,7 @@ impl AboutPage {
             download_threads_label,
             download_threads,
             advanced_options,
+            experimental_mica,
             settings_help,
             credits,
             link_buttons,
@@ -989,6 +1002,7 @@ impl AboutPage {
             ID_ABOUT_WIM_ENGINE => return Some(InfoIntent::SelectWimEngine),
             ID_ABOUT_DOWNLOAD_THREADS => return Some(InfoIntent::SelectDownloadThreads),
             ID_ABOUT_ADVANCED => return Some(InfoIntent::ToggleAdvancedOptions),
+            ID_ABOUT_EXPERIMENTAL_MICA => return Some(InfoIntent::ToggleExperimentalMica),
             _ => {}
         }
         if command_id == ID_ABOUT_EASY_MODE {
@@ -1025,6 +1039,10 @@ impl AboutPage {
 
     pub unsafe fn advanced_options_enabled(&self) -> bool {
         is_checked(self.advanced_options)
+    }
+
+    pub unsafe fn experimental_mica_enabled(&self) -> bool {
+        is_checked(self.experimental_mica)
     }
 
     pub unsafe fn set_easy_mode_state(&self, enabled: bool, available: bool) {
@@ -1090,6 +1108,7 @@ impl AboutPage {
         set_text(self.wim_engine_label, &crate::tr!("WIM 引擎:"));
         set_text(self.download_threads_label, &crate::tr!("下载线程:"));
         set_text(self.advanced_options, &crate::tr!("启用高级选项"));
+        set_text(self.experimental_mica, &crate::tr!("启用 Mica（实验性）"));
         set_text(
             self.settings_help,
             &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n下载线程数从下一个下载任务开始生效；镜像引擎同时用于正常系统端和 PE 端。"),
@@ -1290,11 +1309,20 @@ impl AboutPage {
             true,
         );
         let advanced_y = download_threads_y + threads_row_height + gap;
+        let settings_half = (width - gap) / 2;
         let _ = MoveWindow(
             self.advanced_options,
             settings_x,
             advanced_y,
-            width,
+            settings_half,
+            s(26),
+            true,
+        );
+        let _ = MoveWindow(
+            self.experimental_mica,
+            settings_x + settings_half + gap,
+            advanced_y,
+            (width - settings_half - gap).max(0),
             s(26),
             true,
         );
@@ -1371,6 +1399,7 @@ impl AboutPage {
             self.easy_mode,
             self.logging,
             self.advanced_options,
+            self.experimental_mica,
             self.refresh_languages,
         ] {
             apply_control_theme(control, palette, NativeControlKind::General);
@@ -1404,6 +1433,7 @@ impl AboutPage {
             self.download_threads_label,
             self.download_threads,
             self.advanced_options,
+            self.experimental_mica,
             self.settings_help,
             self.credits,
         ]
@@ -1484,6 +1514,10 @@ mod tests {
             (ID_ABOUT_WIM_ENGINE, InfoIntent::SelectWimEngine),
             (ID_ABOUT_DOWNLOAD_THREADS, InfoIntent::SelectDownloadThreads),
             (ID_ABOUT_ADVANCED, InfoIntent::ToggleAdvancedOptions),
+            (
+                ID_ABOUT_EXPERIMENTAL_MICA,
+                InfoIntent::ToggleExperimentalMica,
+            ),
         ] {
             assert_eq!(AboutPage::command_intent(command), Some(intent));
         }

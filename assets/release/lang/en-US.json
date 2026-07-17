@@ -373,6 +373,7 @@
     "启用无人值守安装": "Enable Unattended Installation",
     "启用日志记录": "Enable Logging",
     "启用高级选项": "Enable Advanced Options",
+    "启用 Mica（实验性）": "Enable Mica (Experimental)",
     "响应数据不完整": "Incomplete response data",
     "回环": "Loopback",
     "固态": "SSD",

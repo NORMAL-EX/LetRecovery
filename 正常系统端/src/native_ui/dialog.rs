@@ -18,15 +18,16 @@ use windows::Win32::Graphics::Gdi::{
     RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, HDITEMW, HDI_TEXT, ODT_HEADER};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
-    GetClassNameW, GetClientRect, GetMessageW, GetParent, GetWindowLongPtrW, GetWindowRect,
-    IsDialogMessageW, IsWindow, IsWindowVisible, LoadCursorW, MoveWindow, RegisterClassExW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    EnumThreadWindows, GetClassNameW, GetClientRect, GetMessageW, GetParent, GetWindowLongPtrW,
+    GetWindowRect, IsDialogMessageW, IsWindow, IsWindowVisible, LoadCursorW, MoveWindow,
+    RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
     GWLP_USERDATA, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE,
     WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DPICHANGED,
@@ -42,6 +43,8 @@ use super::theme::{
     apply_control_theme, apply_list_view_theme, apply_progress_theme, apply_trackbar_theme,
     Brushes, NativeControlKind, Palette,
 };
+use super::{backdrop, redraw};
+use crate::core::app_config::{AppConfig, ExperimentalWindowBackdrop};
 
 const DIALOG_CLASS: PCWSTR = w!("LetRecovery.Native.InnoDialog");
 const CONTENT_CLASS: PCWSTR = w!("LetRecovery.Native.InnoDialogContent");
@@ -271,6 +274,7 @@ impl DialogState {
 
     unsafe fn create_children(&mut self, hwnd: HWND) -> windows::core::Result<()> {
         self.dpi = GetDpiForWindow(hwnd).max(96);
+        self.refresh_palette_and_backdrop();
         self.create_fonts();
         let title = child(hwnd, w!("STATIC"), &self.labels[0], 0, ID_TITLE)?;
         let description = child(hwnd, w!("STATIC"), &self.labels[1], 0, ID_DESCRIPTION)?;
@@ -308,6 +312,27 @@ impl DialogState {
         self.layout();
         let _ = SetFocus(primary);
         Ok(())
+    }
+
+    unsafe fn refresh_palette_and_backdrop(&mut self) {
+        let base = Palette::system();
+        let requested = AppConfig::load().experimental_window_backdrop;
+        let backdrop_active =
+            match backdrop::apply_mica(self.hwnd, requested == ExperimentalWindowBackdrop::Mica) {
+                Ok(active) => active,
+                Err(error) => {
+                    if requested == ExperimentalWindowBackdrop::Mica {
+                        log::warn!("工具窗口 Mica 不可用，已回退为普通背景: {error}");
+                    }
+                    false
+                }
+            };
+        self.palette = if backdrop_active {
+            base.with_system_backdrop_surface()
+        } else {
+            base
+        };
+        self.brushes = Brushes::new(self.palette);
     }
 
     unsafe fn create_fonts(&mut self) {
@@ -601,6 +626,13 @@ impl DialogShell {
             .map_or(HWND::default(), |h| h.content)
     }
 
+    /// Returns the palette already resolved against the shell's actual DWM material state.
+    /// Tool-specific controls created after the shell must use this instead of recomputing the
+    /// ordinary system palette and accidentally replacing Mica-safe text or field colors.
+    pub fn palette(&self) -> Palette {
+        self.state.palette
+    }
+
     /// Fits the shell around the tool's natural visible content. The translated description is
     /// measured with the actual dialog font before the final window height is chosen.
     pub unsafe fn fit_content_height(&mut self, logical_content_height: i32) {
@@ -695,6 +727,28 @@ unsafe fn prepare_dialog_descendants(state: &DialogState) {
         Some(prepare_dialog_descendant),
         LPARAM((&context as *const DialogDescendantTheme) as isize),
     );
+    super::theme::apply_backdrop_composition_to_descendants(state.hwnd, state.palette);
+}
+
+/// Reapplies the persisted Mica setting to every open reusable tool shell on the UI thread.
+pub(crate) unsafe fn refresh_open_dialog_backdrops() {
+    let _ = EnumThreadWindows(
+        GetCurrentThreadId(),
+        Some(refresh_dialog_backdrop),
+        LPARAM(0),
+    );
+}
+
+unsafe extern "system" fn refresh_dialog_backdrop(hwnd: HWND, _lparam: LPARAM) -> BOOL {
+    let mut class_name = [0u16; 64];
+    let length = GetClassNameW(hwnd, &mut class_name);
+    if length > 0
+        && String::from_utf16_lossy(&class_name[..length as usize])
+            .eq_ignore_ascii_case("LetRecovery.Native.InnoDialog")
+    {
+        let _ = SendMessageW(hwnd, WM_SETTINGCHANGE, WPARAM(0), LPARAM(0));
+    }
+    BOOL(1)
 }
 
 unsafe extern "system" fn prepare_dialog_descendant(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -862,21 +916,14 @@ unsafe extern "system" fn dialog_proc(
                 // Existing UxTheme handles become stale on WM_THEMECHANGED.  Freeze the complete
                 // dialog while replacing brushes and descendant theme classes so a modeless tool
                 // never shows half of each palette during an online system-theme switch.
-                let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
-                state.palette = Palette::system();
-                state.brushes = Brushes::new(state.palette);
+                let redraw = redraw::suspend(hwnd);
+                state.refresh_palette_and_backdrop();
                 state.apply_theme();
                 // Reapplying an existing subclass updates its palette reference data. Walk every
                 // live descendant in the same frozen frame so fields, ComboLBox popups, reports,
                 // choices, progress bars and sliders cannot retain their creation-time theme.
                 prepare_dialog_descendants(state);
-                let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
-                let _ = RedrawWindow(
-                    hwnd,
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-                );
+                redraw::resume(hwnd, redraw);
             }
             LRESULT(0)
         }

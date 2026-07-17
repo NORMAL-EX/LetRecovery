@@ -5,11 +5,7 @@ use std::sync::Arc;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_AUTO, DWMSBT_MAINWINDOW,
-    DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWM_SYSTEMBACKDROP_TYPE,
-};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
     GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx,
@@ -24,8 +20,7 @@ use windows::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, LVCF_FMT, LVCF_TEXT,
     LVCF_WIDTH, LVCOLUMNW, LVCOLUMNW_FORMAT, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
     LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVN_ITEMCHANGED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, MARGINS, NMHDR,
-    ODT_HEADER,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, ODT_HEADER,
 };
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
@@ -46,11 +41,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
     WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM,
     WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCCREATE, WM_NOTIFY, WM_PAINT,
-    WM_SETFONT, WM_SETICON, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_COMPOSITED, WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
+use super::backdrop;
 use super::controls::{center_single_line_edit_in_row, child, draw_inno_button, wide, ButtonRole};
 use super::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
 use super::driver_transfer_dialog::NativeDriverTransferDialog;
@@ -74,6 +70,7 @@ use super::pages::progress::{
     ProgressStatus, ProgressValue, ID_CANCEL_OPERATION, ID_PROGRESS_PRIMARY, ID_PROGRESS_SECONDARY,
 };
 use super::pages::tools::{ToolIntent, ToolLabels, ToolsPage};
+use super::redraw;
 use super::theme::{self, Brushes};
 use super::tool_dialogs::{NativeToolDialog, ToolDialogIntent, ToolDialogKind};
 use super::tool_dialogs_mutating::{
@@ -139,33 +136,6 @@ use crate::PreloadedConfig;
 
 const CLASS_NAME: PCWSTR = w!("LetRecovery.Native.MainWindow");
 const SS_CENTER_STYLE: i32 = 0x0000_0001;
-
-const fn requested_system_backdrop(
-    backdrop: ExperimentalWindowBackdrop,
-) -> DWM_SYSTEMBACKDROP_TYPE {
-    match backdrop {
-        ExperimentalWindowBackdrop::None => DWMSBT_NONE,
-        ExperimentalWindowBackdrop::Auto => DWMSBT_AUTO,
-        ExperimentalWindowBackdrop::Mica => DWMSBT_MAINWINDOW,
-        ExperimentalWindowBackdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
-        ExperimentalWindowBackdrop::MicaAlt => DWMSBT_TABBEDWINDOW,
-    }
-}
-
-/// Explicit materials cover the full client in both themes. Light mode is safe only because every
-/// transparent caption uses `DTT_COMPOSITED` and every entity surface establishes an opaque BGRA
-/// base before native GDI text is drawn; near-black RGB alone is not an alpha strategy.
-const fn full_client_backdrop_is_safe(
-    requested: ExperimentalWindowBackdrop,
-    _dark_theme: bool,
-) -> bool {
-    matches!(
-        requested,
-        ExperimentalWindowBackdrop::Mica
-            | ExperimentalWindowBackdrop::Acrylic
-            | ExperimentalWindowBackdrop::MicaAlt
-    )
-}
 
 unsafe fn system_backdrop_surface_brush() -> HBRUSH {
     HBRUSH(GetStockObject(BLACK_BRUSH).0)
@@ -2283,6 +2253,8 @@ impl NativeWindow {
                 wim_engine: self.app_config.wim_engine,
                 download_threads: self.app_config.download_threads,
                 advanced_options_enabled: self.app_config.enable_advanced_options,
+                experimental_mica_enabled: self.app_config.experimental_window_backdrop
+                    == ExperimentalWindowBackdrop::Mica,
             },
         )?;
         about.apply_theme(self.palette);
@@ -2448,36 +2420,14 @@ impl NativeWindow {
 
     unsafe fn apply_experimental_window_backdrop(&mut self, hwnd: HWND) {
         let requested = self.app_config.experimental_window_backdrop;
-        let backdrop = requested_system_backdrop(requested);
-        let attribute_result = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            (&backdrop as *const DWM_SYSTEMBACKDROP_TYPE).cast(),
-            size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
-        );
-        let full_window = full_client_backdrop_is_safe(requested, self.palette.dark);
-        let margins = if full_window && attribute_result.is_ok() {
-            MARGINS {
-                cxLeftWidth: -1,
-                cxRightWidth: -1,
-                cyTopHeight: -1,
-                cyBottomHeight: -1,
+        match backdrop::apply_mica(hwnd, requested == ExperimentalWindowBackdrop::Mica) {
+            Ok(active) => self.backdrop_active = active,
+            Err(error) => {
+                self.backdrop_active = false;
+                if requested == ExperimentalWindowBackdrop::Mica {
+                    log::warn!("实验性 Mica 不可用，已回退为普通背景: {error}");
+                }
             }
-        } else {
-            MARGINS::default()
-        };
-        let frame_result = DwmExtendFrameIntoClientArea(hwnd, &margins);
-        self.backdrop_active = full_window && attribute_result.is_ok() && frame_result.is_ok();
-        let request_failed = attribute_result.is_err() || (full_window && frame_result.is_err());
-        if requested != ExperimentalWindowBackdrop::None && request_failed {
-            let detail = attribute_result
-                .err()
-                .or_else(|| frame_result.err())
-                .map_or_else(
-                    || String::from("DWM rejected the requested material"),
-                    |error| error.to_string(),
-                );
-            log::warn!("实验性窗口背景不可用，已回退为普通背景: {detail}");
         }
     }
 
@@ -2486,16 +2436,10 @@ impl NativeWindow {
         // WM_THEMECHANGED invalidates cached UxTheme handles even when the light/dark bit did not
         // change.  Reapply the complete control tree every time, but keep the visible transition
         // atomic so pages and their scrollbars cannot expose a mixture of old and new colours.
-        let _ = SendMessageW(hwnd, WM_SETREDRAW, WPARAM(0), LPARAM(0));
+        let redraw = redraw::suspend(hwnd);
         self.palette = palette;
         self.apply_native_dark_theme(hwnd);
-        let _ = SendMessageW(hwnd, WM_SETREDRAW, WPARAM(1), LPARAM(0));
-        let _ = RedrawWindow(
-            hwnd,
-            None,
-            None,
-            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-        );
+        redraw::resume(hwnd, redraw);
     }
 
     unsafe fn populate_partitions(&self, list: HWND, add_columns: bool) {
@@ -3216,6 +3160,87 @@ impl NativeWindow {
         }
     }
 
+    /// Page controls are created and laid out together at startup and on every real size, DPI or
+    /// language change. Navigation only changes visibility and the small command bar at the
+    /// bottom; rerunning every hidden page's text measurement and dozens of MoveWindow calls here
+    /// made a simple navigation click hundreds of milliseconds slower on a high-DPI display.
+    unsafe fn layout_page_switch_chrome(&self, hwnd: HWND) {
+        let Some(h) = self.handles else { return };
+        let mut rect = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        let width = (rect.right - rect.left).max(0);
+        let height = (rect.bottom - rect.top).max(0);
+        let nav = self.scale(NAV_WIDTH);
+        let command = self.scale(COMMAND_HEIGHT);
+        let margin = self.scale(24);
+        let content_left = if self.progress_visible {
+            margin
+        } else {
+            nav + margin
+        };
+        let content_right = width - margin;
+        let content_width = (content_right - content_left).max(0);
+        let footer_y = height - command;
+        let compact_chinese = self
+            .app_config
+            .language
+            .to_ascii_lowercase()
+            .starts_with("zh");
+        let button_gap = self.scale(8);
+        let preferred_button_width = self.scale(if compact_chinese { 96 } else { 136 });
+        let command_button_width =
+            preferred_button_width.min(((content_width - button_gap * 2) / 3).max(0));
+        let easy_visible = self.page == Page::Install && self.app_config.easy_mode_enabled;
+        let install_visible = self.page == Page::Install
+            && !easy_visible
+            && !self.advanced_visible
+            && !self.progress_visible;
+        let command_visibility = if self.progress_visible {
+            [false, false, false]
+        } else if self.advanced_visible {
+            [true, false, false]
+        } else {
+            [
+                install_visible || self.page == Page::Hardware,
+                install_visible,
+                !matches!(self.page, Page::Download | Page::Tools) && !easy_visible,
+            ]
+        };
+        let command_layout = command_bar_layout(
+            content_right,
+            button_gap,
+            command_button_width,
+            command_visibility,
+        );
+        let advanced_x = if self.advanced_visible {
+            centered_command_button_x(content_left, content_width, command_button_width)
+        } else {
+            command_layout.x[0].unwrap_or(content_right)
+        };
+        for (control, x) in [
+            (h.advanced, advanced_x),
+            (h.refresh, command_layout.x[1].unwrap_or(content_right)),
+            (h.primary, command_layout.x[2].unwrap_or(content_right)),
+        ] {
+            let _ = MoveWindow(
+                control,
+                x,
+                footer_y + self.scale(12),
+                command_button_width,
+                self.scale(28),
+                false,
+            );
+        }
+        let _ = MoveWindow(
+            h.status,
+            self.scale(16),
+            footer_y + self.scale(18),
+            (command_layout.left_edge - self.scale(24)).max(0),
+            self.scale(20),
+            false,
+        );
+    }
+
     fn install_page_content_visible(&self) -> bool {
         self.page == Page::Install
             && !self.app_config.easy_mode_enabled
@@ -3329,13 +3354,10 @@ impl NativeWindow {
             self.hardware_copy_feedback.expire();
         }
         // A page switch changes the visibility and geometry of dozens of child windows.  Letting
-        // every ShowWindow call paint immediately exposes intermediate layouts as flashes.  Only
-        // suspend an already-visible top-level window: WM_SETREDRAW(TRUE) would otherwise make an
-        // initially hidden window visible before startup has finished.
-        let redraw_was_suspended = manage_redraw && IsWindowVisible(hwnd).as_bool();
-        if redraw_was_suspended {
-            let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
-        }
+        // every ShowWindow call paint immediately exposes intermediate layouts as flashes. Suspend
+        // the visible top level and every descendant; WM_SETREDRAW is per HWND and freezing only
+        // the parent does not stop a child common control from publishing its own intermediate DC.
+        let redraw = manage_redraw.then(|| redraw::suspend(hwnd)).flatten();
         if self.advanced_visible {
             if let Some(advanced) = &self.advanced_page {
                 advanced.show(false);
@@ -3489,22 +3511,15 @@ impl NativeWindow {
             PrimaryStateRefresh::Backup => self.update_backup_primary_state(),
             PrimaryStateRefresh::None => {}
         }
-        // Visibility is page-dependent, so geometry must be recalculated after ShowWindow has
-        // established the final command set. Without this call, navigation retained the previous
-        // page's button positions until the next WM_SIZE and Hardware showed a blank Refresh slot
-        // between Save and Copy.
-        self.layout(hwnd);
+        // Page geometry is already stable from startup/WM_SIZE. Only the command bar depends on
+        // page visibility; relayout of every hidden page here caused the visible controls to be
+        // presented one by one and made Tools especially slow.
+        self.layout_page_switch_chrome(hwnd);
         for nav in h.nav {
             let _ = InvalidateRect(nav, None, false);
         }
-        if redraw_was_suspended {
-            let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
-            let _ = RedrawWindow(
-                hwnd,
-                None,
-                None,
-                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-            );
+        if redraw.is_some() {
+            redraw::resume_client(hwnd, redraw);
         } else if manage_redraw {
             let _ = InvalidateRect(hwnd, None, false);
         }
@@ -3650,10 +3665,7 @@ impl NativeWindow {
         // pointer position does not generate WM_MOUSELEAVE until the user moves the mouse and
         // the stale button surface can cover the first frame at its new position.
         let _ = SendMessageW(h.advanced, WM_CANCELMODE, WPARAM(0), LPARAM(0));
-        let redraw_was_suspended = IsWindowVisible(hwnd).as_bool();
-        if redraw_was_suspended {
-            let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
-        }
+        let redraw = redraw::suspend(hwnd);
         self.advanced_visible = true;
         if let Some(advanced) = &self.advanced_page {
             let ssid = self
@@ -3711,15 +3723,16 @@ impl NativeWindow {
         // The advanced page leaves only “Save and return” in the global command bar. Repack it
         // after hiding the normal Install commands rather than retaining the three-button layout.
         self.layout(hwnd);
-        if redraw_was_suspended {
-            let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
+        if redraw.is_some() {
+            redraw::resume(hwnd, redraw);
+        } else {
+            let _ = RedrawWindow(
+                hwnd,
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            );
         }
-        let _ = RedrawWindow(
-            hwnd,
-            None,
-            None,
-            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-        );
     }
 
     unsafe fn update_install_primary_state(&self) {
@@ -7760,12 +7773,9 @@ impl NativeWindow {
     }
 
     unsafe fn enter_progress(&mut self, hwnd: HWND, initial: LongTaskProgress, timer_id: usize) {
-        let redraw_was_suspended = IsWindowVisible(hwnd).as_bool();
-        if redraw_was_suspended {
-            let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
-        }
-        self.progress_visible = true;
         let Some(handles) = &self.handles else { return };
+        let redraw = redraw::suspend(hwnd);
+        self.progress_visible = true;
         for control in handles.nav.into_iter().chain([
             handles.brand,
             handles.title,
@@ -7826,14 +7836,8 @@ impl NativeWindow {
             page.show(true);
         }
         self.layout(hwnd);
-        if redraw_was_suspended {
-            let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
-            let _ = RedrawWindow(
-                hwnd,
-                None,
-                None,
-                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-            );
+        if redraw.is_some() {
+            redraw::resume(hwnd, redraw);
         } else {
             let _ = InvalidateRect(hwnd, None, false);
         }
@@ -8318,7 +8322,7 @@ impl NativeWindow {
         // Returning from a full-window task used to show and move every child one by one.  The
         // intermediate states were visible as a short flash, especially on software-rendered or
         // remote desktops.  Suspend painting until the destination page has its final layout.
-        let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
+        let redraw = redraw::suspend(hwnd);
         self.progress_visible = false;
         if let Some(page) = &self.progress_page {
             page.show(false);
@@ -8335,13 +8339,7 @@ impl NativeWindow {
         }
         self.select_page_impl(hwnd, destination, false);
         self.layout(hwnd);
-        let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
-        let _ = RedrawWindow(
-            hwnd,
-            None,
-            None,
-            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-        );
+        redraw::resume(hwnd, redraw);
     }
 
     unsafe fn handle_progress_command(&mut self, hwnd: HWND, intent: ProgressIntent) {
@@ -8954,7 +8952,7 @@ impl NativeWindow {
         // SetWindowText, ComboBox resets and ListView repopulation each invalidate their own
         // native HWND. Keep those intermediate mixed-language frames hidden and publish one
         // complete non-client/client/descendant transaction after layout has stabilised.
-        let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
+        let redraw = redraw::suspend(hwnd);
         set_text(hwnd, &crate::tr!("LetRecovery - Windows系统一键重装工具"));
         if let Some(handles) = &self.handles {
             for (control, label) in handles.nav.into_iter().zip([
@@ -9118,13 +9116,7 @@ impl NativeWindow {
         self.update_system_status();
         self.select_page(hwnd, self.page);
         self.layout(hwnd);
-        let _ = SendMessageW(hwnd, WM_SETREDRAW, WPARAM(1), LPARAM(0));
-        let _ = RedrawWindow(
-            hwnd,
-            None,
-            None,
-            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-        );
+        redraw::resume(hwnd, redraw);
     }
 
     unsafe fn save_hardware_report(&self, hwnd: HWND) {
@@ -9423,7 +9415,7 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
         let (window_width, window_height) =
             preferred_window_size(initial_dpi, screen_width, screen_height);
         let hwnd = CreateWindowExW(
-            WS_EX_CONTROLPARENT,
+            WS_EX_CONTROLPARENT | WS_EX_COMPOSITED,
             CLASS_NAME,
             PCWSTR(title.as_ptr()),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
@@ -10172,6 +10164,16 @@ unsafe extern "system" fn window_proc(
                                 state
                                     .app_config
                                     .set_advanced_options(page.advanced_options_enabled());
+                            }
+                        }
+                        Some(InfoIntent::ToggleExperimentalMica) => {
+                            if let Some(page) = &state.about_page {
+                                let enabled = page.experimental_mica_enabled();
+                                state.app_config.set_experimental_mica(enabled);
+                                let redraw = redraw::suspend(hwnd);
+                                state.apply_native_dark_theme(hwnd);
+                                super::dialog::refresh_open_dialog_backdrops();
+                                redraw::resume(hwnd, redraw);
                             }
                         }
                         Some(InfoIntent::OpenLogDirectory) => state.open_log_directory(hwnd),
@@ -11184,11 +11186,7 @@ unsafe fn draw_line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF
 
 #[cfg(test)]
 mod tests {
-    use super::{full_client_backdrop_is_safe, requested_system_backdrop, HardwareCopyFeedback};
-    use crate::core::app_config::ExperimentalWindowBackdrop;
-    use windows::Win32::Graphics::Dwm::{
-        DWMSBT_AUTO, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW,
-    };
+    use super::HardwareCopyFeedback;
 
     #[test]
     fn hardware_copy_feedback_expires_back_to_the_normal_caption() {
@@ -11198,38 +11196,5 @@ mod tests {
         assert_eq!(feedback.caption_key(), "已复制");
         feedback.expire();
         assert_eq!(feedback.caption_key(), "复制信息");
-    }
-
-    #[test]
-    fn experimental_config_maps_only_to_documented_system_backdrops() {
-        for (config, expected) in [
-            (ExperimentalWindowBackdrop::None, DWMSBT_NONE),
-            (ExperimentalWindowBackdrop::Auto, DWMSBT_AUTO),
-            (ExperimentalWindowBackdrop::Mica, DWMSBT_MAINWINDOW),
-            (ExperimentalWindowBackdrop::Acrylic, DWMSBT_TRANSIENTWINDOW),
-            (ExperimentalWindowBackdrop::MicaAlt, DWMSBT_TABBEDWINDOW),
-        ] {
-            assert_eq!(requested_system_backdrop(config), expected);
-        }
-    }
-
-    #[test]
-    fn both_alpha_aware_themes_extend_explicit_system_materials_over_the_client() {
-        for backdrop in [
-            ExperimentalWindowBackdrop::Mica,
-            ExperimentalWindowBackdrop::Acrylic,
-            ExperimentalWindowBackdrop::MicaAlt,
-        ] {
-            assert!(full_client_backdrop_is_safe(backdrop, true));
-            assert!(full_client_backdrop_is_safe(backdrop, false));
-        }
-        assert!(!full_client_backdrop_is_safe(
-            ExperimentalWindowBackdrop::None,
-            true
-        ));
-        assert!(!full_client_backdrop_is_safe(
-            ExperimentalWindowBackdrop::Auto,
-            true
-        ));
     }
 }

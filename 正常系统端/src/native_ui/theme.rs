@@ -15,8 +15,8 @@ use windows::Win32::Graphics::Gdi::{
     RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor,
     SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER,
     DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE,
-    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW,
-    SRCCOPY, TRANSPARENT,
+    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE,
+    RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     BeginBufferedPaint, BufferedPaintInit, BufferedPaintSetAlpha, EndBufferedPaint,
@@ -45,10 +45,10 @@ use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 use super::controls::{
-    button_visual, draw_alpha_composited_text, draw_antialiased_control_frame,
-    draw_backdrop_static_text, draw_opaque_surface_text, draw_progress, fill_alpha_opaque_rect,
-    fill_round_rect_antialiased, rounded_control_frame_geometry, ButtonRole, ControlState,
-    InnoMetrics, ProgressRole,
+    alpha_blend_premultiplied_bgra, button_visual, draw_alpha_composited_text,
+    draw_antialiased_control_frame, draw_backdrop_static_text, draw_nested_backdrop_static_text,
+    draw_opaque_surface_text, draw_progress, fill_alpha_opaque_rect, fill_round_rect_antialiased,
+    rounded_control_frame_geometry, ButtonRole, ControlState, InnoMetrics, ProgressRole,
 };
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
@@ -579,10 +579,9 @@ unsafe fn install_combo_selection_item_subclass(combo: HWND, palette: Palette) {
 
 const BACKDROP_STATIC_SUBCLASS_ID: usize = 0x4c52_4253;
 
-/// Installs alpha-aware text painting on every plain STATIC child of the main window. Transparent
-/// STATIC captions cannot use `BufferedPaintSetAlpha(255)` over their complete rectangle because
-/// that would replace Mica with an opaque block; `DTT_COMPOSITED` instead supplies alpha only for
-/// the glyph coverage while leaving the material visible between and around characters.
+/// Installs alpha-aware text painting on every plain STATIC descendant. Direct labels retain
+/// UxTheme's glass compositor; labels inside the tool-dialog content child use a deterministic
+/// premultiplied glyph mask because nested HWND redirection otherwise discards their text alpha.
 pub unsafe fn apply_backdrop_composition_to_descendants(root: HWND, palette: Palette) {
     let reference = palette_reference(palette);
     let _ = EnumChildWindows(
@@ -671,18 +670,27 @@ unsafe fn paint_backdrop_static(hwnd: HWND, palette: Palette) {
         } else {
             flags |= DT_WORDBREAK;
         }
-        draw_backdrop_static_text(
-            hwnd,
-            dc,
-            &text,
-            &mut rect,
-            flags,
-            if IsWindowEnabled(hwnd).as_bool() {
-                palette.text
+        let parent_class = GetParent(hwnd)
+            .ok()
+            .map(|parent| control_class_name(parent))
+            .unwrap_or_default();
+        let nested_content = static_uses_nested_material_mask(&parent_class);
+        let color = if IsWindowEnabled(hwnd).as_bool() {
+            if nested_content {
+                // Pure COLORREF(0) is the full-client DWM glass key. Keep nested glyphs visibly
+                // black without turning the entire STATIC rectangle into an opaque strip.
+                palette.foreground_black()
             } else {
-                palette.text_disabled
-            },
-        );
+                palette.text
+            }
+        } else {
+            palette.text_disabled
+        };
+        if nested_content {
+            draw_nested_backdrop_static_text(hwnd, dc, &text, &mut rect, flags, color);
+        } else {
+            draw_backdrop_static_text(hwnd, dc, &text, &mut rect, flags, color);
+        }
         if let Some(old_font) = old_font {
             let _ = SelectObject(dc, old_font);
         }
@@ -714,6 +722,10 @@ unsafe fn control_class_name(control: HWND) -> String {
     let mut buffer = [0u16; 64];
     let length = GetClassNameW(control, &mut buffer);
     String::from_utf16_lossy(&buffer[..usize::try_from(length.max(0)).unwrap_or(0)])
+}
+
+fn static_uses_nested_material_mask(parent_class: &str) -> bool {
+    parent_class.eq_ignore_ascii_case("LetRecovery.Native.InnoDialogContent")
 }
 
 fn is_edit_class(class_name: &str) -> bool {
@@ -1485,9 +1497,9 @@ fn weighted_radio_color(
     COLORREF(channel(0) | channel(8) | channel(16))
 }
 
-/// Produces an opaque top-down BGRA glyph. Eight-by-eight subpixel coverage is evaluated in the
-/// final DPI-sized square, which guarantees mirror symmetry and prevents GDI stretching from
-/// pulling a dark corner texel into the light background.
+/// Produces a top-down BGRA glyph. Material mode keeps pixels outside the circular coverage fully
+/// transparent and premultiplies the antialiased edge; ordinary mode remains opaque against the
+/// normal page background. Both paths evaluate eight-by-eight coverage at the final DPI size.
 fn radio_glyph_bgra(side: i32, palette: Palette, state: ControlState, checked: bool) -> Vec<u8> {
     const SAMPLES: i32 = 8;
     let side = side.max(1);
@@ -1525,21 +1537,37 @@ fn radio_glyph_bgra(side: i32, palette: Palette, state: ControlState, checked: b
                     }
                 }
             }
-            let color = weighted_radio_color(
-                palette.window,
-                background_samples,
-                primary,
-                primary_samples,
-                secondary,
-                secondary_samples,
-            )
-            .0;
-            pixels.extend_from_slice(&[
-                ((color >> 16) & 0xff) as u8,
-                ((color >> 8) & 0xff) as u8,
-                (color & 0xff) as u8,
-                255,
-            ]);
+            if palette.uses_system_backdrop_surface() {
+                let covered = primary_samples + secondary_samples;
+                let premultiplied_channel = |shift: u32| {
+                    ((((primary.0 >> shift) & 0xff) * primary_samples
+                        + ((secondary.0 >> shift) & 0xff) * secondary_samples
+                        + 32)
+                        / 64) as u8
+                };
+                pixels.extend_from_slice(&[
+                    premultiplied_channel(16),
+                    premultiplied_channel(8),
+                    premultiplied_channel(0),
+                    ((covered * 255 + 32) / 64) as u8,
+                ]);
+            } else {
+                let color = weighted_radio_color(
+                    palette.window,
+                    background_samples,
+                    primary,
+                    primary_samples,
+                    secondary,
+                    secondary_samples,
+                )
+                .0;
+                pixels.extend_from_slice(&[
+                    ((color >> 16) & 0xff) as u8,
+                    ((color >> 8) & 0xff) as u8,
+                    (color & 0xff) as u8,
+                    255,
+                ]);
+            }
         }
     }
     pixels
@@ -1559,6 +1587,11 @@ unsafe fn draw_radio_glyph(
         return;
     }
     let pixels = radio_glyph_bgra(side, palette, state, checked);
+    if palette.uses_system_backdrop_surface()
+        && alpha_blend_premultiplied_bgra(dc, rect.left, rect.top, side, side, &pixels)
+    {
+        return;
+    }
     let bitmap = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -2553,8 +2586,30 @@ unsafe fn clip_combo_to_closed_field(hwnd: HWND, _palette: Palette) {
     // Microsoft recommends redrawing a visible window when changing its region. Without that
     // redraw, the pixels removed from USER32's retained drop-list height survive as a narrow line
     // immediately below the deterministic field until some unrelated parent repaint occurs.
-    if !region.is_invalid() && SetWindowRgn(hwnd, region, true) == 0 {
-        let _ = DeleteObject(region);
+    if !region.is_invalid() {
+        if SetWindowRgn(hwnd, region, true) == 0 {
+            let _ = DeleteObject(region);
+        } else if full_height > closed_height {
+            // The removed tail belonged to the child before SetWindowRgn, but becomes parent
+            // surface afterwards. SetWindowRgn redraws the child only; explicitly invalidate that
+            // parent strip or its last stock UxTheme row can survive as the reported bottom line.
+            let parent = GetParent(hwnd).unwrap_or_default();
+            let mut parent_origin = POINT::default();
+            if !parent.is_invalid() && ClientToScreen(parent, &mut parent_origin).as_bool() {
+                let exposed_tail = RECT {
+                    left: window.left - parent_origin.x,
+                    top: window.top - parent_origin.y + closed_height,
+                    right: window.right - parent_origin.x,
+                    bottom: window.bottom - parent_origin.y,
+                };
+                let _ = RedrawWindow(
+                    parent,
+                    Some(&exposed_tail),
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME,
+                );
+            }
+        }
     }
 }
 
@@ -3840,6 +3895,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_nested_tool_content_uses_the_deterministic_static_mask() {
+        assert!(static_uses_nested_material_mask(
+            "LetRecovery.Native.InnoDialogContent"
+        ));
+        assert!(static_uses_nested_material_mask(
+            "letrecovery.native.innodialogcontent"
+        ));
+        assert!(!static_uses_nested_material_mask(
+            "LetRecovery.Native.InnoDialog"
+        ));
+        assert!(!static_uses_nested_material_mask("Static"));
+    }
+
+    #[test]
     fn inno_windows11_reference_colors_are_stable() {
         assert_eq!(Palette::LIGHT.window, rgb(249, 249, 249));
         assert_eq!(Palette::LIGHT.edit, rgb(255, 255, 255));
@@ -4385,6 +4454,26 @@ mod tests {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn material_radio_glyph_keeps_the_rectangular_tile_fully_transparent() {
+        for base in [Palette::LIGHT, Palette::DARK] {
+            let palette = base.with_system_backdrop_surface();
+            for side in [13, 20, 26] {
+                for checked in [false, true] {
+                    let pixels = radio_glyph_bgra(side, palette, ControlState::default(), checked);
+                    let pixel = |x: i32, y: i32| {
+                        let offset = ((y * side + x) * 4) as usize;
+                        &pixels[offset..offset + 4]
+                    };
+                    for (x, y) in [(0, 0), (side - 1, 0), (0, side - 1), (side - 1, side - 1)] {
+                        assert_eq!(pixel(x, y), &[0, 0, 0, 0]);
+                    }
+                    assert_eq!(pixel(side / 2, side / 2)[3], 255);
                 }
             }
         }
