@@ -1964,6 +1964,52 @@ impl NativeWindow {
             let _ = SendMessageW(image_volume, 0x014E, WPARAM(0), LPARAM(0)); // CB_SETCURSEL
             let _ = ShowWindow(image_volume_label, SW_SHOW);
             let _ = ShowWindow(image_volume, SW_SHOW);
+            for (row, values) in [
+                [
+                    "C: (当前系统)",
+                    "299.0 GB",
+                    "48.5 GB",
+                    "OS",
+                    "GPT",
+                    "未加密",
+                    "已有系统",
+                ],
+                ["D:", "200.0 GB", "30.3 GB", "", "GPT", "未加密", "空闲"],
+                ["E:", "428.5 GB", "110.3 GB", "", "GPT", "未加密", "空闲"],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for (column, value) in values.into_iter().enumerate() {
+                    let mut value = wide(value);
+                    let mut item = LVITEMW {
+                        mask: LVIF_TEXT,
+                        iItem: row as i32,
+                        iSubItem: column as i32,
+                        pszText: windows::core::PWSTR(value.as_mut_ptr()),
+                        ..Default::default()
+                    };
+                    let message = if column == 0 { LVM_INSERTITEMW } else { 0x104c };
+                    let _ = SendMessageW(
+                        partitions,
+                        message,
+                        WPARAM(0),
+                        LPARAM((&mut item as *mut LVITEMW) as isize),
+                    );
+                }
+            }
+            let mut selected = LVITEMW {
+                stateMask: LVIS_SELECTED,
+                state: LVIS_SELECTED,
+                iItem: 0,
+                ..Default::default()
+            };
+            let _ = SendMessageW(
+                partitions,
+                0x102b,
+                WPARAM(0),
+                LPARAM((&mut selected as *mut LVITEMW) as isize),
+            );
         }
         self.update_pca_combo_labels();
         self.create_secondary_pages(hwnd)?;
@@ -2515,13 +2561,23 @@ impl NativeWindow {
     }
 
     unsafe fn refresh_window_activation(&mut self, hwnd: HWND, active: bool) {
+        if self.window_active == active {
+            return;
+        }
         self.window_active = active;
         // Inactive must be byte-for-byte the same visual mode as disabling the experiment: AUTO
-        // backdrop, zero client frame and the ordinary palette. Reapply and confirm MAINWINDOW
-        // only after this exact top-level becomes active again.
+        // backdrop, zero client frame and the ordinary palette.
         let redraw = redraw::suspend(hwnd);
+        // Activation never changes the system light/dark bit or any control geometry. Applying the
+        // full theme path here used to request/reset Mica twice, call SetWindowTheme on every HWND
+        // and issue Edit SWP_FRAMECHANGED, producing a whole-page flash and visibly moving only the
+        // text. Switch DWM once, then update palette-bearing subclass data without rebuilding the
+        // native control tree. The remaining compositor-owned transition is tracked separately:
+        // USER32/DWM can still expose a 0-16 ms intermediate frame while changing activation.
         self.apply_experimental_window_backdrop(hwnd);
-        self.apply_native_dark_theme(hwnd);
+        let control_palette = self.control_palette();
+        self.brushes = Brushes::new(control_palette);
+        theme::refresh_material_palette_to_descendants(hwnd, control_palette);
         redraw::resume(hwnd, redraw);
     }
 
@@ -9682,14 +9738,12 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_NCACTIVATE => {
-            let result = DefWindowProcW(hwnd, message, wparam, lparam);
             if let Some(state) = state {
                 // This is the exact state DWM uses for the active/inactive title bar. Keep child
-                // material surfaces in lockstep even on shells that do not deliver a useful
-                // WM_ACTIVATE transition to this process.
+                // material surfaces in lockstep while USER32 commits that state.
                 state.refresh_window_activation(hwnd, wparam.0 != 0);
             }
-            result
+            DefWindowProcW(hwnd, message, wparam, lparam)
         }
         WM_SIZE => {
             if let Some(state) = state {

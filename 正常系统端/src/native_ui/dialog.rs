@@ -42,7 +42,7 @@ use super::controls::{child, draw_inno_button, wide, ButtonRole, InnoMetrics};
 use super::layout::{measure_text, LayoutMetrics};
 use super::theme::{
     apply_control_theme, apply_list_view_theme, apply_progress_theme, apply_trackbar_theme,
-    Brushes, NativeControlKind, Palette,
+    refresh_material_palette_to_descendants, Brushes, NativeControlKind, Palette,
 };
 use super::{backdrop, redraw};
 use crate::core::app_config::{AppConfig, ExperimentalWindowBackdrop};
@@ -346,11 +346,13 @@ impl DialogState {
     }
 
     unsafe fn refresh_window_activation(&mut self, active: bool) {
+        if self.window_active == active {
+            return;
+        }
         self.window_active = active;
         let redraw = redraw::suspend(self.hwnd);
         self.refresh_palette_and_backdrop();
-        self.apply_theme();
-        prepare_dialog_descendants(self);
+        refresh_material_palette_to_descendants(self.hwnd, self.palette);
         redraw::resume(self.hwnd, redraw);
     }
 
@@ -893,11 +895,10 @@ unsafe extern "system" fn dialog_proc(
             }
         }
         WM_NCACTIVATE => {
-            let result = DefWindowProcW(hwnd, message, wparam, lparam);
             if let Some(state) = state {
                 state.refresh_window_activation(wparam.0 != 0);
             }
-            result
+            DefWindowProcW(hwnd, message, wparam, lparam)
         }
         WM_SIZE => {
             if let Some(state) = state {

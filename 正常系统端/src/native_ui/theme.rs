@@ -25,7 +25,9 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, IsWindowEnabled, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
 };
-use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows::Win32::UI::Shell::{
+    DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass, SUBCLASSPROC,
+};
 #[cfg(test)]
 use windows::Win32::UI::WindowsAndMessaging::WS_VSCROLL;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -946,6 +948,108 @@ const WM_MOUSELEAVE_MESSAGE: u32 = 0x02a3;
 const WM_NCMOUSEMOVE_MESSAGE: u32 = 0x00a0;
 const WM_NCMOUSELEAVE_MESSAGE: u32 = 0x02a2;
 const WM_REPAINT_TRACKING_COMBO: u32 = 0x8000 + 0x4c5;
+
+unsafe fn update_existing_subclass_reference(
+    hwnd: HWND,
+    procedure: SUBCLASSPROC,
+    subclass_id: usize,
+    reference_data: usize,
+) {
+    let mut current_reference = 0usize;
+    if GetWindowSubclass(hwnd, procedure, subclass_id, Some(&mut current_reference)).as_bool() {
+        let _ = SetWindowSubclass(hwnd, procedure, subclass_id, reference_data);
+    }
+}
+
+/// Refreshes only palette references after a top-level Mica activation transition.
+///
+/// The light/dark system theme has not changed, so reapplying UxTheme classes, non-client styles
+/// and `SWP_FRAMECHANGED` is both unnecessary and visibly harmful: Edit recalculates its client
+/// metrics and STATIC text changes rasterization between the inactive and active frames.  Keep the
+/// existing native control structure and update only subclasses/colours that actually depend on
+/// the material palette.
+pub unsafe fn refresh_material_palette_to_descendants(root: HWND, palette: Palette) {
+    let _ = EnumChildWindows(
+        root,
+        Some(refresh_material_palette_descendant),
+        LPARAM(palette_reference(palette) as isize),
+    );
+}
+
+unsafe extern "system" fn refresh_material_palette_descendant(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let reference = lparam.0 as usize;
+    let palette = palette_from_reference(reference);
+    let palette_subclasses: [(SUBCLASSPROC, usize); 9] = [
+        (Some(check_box_subclass), CHECK_BOX_SUBCLASS_ID),
+        (Some(radio_button_subclass), RADIO_BUTTON_SUBCLASS_ID),
+        (Some(rounded_control_subclass), ROUNDED_CONTROL_SUBCLASS_ID),
+        (
+            Some(single_line_edit_subclass),
+            SINGLE_LINE_EDIT_SUBCLASS_ID,
+        ),
+        (
+            Some(combo_selection_item_subclass),
+            COMBO_SELECTION_ITEM_SUBCLASS_ID,
+        ),
+        (Some(backdrop_static_subclass), BACKDROP_STATIC_SUBCLASS_ID),
+        (Some(list_view_subclass), LIST_VIEW_SUBCLASS_ID),
+        (Some(progress_subclass), PROGRESS_SUBCLASS_ID),
+        (Some(trackbar_subclass), TRACKBAR_SUBCLASS_ID),
+    ];
+    for (procedure, subclass_id) in palette_subclasses {
+        update_existing_subclass_reference(hwnd, procedure, subclass_id, reference);
+    }
+
+    let class_name = control_class_name(hwnd);
+    if class_name.eq_ignore_ascii_case("SysListView32") {
+        set_list_view_colors(hwnd, palette);
+        if let Ok(parent) = GetParent(hwnd) {
+            let list_value = hwnd.0 as usize;
+            let dark_flag = usize::from(palette.dark) << (usize::BITS - 1);
+            let backdrop_flag =
+                usize::from(palette.uses_system_backdrop_surface()) << (usize::BITS - 2);
+            update_existing_subclass_reference(
+                parent,
+                Some(list_view_parent_subclass),
+                LIST_VIEW_PARENT_SUBCLASS_ID ^ list_value,
+                list_value | dark_flag | backdrop_flag,
+            );
+        }
+        let header = HWND(SendMessageW(hwnd, 0x101f, WPARAM(0), LPARAM(0)).0 as *mut _);
+        if !header.is_invalid() {
+            update_existing_subclass_reference(
+                header,
+                Some(header_subclass),
+                HEADER_SUBCLASS_ID,
+                reference,
+            );
+        }
+    } else if class_name.eq_ignore_ascii_case("ComboBox") {
+        let mut info = COMBOBOXINFO {
+            cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+            ..Default::default()
+        };
+        if GetComboBoxInfo(hwnd, &mut info).is_ok() {
+            if !info.hwndItem.is_invalid() && info.hwndItem != hwnd {
+                update_existing_subclass_reference(
+                    info.hwndItem,
+                    Some(combo_selection_item_subclass),
+                    COMBO_SELECTION_ITEM_SUBCLASS_ID,
+                    reference,
+                );
+            }
+            if !info.hwndList.is_invalid() {
+                update_existing_subclass_reference(
+                    info.hwndList,
+                    Some(rounded_control_subclass),
+                    ROUNDED_CONTROL_SUBCLASS_ID,
+                    reference,
+                );
+            }
+        }
+    }
+    BOOL(1)
+}
 
 /// Messages whose USER32/comctl32 default handling may repaint a native non-client scrollbar.
 /// The rounded frame must be overlaid only after that handling finishes; otherwise the scrollbar
@@ -1875,6 +1979,11 @@ unsafe extern "system" fn list_view_subclass(
                 return LRESULT(0);
             }
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            // ItemsView can repaint the client area below the final row with its stock white
+            // class brush after both LVM_SETBKCOLOR and item custom draw. Item callbacks cannot
+            // cover an area that has no item, so restore only that trailing body rectangle after
+            // the native report has finished; rows, header and scrollbars remain native.
+            paint_list_view_trailing_body(hwnd, palette_from_reference(reference_data));
             // The v6 ListView double buffer can publish its body after the child header has
             // painted, temporarily replacing only the header background. Repaint that single
             // child synchronously after the body transaction; `paint_header` never invalidates
@@ -1924,6 +2033,58 @@ unsafe extern "system" fn list_view_subclass(
 
 const fn list_view_needs_empty_body_paint(item_count: isize) -> bool {
     item_count == 0
+}
+
+fn list_view_trailing_body_rect(
+    client: RECT,
+    item_count: isize,
+    last_item_bottom: Option<i32>,
+) -> Option<RECT> {
+    if item_count <= 0 {
+        return None;
+    }
+    let top = last_item_bottom?.clamp(client.top, client.bottom);
+    (top < client.bottom).then_some(RECT {
+        left: client.left,
+        top,
+        right: client.right,
+        bottom: client.bottom,
+    })
+}
+
+unsafe fn paint_list_view_trailing_body(hwnd: HWND, palette: Palette) {
+    const LVM_GETITEMCOUNT: u32 = 0x1004;
+    const LVM_GETITEMRECT: u32 = 0x100e;
+    const LVIR_BOUNDS: i32 = 0;
+
+    let item_count = SendMessageW(hwnd, LVM_GETITEMCOUNT, WPARAM(0), LPARAM(0)).0;
+    if item_count <= 0 {
+        return;
+    }
+    let mut client = RECT::default();
+    if GetClientRect(hwnd, &mut client).is_err() {
+        return;
+    }
+    let mut last = RECT {
+        left: LVIR_BOUNDS,
+        ..Default::default()
+    };
+    let last_bottom = (SendMessageW(
+        hwnd,
+        LVM_GETITEMRECT,
+        WPARAM((item_count - 1) as usize),
+        LPARAM((&mut last as *mut RECT) as isize),
+    )
+    .0 != 0)
+        .then_some(last.bottom);
+    let Some(rect) = list_view_trailing_body_rect(client, item_count, last_bottom) else {
+        return;
+    };
+    let dc = windows::Win32::Graphics::Gdi::GetDC(hwnd);
+    if !dc.is_invalid() {
+        fill(dc, &rect, palette.edit);
+        let _ = ReleaseDC(hwnd, dc);
+    }
 }
 
 unsafe fn inset_edit_client_rect(hwnd: HWND, rect: &mut RECT, dpi: u32) {
@@ -2029,6 +2190,21 @@ unsafe extern "system" fn single_line_edit_subclass(
             paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
             result
         }
+        message if edit_message_may_change_visible_text(message, wparam.0) => {
+            // USER32 performs user-initiated Edit operations synchronously and can draw the new
+            // glyphs directly before the next WM_PAINT. On a DWM-extended client that direct GDI
+            // path has no valid alpha byte, so light-theme black text becomes a white/transparent
+            // interim frame while typing. Let USER32 update its text buffer first, then force our
+            // opaque BGRA painter to publish the final field before this input message returns.
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let _ = RedrawWindow(
+                hwnd,
+                None,
+                None,
+                RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+            );
+            result
+        }
         WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             let _ = RedrawWindow(
@@ -2050,6 +2226,20 @@ unsafe extern "system" fn single_line_edit_subclass(
         }
         _ => DefSubclassProc(hwnd, message, wparam, lparam),
     }
+}
+
+const fn edit_message_may_change_visible_text(message: u32, wparam: usize) -> bool {
+    matches!(
+        message,
+        0x000c // WM_SETTEXT
+            | 0x00c2 // EM_REPLACESEL
+            | 0x0102 // WM_CHAR (including Backspace)
+            | 0x010f // WM_IME_COMPOSITION
+            | 0x0300 // WM_CUT
+            | 0x0302 // WM_PASTE
+            | 0x0303 // WM_CLEAR
+            | 0x0304 // WM_UNDO
+    ) || (message == WM_KEYDOWN && wparam == 0x2e) // VK_DELETE
 }
 
 /// Paints the stock Edit client into one compatible bitmap and publishes it atomically. USER32
@@ -4575,5 +4765,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn edit_mutation_messages_are_republished_before_returning_to_dwm() {
+        for message in [
+            0x000c, 0x00c2, 0x0102, 0x010f, 0x0300, 0x0302, 0x0303, 0x0304,
+        ] {
+            assert!(edit_message_may_change_visible_text(message, 0));
+        }
+        assert!(edit_message_may_change_visible_text(WM_KEYDOWN, 0x2e));
+        assert!(!edit_message_may_change_visible_text(WM_KEYDOWN, 0x25));
+        assert!(!edit_message_may_change_visible_text(WM_MOUSEMOVE, 0));
+    }
+
+    #[test]
+    fn list_view_trailing_material_fill_begins_after_the_final_row() {
+        let client = RECT {
+            left: 0,
+            top: 0,
+            right: 900,
+            bottom: 180,
+        };
+        assert_eq!(
+            list_view_trailing_body_rect(client, 3, Some(72)),
+            Some(RECT {
+                left: 0,
+                top: 72,
+                right: 900,
+                bottom: 180,
+            })
+        );
+        assert_eq!(list_view_trailing_body_rect(client, 0, None), None);
+        assert_eq!(list_view_trailing_body_rect(client, 3, Some(180)), None);
+        assert_eq!(list_view_trailing_body_rect(client, 3, Some(240)), None);
     }
 }
