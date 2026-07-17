@@ -7,7 +7,7 @@ use std::mem::size_of;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMSBT_NONE,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_AUTO, DWMSBT_MAINWINDOW,
     DWMWA_SYSTEMBACKDROP_TYPE, DWM_SYSTEMBACKDROP_TYPE,
 };
 use windows::Win32::UI::Controls::MARGINS;
@@ -18,10 +18,12 @@ use windows::Win32::UI::Controls::MARGINS;
 /// non-material state before the error is returned, preventing a black glass client without a
 /// matching system backdrop.
 pub(crate) unsafe fn apply_mica(hwnd: HWND, enabled: bool) -> windows::core::Result<bool> {
+    // AUTO keeps the default Win32 title bar under DWM policy while leaving the client opaque.
+    // MAINWINDOW is reserved for the explicit experimental full-window option.
     let backdrop = if enabled {
         DWMSBT_MAINWINDOW
     } else {
-        DWMSBT_NONE
+        DWMSBT_AUTO
     };
     DwmSetWindowAttribute(
         hwnd,
@@ -42,11 +44,11 @@ pub(crate) unsafe fn apply_mica(hwnd: HWND, enabled: bool) -> windows::core::Res
     };
     if let Err(error) = DwmExtendFrameIntoClientArea(hwnd, &margins) {
         if enabled {
-            let none = DWMSBT_NONE;
+            let automatic_title_bar = DWMSBT_AUTO;
             let _ = DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_SYSTEMBACKDROP_TYPE,
-                (&none as *const DWM_SYSTEMBACKDROP_TYPE).cast(),
+                (&automatic_title_bar as *const DWM_SYSTEMBACKDROP_TYPE).cast(),
                 size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
             );
             let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS::default());
@@ -61,8 +63,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_experimental_material_boundary_only_uses_mica_or_none() {
+    fn the_experimental_material_boundary_uses_mica_or_system_title_bar_auto() {
+        assert_eq!(DWMSBT_AUTO, DWM_SYSTEMBACKDROP_TYPE(0));
         assert_eq!(DWMSBT_MAINWINDOW, DWM_SYSTEMBACKDROP_TYPE(2));
-        assert_eq!(DWMSBT_NONE, DWM_SYSTEMBACKDROP_TYPE(1));
     }
 }

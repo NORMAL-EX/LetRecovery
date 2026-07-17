@@ -18,9 +18,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, SetWindowTheme, DRAWITEMSTRUCT, HDF_OWNERDRAW, HDITEMW, HDI_TEXT,
     ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, LVCF_FMT, LVCF_TEXT,
-    LVCF_WIDTH, LVCOLUMNW, LVCOLUMNW_FORMAT, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVN_ITEMCHANGED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, ODT_HEADER,
+    LVCF_WIDTH, LVCOLUMNW, LVCOLUMNW_FORMAT, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED, LVITEMW,
+    LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVN_ITEMCHANGED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS,
+    NMHDR, NMLISTVIEW, ODT_HEADER,
 };
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
@@ -43,7 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCCREATE, WM_NOTIFY, WM_PAINT,
     WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
     WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_COMPOSITED, WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::backdrop;
@@ -150,6 +151,7 @@ const WM_PCA_FIRMWARE_READY: u32 = 0x8003;
 const WM_PCA_TARGET_READY: u32 = 0x8004;
 const WM_TOOL_WORKER_READY: u32 = 0x8005;
 const WM_PARTITIONS_READY: u32 = 0x8006;
+const WM_INSTALL_PARTITION_SELECTION_CHANGED: u32 = 0x8007;
 const BACKUP_TIMER_ID: usize = 1;
 const DOWNLOAD_TIMER_ID: usize = 2;
 const INSTALL_TIMER_ID: usize = 3;
@@ -172,6 +174,10 @@ fn device_change_requests_partition_refresh(event: usize) -> bool {
         event,
         DBT_DEVNODES_CHANGED | DBT_CONFIGCHANGED | DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE
     )
+}
+
+const fn list_view_selection_state_changed(changed: u32, old_state: u32, new_state: u32) -> bool {
+    changed & LVIF_STATE.0 != 0 && (old_state ^ new_state) & LVIS_SELECTED.0 != 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -593,12 +599,13 @@ mod layout_tests {
         bitlocker_gate_completion, centered_command_button_x, command_bar_layout,
         command_button_role, confirmed_tool_backend_request,
         device_change_requests_partition_refresh, download_failure_message,
-        initial_mutating_tool_state, install_partition_heading_y, minimum_window_size,
-        pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
-        pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
-        tool_backend_result_succeeded, BitLockerGateCompletion, Page, PcaTargetContext,
-        PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
-        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED,
+        initial_mutating_tool_state, install_partition_heading_y,
+        list_view_selection_state_changed, minimum_window_size, pca_target_error_blocks,
+        pca_target_probe_required, pca_target_result_is_current, pca_target_uses_uefi,
+        preferred_window_size, primary_state_refresh_for_page, tool_backend_result_succeeded,
+        BitLockerGateCompletion, Page, PcaTargetContext, PcaTargetKey, PcaTargetMessage,
+        PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
+        DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_executor::{DownloadFailureStage, DownloadWorkerError};
@@ -639,6 +646,26 @@ mod layout_tests {
         // must not start an expensive inventory scan.
         assert!(!device_change_requests_partition_refresh(0x8001));
         assert!(!device_change_requests_partition_refresh(0x8003));
+    }
+
+    #[test]
+    fn install_selection_work_is_limited_to_real_selected_bit_transitions() {
+        assert!(list_view_selection_state_changed(
+            LVIF_STATE.0,
+            0,
+            LVIS_SELECTED.0
+        ));
+        assert!(list_view_selection_state_changed(
+            LVIF_STATE.0,
+            LVIS_SELECTED.0,
+            0
+        ));
+        assert!(!list_view_selection_state_changed(LVIF_STATE.0, 1, 1));
+        assert!(!list_view_selection_state_changed(
+            LVIF_TEXT.0,
+            0,
+            LVIS_SELECTED.0
+        ));
     }
 
     #[test]
@@ -1198,6 +1225,7 @@ struct NativeWindow {
     partition_refresh_in_flight: bool,
     partition_refresh_requested: bool,
     partition_list_replacing: bool,
+    install_selection_update_pending: bool,
     image_volumes: Vec<crate::core::dism::ImageInfo>,
     install_volume_row_presented: bool,
     install_volume_layout_transition: Option<InstallVolumeLayoutTransition>,
@@ -1370,6 +1398,7 @@ impl NativeWindow {
             partition_refresh_in_flight: false,
             partition_refresh_requested: false,
             partition_list_replacing: false,
+            install_selection_update_pending: false,
             image_volumes: Vec::new(),
             install_volume_row_presented: false,
             install_volume_layout_transition: None,
@@ -2411,20 +2440,31 @@ impl NativeWindow {
     }
 
     fn control_palette(&self) -> theme::Palette {
-        if self.backdrop_active {
+        if self.uses_system_backdrop_surface() {
             self.palette.with_system_backdrop_surface()
         } else {
             self.palette
         }
     }
 
+    const fn uses_system_backdrop_surface(&self) -> bool {
+        // DWM owns the active/inactive transition. Keeping the child surfaces translucent makes
+        // them reveal DWM's neutral inactive fallback automatically and avoids re-entering
+        // Common Controls from WM_ACTIVATE to reinstall themes.
+        self.backdrop_active
+    }
+
     unsafe fn apply_experimental_window_backdrop(&mut self, hwnd: HWND) {
         let requested = self.app_config.experimental_window_backdrop;
-        match backdrop::apply_mica(hwnd, requested == ExperimentalWindowBackdrop::Mica) {
+        // The normal executable can be used as a diagnostic fallback in reduced environments.
+        // Never request a DWM material from WinPE even if a desktop config.json was copied in.
+        let endpoint_supports_mica = !crate::core::disk::DiskManager::is_pe_environment();
+        let enabled = requested == ExperimentalWindowBackdrop::Mica && endpoint_supports_mica;
+        match backdrop::apply_mica(hwnd, enabled) {
             Ok(active) => self.backdrop_active = active,
             Err(error) => {
                 self.backdrop_active = false;
-                if requested == ExperimentalWindowBackdrop::Mica {
+                if enabled {
                     log::warn!("实验性 Mica 不可用，已回退为普通背景: {error}");
                 }
             }
@@ -3520,6 +3560,12 @@ impl NativeWindow {
         }
         if redraw.is_some() {
             redraw::resume_client(hwnd, redraw);
+            // The shared title/description change text while their STATIC redraw is suspended.
+            // Publish both redirected child surfaces after the root transaction so DWM cannot
+            // retain an empty intermediate label surface from the previous page.
+            for label in [h.title, h.description] {
+                let _ = RedrawWindow(label, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+            }
         } else if manage_redraw {
             let _ = InvalidateRect(hwnd, None, false);
         }
@@ -9415,7 +9461,7 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
         let (window_width, window_height) =
             preferred_window_size(initial_dpi, screen_width, screen_height);
         let hwnd = CreateWindowExW(
-            WS_EX_CONTROLPARENT | WS_EX_COMPOSITED,
+            WS_EX_CONTROLPARENT,
             CLASS_NAME,
             PCWSTR(title.as_ptr()),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
@@ -9644,6 +9690,15 @@ unsafe extern "system" fn window_proc(
             if let Some(state) = state {
                 let message = *Box::from_raw(lparam.0 as *mut PartitionRefreshMessage);
                 state.finish_partition_refresh(hwnd, message);
+            }
+            LRESULT(0)
+        }
+        WM_INSTALL_PARTITION_SELECTION_CHANGED => {
+            if let Some(state) = state {
+                state.install_selection_update_pending = false;
+                let redraw = redraw::suspend(hwnd);
+                state.handle_install_partition_changed(hwnd);
+                redraw::resume_client(hwnd, redraw);
             }
             LRESULT(0)
         }
@@ -10309,8 +10364,34 @@ unsafe extern "system" fn window_proc(
                     }
                 } else if header.idFrom == ID_PARTITIONS as usize && header.code == LVN_ITEMCHANGED
                 {
-                    if !state.partition_list_replacing {
-                        state.handle_install_partition_changed(hwnd);
+                    let change = &*(lparam.0 as *const NMLISTVIEW);
+                    let selection_state_changed = list_view_selection_state_changed(
+                        change.uChanged.0,
+                        change.uOldState,
+                        change.uNewState,
+                    );
+                    if !state.partition_list_replacing
+                        && selection_state_changed
+                        && !state.install_selection_update_pending
+                    {
+                        // A single selection move normally sends one notification for the old row
+                        // and another for the new row. Defer and coalesce both so expensive target
+                        // checks and layout run once against the final ListView state, outside the
+                        // control's synchronous notification/paint transaction.
+                        state.install_selection_update_pending = true;
+                        if PostMessageW(
+                            hwnd,
+                            WM_INSTALL_PARTITION_SELECTION_CHANGED,
+                            WPARAM(0),
+                            LPARAM(0),
+                        )
+                        .is_err()
+                        {
+                            state.install_selection_update_pending = false;
+                            let redraw = redraw::suspend(hwnd);
+                            state.handle_install_partition_changed(hwnd);
+                            redraw::resume_client(hwnd, redraw);
+                        }
                     }
                 } else if header.idFrom == crate::native_ui::pages::backup::ID_SOURCE_LIST as usize
                     && header.code == LVN_ITEMCHANGED
@@ -10408,14 +10489,14 @@ unsafe extern "system" fn window_proc(
                 let _ = SetTextColor(dc, state.control_palette().text);
                 let _ = SetBkColor(
                     dc,
-                    if state.backdrop_active {
+                    if state.uses_system_backdrop_surface() {
                         COLORREF(0)
                     } else {
                         state.palette.window
                     },
                 );
                 let _ = SetBkMode(dc, TRANSPARENT);
-                let brush = if state.backdrop_active {
+                let brush = if state.uses_system_backdrop_surface() {
                     system_backdrop_surface_brush()
                 } else {
                     state.brushes.window
@@ -10430,14 +10511,14 @@ unsafe extern "system" fn window_proc(
                 let _ = SetTextColor(dc, state.control_palette().text);
                 let _ = SetBkColor(
                     dc,
-                    if state.backdrop_active {
+                    if state.uses_system_backdrop_surface() {
                         COLORREF(0)
                     } else {
                         state.palette.window
                     },
                 );
                 let _ = SetBkMode(dc, TRANSPARENT);
-                let brush = if state.backdrop_active {
+                let brush = if state.uses_system_backdrop_surface() {
                     system_backdrop_surface_brush()
                 } else {
                     state.brushes.window
@@ -10453,7 +10534,7 @@ unsafe extern "system" fn window_proc(
                 let dc = BeginPaint(hwnd, &mut paint);
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let surface = if state.backdrop_active {
+                let surface = if state.uses_system_backdrop_surface() {
                     system_backdrop_surface_brush()
                 } else {
                     state.brushes.window
@@ -10469,7 +10550,7 @@ unsafe extern "system" fn window_proc(
                         right: state.scale(NAV_WIDTH),
                         bottom: rect.bottom - state.scale(COMMAND_HEIGHT),
                     };
-                    if !state.backdrop_active {
+                    if !state.uses_system_backdrop_surface() {
                         let _ = FillRect(dc, &nav_rect, state.brushes.nav);
                     }
                     let footer_rect = RECT {
@@ -10478,7 +10559,7 @@ unsafe extern "system" fn window_proc(
                         right: rect.right,
                         bottom: rect.bottom,
                     };
-                    if !state.backdrop_active {
+                    if !state.uses_system_backdrop_surface() {
                         let _ = FillRect(dc, &footer_rect, state.brushes.window);
                     }
                     draw_line(

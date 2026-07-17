@@ -1,5 +1,3 @@
-use std::sync::Once;
-
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     BOOL, COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -10,19 +8,18 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
-    CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GdiFlush,
-    GetTextMetricsW, GetWindowDC, InvalidateRect, LineTo, MoveToEx, RedrawWindow, ReleaseDC,
-    RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor,
-    SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER,
-    DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE,
-    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE,
-    RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
+    CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
+    GdiFlush, GetTextMetricsW, GetWindowDC, InvalidateRect, LineTo, MoveToEx, RedrawWindow,
+    ReleaseDC, RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode,
+    SetTextColor, SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
+    DT_WORDBREAK, HALFTONE, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME,
+    RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    BeginBufferedPaint, BufferedPaintInit, BufferedPaintSetAlpha, EndBufferedPaint,
-    GetComboBoxInfo, SetWindowTheme, BPBF_TOPDOWNDIB, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
-    CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW, CDRF_SKIPDEFAULT, CDRF_SKIPPOSTPAINT, COMBOBOXINFO,
-    HDITEMW, HDI_TEXT, LVIF_TEXT, LVITEMW, NMLVCUSTOMDRAW, NM_CUSTOMDRAW,
+    GetComboBoxInfo, SetWindowTheme, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT,
+    CDRF_NOTIFYITEMDRAW, CDRF_SKIPDEFAULT, CDRF_SKIPPOSTPAINT, COMBOBOXINFO, HDITEMW, HDI_TEXT,
+    LVIF_TEXT, LVITEMW, NMLVCUSTOMDRAW, NM_CUSTOMDRAW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -39,16 +36,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOSIZE, SWP_NOZORDER, WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND,
     WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
-    WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER, WS_EX_CLIENTEDGE, WS_EX_LAYERED,
+    WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE,
+    WS_EX_LAYERED,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 use super::controls::{
     alpha_blend_premultiplied_bgra, button_visual, draw_alpha_composited_text,
-    draw_antialiased_control_frame, draw_backdrop_static_text, draw_nested_backdrop_static_text,
-    draw_opaque_surface_text, draw_progress, fill_alpha_opaque_rect, fill_round_rect_antialiased,
-    rounded_control_frame_geometry, ButtonRole, ControlState, InnoMetrics, ProgressRole,
+    draw_antialiased_control_frame, draw_opaque_surface_text, draw_progress,
+    fill_alpha_opaque_rect, fill_round_rect_antialiased, rounded_control_frame_geometry,
+    ButtonRole, ControlState, InnoMetrics, ProgressRole,
 };
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
@@ -192,13 +190,17 @@ impl Palette {
                 MaterialSurfaceState::Normal => (rgb(72, 88, 120), 180),
                 MaterialSurfaceState::Hot => (rgb(85, 105, 145), 200),
                 MaterialSurfaceState::Pressed => (rgb(60, 75, 105), 190),
-                MaterialSurfaceState::Disabled => (rgb(86, 98, 122), 112),
+                MaterialSurfaceState::Disabled => (rgb(64, 78, 108), 154),
             };
             MaterialSurfaceVisual {
                 fill,
                 border: rgb(145, 165, 205),
                 fill_alpha,
-                border_alpha: 130,
+                border_alpha: if matches!(state, MaterialSurfaceState::Disabled) {
+                    104
+                } else {
+                    130
+                },
             }
         } else {
             let (fill, fill_alpha) = match state {
@@ -207,13 +209,17 @@ impl Palette {
                 MaterialSurfaceState::Normal => (rgb(232, 239, 248), 118),
                 MaterialSurfaceState::Hot => (rgb(238, 244, 252), 145),
                 MaterialSurfaceState::Pressed => (rgb(214, 224, 236), 138),
-                MaterialSurfaceState::Disabled => (rgb(235, 240, 247), 76),
+                MaterialSurfaceState::Disabled => (rgb(224, 233, 244), 104),
             };
             MaterialSurfaceVisual {
                 fill,
                 border: rgb(113, 131, 154),
                 fill_alpha,
-                border_alpha: 64,
+                border_alpha: if matches!(state, MaterialSurfaceState::Disabled) {
+                    52
+                } else {
+                    64
+                },
             }
         }
     }
@@ -349,8 +355,8 @@ const fn native_theme_class(kind: NativeControlKind, dark: bool) -> NativeThemeC
         (
             NativeControlKind::General
             | NativeControlKind::ScrollableField
-            | NativeControlKind::List
-            | NativeControlKind::ListView,
+            | NativeControlKind::ListView
+            | NativeControlKind::List,
             true,
         ) => NativeThemeClass::DarkExplorer,
         _ => NativeThemeClass::Explorer,
@@ -653,46 +659,67 @@ unsafe fn paint_backdrop_static(hwnd: HWND, palette: Palette) {
     let mut text = vec![0u16; length + 1];
     let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
     text.truncate(copied);
-    if !text.is_empty() {
-        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
-        let old_font = (font.0 != 0)
-            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        let mut flags = DT_NOPREFIX;
-        flags |= match style & 0x3 {
-            1 => DT_CENTER,
-            2 => DT_RIGHT,
-            _ => windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0),
-        };
-        let dpi = GetDpiForWindow(hwnd).max(96);
-        if style & 0x0200 != 0 || rect.bottom - rect.top <= scale(36, dpi) {
-            flags |= DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
-        } else {
-            flags |= DT_WORDBREAK;
-        }
-        let parent_class = GetParent(hwnd)
-            .ok()
-            .map(|parent| control_class_name(parent))
-            .unwrap_or_default();
-        let nested_content = static_uses_nested_material_mask(&parent_class);
-        let color = if IsWindowEnabled(hwnd).as_bool() {
-            if nested_content {
-                // Pure COLORREF(0) is the full-client DWM glass key. Keep nested glyphs visibly
-                // black without turning the entire STATIC rectangle into an opaque strip.
-                palette.foreground_black()
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width > 0 && height > 0 {
+        let buffer_dc = CreateCompatibleDC(dc);
+        let bitmap = CreateCompatibleBitmap(dc, width, height);
+        if !buffer_dc.is_invalid() && !bitmap.is_invalid() {
+            let old_bitmap = SelectObject(buffer_dc, bitmap);
+            let background = CreateSolidBrush(palette.system_backdrop_edge_fallback());
+            let local = RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+            let _ = FillRect(buffer_dc, &local, background);
+            let _ = DeleteObject(background);
+            let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+            let old_font = (font.0 != 0).then(|| {
+                SelectObject(
+                    buffer_dc,
+                    windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _),
+                )
+            });
+            let _ = SetBkMode(buffer_dc, TRANSPARENT);
+            let _ = SetTextColor(
+                buffer_dc,
+                if IsWindowEnabled(hwnd).as_bool() {
+                    palette.foreground_black()
+                } else {
+                    palette.text_disabled
+                },
+            );
+            let mut draw_rect = local;
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            let mut flags = DT_NOPREFIX;
+            flags |= match style & 0x3 {
+                1 => DT_CENTER,
+                2 => DT_RIGHT,
+                _ => windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0),
+            };
+            let dpi = GetDpiForWindow(hwnd).max(96);
+            if style & 0x0200 != 0 || height <= scale(36, dpi) {
+                flags |= DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
             } else {
-                palette.text
+                flags |= DT_WORDBREAK;
             }
-        } else {
-            palette.text_disabled
-        };
-        if nested_content {
-            draw_nested_backdrop_static_text(hwnd, dc, &text, &mut rect, flags, color);
-        } else {
-            draw_backdrop_static_text(hwnd, dc, &text, &mut rect, flags, color);
+            if !text.is_empty() {
+                let _ = DrawTextW(buffer_dc, &mut text, &mut draw_rect, flags);
+            }
+            let _ = GdiFlush();
+            let _ = BitBlt(dc, 0, 0, width, height, buffer_dc, 0, 0, SRCCOPY);
+            if let Some(old_font) = old_font {
+                let _ = SelectObject(buffer_dc, old_font);
+            }
+            let _ = SelectObject(buffer_dc, old_bitmap);
         }
-        if let Some(old_font) = old_font {
-            let _ = SelectObject(dc, old_font);
+        if !bitmap.is_invalid() {
+            let _ = DeleteObject(bitmap);
+        }
+        if !buffer_dc.is_invalid() {
+            let _ = DeleteDC(buffer_dc);
         }
     }
     let _ = EndPaint(hwnd, &paint);
@@ -722,10 +749,6 @@ unsafe fn control_class_name(control: HWND) -> String {
     let mut buffer = [0u16; 64];
     let length = GetClassNameW(control, &mut buffer);
     String::from_utf16_lossy(&buffer[..usize::try_from(length.max(0)).unwrap_or(0)])
-}
-
-fn static_uses_nested_material_mask(parent_class: &str) -> bool {
-    parent_class.eq_ignore_ascii_case("LetRecovery.Native.InnoDialogContent")
 }
 
 fn is_edit_class(class_name: &str) -> bool {
@@ -817,6 +840,23 @@ unsafe fn apply_control_frame_styles(control: HWND, style: isize, ex_style: isiz
 /// Themes both halves of a report ListView. The header is a separate HWND and otherwise retains a
 /// light background even when the list client colors are explicitly dark.
 pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND> {
+    // A report's header is a real child HWND. Microsoft documents that a parent without
+    // WS_CLIPCHILDREN may draw over a child and make the child repaint afterward. ListView theme
+    // timers then expose precisely that intermediate frame (body colour covering the header).
+    // Apply the style centrally to every report before installing either painter.
+    let style = GetWindowLongPtrW(list, GWL_STYLE);
+    if style & WS_CLIPCHILDREN.0 as isize == 0 {
+        let _ = SetWindowLongPtrW(list, GWL_STYLE, style | WS_CLIPCHILDREN.0 as isize);
+        let _ = SetWindowPos(
+            list,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
     // USER32/comctl32 can repaint a square non-client border after hover, focus or header paint.
     // Keep the report implementation native, but reserve its outer frame for the deterministic
     // antialiased overlay installed below.
@@ -867,7 +907,13 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
         return None;
     }
     let header = HWND(header.0 as *mut _);
-    apply_control_theme(header, palette, NativeControlKind::Header);
+    // The header is completely painted by `header_subclass`. Leaving ItemsView active at the same
+    // time lets UxTheme run a buffered hot/focus transition over that finished frame: the custom
+    // text disappears for several timer ticks and then returns, which looks like a permanently
+    // flickering hardware table. Disable only the header's visual-style renderer; the ListView
+    // body and its non-client scrollbar retain ItemsView, sizing/hit-testing stay native, and one
+    // deterministic painter owns every visible header pixel.
+    let _ = SetWindowTheme(header, w!(""), w!(""));
     // A report header is parented to the ListView itself, so HDF_OWNERDRAW sends WM_DRAWITEM to
     // the ListView instead of our dialog content window.  Subclassing the header is the only
     // deterministic way to avoid dark ItemsView drawing black text on a black header.
@@ -1008,6 +1054,19 @@ unsafe fn redraw_control_frame(control: HWND) {
         None,
         None,
         RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE,
+    );
+}
+
+unsafe fn repaint_list_view_header_now(list: HWND) {
+    let header = SendMessageW(list, 0x101f, WPARAM(0), LPARAM(0)); // LVM_GETHEADER
+    if header.0 == 0 {
+        return;
+    }
+    let _ = RedrawWindow(
+        HWND(header.0 as *mut _),
+        None,
+        None,
+        RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
     );
 }
 
@@ -1867,10 +1926,16 @@ unsafe extern "system" fn list_view_subclass(
                 let _ = GetClientRect(hwnd, &mut client);
                 fill(dc, &client, palette_from_reference(reference_data).edit);
                 let _ = EndPaint(hwnd, &paint);
+                repaint_list_view_header_now(hwnd);
                 paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
                 return LRESULT(0);
             }
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            // The v6 ListView double buffer can publish its body after the child header has
+            // painted, temporarily replacing only the header background. Repaint that single
+            // child synchronously after the body transaction; `paint_header` never invalidates
+            // the report, so this ordering cannot form a feedback loop.
+            repaint_list_view_header_now(hwnd);
             // Checkbox glyphs only — the list frame stays under the Windows 11 ItemsView /
             // Explorer theme so corners match other Fluent controls without blue residual feet.
             paint_list_view_checkboxes(hwnd, palette_from_reference(reference_data));
@@ -1884,11 +1949,14 @@ unsafe extern "system" fn list_view_subclass(
         }
         message if native_scrollbar_may_repaint_frame(message) => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            // UxTheme drives native scrollbar hover transitions with WM_TIMER. Repainting the
-            // complete report for every animation tick makes both the header and rows flash even
-            // on full Windows. The stock control already painted that animation; no frame update
-            // is required until an actual scroll/origin message arrives.
+            // UxTheme drives native scrollbar hover transitions with WM_TIMER. Invalidating the
+            // complete report for every animation tick makes both the header and rows flash, but
+            // letting the timer finish untouched can overwrite one 8x8 rounded corner in light
+            // mode. Restore only the authoritative frame pixels synchronously: no update region,
+            // header paint or row paint is generated.
             if message == 0x0113 {
+                repaint_list_view_header_now(hwnd);
+                paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
                 return result;
             }
             if list_view_scrolls_client_pixels(message) {
@@ -1998,7 +2066,7 @@ unsafe extern "system" fn single_line_edit_subclass(
     match message {
         WM_PAINT => {
             let palette = palette_from_reference(reference_data);
-            paint_single_line_edit_client_opaque(hwnd);
+            paint_single_line_edit_client_opaque(hwnd, palette);
             paint_rounded_control_frame(hwnd, palette);
             LRESULT(0)
         }
@@ -2056,17 +2124,12 @@ unsafe extern "system" fn single_line_edit_subclass(
     }
 }
 
-/// Paints the stock Edit client through UxTheme's top-down buffer and makes the result opaque.
-/// This is Microsoft's supported GDI-on-glass path: USER32 still owns text, selection, password,
-/// IME and background rendering, while the explicit alpha prevents black glyphs becoming DWM's
-/// glass key. The child window itself deliberately remains non-layered.
-unsafe fn paint_single_line_edit_client_opaque(hwnd: HWND) {
+/// Paints the stock Edit client into one compatible bitmap and publishes it atomically. USER32
+/// still owns text, selection, password, IME and background rendering; avoiding a second UxTheme
+/// buffered surface prevents DWM from briefly presenting an empty redirected Edit child.
+unsafe fn paint_single_line_edit_client_opaque(hwnd: HWND, palette: Palette) {
     const WM_PRINTCLIENT: u32 = 0x0318;
     const PRF_CLIENT: isize = 0x0000_0004;
-    static BUFFERED_PAINT_INIT: Once = Once::new();
-    BUFFERED_PAINT_INIT.call_once(|| {
-        let _ = BufferedPaintInit();
-    });
 
     let mut paint = PAINTSTRUCT::default();
     let target_dc = BeginPaint(hwnd, &mut paint);
@@ -2078,9 +2141,17 @@ unsafe fn paint_single_line_edit_client_opaque(hwnd: HWND) {
         && client.right > client.left
         && client.bottom > client.top;
     if client_valid {
-        let mut buffer_dc = HDC::default();
-        let buffer = BeginBufferedPaint(target_dc, &client, BPBF_TOPDOWNDIB, None, &mut buffer_dc);
-        if buffer != 0 && !buffer_dc.is_invalid() {
+        let buffer_dc = CreateCompatibleDC(target_dc);
+        let bitmap = CreateCompatibleBitmap(
+            target_dc,
+            client.right - client.left,
+            client.bottom - client.top,
+        );
+        if !buffer_dc.is_invalid() && !bitmap.is_invalid() {
+            let old_bitmap = SelectObject(buffer_dc, bitmap);
+            let background = CreateSolidBrush(palette.edit);
+            let _ = FillRect(buffer_dc, &client, background);
+            let _ = DeleteObject(background);
             let _ = SetPropW(
                 hwnd,
                 EDIT_OPAQUE_BUFFER_PROPERTY,
@@ -2094,8 +2165,18 @@ unsafe fn paint_single_line_edit_client_opaque(hwnd: HWND) {
             );
             let _ = RemovePropW(hwnd, EDIT_OPAQUE_BUFFER_PROPERTY);
             let _ = GdiFlush();
-            let _ = BufferedPaintSetAlpha(buffer, None, 255);
-            let _ = EndBufferedPaint(buffer, true);
+            let _ = BitBlt(
+                target_dc,
+                client.left,
+                client.top,
+                client.right - client.left,
+                client.bottom - client.top,
+                buffer_dc,
+                0,
+                0,
+                SRCCOPY,
+            );
+            let _ = SelectObject(buffer_dc, old_bitmap);
         } else {
             let _ = DefSubclassProc(
                 hwnd,
@@ -2103,6 +2184,12 @@ unsafe fn paint_single_line_edit_client_opaque(hwnd: HWND) {
                 WPARAM(target_dc.0 as usize),
                 LPARAM(PRF_CLIENT),
             );
+        }
+        if !bitmap.is_invalid() {
+            let _ = DeleteObject(bitmap);
+        }
+        if !buffer_dc.is_invalid() {
+            let _ = DeleteDC(buffer_dc);
         }
     }
     let _ = EndPaint(hwnd, &paint);
@@ -3895,20 +3982,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_nested_tool_content_uses_the_deterministic_static_mask() {
-        assert!(static_uses_nested_material_mask(
-            "LetRecovery.Native.InnoDialogContent"
-        ));
-        assert!(static_uses_nested_material_mask(
-            "letrecovery.native.innodialogcontent"
-        ));
-        assert!(!static_uses_nested_material_mask(
-            "LetRecovery.Native.InnoDialog"
-        ));
-        assert!(!static_uses_nested_material_mask("Static"));
-    }
-
-    #[test]
     fn inno_windows11_reference_colors_are_stable() {
         assert_eq!(Palette::LIGHT.window, rgb(249, 249, 249));
         assert_eq!(Palette::LIGHT.edit, rgb(255, 255, 255));
@@ -4287,6 +4360,9 @@ mod tests {
             native_theme_class(NativeControlKind::ListView, true),
             NativeThemeClass::DarkExplorer
         );
+        // Keep the report's native non-client scrollbar in the supported dark Explorer family.
+        // FlatSB colour overrides are unavailable in comctl32 v6 and ItemsView produces a bright
+        // white scrollbar trough on the dark Mica surface.
         assert_eq!(
             native_theme_class(NativeControlKind::Field, false),
             NativeThemeClass::Cfd

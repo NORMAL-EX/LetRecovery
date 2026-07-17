@@ -240,6 +240,7 @@ struct DialogState {
     dpi: u32,
     palette: Palette,
     brushes: Brushes,
+    backdrop_active: bool,
     font: HFONT,
     heading_font: HFONT,
     labels: [String; 5],
@@ -257,6 +258,7 @@ impl DialogState {
             dpi: 96,
             palette,
             brushes: Brushes::new(palette),
+            backdrop_active: false,
             font: HFONT::default(),
             heading_font: HFONT::default(),
             labels: [
@@ -317,17 +319,18 @@ impl DialogState {
     unsafe fn refresh_palette_and_backdrop(&mut self) {
         let base = Palette::system();
         let requested = AppConfig::load().experimental_window_backdrop;
-        let backdrop_active =
-            match backdrop::apply_mica(self.hwnd, requested == ExperimentalWindowBackdrop::Mica) {
-                Ok(active) => active,
-                Err(error) => {
-                    if requested == ExperimentalWindowBackdrop::Mica {
-                        log::warn!("工具窗口 Mica 不可用，已回退为普通背景: {error}");
-                    }
-                    false
+        let endpoint_supports_mica = !crate::core::disk::DiskManager::is_pe_environment();
+        let enabled = requested == ExperimentalWindowBackdrop::Mica && endpoint_supports_mica;
+        self.backdrop_active = match backdrop::apply_mica(self.hwnd, enabled) {
+            Ok(active) => active,
+            Err(error) => {
+                if enabled {
+                    log::warn!("工具窗口 Mica 不可用，已回退为普通背景: {error}");
                 }
-            };
-        self.palette = if backdrop_active {
+                false
+            }
+        };
+        self.palette = if self.backdrop_active {
             base.with_system_backdrop_surface()
         } else {
             base

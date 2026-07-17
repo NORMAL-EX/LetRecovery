@@ -10,7 +10,9 @@ use std::cell::RefCell;
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Graphics::Gdi::HFONT;
+use windows::Win32::Graphics::Gdi::{
+    RedrawWindow, HFONT, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+};
 use windows::Win32::UI::Controls::{
     LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW,
     LVM_INSERTITEMW, LVM_SETBKCOLOR, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
@@ -19,9 +21,9 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, BS_AUTOCHECKBOX, BS_OWNERDRAW,
-    CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, SW_HIDE, SW_SHOW,
-    WM_SETFONT, WS_BORDER, WS_TABSTOP,
+    IsWindowVisible, MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, BS_AUTOCHECKBOX,
+    BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
+    SW_HIDE, SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP,
 };
 
 use super::download::PageRect;
@@ -208,6 +210,11 @@ impl HardwareInfoPage {
     }
 
     pub unsafe fn set_rows(&self, rows: Vec<HardwareInfoRow>) {
+        // Hardware enumeration can complete while this page is already visible. All mutations run
+        // inside the current window message and are published with one synchronous final redraw.
+        // Do not toggle WM_SETREDRAW on this child: DefWindowProc implements it by changing
+        // WS_VISIBLE, which can make DWM publish a redirected frame without the real Header child.
+        let visible = IsWindowVisible(self.report).as_bool();
         let _ = SendMessageW(self.report, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
         for (index, row) in rows.iter().enumerate() {
             insert_hardware_item(self.report, index as i32, 0, &row.category);
@@ -215,6 +222,14 @@ impl HardwareInfoPage {
             insert_hardware_item(self.report, index as i32, 2, &row.value);
         }
         *self.rows.borrow_mut() = rows;
+        if visible {
+            let _ = RedrawWindow(
+                self.report,
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            );
+        }
     }
 
     /// Refreshes the controls whose captions are owned by this page.

@@ -137,7 +137,16 @@ struct ButtonSurfaceVisual {
 pub fn button_visual(palette: Palette, role: ButtonRole, state: ControlState) -> ButtonVisual {
     if state.disabled {
         return ButtonVisual {
-            fill: if palette.dark {
+            fill: if palette.window.0 == 0 && palette.nav.0 == 0 {
+                // Keep disabled material actions visibly blue-gray instead of collapsing into a
+                // flat neutral slab. Secondary buttons publish the alpha surface resolved below;
+                // disabled primary actions use this restrained opaque equivalent.
+                if palette.dark {
+                    rgb(60, 70, 92)
+                } else {
+                    rgb(226, 233, 242)
+                }
+            } else if palette.dark {
                 rgb(47, 47, 47)
             } else {
                 rgb(249, 249, 249)
