@@ -5,13 +5,18 @@ use std::sync::Arc;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+use windows::Win32::Graphics::Dwm::{
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_AUTO, DWMSBT_MAINWINDOW,
+    DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWM_SYSTEMBACKDROP_TYPE,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-    GetMonitorInfoW, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, RedrawWindow,
-    SelectObject, SetBkColor, SetBkMode, SetTextColor, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PEN_STYLE,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
+    GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx,
+    RedrawWindow, SelectObject, SetBkColor, SetBkMode, SetTextColor, BLACK_BRUSH, DT_END_ELLIPSIS,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, HFONT, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PEN_STYLE, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME,
+    RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -19,7 +24,8 @@ use windows::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, LVCF_FMT, LVCF_TEXT,
     LVCF_WIDTH, LVCOLUMNW, LVCOLUMNW_FORMAT, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
     LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVN_ITEMCHANGED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, ODT_HEADER,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS, MARGINS, NMHDR,
+    ODT_HEADER,
 };
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
@@ -31,22 +37,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetClientRect, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, IsWindowVisible, KillTimer,
     LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE, CBS_DROPDOWNLIST, CREATESTRUCTW,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GWLP_USERDATA, HICON, HMENU,
-    ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, MINMAXINFO, MSG,
-    SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
+    SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE,
+    CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE,
+    ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW,
+    IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG, SM_CXICON, SM_CXSCREEN,
+    SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCCREATE, WM_NOTIFY, WM_PAINT, WM_SETFONT,
-    WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
-    WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT,
-    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCCREATE, WM_NOTIFY, WM_PAINT,
+    WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_CONTROLPARENT, WS_EX_LAYERED, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::controls::{center_single_line_edit_in_row, child, draw_inno_button, wide, ButtonRole};
-use super::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
+use super::dialog::{
+    DialogButtons, DialogResult, DialogShell, DialogSpec, FIRST_PRESENTATION_ALPHA,
+};
 use super::driver_transfer_dialog::NativeDriverTransferDialog;
 use super::layout::{centered_control_y_ceil, measure_text, measured_button_width, LayoutMetrics};
 use super::pages::advanced::{
@@ -94,6 +103,7 @@ use super::tools::password_reset::{
 use super::tools::quick_partition::{NativeQuickPartitionDialog, QuickPartitionDialogIntent};
 use super::tools::storage_driver::{NativeStorageDriverDialog, StorageDriverDialogIntent};
 use super::tools::time_sync::{NativeTimeSyncDialog, TimeSyncDialogIntent};
+use crate::core::app_config::ExperimentalWindowBackdrop;
 use crate::core::native_backup_controller::{plan_backup_launch, BackupLaunchIntent};
 use crate::core::native_backup_executor::{execute_backup, BackupExecution, BackupWorkerMessage};
 use crate::core::native_bitlocker_gate::{
@@ -132,6 +142,37 @@ use crate::PreloadedConfig;
 
 const CLASS_NAME: PCWSTR = w!("LetRecovery.Native.MainWindow");
 const SS_CENTER_STYLE: i32 = 0x0000_0001;
+
+const fn requested_system_backdrop(
+    backdrop: ExperimentalWindowBackdrop,
+) -> DWM_SYSTEMBACKDROP_TYPE {
+    match backdrop {
+        ExperimentalWindowBackdrop::None => DWMSBT_NONE,
+        ExperimentalWindowBackdrop::Auto => DWMSBT_AUTO,
+        ExperimentalWindowBackdrop::Mica => DWMSBT_MAINWINDOW,
+        ExperimentalWindowBackdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
+        ExperimentalWindowBackdrop::MicaAlt => DWMSBT_TABBEDWINDOW,
+    }
+}
+
+/// Explicit materials cover the full client in both themes. Light mode is safe only because every
+/// transparent caption uses `DTT_COMPOSITED` and every entity surface establishes an opaque BGRA
+/// base before native GDI text is drawn; near-black RGB alone is not an alpha strategy.
+const fn full_client_backdrop_is_safe(
+    requested: ExperimentalWindowBackdrop,
+    _dark_theme: bool,
+) -> bool {
+    matches!(
+        requested,
+        ExperimentalWindowBackdrop::Mica
+            | ExperimentalWindowBackdrop::Acrylic
+            | ExperimentalWindowBackdrop::MicaAlt
+    )
+}
+
+unsafe fn system_backdrop_surface_brush() -> HBRUSH {
+    HBRUSH(GetStockObject(BLACK_BRUSH).0)
+}
 // Keeps the longest English navigation caption readable at 100-200% DPI.
 const NAV_WIDTH: i32 = 180;
 const HEADER_HEIGHT: i32 = 66;
@@ -141,6 +182,7 @@ const WM_IMAGE_INFO_READY: u32 = 0x8002;
 const WM_PCA_FIRMWARE_READY: u32 = 0x8003;
 const WM_PCA_TARGET_READY: u32 = 0x8004;
 const WM_TOOL_WORKER_READY: u32 = 0x8005;
+const WM_PARTITIONS_READY: u32 = 0x8006;
 const BACKUP_TIMER_ID: usize = 1;
 const DOWNLOAD_TIMER_ID: usize = 2;
 const INSTALL_TIMER_ID: usize = 3;
@@ -148,8 +190,60 @@ const TOOL_DIALOG_TIMER_ID: usize = 4;
 const CATALOGUE_TIMER_ID: usize = 5;
 const HARDWARE_COPY_TIMER_ID: usize = 6;
 const INSTALL_VOLUME_LAYOUT_TIMER_ID: usize = 7;
+const PARTITION_REFRESH_TIMER_ID: usize = 8;
 const INSTALL_VOLUME_LAYOUT_TICK_MS: u32 = 40;
 const INSTALL_VOLUME_LAYOUT_FRAMES: u8 = 3;
+const PARTITION_REFRESH_DEBOUNCE_MS: u32 = 350;
+
+const DBT_DEVNODES_CHANGED: usize = 0x0007;
+const DBT_CONFIGCHANGED: usize = 0x0018;
+const DBT_DEVICEARRIVAL: usize = 0x8000;
+const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
+
+fn device_change_requests_partition_refresh(event: usize) -> bool {
+    matches!(
+        event,
+        DBT_DEVNODES_CHANGED | DBT_CONFIGCHANGED | DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PartitionSelectionKey {
+    letter: String,
+    disk_number: Option<u32>,
+    partition_number: Option<u32>,
+    total_size_mb: u64,
+}
+
+impl From<&crate::core::disk::Partition> for PartitionSelectionKey {
+    fn from(partition: &crate::core::disk::Partition) -> Self {
+        Self {
+            letter: partition.letter.clone(),
+            disk_number: partition.disk_number,
+            partition_number: partition.partition_number,
+            total_size_mb: partition.total_size_mb,
+        }
+    }
+}
+
+impl PartitionSelectionKey {
+    fn matches(&self, partition: &crate::core::disk::Partition) -> bool {
+        match (
+            self.disk_number,
+            self.partition_number,
+            partition.disk_number,
+            partition.partition_number,
+        ) {
+            (Some(expected_disk), Some(expected_partition), Some(disk), Some(partition_number)) => {
+                expected_disk == disk && expected_partition == partition_number
+            }
+            _ => {
+                self.letter.eq_ignore_ascii_case(&partition.letter)
+                    && self.total_size_mb == partition.total_size_mb
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct HardwareCopyFeedback {
@@ -187,6 +281,11 @@ struct ImageInfoMessage {
         crate::core::native_image_source::InspectedImageSource,
         crate::core::native_image_source::ImageSourceError,
     >,
+}
+
+struct PartitionRefreshMessage {
+    generation: u64,
+    result: Result<Vec<crate::core::disk::Partition>, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,11 +519,19 @@ fn preferred_window_size(dpi: i32, screen_width: i32, screen_height: i32) -> (i3
 
 fn minimum_window_size(dpi: i32, work_width: i32, work_height: i32) -> (i32, i32) {
     let dpi = dpi.max(96);
-    let available_width = (work_width - 16 * dpi / 96).max(1);
-    let available_height = (work_height - 40 * dpi / 96).max(1);
+    // `rcWork` already excludes the taskbar and other app bars. Subtracting another DPI-scaled
+    // title-bar allowance here made the minimum client area roughly 80 px too short at 200% DPI,
+    // so the last About-page action overlapped the stable command/status bar in low-resolution PE.
+    // Clamp directly to the monitor work area; the non-client frame is already part of the tracked
+    // window size reported through WM_GETMINMAXINFO.
+    let available_width = work_width.max(1);
+    let available_height = work_height.max(1);
     (
         (800 * dpi / 96).min(available_width),
-        (560 * dpi / 96).min(available_height),
+        // 600 logical pixels is the compact page/command-bar baseline.  About can need a second
+        // measured button row after localization, so the old 560 baseline was not sufficient even
+        // on an otherwise roomy 96-DPI monitor.
+        (600 * dpi / 96).min(available_height),
     )
 }
 
@@ -517,12 +624,14 @@ impl InstallVolumeLayoutTransition {
 mod layout_tests {
     use super::{
         bitlocker_gate_completion, centered_command_button_x, command_bar_layout,
-        command_button_role, confirmed_tool_backend_request, download_failure_message,
+        command_button_role, confirmed_tool_backend_request,
+        device_change_requests_partition_refresh, download_failure_message,
         initial_mutating_tool_state, install_partition_heading_y, minimum_window_size,
         pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
         pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
         tool_backend_result_succeeded, BitLockerGateCompletion, Page, PcaTargetContext,
-        PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh,
+        PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
+        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_executor::{DownloadFailureStage, DownloadWorkerError};
@@ -544,9 +653,25 @@ mod layout_tests {
 
     #[test]
     fn minimum_window_tracks_dpi_but_never_exceeds_the_work_area() {
-        assert_eq!(minimum_window_size(96, 1920, 1080), (800, 560));
-        assert_eq!(minimum_window_size(144, 1280, 720), (1200, 660));
-        assert_eq!(minimum_window_size(192, 1280, 720), (1248, 640));
+        assert_eq!(minimum_window_size(96, 1920, 1080), (800, 600));
+        assert_eq!(minimum_window_size(144, 1280, 720), (1200, 720));
+        assert_eq!(minimum_window_size(192, 1280, 720), (1280, 720));
+    }
+
+    #[test]
+    fn partition_refresh_only_accepts_inventory_changing_device_events() {
+        for event in [
+            DBT_DEVNODES_CHANGED,
+            DBT_CONFIGCHANGED,
+            DBT_DEVICEARRIVAL,
+            DBT_DEVICEREMOVECOMPLETE,
+        ] {
+            assert!(device_change_requests_partition_refresh(event));
+        }
+        // Query/remove-pending notifications require their normal DefWindowProc contract and
+        // must not start an expensive inventory scan.
+        assert!(!device_change_requests_partition_refresh(0x8001));
+        assert!(!device_change_requests_partition_refresh(0x8003));
     }
 
     #[test]
@@ -1098,9 +1223,14 @@ struct NativeWindow {
     font_brand: HFONT,
     palette: theme::Palette,
     brushes: Brushes,
+    backdrop_active: bool,
     handles: Option<Handles>,
     app_config: crate::core::app_config::AppConfig,
     partitions: Vec<crate::core::disk::Partition>,
+    partition_refresh_generation: u64,
+    partition_refresh_in_flight: bool,
+    partition_refresh_requested: bool,
+    partition_list_replacing: bool,
     image_volumes: Vec<crate::core::dism::ImageInfo>,
     install_volume_row_presented: bool,
     install_volume_layout_transition: Option<InstallVolumeLayoutTransition>,
@@ -1265,9 +1395,14 @@ impl NativeWindow {
             font_brand: HFONT::default(),
             palette,
             brushes: Brushes::new(palette),
+            backdrop_active: false,
             handles: None,
             app_config,
             partitions,
+            partition_refresh_generation: 0,
+            partition_refresh_in_flight: false,
+            partition_refresh_requested: false,
+            partition_list_replacing: false,
             image_volumes: Vec::new(),
             install_volume_row_presented: false,
             install_volume_layout_transition: None,
@@ -2182,7 +2317,7 @@ impl NativeWindow {
         }
     }
 
-    unsafe fn apply_native_dark_theme(&self, hwnd: HWND) {
+    unsafe fn apply_native_dark_theme(&mut self, hwnd: HWND) {
         let enabled: i32 = i32::from(self.palette.dark);
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -2190,6 +2325,13 @@ impl NativeWindow {
             (&enabled as *const i32).cast(),
             size_of::<i32>() as u32,
         );
+
+        self.apply_experimental_window_backdrop(hwnd);
+        let control_palette = self.control_palette();
+        // Backdrop activation changes the field/button palette. Rebuild the GDI brushes only
+        // after DWM has accepted or rejected the request; retaining creation-time brushes caused
+        // edit/list surfaces and their text colours to come from different palettes.
+        self.brushes = Brushes::new(control_palette);
 
         let Some(h) = self.handles else { return };
         let control_theme = if self.palette.dark {
@@ -2221,7 +2363,11 @@ impl NativeWindow {
         // easy-mode pages do.  Reapplying this on a system-theme change also refreshes the
         // subclass palette reference without changing USER32's checkbox behaviour.
         for checkbox in [h.format, h.boot, h.unattend, h.reboot, h.run_diskpart] {
-            theme::apply_control_theme(checkbox, self.palette, theme::NativeControlKind::General);
+            theme::apply_control_theme(
+                checkbox,
+                control_palette,
+                theme::NativeControlKind::General,
+            );
         }
         for field in [
             h.image_edit,
@@ -2231,7 +2377,7 @@ impl NativeWindow {
             h.pca_mode,
             h.pe,
         ] {
-            theme::apply_control_theme(field, self.palette, theme::NativeControlKind::Field);
+            theme::apply_control_theme(field, control_palette, theme::NativeControlKind::Field);
         }
 
         for list in [
@@ -2245,7 +2391,7 @@ impl NativeWindow {
         .into_iter()
         .flatten()
         {
-            let _ = theme::apply_list_view_theme(list, self.palette);
+            let _ = theme::apply_list_view_theme(list, control_palette);
         }
 
         // ListView does not consistently inherit the dark client colors before Windows 11.
@@ -2254,40 +2400,87 @@ impl NativeWindow {
             h.partitions,
             0x1001,
             WPARAM(0),
-            LPARAM(self.palette.edit.0 as isize),
+            LPARAM(control_palette.edit.0 as isize),
         );
         let _ = SendMessageW(
             h.partitions,
             0x1026,
             WPARAM(0),
-            LPARAM(self.palette.edit.0 as isize),
+            LPARAM(control_palette.edit.0 as isize),
         );
         let _ = SendMessageW(
             h.partitions,
             0x1024,
             WPARAM(0),
-            LPARAM(self.palette.text.0 as isize),
+            LPARAM(control_palette.text.0 as isize),
         );
         if let Some(page) = &self.backup_page {
-            page.apply_theme(self.palette);
+            page.apply_theme(control_palette);
         }
         if let Some(page) = &self.advanced_page {
-            page.apply_theme(self.palette);
+            page.apply_theme(control_palette);
         }
         if let Some(page) = &self.download_page {
-            page.apply_theme(self.palette);
+            page.apply_theme(control_palette);
         }
         if let Some(page) = &self.progress_page {
-            page.apply_theme(self.palette);
+            page.apply_theme(control_palette);
         }
         if let Some(page) = &self.easy_page {
-            page.apply_theme(self.palette);
+            page.apply_theme(control_palette);
         }
         if let Some(page) = &self.hardware_page {
-            page.apply_theme(self.palette);
+            page.apply_theme(control_palette);
         }
         if let Some(page) = &self.about_page {
-            page.apply_theme(self.palette);
+            page.apply_theme(control_palette);
+        }
+        // Plain STATIC captions do not pass through page-specific theme helpers. Install the
+        // alpha-aware glass painter across the complete main-window descendant tree only after
+        // every page has applied its native class and material palette.
+        theme::apply_backdrop_composition_to_descendants(hwnd, control_palette);
+    }
+
+    fn control_palette(&self) -> theme::Palette {
+        if self.backdrop_active {
+            self.palette.with_system_backdrop_surface()
+        } else {
+            self.palette
+        }
+    }
+
+    unsafe fn apply_experimental_window_backdrop(&mut self, hwnd: HWND) {
+        let requested = self.app_config.experimental_window_backdrop;
+        let backdrop = requested_system_backdrop(requested);
+        let attribute_result = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            (&backdrop as *const DWM_SYSTEMBACKDROP_TYPE).cast(),
+            size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
+        );
+        let full_window = full_client_backdrop_is_safe(requested, self.palette.dark);
+        let margins = if full_window && attribute_result.is_ok() {
+            MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            }
+        } else {
+            MARGINS::default()
+        };
+        let frame_result = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        self.backdrop_active = full_window && attribute_result.is_ok() && frame_result.is_ok();
+        let request_failed = attribute_result.is_err() || (full_window && frame_result.is_err());
+        if requested != ExperimentalWindowBackdrop::None && request_failed {
+            let detail = attribute_result
+                .err()
+                .or_else(|| frame_result.err())
+                .map_or_else(
+                    || String::from("DWM rejected the requested material"),
+                    |error| error.to_string(),
+                );
+            log::warn!("实验性窗口背景不可用，已回退为普通背景: {detail}");
         }
     }
 
@@ -2298,7 +2491,6 @@ impl NativeWindow {
         // atomic so pages and their scrollbars cannot expose a mixture of old and new colours.
         let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
         self.palette = palette;
-        self.brushes = Brushes::new(palette);
         self.apply_native_dark_theme(hwnd);
         let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
         let _ = RedrawWindow(
@@ -3514,6 +3706,10 @@ impl NativeWindow {
         set_text(h.advanced, &crate::tr!("保存并返回"));
         if let Some(advanced) = &self.advanced_page {
             advanced.show(true);
+            // Dialog shells reassert descendant themes after their final ShowWindow pass. Do the
+            // same for this embedded page so its checkboxes use exactly the same shared painter
+            // and current light/dark palette as controls that were visible during startup.
+            advanced.apply_theme(self.control_palette());
         }
         // The advanced page leaves only “Save and return” in the global command bar. Repack it
         // after hiding the normal Install commands rather than retaining the three-button layout.
@@ -3804,8 +4000,10 @@ impl NativeWindow {
         let selected = usize::try_from(selected_index)
             .ok()
             .and_then(|index| self.image_volumes.get(index));
-        let show_windows_7 = selected
-            .is_some_and(|image| image.major_version == Some(6) && image.minor_version == Some(1));
+        // The bundled Windows 7 USB/NVMe and UefiSeven resources were retired. Keep the legacy
+        // config fields parse-compatible, but do not expose options that no longer have a vetted
+        // release payload.
+        let show_windows_7 = false;
         let show_xp = self.xp_i386_source.is_some()
             || selected.is_some_and(|image| image.major_version == Some(5));
         let show_pca = self.page == Page::Install
@@ -3911,6 +4109,13 @@ impl NativeWindow {
         }
         self.advanced_defaults_target = target;
         let advanced = &mut self.app_config.install_prefs.advanced_options;
+        advanced.win7_inject_usb3_driver = false;
+        advanced.win7_usb3_driver_path.clear();
+        advanced.win7_inject_nvme_driver = false;
+        advanced.win7_nvme_driver_path.clear();
+        advanced.win7_fix_acpi_bsod = false;
+        advanced.win7_fix_storage_bsod = false;
+        advanced.win7_uefi_patch = false;
         advanced.import_storage_controller_drivers =
             selected.is_some_and(|image| image.major_version.is_some_and(|major| major >= 10));
         if self.xp_i386_source.is_some()
@@ -4041,56 +4246,149 @@ impl NativeWindow {
         });
     }
 
-    unsafe fn refresh_partitions(&mut self) -> bool {
-        let Some(list) = self.handles.as_ref().map(|handles| handles.partitions) else {
-            return false;
-        };
-        let previous_backup_source = self
-            .backup_page
+    unsafe fn selected_install_partition_key(&self, list: HWND) -> Option<PartitionSelectionKey> {
+        let selected = SendMessageW(list, 0x100C, WPARAM(usize::MAX), LPARAM(2)).0;
+        usize::try_from(selected)
+            .ok()
+            .and_then(|index| self.partitions.get(index))
+            .map(PartitionSelectionKey::from)
+    }
+
+    unsafe fn selected_backup_partition_key(&self) -> Option<PartitionSelectionKey> {
+        self.backup_page
             .as_ref()
             .and_then(|page| page.read_state().source_partition)
             .and_then(|index| self.partitions.get(index))
-            .map(|partition| {
-                (
-                    partition.letter.clone(),
-                    partition.disk_number,
-                    partition.partition_number,
-                    partition.total_size_mb,
-                )
-            });
+            .map(PartitionSelectionKey::from)
+    }
+
+    unsafe fn apply_partition_inventory(
+        &mut self,
+        partitions: Vec<crate::core::disk::Partition>,
+    ) -> bool {
+        let Some(list) = self.handles.as_ref().map(|handles| handles.partitions) else {
+            return false;
+        };
+        let previous_install_target = self.selected_install_partition_key(list);
+        let previous_backup_source = self.selected_backup_partition_key();
+        self.partitions = partitions;
+        let selected_install_target = previous_install_target.as_ref().and_then(|key| {
+            self.partitions
+                .iter()
+                .position(|partition| key.matches(partition))
+        });
+        let selected_backup_source = previous_backup_source.as_ref().and_then(|key| {
+            self.partitions
+                .iter()
+                .position(|partition| key.matches(partition))
+        });
+
+        self.partition_list_replacing = true;
+        let _ = SendMessageW(list, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
+        self.populate_partitions(list, false);
+        let mut clear_selection = LVITEMW {
+            stateMask: LVIS_SELECTED,
+            state: Default::default(),
+            iItem: -1,
+            ..Default::default()
+        };
+        let _ = SendMessageW(
+            list,
+            0x102B,
+            WPARAM(usize::MAX),
+            LPARAM((&mut clear_selection as *mut LVITEMW) as isize),
+        );
+        if let Some(row) = selected_install_target {
+            let mut select = LVITEMW {
+                stateMask: LVIS_SELECTED,
+                state: LVIS_SELECTED,
+                iItem: row as i32,
+                ..Default::default()
+            };
+            let _ = SendMessageW(
+                list,
+                0x102B,
+                WPARAM(row),
+                LPARAM((&mut select as *mut LVITEMW) as isize),
+            );
+        }
+        self.partition_list_replacing = false;
+
+        let backup_rows = self.backup_partition_rows();
+        if let Some(page) = &self.backup_page {
+            page.replace_partitions(&backup_rows, selected_backup_source);
+        }
+        self.update_install_primary_state();
+        self.update_backup_primary_state();
+        true
+    }
+
+    unsafe fn refresh_partitions(&mut self) -> bool {
         match crate::core::disk::DiskManager::get_partitions() {
-            Ok(partitions) => {
-                self.partitions = partitions;
-                let selected_backup_source = previous_backup_source.and_then(
-                    |(letter, disk_number, partition_number, total_size_mb)| {
-                        self.partitions.iter().position(|partition| {
-                            match (disk_number, partition_number) {
-                                (Some(disk), Some(number)) => {
-                                    partition.disk_number == Some(disk)
-                                        && partition.partition_number == Some(number)
-                                }
-                                _ => {
-                                    partition.letter.eq_ignore_ascii_case(&letter)
-                                        && partition.total_size_mb == total_size_mb
-                                }
-                            }
-                        })
-                    },
-                );
-                let _ = SendMessageW(list, LVM_DELETEALLITEMS, WPARAM(0), LPARAM(0));
-                self.populate_partitions(list, false);
-                let backup_rows = self.backup_partition_rows();
-                if let Some(page) = &self.backup_page {
-                    page.replace_partitions(&backup_rows, selected_backup_source);
-                }
-                self.update_install_primary_state();
-                self.update_backup_primary_state();
-                true
-            }
+            Ok(partitions) => self.apply_partition_inventory(partitions),
             Err(error) => {
                 log::warn!("原生 UI 刷新分区失败: {error}");
                 false
             }
+        }
+    }
+
+    unsafe fn schedule_partition_refresh(&mut self, hwnd: HWND) {
+        self.partition_refresh_requested = true;
+        let _ = KillTimer(hwnd, PARTITION_REFRESH_TIMER_ID);
+        let _ = SetTimer(
+            hwnd,
+            PARTITION_REFRESH_TIMER_ID,
+            PARTITION_REFRESH_DEBOUNCE_MS,
+            None,
+        );
+    }
+
+    unsafe fn start_scheduled_partition_refresh(&mut self, hwnd: HWND) {
+        let _ = KillTimer(hwnd, PARTITION_REFRESH_TIMER_ID);
+        if self.partition_refresh_in_flight || !self.partition_refresh_requested {
+            return;
+        }
+        self.partition_refresh_requested = false;
+        self.partition_refresh_in_flight = true;
+        self.partition_refresh_generation = self.partition_refresh_generation.wrapping_add(1);
+        let generation = self.partition_refresh_generation;
+        let window = hwnd.0 as usize;
+        std::thread::spawn(move || {
+            let result =
+                crate::core::disk::DiskManager::get_partitions().map_err(|error| error.to_string());
+            let payload = Box::into_raw(Box::new(PartitionRefreshMessage { generation, result }));
+            unsafe {
+                if PostMessageW(
+                    HWND(window as *mut _),
+                    WM_PARTITIONS_READY,
+                    WPARAM(0),
+                    LPARAM(payload as isize),
+                )
+                .is_err()
+                {
+                    drop(Box::from_raw(payload));
+                }
+            }
+        });
+    }
+
+    unsafe fn finish_partition_refresh(&mut self, hwnd: HWND, message: PartitionRefreshMessage) {
+        if message.generation != self.partition_refresh_generation {
+            return;
+        }
+        self.partition_refresh_in_flight = false;
+        match message.result {
+            Ok(partitions) => {
+                if self.apply_partition_inventory(partitions) {
+                    self.request_pca_target_detection(hwnd);
+                    self.update_pca_detection_status();
+                }
+            }
+            Err(error) => log::warn!("设备变更后的异步分区刷新失败: {error}"),
+        }
+        if self.partition_refresh_requested {
+            self.schedule_partition_refresh(hwnd);
         }
     }
 
@@ -4855,11 +5153,26 @@ impl NativeWindow {
                     &system_drive,
                 )
                 .map_err(|error| error.to_string())?;
+                let hardware_ids = lr_core::driver::list_present_hardware_ids()
+                    .map_err(|error| error.to_string())?;
+                let packages =
+                    lr_core::storage_driver_match::select_builtin_storage_driver_packages(
+                        hardware_ids.iter().map(String::as_str),
+                    );
+                let [package] = packages.as_slice() else {
+                    return Err(crate::tr!(
+                        "未检测到唯一匹配的 Intel VMD 控制器，已拒绝导入随包存储驱动。"
+                    ));
+                };
+                let directory = plan.driver_directory().join(package.directory_name());
+                if !directory.is_dir() {
+                    return Err(crate::tr!("匹配的 Intel VMD 驱动包不存在。"));
+                }
                 Ok(
                     super::tool_dialogs_mutating::MutatingToolIntent::ImportStorageDriver {
-                        directory: plan.driver_directory().to_string_lossy().into_owned(),
+                        directory: directory.to_string_lossy().into_owned(),
                         offline_root: plan.target().to_owned(),
-                        recursive: true,
+                        recursive: false,
                     },
                 )
             })();
@@ -7809,29 +8122,34 @@ impl NativeWindow {
                         state.status_text = crate::tr!("正在安装");
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::PhaseStarted {
-                        index,
-                        total,
                         phase,
+                        ..
                     }) => {
                         state.overall =
-                            ProgressValue::new(index.saturating_sub(1) as u64, total as u64);
+                            ProgressValue::new(u64::from(phase.weighted_overall_progress(0)), 100);
                         state.step = ProgressValue::new(0, 100);
                         state.current_step = install_phase_label(phase);
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::Progress {
+                        phase,
                         percentage,
                         detail,
-                        ..
                     }) => {
                         state.step = ProgressValue::new(u64::from(percentage), 100);
+                        state.overall = ProgressValue::new(
+                            u64::from(phase.weighted_overall_progress(percentage)),
+                            100,
+                        );
                         state.detail = detail;
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::PhaseCompleted {
-                        index,
-                        total,
+                        phase,
                         ..
                     }) => {
-                        state.overall = ProgressValue::new(index as u64, total as u64);
+                        state.overall = ProgressValue::new(
+                            u64::from(phase.weighted_overall_progress(100)),
+                            100,
+                        );
                         state.step = ProgressValue::new(100, 100);
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::Completed(outcome)) => {
@@ -9098,7 +9416,7 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
         let (window_width, window_height) =
             preferred_window_size(initial_dpi, screen_width, screen_height);
         let hwnd = CreateWindowExW(
-            WS_EX_CONTROLPARENT,
+            WS_EX_CONTROLPARENT | WS_EX_LAYERED,
             CLASS_NAME,
             PCWSTR(title.as_ptr()),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
@@ -9111,6 +9429,14 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
             HINSTANCE(instance.0),
             Some((&mut *state as *mut NativeWindow).cast()),
         )?;
+        // WinPE may present stock child-control surfaces between ShowWindow and the first complete
+        // WM_PAINT pass. A global alpha of zero is not safe here: USER32 deliberately lets mouse
+        // input pass through zero-alpha layered pixels to whatever window is underneath. Alpha 1
+        // remains visually imperceptible while keeping the complete LetRecovery window hit-testable
+        // throughout the synchronous first-frame transaction.
+        let staged_near_transparent =
+            SetLayeredWindowAttributes(hwnd, COLORREF(0), FIRST_PRESENTATION_ALPHA, LWA_ALPHA)
+                .is_ok();
         let _ = SendMessageW(
             hwnd,
             WM_SETICON,
@@ -9140,6 +9466,40 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
             );
         }
         let _ = ShowWindow(hwnd, SW_SHOW);
+        // WinPE's reduced USER32/UxTheme implementation can defer the first paint of child
+        // controls until later messages. If we enter the message loop immediately, the
+        // compositor may present stock white Edit/Combo/List surfaces before their installed
+        // subclasses and palette get a turn to paint. Complete one whole-window paint
+        // transaction synchronously while still inside the initial ShowWindow call sequence.
+        // Omitting RDW_ERASE is intentional: erasing with a stock class brush would recreate the
+        // white intermediate frame this startup barrier is meant to prevent.
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+        if staged_near_transparent {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+            // Layering is only a first-presentation staging mechanism. Keeping the top-level
+            // window layered makes later WM_SETREDRAW-based page switches transiently lose their
+            // redirected surface on some USER32/DWM combinations, which looks like the entire
+            // application disappears and reappears. Return to a normal opaque HWND immediately
+            // after the fully painted first frame has been revealed.
+            let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style & !(WS_EX_LAYERED.0 as isize));
+            // Flush USER32's cached non-client and hit-test state immediately. The next real click
+            // must observe a normal opaque top-level window, never the retired layered surface.
+            let _ = SetWindowPos(
+                hwnd,
+                HWND::default(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&message);
@@ -9158,6 +9518,16 @@ unsafe fn is_non_click_button_notification(source: HWND, notification: u16) -> b
     let length = GetClassNameW(source, &mut class_name);
     length > 0
         && String::from_utf16_lossy(&class_name[..length as usize]).eq_ignore_ascii_case("Button")
+}
+
+unsafe fn control_has_class(control: HWND, expected: &str) -> bool {
+    if control.0.is_null() {
+        return false;
+    }
+    let mut class_name = [0u16; 32];
+    let length = GetClassNameW(control, &mut class_name);
+    length > 0
+        && String::from_utf16_lossy(&class_name[..length as usize]).eq_ignore_ascii_case(expected)
 }
 
 unsafe extern "system" fn window_proc(
@@ -9239,6 +9609,15 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_DEVICECHANGE => {
+            if let Some(state) = state {
+                if device_change_requests_partition_refresh(wparam.0) {
+                    state.schedule_partition_refresh(hwnd);
+                    return LRESULT(1);
+                }
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
         WM_TOOL_WORKER_READY => {
             if let Some(state) = state {
                 state.poll_tool_dialogs(hwnd);
@@ -9288,6 +9667,13 @@ unsafe extern "system" fn window_proc(
                     state.update_pca_detection_status();
                     state.update_install_primary_state();
                 }
+            }
+            LRESULT(0)
+        }
+        WM_PARTITIONS_READY => {
+            if let Some(state) = state {
+                let message = *Box::from_raw(lparam.0 as *mut PartitionRefreshMessage);
+                state.finish_partition_refresh(hwnd, message);
             }
             LRESULT(0)
         }
@@ -9602,6 +9988,14 @@ unsafe extern "system" fn window_proc(
                 if wifi_toggled {
                     state.handle_wifi_migration_toggle(hwnd);
                 }
+                if notification == BN_CLICKED as u16 {
+                    let control = HWND(lparam.0 as *mut _);
+                    if let Some(page) = &state.advanced_page {
+                        if page.owns_dependency_toggle(control) {
+                            page.update_dependencies();
+                        }
+                    }
+                }
                 match command_id {
                     ID_NAV_INSTALL => state.select_page(hwnd, Page::Install),
                     ID_NAV_BACKUP => state.select_page(hwnd, Page::Backup),
@@ -9869,6 +10263,8 @@ unsafe extern "system" fn window_proc(
                     }
                 } else if wparam.0 == INSTALL_VOLUME_LAYOUT_TIMER_ID {
                     state.advance_install_volume_layout(hwnd);
+                } else if wparam.0 == PARTITION_REFRESH_TIMER_ID {
+                    state.start_scheduled_partition_refresh(hwnd);
                 }
                 if state.close_after_task && !state.has_active_long_task() {
                     let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -9933,7 +10329,9 @@ unsafe extern "system" fn window_proc(
                     }
                 } else if header.idFrom == ID_PARTITIONS as usize && header.code == LVN_ITEMCHANGED
                 {
-                    state.handle_install_partition_changed(hwnd);
+                    if !state.partition_list_replacing {
+                        state.handle_install_partition_changed(hwnd);
+                    }
                 } else if header.idFrom == crate::native_ui::pages::backup::ID_SOURCE_LIST as usize
                     && header.code == LVN_ITEMCHANGED
                 {
@@ -9960,7 +10358,7 @@ unsafe extern "system" fn window_proc(
                 if state
                     .progress_page
                     .as_ref()
-                    .is_some_and(|page| page.draw_item(item, state.palette))
+                    .is_some_and(|page| page.draw_item(item, state.control_palette()))
                 {
                     return LRESULT(1);
                 } else if item.CtlType.0 == ODT_HEADER {
@@ -9972,22 +10370,86 @@ unsafe extern "system" fn window_proc(
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
-        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+        WM_CTLCOLOREDIT => {
             if let Some(state) = state {
                 let dc = HDC(wparam.0 as *mut _);
-                let _ = SetTextColor(dc, state.palette.text);
-                let _ = SetBkColor(dc, state.palette.edit);
+                let palette = state.control_palette();
+                let _ = SetTextColor(dc, palette.text);
+                let _ = SetBkColor(dc, palette.edit_brush_color());
                 return LRESULT(state.brushes.edit.0 as isize);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
-        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+        WM_CTLCOLORLISTBOX => {
             if let Some(state) = state {
                 let dc = HDC(wparam.0 as *mut _);
-                let _ = SetTextColor(dc, state.palette.text);
-                let _ = SetBkColor(dc, state.palette.window);
+                let palette = state.control_palette();
+                let _ = SetTextColor(dc, palette.text);
+                let _ = SetBkColor(dc, palette.edit);
+                return LRESULT(state.brushes.list.0 as isize);
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_CTLCOLORSTATIC => {
+            if let Some(state) = state {
+                let dc = HDC(wparam.0 as *mut _);
+                let control = HWND(lparam.0 as *mut _);
+                // Disabled and read-only Edit controls send WM_CTLCOLORSTATIC instead of
+                // WM_CTLCOLOREDIT. Keep their field surface identical to enabled edits while
+                // using the disabled caption colour, rather than painting the window background
+                // through the Edit client area as a mismatched grey block.
+                if control_has_class(control, "Edit") {
+                    let palette = state.control_palette();
+                    let enabled = IsWindowEnabled(control).as_bool();
+                    let _ = SetTextColor(
+                        dc,
+                        if enabled {
+                            palette.text
+                        } else {
+                            palette.text_disabled
+                        },
+                    );
+                    let _ = SetBkColor(dc, palette.edit_brush_color());
+                    return LRESULT(state.brushes.edit.0 as isize);
+                }
+                let _ = SetTextColor(dc, state.control_palette().text);
+                let _ = SetBkColor(
+                    dc,
+                    if state.backdrop_active {
+                        COLORREF(0)
+                    } else {
+                        state.palette.window
+                    },
+                );
                 let _ = SetBkMode(dc, TRANSPARENT);
-                return LRESULT(state.brushes.window.0 as isize);
+                let brush = if state.backdrop_active {
+                    system_backdrop_surface_brush()
+                } else {
+                    state.brushes.window
+                };
+                return LRESULT(brush.0 as isize);
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_CTLCOLORBTN => {
+            if let Some(state) = state {
+                let dc = HDC(wparam.0 as *mut _);
+                let _ = SetTextColor(dc, state.control_palette().text);
+                let _ = SetBkColor(
+                    dc,
+                    if state.backdrop_active {
+                        COLORREF(0)
+                    } else {
+                        state.palette.window
+                    },
+                );
+                let _ = SetBkMode(dc, TRANSPARENT);
+                let brush = if state.backdrop_active {
+                    system_backdrop_surface_brush()
+                } else {
+                    state.brushes.window
+                };
+                return LRESULT(brush.0 as isize);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
@@ -9998,7 +10460,12 @@ unsafe extern "system" fn window_proc(
                 let dc = BeginPaint(hwnd, &mut paint);
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let _ = FillRect(dc, &rect, state.brushes.window);
+                let surface = if state.backdrop_active {
+                    system_backdrop_surface_brush()
+                } else {
+                    state.brushes.window
+                };
+                let _ = FillRect(dc, &rect, surface);
                 // Long tasks intentionally occupy the complete client area.  Painting the normal
                 // navigation rail underneath their transparent STATIC controls leaked the old
                 // navigation separator through as several disconnected vertical strokes.
@@ -10009,14 +10476,18 @@ unsafe extern "system" fn window_proc(
                         right: state.scale(NAV_WIDTH),
                         bottom: rect.bottom - state.scale(COMMAND_HEIGHT),
                     };
-                    let _ = FillRect(dc, &nav_rect, state.brushes.nav);
+                    if !state.backdrop_active {
+                        let _ = FillRect(dc, &nav_rect, state.brushes.nav);
+                    }
                     let footer_rect = RECT {
                         left: 0,
                         top: rect.bottom - state.scale(COMMAND_HEIGHT),
                         right: rect.right,
                         bottom: rect.bottom,
                     };
-                    let _ = FillRect(dc, &footer_rect, state.brushes.window);
+                    if !state.backdrop_active {
+                        let _ = FillRect(dc, &footer_rect, state.brushes.window);
+                    }
                     draw_line(
                         dc,
                         state.scale(NAV_WIDTH),
@@ -10062,6 +10533,7 @@ unsafe extern "system" fn window_proc(
             let _ = KillTimer(hwnd, CATALOGUE_TIMER_ID);
             let _ = KillTimer(hwnd, HARDWARE_COPY_TIMER_ID);
             let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
+            let _ = KillTimer(hwnd, PARTITION_REFRESH_TIMER_ID);
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -10075,7 +10547,8 @@ impl NativeWindow {
     }
 
     unsafe fn draw_header_cell(&self, dc: HDC, header: HWND, index: usize, rect: RECT) {
-        let brush = CreateSolidBrush(self.palette.button);
+        let palette = self.control_palette();
+        let brush = CreateSolidBrush(palette.button);
         let _ = FillRect(dc, &rect, brush);
         let _ = DeleteObject(brush);
 
@@ -10096,7 +10569,7 @@ impl NativeWindow {
         text.truncate(length);
 
         let _ = SetBkMode(dc, TRANSPARENT);
-        let _ = SetTextColor(dc, self.palette.text);
+        let _ = SetTextColor(dc, palette.text);
         let old_font = SelectObject(dc, self.font);
         let mut text_rect = rect;
         text_rect.left += self.scale(8);
@@ -10114,7 +10587,7 @@ impl NativeWindow {
             rect.top + self.scale(4),
             rect.right - 1,
             rect.bottom - self.scale(4),
-            self.palette.separator,
+            palette.separator,
         );
     }
 
@@ -10147,7 +10620,7 @@ impl NativeWindow {
         } else {
             command_button_role(id)
         };
-        draw_inno_button(item, self.palette, role, self.font, self.dpi);
+        draw_inno_button(item, self.control_palette(), role, self.font, self.dpi);
     }
 }
 
@@ -10720,7 +11193,11 @@ unsafe fn draw_line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF
 
 #[cfg(test)]
 mod tests {
-    use super::HardwareCopyFeedback;
+    use super::{full_client_backdrop_is_safe, requested_system_backdrop, HardwareCopyFeedback};
+    use crate::core::app_config::ExperimentalWindowBackdrop;
+    use windows::Win32::Graphics::Dwm::{
+        DWMSBT_AUTO, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW,
+    };
 
     #[test]
     fn hardware_copy_feedback_expires_back_to_the_normal_caption() {
@@ -10730,5 +11207,38 @@ mod tests {
         assert_eq!(feedback.caption_key(), "已复制");
         feedback.expire();
         assert_eq!(feedback.caption_key(), "复制信息");
+    }
+
+    #[test]
+    fn experimental_config_maps_only_to_documented_system_backdrops() {
+        for (config, expected) in [
+            (ExperimentalWindowBackdrop::None, DWMSBT_NONE),
+            (ExperimentalWindowBackdrop::Auto, DWMSBT_AUTO),
+            (ExperimentalWindowBackdrop::Mica, DWMSBT_MAINWINDOW),
+            (ExperimentalWindowBackdrop::Acrylic, DWMSBT_TRANSIENTWINDOW),
+            (ExperimentalWindowBackdrop::MicaAlt, DWMSBT_TABBEDWINDOW),
+        ] {
+            assert_eq!(requested_system_backdrop(config), expected);
+        }
+    }
+
+    #[test]
+    fn both_alpha_aware_themes_extend_explicit_system_materials_over_the_client() {
+        for backdrop in [
+            ExperimentalWindowBackdrop::Mica,
+            ExperimentalWindowBackdrop::Acrylic,
+            ExperimentalWindowBackdrop::MicaAlt,
+        ] {
+            assert!(full_client_backdrop_is_safe(backdrop, true));
+            assert!(full_client_backdrop_is_safe(backdrop, false));
+        }
+        assert!(!full_client_backdrop_is_safe(
+            ExperimentalWindowBackdrop::None,
+            true
+        ));
+        assert!(!full_client_backdrop_is_safe(
+            ExperimentalWindowBackdrop::Auto,
+            true
+        ));
     }
 }

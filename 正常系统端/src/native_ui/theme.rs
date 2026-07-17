@@ -1,17 +1,20 @@
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    BOOL, COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC,
-    GetTextMetricsW, GetWindowDC, InvalidateRect, LineTo, MoveToEx, RedrawWindow, ReleaseDC,
-    RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor,
-    StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_END_ELLIPSIS,
-    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HALFTONE, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE,
-    RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
+    CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetTextMetricsW,
+    GetWindowDC, InvalidateRect, LineTo, MoveToEx, RedrawWindow, ReleaseDC, RoundRect,
+    SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor, SetWindowRgn,
+    StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER,
+    DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE,
+    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW,
+    SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     GetComboBoxInfo, SetWindowTheme, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT,
@@ -26,21 +29,23 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 #[cfg(test)]
 use windows::Win32::UI::WindowsAndMessaging::WS_VSCROLL;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetPropW, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, RemovePropW, SendMessageW,
-    SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret, GWL_EXSTYLE, GWL_STYLE,
-    NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY,
-    WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE,
-    WM_THEMECHANGED, WS_BORDER, WS_EX_CLIENTEDGE,
+    EnumChildWindows, GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetPropW,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret,
+    PostMessageW, RemovePropW, SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret,
+    GWL_EXSTYLE, GWL_STYLE, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND,
+    WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
+    WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER, WS_EX_CLIENTEDGE,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 use super::controls::{
-    button_visual, draw_antialiased_control_frame, draw_progress, fill_round_rect_antialiased,
-    rounded_control_frame_geometry, ButtonRole, ControlState, InnoMetrics, ProgressRole,
+    button_visual, draw_alpha_composited_text, draw_antialiased_control_frame,
+    draw_backdrop_static_text, draw_opaque_surface_text, draw_progress, fill_alpha_opaque_rect,
+    fill_round_rect_antialiased, rounded_control_frame_geometry, ButtonRole, ControlState,
+    InnoMetrics, ProgressRole,
 };
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
@@ -72,6 +77,43 @@ pub struct Palette {
     pub progress: COLORREF,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaterialSurfaceState {
+    Normal,
+    Hot,
+    Pressed,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MaterialSurfaceVisual {
+    pub fill: COLORREF,
+    pub border: COLORREF,
+    pub fill_alpha: u8,
+    pub border_alpha: u8,
+}
+
+const fn composite_channel(source: u32, alpha: u32, background: u32) -> u32 {
+    (source * alpha + background * (255 - alpha) + 127) / 255
+}
+
+const fn composite_color(source: COLORREF, alpha: u8, background: COLORREF) -> COLORREF {
+    let alpha = alpha as u32;
+    rgb(
+        composite_channel(source.0 & 0xff, alpha, background.0 & 0xff) as u8,
+        composite_channel((source.0 >> 8) & 0xff, alpha, (background.0 >> 8) & 0xff) as u8,
+        composite_channel((source.0 >> 16) & 0xff, alpha, (background.0 >> 16) & 0xff) as u8,
+    )
+}
+
+const fn subtract_color(value: COLORREF, background: COLORREF) -> COLORREF {
+    rgb(
+        ((value.0 & 0xff) as u8).saturating_sub((background.0 & 0xff) as u8),
+        (((value.0 >> 8) & 0xff) as u8).saturating_sub(((background.0 >> 8) & 0xff) as u8),
+        (((value.0 >> 16) & 0xff) as u8).saturating_sub(((background.0 >> 16) & 0xff) as u8),
+    )
+}
+
 impl Palette {
     pub const LIGHT: Self = Self {
         dark: false,
@@ -97,15 +139,15 @@ impl Palette {
         dark: true,
         window: rgb(43, 43, 43),
         nav: rgb(43, 43, 43),
-        edit: rgb(31, 31, 31),
-        button: rgb(55, 55, 55),
-        button_hot: rgb(62, 62, 62),
-        button_pressed: rgb(47, 47, 47),
+        edit: rgb(28, 28, 28),
+        button: rgb(48, 48, 48),
+        button_hot: rgb(55, 55, 55),
+        button_pressed: rgb(41, 41, 41),
         text: rgb(255, 255, 255),
         text_secondary: rgb(214, 214, 214),
         text_disabled: rgb(120, 120, 120),
-        border: rgb(67, 67, 67),
-        separator: rgb(81, 81, 81),
+        border: rgb(61, 61, 61),
+        separator: rgb(72, 72, 72),
         accent_fill: rgb(49, 72, 83),
         accent_border: rgb(66, 149, 192),
         // User-audited Windows 11 selection colour from the supplied RGB sample.
@@ -113,6 +155,113 @@ impl Palette {
         highlight_border: rgb(76, 194, 255),
         progress: rgb(113, 199, 132),
     };
+
+    /// Uses DWM's black glass key for window/nav pixels that should reveal a system backdrop.
+    /// Ordinary buttons use the material overlay directly. Classic Edit, ComboBox, ListBox and
+    /// ListView child HWNDs cannot publish per-pixel alpha into the parent DWM surface reliably, so
+    /// they use the exact same overlay resolved against the documented Mica fallback neutral.
+    /// Highlighted actions and selected rows remain opaque.
+    pub const fn with_system_backdrop_surface(mut self) -> Self {
+        let background = self.system_backdrop_edge_fallback();
+        let normal = self.material_surface_visual(MaterialSurfaceState::Normal);
+        let hot = self.material_surface_visual(MaterialSurfaceState::Hot);
+        let pressed = self.material_surface_visual(MaterialSurfaceState::Pressed);
+        self.edit = composite_color(normal.fill, normal.fill_alpha, background);
+        self.button = self.edit;
+        self.button_hot = composite_color(hot.fill, hot.fill_alpha, background);
+        self.button_pressed = composite_color(pressed.fill, pressed.fill_alpha, background);
+        self.border = composite_color(normal.border, normal.border_alpha, background);
+        self.separator = self.border;
+        self.window = COLORREF(0);
+        self.nav = COLORREF(0);
+        self
+    }
+
+    pub(crate) const fn material_surface_visual(
+        self,
+        state: MaterialSurfaceState,
+    ) -> MaterialSurfaceVisual {
+        if self.dark {
+            let (fill, fill_alpha) = match state {
+                MaterialSurfaceState::Normal => (rgb(130, 165, 255), 73),
+                MaterialSurfaceState::Hot => (rgb(150, 185, 255), 96),
+                MaterialSurfaceState::Pressed => (rgb(110, 140, 220), 72),
+                MaterialSurfaceState::Disabled => (rgb(150, 175, 220), 38),
+            };
+            MaterialSurfaceVisual {
+                fill,
+                border: rgb(183, 200, 240),
+                fill_alpha,
+                border_alpha: 82,
+            }
+        } else {
+            let (fill, fill_alpha) = match state {
+                MaterialSurfaceState::Normal => (rgb(255, 255, 255), 142),
+                MaterialSurfaceState::Hot => (rgb(255, 255, 255), 180),
+                MaterialSurfaceState::Pressed => (rgb(215, 224, 234), 150),
+                MaterialSurfaceState::Disabled => (rgb(255, 255, 255), 80),
+            };
+            MaterialSurfaceVisual {
+                fill,
+                border: rgb(113, 131, 154),
+                fill_alpha,
+                border_alpha: 45,
+            }
+        }
+    }
+
+    const fn uses_system_backdrop_surface(self) -> bool {
+        self.window.0 == 0 && self.nav.0 == 0
+    }
+
+    /// GDI brushes painted into a client area covered by `DwmExtendFrameIntoClientArea` use black
+    /// as the glass key and contribute their RGB channels to the resolved backdrop. Returning the
+    /// already-resolved field colour would therefore add the Mica neutral twice (`#3c4660` becoming
+    /// `#5c6680` in the audited dark frame). Other controls publish opaque BGRA and keep `edit`.
+    pub(crate) const fn edit_brush_color(self) -> COLORREF {
+        if self.uses_system_backdrop_surface() {
+            subtract_color(self.edit, self.system_backdrop_edge_fallback())
+        } else {
+            self.edit
+        }
+    }
+
+    /// Opaque colour used only while rasterizing an antialiased edge on a stock child HWND.
+    ///
+    /// DWM resolves the real system material on the top-level window, but a classic Edit,
+    /// ComboBox or ListView is not an independent per-pixel-alpha surface.  Publishing partially
+    /// transparent BGRA into those child DCs turns the edge into black/white corner pixels.  The
+    /// Windows 11 Mica fallback neutrals are deliberately close to the resolved material and let
+    /// us premix the few boundary pixels without replacing the material behind the control.
+    const fn system_backdrop_edge_fallback(self) -> COLORREF {
+        if self.dark {
+            rgb(32, 32, 32)
+        } else {
+            rgb(243, 243, 243)
+        }
+    }
+
+    /// A light material needs a slightly clearer one-pixel field stroke than the opaque page.
+    /// The same absolute colour is used for both straight edges and rounded samples.
+    const fn control_border(self) -> COLORREF {
+        if self.uses_system_backdrop_surface() && !self.dark {
+            self.separator
+        } else {
+            self.border
+        }
+    }
+
+    pub const fn foreground_black(self) -> COLORREF {
+        if self.uses_system_backdrop_surface() {
+            if self.dark {
+                rgb(1, 1, 1)
+            } else {
+                rgb(24, 24, 24)
+            }
+        } else {
+            rgb(0, 0, 0)
+        }
+    }
 
     pub fn system() -> Self {
         #[cfg(feature = "non-elevated-tests")]
@@ -204,7 +353,7 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             control,
             Some(check_box_subclass),
             CHECK_BOX_SUBCLASS_ID,
-            usize::from(palette.dark),
+            palette_reference(palette),
         );
         let _ = InvalidateRect(control, None, false);
     } else if is_auto_radio_button(&class_name, control_style) {
@@ -214,7 +363,7 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             control,
             Some(radio_button_subclass),
             RADIO_BUTTON_SUBCLASS_ID,
-            usize::from(palette.dark),
+            palette_reference(palette),
         );
         let _ = InvalidateRect(control, None, false);
     }
@@ -233,7 +382,7 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             control,
             Some(single_line_edit_subclass),
             SINGLE_LINE_EDIT_SUBCLASS_ID,
-            usize::from(palette.dark),
+            palette_reference(palette),
         );
         let _ = SetWindowPos(
             control,
@@ -244,6 +393,7 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
+        apply_material_rounded_control_region(control, palette);
         let _ = RedrawWindow(
             control,
             None,
@@ -262,8 +412,9 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             control,
             Some(rounded_control_subclass),
             ROUNDED_CONTROL_SUBCLASS_ID,
-            usize::from(palette.dark),
+            palette_reference(palette),
         );
+        apply_material_rounded_control_region(control, palette);
         let _ = InvalidateRect(control, None, false);
     } else if is_edit {
         apply_single_border_style(control);
@@ -278,12 +429,17 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             control,
             Some(rounded_control_subclass),
             ROUNDED_CONTROL_SUBCLASS_ID,
-            usize::from(palette.dark),
+            palette_reference(palette),
         );
         set_combo_selection_field_height(
             control,
             InnoMetrics::for_dpi(GetDpiForWindow(control).max(96)).field_height,
         );
+        set_combo_popup_row_height(
+            control,
+            InnoMetrics::for_dpi(GetDpiForWindow(control).max(96)).field_height,
+        );
+        clip_combo_to_closed_field(control, palette);
         let _ = InvalidateRect(control, None, false);
     } else if matches!(kind, NativeControlKind::List) && is_list_box(control) {
         // Standalone ListBoxes retain their existing Inno row palette, but the HWND itself has one
@@ -293,8 +449,9 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             control,
             Some(rounded_control_subclass),
             ROUNDED_CONTROL_SUBCLASS_ID,
-            usize::from(palette.dark),
+            palette_reference(palette),
         );
+        apply_material_rounded_control_region(control, palette);
         let _ = InvalidateRect(control, None, false);
     } else if matches!(
         kind,
@@ -307,6 +464,7 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             Some(rounded_control_subclass),
             ROUNDED_CONTROL_SUBCLASS_ID,
         );
+        clear_control_window_region(control);
         let _ = InvalidateRect(control, None, false);
     }
 
@@ -316,7 +474,11 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
         cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
         ..Default::default()
     };
-    if GetComboBoxInfo(control, &mut info).is_ok() && !info.hwndList.0.is_null() {
+    let _ = GetComboBoxInfo(control, &mut info);
+    if is_combo && matches!(kind, NativeControlKind::Field) && is_drop_down_list(control) {
+        install_combo_selection_item_subclass(control, palette);
+    }
+    if !info.hwndList.0.is_null() {
         // The popup is a ListBox, not another field frame.  DarkMode_CFD is correct for the
         // closed ComboBox but corrupts the popup/arrow painting on some Windows 11 builds (the
         // selected string is drawn a second time in the arrow area).  Explorer keeps the popup
@@ -327,6 +489,10 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             w!("Explorer")
         };
         let _ = SetWindowTheme(info.hwndList, popup_class, PCWSTR::null());
+        set_combo_popup_row_height(
+            control,
+            InnoMetrics::for_dpi(GetDpiForWindow(control).max(96)).field_height,
+        );
         // Inno's TNewComboBox is a stock TComboBox. Preserve USER32's normal rectangular popup
         // renderer; this removes the slower WM_DRAWITEM/rounded-overlay paths and keeps keyboard,
         // hover and accessibility behaviour identical to the native control.
@@ -339,6 +505,153 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
         apply_combo_popup_native_chrome(info.hwndList, palette);
         let _ = InvalidateRect(info.hwndList, None, false);
     }
+}
+
+/// Installs the compatibility painter on USER32's read-only closed selection child.
+///
+/// Some WinPE USER32 builds create or recreate this child only after the first focus/drop-down
+/// transition, so this helper is intentionally idempotent and is called both during initial theme
+/// application and from the parent ComboBox state transitions.
+unsafe fn install_combo_selection_item_subclass(combo: HWND, palette: Palette) {
+    let mut info = COMBOBOXINFO {
+        cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+        ..Default::default()
+    };
+    if GetComboBoxInfo(combo, &mut info).is_err()
+        || info.hwndItem.0.is_null()
+        || info.hwndItem == combo
+    {
+        return;
+    }
+    if GetPropW(info.hwndItem, COMBO_SELECTION_ITEM_PREPARED_PROPERTY).is_invalid() {
+        let _ = SetWindowTheme(info.hwndItem, w!(""), w!(""));
+        apply_borderless_style(info.hwndItem);
+        let _ = SetPropW(
+            info.hwndItem,
+            COMBO_SELECTION_ITEM_PREPARED_PROPERTY,
+            HANDLE(std::ptr::dangling_mut()),
+        );
+    }
+    let _ = SetWindowSubclass(
+        info.hwndItem,
+        Some(combo_selection_item_subclass),
+        COMBO_SELECTION_ITEM_SUBCLASS_ID,
+        palette_reference(palette),
+    );
+    repaint_combo_selection_item_now(info.hwndItem, palette);
+}
+
+const BACKDROP_STATIC_SUBCLASS_ID: usize = 0x4c52_4253;
+
+/// Installs alpha-aware text painting on every plain STATIC child of the main window. Transparent
+/// STATIC captions cannot use `BufferedPaintSetAlpha(255)` over their complete rectangle because
+/// that would replace Mica with an opaque block; `DTT_COMPOSITED` instead supplies alpha only for
+/// the glyph coverage while leaving the material visible between and around characters.
+pub unsafe fn apply_backdrop_composition_to_descendants(root: HWND, palette: Palette) {
+    let reference = palette_reference(palette);
+    let _ = EnumChildWindows(
+        root,
+        Some(prepare_backdrop_descendant),
+        LPARAM(reference as isize),
+    );
+}
+
+unsafe extern "system" fn prepare_backdrop_descendant(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let palette = palette_from_reference(lparam.0 as usize);
+    let class_name = control_class_name(hwnd);
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    // SS_LEFT/SS_CENTER/SS_RIGHT are the only text-only STATIC types. Icons, bitmaps, frames and
+    // owner-draw statics retain their existing renderer.
+    if class_name.eq_ignore_ascii_case("Static") && style & 0x1f <= 2 {
+        let _ = SetWindowSubclass(
+            hwnd,
+            Some(backdrop_static_subclass),
+            BACKDROP_STATIC_SUBCLASS_ID,
+            palette_reference(palette),
+        );
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    BOOL(1)
+}
+
+unsafe extern "system" fn backdrop_static_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    match message {
+        WM_PAINT => {
+            let palette = palette_from_reference(reference_data);
+            if palette.uses_system_backdrop_surface() && !palette.dark {
+                paint_backdrop_static(hwnd, palette);
+                LRESULT(0)
+            } else {
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            }
+        }
+        WM_ENABLE | WM_SETTEXT | WM_THEMECHANGED => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let _ = InvalidateRect(hwnd, None, false);
+            result
+        }
+        WM_NCDESTROY => {
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(backdrop_static_subclass),
+                BACKDROP_STATIC_SUBCLASS_ID,
+            );
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn paint_backdrop_static(hwnd: HWND, palette: Palette) {
+    let mut paint = PAINTSTRUCT::default();
+    let dc = BeginPaint(hwnd, &mut paint);
+    let mut rect = RECT::default();
+    let _ = GetClientRect(hwnd, &mut rect);
+    let length = GetWindowTextLengthW(hwnd).max(0) as usize;
+    let mut text = vec![0u16; length + 1];
+    let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
+    text.truncate(copied);
+    if !text.is_empty() {
+        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+        let old_font = (font.0 != 0)
+            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let mut flags = DT_NOPREFIX;
+        flags |= match style & 0x3 {
+            1 => DT_CENTER,
+            2 => DT_RIGHT,
+            _ => windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0),
+        };
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        if style & 0x0200 != 0 || rect.bottom - rect.top <= scale(36, dpi) {
+            flags |= DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
+        } else {
+            flags |= DT_WORDBREAK;
+        }
+        draw_backdrop_static_text(
+            hwnd,
+            dc,
+            &text,
+            &mut rect,
+            flags,
+            if IsWindowEnabled(hwnd).as_bool() {
+                palette.text
+            } else {
+                palette.text_disabled
+            },
+        );
+        if let Some(old_font) = old_font {
+            let _ = SelectObject(dc, old_font);
+        }
+    }
+    let _ = EndPaint(hwnd, &paint);
 }
 
 unsafe fn apply_combo_popup_native_chrome(popup: HWND, palette: Palette) {
@@ -461,6 +774,20 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
     // antialiased overlay installed below.
     apply_borderless_style(list);
     apply_control_theme(list, palette, NativeControlKind::ListView);
+    apply_material_rounded_control_region(list, palette);
+    // Comctl32 v6 explicitly provides double-buffered report painting for this purpose.  Some
+    // callers already request it while creating their ListView, but applying it here as well keeps
+    // every report (including the main install list in reduced WinPE builds) on the same path.
+    const LVM_GETEXTENDEDLISTVIEWSTYLE: u32 = 0x1037;
+    const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = 0x1036;
+    const LVS_EX_DOUBLEBUFFER: isize = 0x0001_0000;
+    let extended = SendMessageW(list, LVM_GETEXTENDEDLISTVIEWSTYLE, WPARAM(0), LPARAM(0)).0;
+    let _ = SendMessageW(
+        list,
+        LVM_SETEXTENDEDLISTVIEWSTYLE,
+        WPARAM(0),
+        LPARAM(extended | LVS_EX_DOUBLEBUFFER),
+    );
     // Do not make every caller remember the three independent ListView colour messages.  In
     // particular, an empty report has no item custom-draw callback and otherwise exposes the
     // class default white body in dark mode.
@@ -470,7 +797,7 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
         list,
         Some(list_view_subclass),
         LIST_VIEW_SUBCLASS_ID,
-        usize::from(palette.dark),
+        palette_reference(palette),
     );
     // Selection colour is delivered as NM_CUSTOMDRAW to the ListView parent rather than the
     // ListView itself. Install one keyed parent subclass per list, so dialogs containing two
@@ -478,11 +805,13 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
     if let Ok(parent) = GetParent(list) {
         let list_value = list.0 as usize;
         let dark_flag = usize::from(palette.dark) << (usize::BITS - 1);
+        let backdrop_flag =
+            usize::from(palette.uses_system_backdrop_surface()) << (usize::BITS - 2);
         let _ = SetWindowSubclass(
             parent,
             Some(list_view_parent_subclass),
             LIST_VIEW_PARENT_SUBCLASS_ID ^ list_value,
-            list_value | dark_flag,
+            list_value | dark_flag | backdrop_flag,
         );
     }
     let header = SendMessageW(list, 0x101F, WPARAM(0), LPARAM(0)); // LVM_GETHEADER
@@ -498,7 +827,7 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
         header,
         Some(header_subclass),
         HEADER_SUBCLASS_ID,
-        usize::from(palette.dark),
+        palette_reference(palette),
     );
     let _ = InvalidateRect(header, None, false);
     Some(header)
@@ -523,7 +852,7 @@ pub unsafe fn apply_progress_theme(control: HWND, palette: Palette) {
         control,
         Some(progress_subclass),
         PROGRESS_SUBCLASS_ID,
-        usize::from(palette.dark),
+        palette_reference(palette),
     );
     let _ = InvalidateRect(control, None, false);
 }
@@ -536,7 +865,7 @@ pub unsafe fn apply_trackbar_theme(control: HWND, palette: Palette) {
         control,
         Some(trackbar_subclass),
         TRACKBAR_SUBCLASS_ID,
-        usize::from(palette.dark),
+        palette_reference(palette),
     );
     let _ = InvalidateRect(control, None, false);
 }
@@ -550,14 +879,21 @@ const CHECK_BOX_SUBCLASS_ID: usize = 0x4c52_4342;
 const RADIO_BUTTON_SUBCLASS_ID: usize = 0x4c52_5242;
 const ROUNDED_CONTROL_SUBCLASS_ID: usize = 0x4c52_5243;
 const SINGLE_LINE_EDIT_SUBCLASS_ID: usize = 0x4c52_4544;
+const COMBO_SELECTION_ITEM_SUBCLASS_ID: usize = 0x4c52_4353;
 const LIST_BOX_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoListBox.HotItem");
 const ROUNDED_CONTROL_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoControl.Hot");
 const COMBO_CARET_HIDDEN_PROPERTY: PCWSTR = w!("LetRecovery.InnoCombo.CaretHidden");
+const COMBO_TRACKING_DROPPED_PROPERTY: PCWSTR = w!("LetRecovery.InnoCombo.TrackingDropped");
+const COMBO_SELECTION_ITEM_PREPARED_PROPERTY: PCWSTR =
+    w!("LetRecovery.InnoCombo.SelectionPrepared");
 const RADIO_BUTTON_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoRadio.Hot");
+const PALETTE_REFERENCE_DARK: usize = 0x1;
+const PALETTE_REFERENCE_SYSTEM_BACKDROP: usize = 0x2;
 const CHECK_BOX_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoCheck.Hot");
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02a3;
 const WM_NCMOUSEMOVE_MESSAGE: u32 = 0x00a0;
 const WM_NCMOUSELEAVE_MESSAGE: u32 = 0x02a2;
+const WM_REPAINT_TRACKING_COMBO: u32 = 0x8000 + 0x4c5;
 
 /// Messages whose USER32/comctl32 default handling may repaint a native non-client scrollbar.
 /// The rounded frame must be overlaid only after that handling finishes; otherwise the scrollbar
@@ -590,11 +926,30 @@ const fn list_view_scrolls_client_pixels(message: u32) -> bool {
     )
 }
 
+const fn palette_reference(palette: Palette) -> usize {
+    let dark = if palette.dark {
+        PALETTE_REFERENCE_DARK
+    } else {
+        0
+    };
+    let backdrop = if palette.uses_system_backdrop_surface() {
+        PALETTE_REFERENCE_SYSTEM_BACKDROP
+    } else {
+        0
+    };
+    dark | backdrop
+}
+
 const fn palette_from_reference(reference_data: usize) -> Palette {
-    if reference_data != 0 {
+    let palette = if reference_data & PALETTE_REFERENCE_DARK != 0 {
         Palette::DARK
     } else {
         Palette::LIGHT
+    };
+    if reference_data & PALETTE_REFERENCE_SYSTEM_BACKDROP != 0 {
+        palette.with_system_backdrop_surface()
+    } else {
+        palette
     }
 }
 
@@ -607,12 +962,15 @@ unsafe fn redraw_control_frame(control: HWND) {
     );
 }
 
-unsafe fn redraw_button_now(control: HWND) {
+unsafe fn invalidate_control_visual(control: HWND) {
+    // Mouse hot-state changes are delivered in bursts (WM_SETCURSOR followed by one or more
+    // WM_MOUSEMOVE messages).  Queue one paint transaction instead of synchronously forcing every
+    // message through WM_PAINT; USER32 can then coalesce the update without an intermediate frame.
     let _ = RedrawWindow(
         control,
         None,
         None,
-        RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+        RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE,
     );
 }
 
@@ -721,7 +1079,7 @@ unsafe extern "system" fn check_box_subclass(
             if message == WM_ENABLE && wparam.0 == 0 {
                 let _ = RemovePropW(hwnd, CHECK_BOX_HOT_PROPERTY);
             }
-            redraw_button_now(hwnd);
+            invalidate_control_visual(hwnd);
             result
         }
         WM_CANCELMODE => {
@@ -740,13 +1098,7 @@ unsafe extern "system" fn check_box_subclass(
 }
 
 unsafe fn paint_check_box(hwnd: HWND, palette: Palette, state: ControlState, checked: bool) {
-    paint_embedded_windows11_button(hwnd, palette, state, checked, ThemedButtonKind::CheckBox);
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ThemedButtonKind {
-    CheckBox,
-    RadioButton,
+    paint_embedded_windows11_checkbox(hwnd, palette, state, checked);
 }
 
 #[derive(Clone, Copy)]
@@ -786,18 +1138,35 @@ const fn themed_button_state(state: ControlState, checked: bool) -> usize {
 fn embedded_button_glyph(
     dark: bool,
     dpi: u32,
-    kind: ThemedButtonKind,
     state: ControlState,
     checked: bool,
 ) -> &'static EmbeddedButtonGlyph {
     let mode = usize::from(dark);
     let dpi = embedded_theme_dpi_index(dpi);
-    let kind = match kind {
-        ThemedButtonKind::CheckBox => 0,
-        ThemedButtonKind::RadioButton => 1,
-    };
     let state = themed_button_state(state, checked);
-    &WIN11_BUTTON_THEME_GLYPHS[(((mode * 4 + dpi) * 2 + kind) * 8) + state]
+    &WIN11_CHECKBOX_THEME_GLYPHS[((mode * 4 + dpi) * 8) + state]
+}
+
+const fn preserve_visible_black_on_system_backdrop(
+    background: u32,
+    alpha: u32,
+    blue: u32,
+    green: u32,
+    red: u32,
+) -> (u32, u32, u32) {
+    if background == 0 && alpha != 0 && blue == 0 && green == 0 && red == 0 {
+        (1, 1, 1)
+    } else {
+        (blue, green, red)
+    }
+}
+
+const fn checkbox_material_fallback(palette: Palette) -> Option<COLORREF> {
+    if palette.uses_system_backdrop_surface() {
+        Some(palette.system_backdrop_edge_fallback())
+    } else {
+        None
+    }
 }
 
 unsafe fn draw_embedded_button_glyph(
@@ -805,6 +1174,7 @@ unsafe fn draw_embedded_button_glyph(
     rect: RECT,
     glyph: &EmbeddedButtonGlyph,
     background: COLORREF,
+    material_fallback: Option<COLORREF>,
 ) {
     let width = (rect.right - rect.left).max(0);
     let height = (rect.bottom - rect.top).max(0);
@@ -812,9 +1182,18 @@ unsafe fn draw_embedded_button_glyph(
         return;
     }
     let background = background.0;
-    let background_red = background & 0xff;
-    let background_green = (background >> 8) & 0xff;
-    let background_blue = (background >> 16) & 0xff;
+    let blend_background = if background == 0 {
+        // Premix the complete fixed Win11 glyph tile against the documented neutral material
+        // fallback. Mixing partially covered and fully transparent texels against literal black
+        // is what made the original rounded checkbox look square and left four dark feet in light
+        // mode. This changes only the tile's backdrop pixels, never its geometry or state image.
+        material_fallback.map_or(background, |color| color.0)
+    } else {
+        background
+    };
+    let background_red = blend_background & 0xff;
+    let background_green = (blend_background >> 8) & 0xff;
+    let background_blue = (blend_background >> 16) & 0xff;
     let mut composed = Vec::with_capacity(glyph.bgra.len());
     for pixel in glyph.bgra.chunks_exact(4) {
         let alpha = u32::from(pixel[3]);
@@ -833,6 +1212,10 @@ unsafe fn draw_embedded_button_glyph(
         let blue = compose(pixel[0], background_blue);
         let green = compose(pixel[1], background_green);
         let red = compose(pixel[2], background_red);
+        // Prevent an opaque black check mark or outline from being interpreted as another DWM
+        // transparent hole when the surrounding page itself uses the black glass key.
+        let (blue, green, red) =
+            preserve_visible_black_on_system_backdrop(background, alpha, blue, green, red);
         composed.extend_from_slice(&[blue as u8, green as u8, red as u8, 255]);
     }
 
@@ -888,16 +1271,14 @@ unsafe fn draw_embedded_button_glyph(
     }
 }
 
-/// USER32 continues to own the real check/radio state machine, keyboard handling, accessibility
-/// and BN_CLICKED semantics.  Only the visible glyph is replaced with pixels rendered once from
-/// the fixed Windows 11 `Aero.msstyles` reference through UxTheme.  That makes Win10 and Win11 use
-/// the same normal/hot/pressed/disabled visuals instead of silently selecting different host themes.
-unsafe fn paint_embedded_windows11_button(
+/// USER32 continues to own the real checkbox state machine, keyboard handling, accessibility and
+/// BN_CLICKED semantics. Only the visible checkbox glyph comes from the fixed Windows 11
+/// `Aero.msstyles` reference, so Win10 and Win11 do not silently select different host themes.
+unsafe fn paint_embedded_windows11_checkbox(
     hwnd: HWND,
     palette: Palette,
     state: ControlState,
     checked: bool,
-    kind: ThemedButtonKind,
 ) {
     let mut paint = PAINTSTRUCT::default();
     let dc = BeginPaint(hwnd, &mut paint);
@@ -912,27 +1293,17 @@ unsafe fn paint_embedded_windows11_button(
         return;
     }
 
-    let (glyph_rect, caption_rect) = match kind {
-        ThemedButtonKind::CheckBox => {
-            let Some(geometry) = check_box_geometry(width, height, dpi) else {
-                let _ = EndPaint(hwnd, &paint);
-                return;
-            };
-            (geometry.glyph, geometry.text)
-        }
-        ThemedButtonKind::RadioButton => {
-            let Some(geometry) = radio_geometry(width, height, dpi) else {
-                let _ = EndPaint(hwnd, &paint);
-                return;
-            };
-            (geometry.glyph, geometry.text)
-        }
+    let Some(geometry) = check_box_geometry(width, height, dpi) else {
+        let _ = EndPaint(hwnd, &paint);
+        return;
     };
+    let (glyph_rect, caption_rect) = (geometry.glyph, geometry.text);
     draw_embedded_button_glyph(
         dc,
         glyph_rect,
-        embedded_button_glyph(palette.dark, dpi, kind, state, checked),
+        embedded_button_glyph(palette.dark, dpi, state, checked),
         palette.window,
+        checkbox_material_fallback(palette),
     );
 
     let text_length = GetWindowTextLengthW(hwnd).max(0) as usize;
@@ -943,21 +1314,19 @@ unsafe fn paint_embedded_windows11_button(
         let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
         let old_font = (font.0 != 0)
             .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
-        let _ = SetBkMode(dc, TRANSPARENT);
-        let _ = SetTextColor(
+        let mut text_rect = caption_rect;
+        draw_alpha_composited_text(
+            hwnd,
             dc,
+            &text,
+            &mut text_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
             if state.disabled {
                 palette.text_disabled
             } else {
                 palette.text
             },
-        );
-        let mut text_rect = caption_rect;
-        let _ = DrawTextW(
-            dc,
-            &mut text,
-            &mut text_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+            palette.uses_system_backdrop_surface() && !palette.dark,
         );
         if let Some(old_font) = old_font {
             let _ = SelectObject(dc, old_font);
@@ -1001,6 +1370,185 @@ fn radio_geometry(width: i32, height: i32, dpi: u32) -> Option<RadioGeometry> {
             bottom: height,
         },
     })
+}
+
+/// Returns the fixed Windows 11 radio colours for the real USER32 state. The old captured PNGs
+/// were already composited against a theme surface and exposed only binary alpha, so their dark
+/// edge texels could never be recomposited correctly on the light page. Keep the audited colours,
+/// but generate true coverage at the final physical size instead of stretching those captures.
+fn radio_state_colors(
+    palette: Palette,
+    state: ControlState,
+    checked: bool,
+) -> (COLORREF, COLORREF) {
+    if checked {
+        let fill = if palette.dark {
+            if state.disabled {
+                rgb(74, 74, 74)
+            } else if state.pressed {
+                rgb(85, 172, 212)
+            } else if state.hot {
+                rgb(91, 189, 233)
+            } else {
+                rgb(96, 205, 255)
+            }
+        } else if state.disabled {
+            rgb(195, 195, 195)
+        } else if state.pressed {
+            rgb(50, 126, 197)
+        } else if state.hot {
+            rgb(25, 110, 191)
+        } else {
+            palette.accent_fill
+        };
+        let centre = if palette.dark {
+            palette.foreground_black()
+        } else {
+            rgb(255, 255, 255)
+        };
+        (fill, centre)
+    } else if palette.dark {
+        if state.disabled {
+            (rgb(74, 74, 74), rgb(55, 55, 55))
+        } else if state.pressed {
+            (rgb(69, 69, 69), rgb(50, 50, 50))
+        } else if state.hot {
+            (rgb(170, 170, 170), rgb(49, 49, 49))
+        } else {
+            (rgb(170, 170, 170), rgb(36, 36, 36))
+        }
+    } else if state.disabled {
+        (rgb(195, 195, 195), palette.window)
+    } else if state.pressed {
+        (rgb(195, 195, 195), rgb(226, 226, 226))
+    } else if state.hot {
+        (rgb(98, 98, 98), rgb(234, 234, 234))
+    } else {
+        (rgb(98, 98, 98), rgb(243, 243, 243))
+    }
+}
+
+fn weighted_radio_color(
+    background: COLORREF,
+    background_samples: u32,
+    primary: COLORREF,
+    primary_samples: u32,
+    secondary: COLORREF,
+    secondary_samples: u32,
+) -> COLORREF {
+    let total = background_samples + primary_samples + secondary_samples;
+    let channel = |shift: u32| {
+        ((((background.0 >> shift) & 0xff) * background_samples
+            + ((primary.0 >> shift) & 0xff) * primary_samples
+            + ((secondary.0 >> shift) & 0xff) * secondary_samples
+            + total / 2)
+            / total)
+            << shift
+    };
+    COLORREF(channel(0) | channel(8) | channel(16))
+}
+
+/// Produces an opaque top-down BGRA glyph. Eight-by-eight subpixel coverage is evaluated in the
+/// final DPI-sized square, which guarantees mirror symmetry and prevents GDI stretching from
+/// pulling a dark corner texel into the light background.
+fn radio_glyph_bgra(side: i32, palette: Palette, state: ControlState, checked: bool) -> Vec<u8> {
+    const SAMPLES: i32 = 8;
+    let side = side.max(1);
+    let centre = f64::from(side) / 2.0;
+    let outer_radius = centre;
+    let ring_width = (f64::from(side) / 13.0).max(1.0);
+    let inner_radius = (outer_radius - ring_width).max(0.0);
+    let dot_radius = f64::from(side) * 2.5 / 13.0;
+    let (primary, secondary) = radio_state_colors(palette, state, checked);
+    let mut pixels = Vec::with_capacity((side * side * 4) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let mut background_samples = 0u32;
+            let mut primary_samples = 0u32;
+            let mut secondary_samples = 0u32;
+            for sample_y in 0..SAMPLES {
+                for sample_x in 0..SAMPLES {
+                    let px = f64::from(x) + (f64::from(sample_x) + 0.5) / f64::from(SAMPLES);
+                    let py = f64::from(y) + (f64::from(sample_y) + 0.5) / f64::from(SAMPLES);
+                    let dx = px - centre;
+                    let dy = py - centre;
+                    let distance_squared = dx * dx + dy * dy;
+                    if distance_squared > outer_radius * outer_radius {
+                        background_samples += 1;
+                    } else if checked {
+                        if distance_squared <= dot_radius * dot_radius {
+                            secondary_samples += 1;
+                        } else {
+                            primary_samples += 1;
+                        }
+                    } else if distance_squared >= inner_radius * inner_radius {
+                        primary_samples += 1;
+                    } else {
+                        secondary_samples += 1;
+                    }
+                }
+            }
+            let color = weighted_radio_color(
+                palette.window,
+                background_samples,
+                primary,
+                primary_samples,
+                secondary,
+                secondary_samples,
+            )
+            .0;
+            pixels.extend_from_slice(&[
+                ((color >> 16) & 0xff) as u8,
+                ((color >> 8) & 0xff) as u8,
+                (color & 0xff) as u8,
+                255,
+            ]);
+        }
+    }
+    pixels
+}
+
+unsafe fn draw_radio_glyph(
+    dc: HDC,
+    rect: RECT,
+    palette: Palette,
+    state: ControlState,
+    checked: bool,
+) {
+    let side = (rect.right - rect.left)
+        .max(0)
+        .min((rect.bottom - rect.top).max(0));
+    if side == 0 {
+        return;
+    }
+    let pixels = radio_glyph_bgra(side, palette, state, checked);
+    let bitmap = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: side,
+            biHeight: -side,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: (side * side * 4) as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let _ = SetDIBitsToDevice(
+        dc,
+        rect.left,
+        rect.top,
+        side as u32,
+        side as u32,
+        0,
+        0,
+        0,
+        side as u32,
+        pixels.as_ptr().cast(),
+        &bitmap,
+        DIB_RGB_COLORS,
+    );
 }
 
 unsafe extern "system" fn radio_button_subclass(
@@ -1048,7 +1596,7 @@ unsafe extern "system" fn radio_button_subclass(
             if message == WM_ENABLE && wparam.0 == 0 {
                 let _ = RemovePropW(hwnd, RADIO_BUTTON_HOT_PROPERTY);
             }
-            redraw_button_now(hwnd);
+            invalidate_control_visual(hwnd);
             result
         }
         WM_NCDESTROY => {
@@ -1062,7 +1610,47 @@ unsafe extern "system" fn radio_button_subclass(
 }
 
 unsafe fn paint_radio_button(hwnd: HWND, palette: Palette, state: ControlState, checked: bool) {
-    paint_embedded_windows11_button(hwnd, palette, state, checked, ThemedButtonKind::RadioButton);
+    let mut paint = PAINTSTRUCT::default();
+    let dc = BeginPaint(hwnd, &mut paint);
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    fill(dc, &client, palette.window);
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let width = (client.right - client.left).max(0);
+    let height = (client.bottom - client.top).max(0);
+    let Some(geometry) = radio_geometry(width, height, dpi) else {
+        let _ = EndPaint(hwnd, &paint);
+        return;
+    };
+    draw_radio_glyph(dc, geometry.glyph, palette, state, checked);
+
+    let text_length = GetWindowTextLengthW(hwnd).max(0) as usize;
+    if text_length > 0 && geometry.text.right > geometry.text.left {
+        let mut text = vec![0u16; text_length + 1];
+        let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
+        text.truncate(copied);
+        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+        let old_font = (font.0 != 0)
+            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
+        let mut text_rect = geometry.text;
+        draw_alpha_composited_text(
+            hwnd,
+            dc,
+            &text,
+            &mut text_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+            if state.disabled {
+                palette.text_disabled
+            } else {
+                palette.text
+            },
+            palette.uses_system_backdrop_surface() && !palette.dark,
+        );
+        if let Some(old_font) = old_font {
+            let _ = SelectObject(dc, old_font);
+        }
+    }
+    let _ = EndPaint(hwnd, &paint);
 }
 
 unsafe extern "system" fn header_subclass(
@@ -1144,11 +1732,14 @@ unsafe fn paint_header(hwnd: HWND, palette: Palette) {
         let mut text_rect = rect;
         text_rect.left += inset;
         text_rect.right -= inset.min((text_rect.right - text_rect.left).max(0));
-        let _ = DrawTextW(
+        draw_alpha_composited_text(
+            hwnd,
             dc,
-            &mut text,
+            &text,
             &mut text_rect,
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+            palette.text,
+            palette.uses_system_backdrop_surface() && !palette.dark,
         );
         let separator = RECT {
             left: rect.right - 1,
@@ -1161,11 +1752,9 @@ unsafe fn paint_header(hwnd: HWND, palette: Palette) {
     if let Some(old_font) = old_font {
         let _ = SelectObject(dc, old_font);
     }
-    // The header is a child of the report and can repaint after the report itself (for example on
-    // hover or horizontal scrolling).  Never draw the ListView-sized frame into the header DC:
-    // both HWNDs use different coordinate spaces and the header's scroll clipping would turn that
-    // misplaced frame into a second rounded end beside the last visible column.  Finish the header
-    // transaction first, then reassert the one authoritative frame on the ListView's own window DC.
+    // The header is a child of the report and covers the report's top edge. Restore only the
+    // authoritative frame after the header transaction, without invalidating either HWND; queuing
+    // another report paint here would form a header/report feedback loop.
     let list = GetParent(hwnd).ok();
     let _ = EndPaint(hwnd, &paint);
     if let Some(list) = list {
@@ -1204,11 +1793,9 @@ unsafe extern "system" fn list_view_subclass(
             if list_view_needs_empty_body_paint(item_count) {
                 let mut paint = PAINTSTRUCT::default();
                 let dc = BeginPaint(hwnd, &mut paint);
-                fill(
-                    dc,
-                    &paint.rcPaint,
-                    palette_from_reference(reference_data).edit,
-                );
+                let mut client = RECT::default();
+                let _ = GetClientRect(hwnd, &mut client);
+                fill(dc, &client, palette_from_reference(reference_data).edit);
                 let _ = EndPaint(hwnd, &paint);
                 paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
                 return LRESULT(0);
@@ -1227,18 +1814,24 @@ unsafe extern "system" fn list_view_subclass(
         }
         message if native_scrollbar_may_repaint_frame(message) => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            // UxTheme drives native scrollbar hover transitions with WM_TIMER. Repainting the
+            // complete report for every animation tick makes both the header and rows flash even
+            // on full Windows. The stock control already painted that animation; no frame update
+            // is required until an actual scroll/origin message arrives.
+            if message == 0x0113 {
+                return result;
+            }
             if list_view_scrolls_client_pixels(message) {
                 // Repaint the complete report after USER32/comctl32 finishes the scroll.  The
                 // control already uses LVS_EX_DOUBLEBUFFER and WM_ERASEBKGND fills the active
                 // palette, so this clears stale row/frame pixels without a white intermediate
                 // frame.  Painting only the exposed strip is what produced the repeated lines.
-                let _ = InvalidateRect(hwnd, None, true);
-                let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+                let _ = InvalidateRect(hwnd, None, false);
             }
             // Keep the native scrollbar and its accessibility/interaction semantics.  Only the
             // deterministic outer frame is painted last so hover and scroll animation cannot
             // expose square corners or class-brush pixels in either theme.
-            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            redraw_control_frame(hwnd);
             result
         }
         WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
@@ -1246,7 +1839,11 @@ unsafe extern "system" fn list_view_subclass(
             // Comctl32 can restore class-default colours while changing enabled/theme state.
             // Reassert all three ListView colours together; partial updates cause a white empty
             // body or black text background until the next full refresh.
-            set_list_view_colors(hwnd, palette_from_reference(reference_data));
+            let palette = palette_from_reference(reference_data);
+            set_list_view_colors(hwnd, palette);
+            if matches!(message, WM_SIZE | WM_THEMECHANGED) {
+                apply_material_rounded_control_region(hwnd, palette);
+            }
             let _ = InvalidateRect(hwnd, None, false);
             result
         }
@@ -1329,6 +1926,14 @@ unsafe extern "system" fn single_line_edit_subclass(
     reference_data: usize,
 ) -> LRESULT {
     match message {
+        WM_PAINT => {
+            // WinPE can show a newly laid-out Edit without issuing another effective WM_NCPAINT.
+            // Let USER32 paint the native text, selection, caret and background first, then paint
+            // the deterministic frame last so the initial visible frame matches the hover repaint.
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            result
+        }
         WM_NCCALCSIZE => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             if lparam.0 != 0 {
@@ -1382,6 +1987,70 @@ unsafe extern "system" fn single_line_edit_subclass(
     }
 }
 
+unsafe extern "system" fn combo_selection_item_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    const WM_PRINTCLIENT: u32 = 0x0318;
+    let palette = palette_from_reference(reference_data);
+    match message {
+        WM_ERASEBKGND | WM_PRINTCLIENT => {
+            let dc = HDC(wparam.0 as *mut _);
+            if !dc.is_invalid() {
+                paint_combo_selection_item_to_dc(hwnd, palette, dc);
+            }
+            LRESULT(1)
+        }
+        WM_PAINT => {
+            // Always validate the child update region. Returning without BeginPaint leaves a
+            // permanent WM_PAINT loop on reduced WinPE USER32 builds.
+            let mut paint = PAINTSTRUCT::default();
+            let _ = BeginPaint(hwnd, &mut paint);
+            let _ = EndPaint(hwnd, &paint);
+            paint_combo_selection_item_window(hwnd, palette);
+            LRESULT(0)
+        }
+        WM_NCPAINT => {
+            paint_combo_selection_item_window(hwnd, palette);
+            LRESULT(0)
+        }
+        WM_ENABLE
+        | WM_SETTEXT
+        | WM_SETFOCUS
+        | WM_KILLFOCUS
+        | WM_THEMECHANGED
+        | WM_LBUTTONDOWN
+        | WM_LBUTTONUP
+        | WM_KEYDOWN
+        | WM_KEYUP
+        | 0x0127 // WM_CHANGEUISTATE
+        | 0x0128 // WM_UPDATEUISTATE
+        => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            // USER32 paints a focus underline directly while processing focus/click/UI-state
+            // messages on the read-only selection child. An asynchronous invalidation leaves that
+            // underline visible until another pointer event, especially in reduced WinPE builds.
+            // Publish the complete child surface and its parent frame in the same transaction.
+            repaint_combo_selection_item_now(hwnd, palette);
+            result
+        }
+        WM_NCDESTROY => {
+            let _ = RemovePropW(hwnd, COMBO_SELECTION_ITEM_PREPARED_PROPERTY);
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(combo_selection_item_subclass),
+                COMBO_SELECTION_ITEM_SUBCLASS_ID,
+            );
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
+    }
+}
+
 unsafe extern "system" fn rounded_control_subclass(
     hwnd: HWND,
     message: u32,
@@ -1392,6 +2061,28 @@ unsafe extern "system" fn rounded_control_subclass(
 ) -> LRESULT {
     const CB_SHOWDROPDOWN: u32 = 0x014f;
     match message {
+        WM_REPAINT_TRACKING_COMBO if is_drop_down_list(hwnd) => {
+            // A real mouse click enters USER32's nested drop-list tracking loop. The stock theme
+            // can repaint the closed selection after WM_LBUTTONDOWN but before that call returns,
+            // so a conventional after-default overlay runs too late. This posted message executes
+            // inside the nested loop and restores the complete deterministic surface while the
+            // popup is actually visible.
+            repaint_combo_closed_now(hwnd, palette_from_reference(reference_data));
+            LRESULT(0)
+        }
+        WM_ERASEBKGND if is_drop_down_list(hwnd) => {
+            // WinPE's reduced USER32/UxTheme stack can still erase the borderless ComboBox with
+            // the stock class brush before WM_PAINT. That erase survives as a bright underline
+            // because the PE renderer does not agree with the closed-field height reported by
+            // COMBOBOXINFO. Paint the deterministic closed surface into the supplied erase DC and
+            // report the erase as complete. The separate ComboLBox popup remains native.
+            let dc = HDC(wparam.0 as *mut _);
+            if !dc.is_invalid() {
+                paint_combo_closed_to_dc(hwnd, palette_from_reference(reference_data), dc);
+            }
+            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            LRESULT(1)
+        }
         WM_PAINT => {
             if is_drop_down_list(hwnd) {
                 paint_combo_closed(hwnd, palette_from_reference(reference_data));
@@ -1405,6 +2096,14 @@ unsafe extern "system" fn rounded_control_subclass(
             result
         }
         WM_NCPAINT => {
+            if is_drop_down_list(hwnd) {
+                // WS_BORDER and WS_EX_CLIENTEDGE are removed when this subclass is installed.
+                // Calling the stock non-client painter anyway is harmless on full Windows, but
+                // WinPE paints a legacy bright bottom edge after our client surface. This frame
+                // is the complete non-client result, so do not run that incompatible renderer.
+                paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+                return LRESULT(0);
+            }
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
             result
@@ -1412,7 +2111,6 @@ unsafe extern "system" fn rounded_control_subclass(
         WM_SETCURSOR if is_drop_down_list(hwnd) => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             ensure_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY, false);
-            redraw_button_now(hwnd);
             result
         }
         WM_MOUSEMOVE => {
@@ -1421,9 +2119,7 @@ unsafe extern "system" fn rounded_control_subclass(
                 update_list_box_hot_item(hwnd, lparam);
             }
             ensure_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY, false);
-            if is_drop_down_list(hwnd) {
-                redraw_button_now(hwnd);
-            } else {
+            if !is_drop_down_list(hwnd) {
                 paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
             }
             result
@@ -1440,9 +2136,7 @@ unsafe extern "system" fn rounded_control_subclass(
                 clear_list_box_hot_item(hwnd);
             }
             clear_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY);
-            if is_drop_down_list(hwnd) {
-                redraw_button_now(hwnd);
-            } else {
+            if !is_drop_down_list(hwnd) {
                 paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
             }
             result
@@ -1450,7 +2144,14 @@ unsafe extern "system" fn rounded_control_subclass(
         message if native_scrollbar_may_repaint_frame(message) => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             if is_drop_down_list(hwnd) {
-                redraw_button_now(hwnd);
+                // A closed ComboBox has no scrollbar of its own; its popup ComboLBox is a
+                // separate HWND.  UxTheme nevertheless posts WM_TIMER while the pointer crosses
+                // adjacent controls.  Synchronously repainting the complete field for every
+                // timer tick produces the visible WinPE flash.  Ignore animation-only timers and
+                // coalesce the remaining state/content changes into the normal paint queue.
+                if message != 0x0113 {
+                    invalidate_control_visual(hwnd);
+                }
             } else {
                 paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
             }
@@ -1458,6 +2159,7 @@ unsafe extern "system" fn rounded_control_subclass(
         }
         WM_SETFOCUS if is_drop_down_list(hwnd) => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            install_combo_selection_item_subclass(hwnd, palette_from_reference(reference_data));
             // USER32 creates and shows a caret when a CBS_DROPDOWNLIST receives focus. The closed
             // field is read-only and fully painted by this subclass, so that caret has no editing
             // meaning and otherwise appears as a one-frame vertical line after a click.
@@ -1472,7 +2174,7 @@ unsafe extern "system" fn rounded_control_subclass(
             {
                 let _ = ShowCaret(hwnd);
             }
-            redraw_button_now(hwnd);
+            repaint_combo_closed_now(hwnd, palette_from_reference(reference_data));
             result
         }
         WM_KILLFOCUS if is_drop_down_list(hwnd) => {
@@ -1482,21 +2184,60 @@ unsafe extern "system" fn rounded_control_subclass(
                 let _ = ShowCaret(hwnd);
             }
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            redraw_button_now(hwnd);
+            repaint_combo_closed_now(hwnd, palette_from_reference(reference_data));
             result
         }
-        WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED | WM_LBUTTONDOWN
-        | WM_LBUTTONUP => {
+        WM_LBUTTONDOWN if is_drop_down_list(hwnd) => {
+            let marked = SetPropW(
+                hwnd,
+                COMBO_TRACKING_DROPPED_PROPERTY,
+                HANDLE(std::ptr::dangling_mut()),
+            )
+            .is_ok();
+            repaint_combo_closed_now(hwnd, palette_from_reference(reference_data));
+            let _ = PostMessageW(hwnd, WM_REPAINT_TRACKING_COMBO, WPARAM(0), LPARAM(0));
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if marked {
+                let _ = RemovePropW(hwnd, COMBO_TRACKING_DROPPED_PROPERTY);
+            }
+            repaint_combo_closed_now(hwnd, palette_from_reference(reference_data));
+            result
+        }
+        WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED | WM_LBUTTONUP => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             if is_drop_down_list(hwnd) {
-                redraw_button_now(hwnd);
+                if matches!(message, WM_SIZE | WM_THEMECHANGED) {
+                    let height = InnoMetrics::for_dpi(GetDpiForWindow(hwnd).max(96)).field_height;
+                    set_combo_selection_field_height(hwnd, height);
+                    set_combo_popup_row_height(hwnd, height);
+                    clip_combo_to_closed_field(hwnd, palette_from_reference(reference_data));
+                }
+                install_combo_selection_item_subclass(hwnd, palette_from_reference(reference_data));
+                if matches!(message, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_SETFOCUS) {
+                    repaint_combo_closed_now(hwnd, palette_from_reference(reference_data));
+                } else {
+                    invalidate_control_visual(hwnd);
+                }
             } else {
+                if matches!(message, WM_SIZE | WM_THEMECHANGED) {
+                    apply_material_rounded_control_region(
+                        hwnd,
+                        palette_from_reference(reference_data),
+                    );
+                }
                 let _ = InvalidateRect(hwnd, None, false);
             }
             result
         }
         CB_SHOWDROPDOWN => {
+            if wparam.0 != 0 {
+                let height = InnoMetrics::for_dpi(GetDpiForWindow(hwnd).max(96)).field_height;
+                set_combo_selection_field_height(hwnd, height);
+                set_combo_popup_row_height(hwnd, height);
+                clip_combo_to_closed_field(hwnd, palette_from_reference(reference_data));
+            }
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            install_combo_selection_item_subclass(hwnd, palette_from_reference(reference_data));
             let mut info = COMBOBOXINFO {
                 cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
                 ..Default::default()
@@ -1510,7 +2251,7 @@ unsafe extern "system" fn rounded_control_subclass(
                     palette_from_reference(reference_data),
                 );
             }
-            let _ = InvalidateRect(hwnd, None, false);
+            repaint_combo_closed_now(hwnd, palette_from_reference(reference_data));
             result
         }
         WM_NCDESTROY => {
@@ -1521,6 +2262,7 @@ unsafe extern "system" fn rounded_control_subclass(
             }
             let _ = RemovePropW(hwnd, LIST_BOX_HOT_PROPERTY);
             let _ = RemovePropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY);
+            let _ = RemovePropW(hwnd, COMBO_TRACKING_DROPPED_PROPERTY);
             let _ = RemoveWindowSubclass(
                 hwnd,
                 Some(rounded_control_subclass),
@@ -1539,12 +2281,15 @@ unsafe fn paint_rounded_control_frame(hwnd: HWND, palette: Palette) {
     }
     let class_name = control_class_name(hwnd);
     let interior = if is_combo_class(&class_name) {
-        palette.button
+        // The antialiased inner edge must blend against the same stateful surface as the closed
+        // selection field. Using the normal button colour here leaves a white/grey crescent when
+        // the field has already switched to its hot or dropped colour.
+        combo_closed_surface(hwnd, palette)
     } else {
         palette.edit
     };
     if is_edit_class(&class_name) && is_single_line_edit(hwnd) {
-        paint_single_line_edit_nonclient_bands(dc, hwnd, interior);
+        paint_single_line_edit_nonclient_bands(dc, hwnd, palette.edit_brush_color());
     }
     draw_rounded_control_frame_to_dc(dc, hwnd, palette, interior);
     let _ = ReleaseDC(hwnd, dc);
@@ -1671,32 +2416,82 @@ unsafe fn set_combo_selection_field_height(hwnd: HWND, height: i32) {
     }
 }
 
+/// Fixes stock popup rows to the same DPI-scaled baseline on both the initial theme transaction
+/// and later theme changes. USER32 otherwise keeps the pre-font row height until the first theme
+/// switch, which makes the initial dark popup visibly shorter than the same popup afterwards.
+unsafe fn set_combo_popup_row_height(hwnd: HWND, height: i32) {
+    const CB_SETITEMHEIGHT: u32 = 0x0153;
+    const POPUP_ROWS: usize = 0;
+    if height > 0 {
+        let _ = SendMessageW(
+            hwnd,
+            CB_SETITEMHEIGHT,
+            WPARAM(POPUP_ROWS),
+            LPARAM(height as isize),
+        );
+    }
+}
+
+/// Restricts the visible/hit-test region of a closed drop-down ComboBox to its selection field.
+///
+/// The height passed to `MoveWindow` is the fully expanded list height. Full Windows clips the
+/// closed control internally, but reduced WinPE USER32 builds can expose pixels from that retained
+/// height below the field. The popup list is a separate top-level ComboLBox, so clipping this HWND
+/// does not change native popup, keyboard or accessibility behaviour.
+unsafe fn clip_combo_to_closed_field(hwnd: HWND, _palette: Palette) {
+    if !is_drop_down_list(hwnd) {
+        return;
+    }
+    let mut window = RECT::default();
+    if GetWindowRect(hwnd, &mut window).is_err() {
+        return;
+    }
+    let width = (window.right - window.left).max(0);
+    let full_height = (window.bottom - window.top).max(0);
+    if width == 0 || full_height == 0 {
+        return;
+    }
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let closed_height =
+        combo_closed_height(hwnd, InnoMetrics::for_dpi(dpi).field_height).clamp(1, full_height);
+    // Keep this region rectangular. CreateRoundRectRgn is a binary pixel mask; using it as the
+    // visible silhouette clips away partially covered pixels and leaves a stair-stepped bracket.
+    // The painter masks the four corners; this region only hides USER32's retained list height.
+    let region = CreateRectRgn(0, 0, width, closed_height);
+    // Microsoft recommends redrawing a visible window when changing its region. Without that
+    // redraw, the pixels removed from USER32's retained drop-list height survive as a narrow line
+    // immediately below the deterministic field until some unrelated parent repaint occurs.
+    if !region.is_invalid() && SetWindowRgn(hwnd, region, true) == 0 {
+        let _ = DeleteObject(region);
+    }
+}
+
+/// Removes any earlier binary rounded region from a stock child HWND.
+///
+/// A GDI region has no partial coverage and cannot represent the visible antialiased edge. The
+/// deterministic last-paint transaction replaces the small exterior corner pixels instead.
+unsafe fn apply_material_rounded_control_region(hwnd: HWND, palette: Palette) {
+    let _ = palette;
+    clear_control_window_region(hwnd);
+}
+
+unsafe fn clear_control_window_region(hwnd: HWND) {
+    let _ = SetWindowRgn(hwnd, windows::Win32::Graphics::Gdi::HRGN::default(), true);
+}
+
 /// Returns the height of the visible, closed selection field of a stock drop-down list.
 ///
-/// A ComboBox HWND may retain the full drop-list height passed to `MoveWindow`; using that HWND
-/// height for either layout or painting makes the closed field jump upward and can leave a tall
-/// stale rectangle behind it. `COMBOBOXINFO` exposes the actual selection/button rectangles that
-/// USER32 calculated from the current font, DPI and common-controls implementation.
+/// `CB_SETITEMHEIGHT(1)` establishes the selection field independently from popup rows. Some
+/// USER32 builds nevertheless report `COMBOBOXINFO` item/button rectangles a few pixels taller
+/// than the requested field because they include stock non-client padding. Our borderless custom
+/// painter owns that padding, so using the reported height would expose a second bottom strip. The
+/// shared Inno field baseline is therefore the authoritative visible and layout height.
 pub(crate) unsafe fn combo_closed_height(hwnd: HWND, fallback: i32) -> i32 {
-    let mut info = COMBOBOXINFO {
-        cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
-        ..Default::default()
-    };
-    if GetComboBoxInfo(hwnd, &mut info).is_err() {
-        return fallback.max(1);
-    }
-    let top = info.rcItem.top.min(info.rcButton.top);
-    let bottom = info.rcItem.bottom.max(info.rcButton.bottom);
-    let measured = bottom.saturating_sub(top);
-    let dpi = GetDpiForWindow(hwnd).max(96);
-    if measured <= 0 {
-        fallback.max(1)
-    } else {
-        // USER32 may report the host OS default height for one message cycle while a new font,
-        // DPI, or theme is being applied. Never let that transient value shrink the shared Inno
-        // baseline; the full-frame painter is intentionally unclipped and draws the final height.
-        measured.max(fallback).clamp(scale(18, dpi), scale(36, dpi))
-    }
+    combo_closed_visual_height(fallback, GetDpiForWindow(hwnd).max(96))
+}
+
+fn combo_closed_visual_height(requested: i32, dpi: u32) -> i32 {
+    requested.max(1).clamp(scale(18, dpi), scale(36, dpi))
 }
 
 /// Paints the complete closed CBS_DROPDOWNLIST in one WM_PAINT transaction. USER32 continues to own
@@ -1713,22 +2508,249 @@ unsafe fn paint_combo_closed(hwnd: HWND, palette: Palette) {
     // leaves the other half stale and can omit part of an edge. Validate the update above, then
     // publish the whole closed client through an unclipped client DC and its frame through an
     // unclipped window DC.
-    let dc = GetDC(hwnd);
+    // A stock ComboBox can retain a themed two-pixel client inset even after WS_BORDER and
+    // WS_EX_CLIENTEDGE are removed. GetDC starts inside that inset, leaving USER32's pale top arc
+    // untouched. Paint the complete closed window surface through the window DC, then publish our
+    // single deterministic frame last.
+    let dc = GetWindowDC(hwnd);
     if !dc.is_invalid() {
-        paint_combo_closed_to_dc(hwnd, palette, dc);
+        paint_combo_closed_window_to_dc(hwnd, palette, dc);
         let _ = ReleaseDC(hwnd, dc);
     }
     paint_rounded_control_frame(hwnd, palette);
 }
 
-unsafe fn paint_combo_closed_to_dc(hwnd: HWND, palette: Palette, dc: HDC) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComboClosedState {
+    Normal,
+    Hot,
+    Dropped,
+}
+
+unsafe fn combo_closed_state(hwnd: HWND) -> ComboClosedState {
+    const CB_GETDROPPEDSTATE: u32 = 0x0157;
+    const STATE_SYSTEM_PRESSED: u32 = 0x0000_0008;
+    let mut info = COMBOBOXINFO {
+        cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+        ..Default::default()
+    };
+    let _ = GetComboBoxInfo(hwnd, &mut info);
+    let pointer_inside = {
+        let mut pointer = POINT::default();
+        let mut window = RECT::default();
+        GetCursorPos(&mut pointer).is_ok()
+            && GetWindowRect(hwnd, &mut window).is_ok()
+            && pointer.x >= window.left
+            && pointer.x < window.right
+            && pointer.y >= window.top
+            && pointer.y < window.bottom
+    };
+    let hot = pointer_inside || !GetPropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY).is_invalid();
+    let dropped = !GetPropW(hwnd, COMBO_TRACKING_DROPPED_PROPERTY).is_invalid()
+        || info.stateButton.0 & STATE_SYSTEM_PRESSED != 0
+        || SendMessageW(hwnd, CB_GETDROPPEDSTATE, WPARAM(0), LPARAM(0)).0 != 0;
+    if dropped {
+        ComboClosedState::Dropped
+    } else if hot && IsWindowEnabled(hwnd).as_bool() {
+        ComboClosedState::Hot
+    } else {
+        ComboClosedState::Normal
+    }
+}
+
+unsafe fn combo_closed_surface(hwnd: HWND, palette: Palette) -> COLORREF {
+    match combo_closed_state(hwnd) {
+        ComboClosedState::Dropped => {
+            if palette.dark {
+                palette.button_pressed
+            } else {
+                rgb(204, 228, 247)
+            }
+        }
+        ComboClosedState::Hot => {
+            if palette.dark {
+                palette.button_hot
+            } else {
+                rgb(229, 241, 251)
+            }
+        }
+        ComboClosedState::Normal => palette.button,
+    }
+}
+
+unsafe fn draw_combo_selected_text(hwnd: HWND, dc: HDC, mut text_rect: RECT, palette: Palette) {
     const CB_GETCURSEL: u32 = 0x0147;
     const CB_GETLBTEXT: u32 = 0x0148;
     const CB_GETLBTEXTLEN: u32 = 0x0149;
-    const CB_GETDROPPEDSTATE: u32 = 0x0157;
     const CB_ERR: isize = -1;
-    const STATE_SYSTEM_PRESSED: u32 = 0x0000_0008;
+    let selected = SendMessageW(hwnd, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    if selected == CB_ERR {
+        return;
+    }
+    let length = SendMessageW(hwnd, CB_GETLBTEXTLEN, WPARAM(selected as usize), LPARAM(0)).0;
+    if length < 0 {
+        return;
+    }
+    let mut text = vec![0u16; length as usize + 1];
+    let copied = SendMessageW(
+        hwnd,
+        CB_GETLBTEXT,
+        WPARAM(selected as usize),
+        LPARAM(text.as_mut_ptr() as isize),
+    )
+    .0
+    .max(0) as usize;
+    text.truncate(copied.min(text.len()));
+    let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+    let old_font = (font.0 != 0)
+        .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
+    let _ = SetBkMode(dc, TRANSPARENT);
+    let _ = SetTextColor(
+        dc,
+        if IsWindowEnabled(hwnd).as_bool() {
+            palette.text
+        } else {
+            palette.text_disabled
+        },
+    );
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    text_rect.left += scale(6, dpi);
+    text_rect.right -= scale(3, dpi);
+    let mut text_metrics = windows::Win32::Graphics::Gdi::TEXTMETRICW::default();
+    let measured = GetTextMetricsW(dc, &mut text_metrics).as_bool();
+    if measured {
+        let available = (text_rect.bottom - text_rect.top).max(0);
+        let text_height = text_metrics.tmHeight.clamp(1, available.max(1));
+        let spare = available.saturating_sub(text_height);
+        text_rect.top += (spare + 1) / 2;
+        text_rect.bottom = text_rect.top + text_height;
+    }
+    let flags = if measured {
+        DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX
+    } else {
+        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX
+    };
+    draw_alpha_composited_text(
+        hwnd,
+        dc,
+        &text,
+        &mut text_rect,
+        flags,
+        if IsWindowEnabled(hwnd).as_bool() {
+            palette.text
+        } else {
+            palette.text_disabled
+        },
+        palette.uses_system_backdrop_surface() && !palette.dark,
+    );
+    if let Some(old_font) = old_font {
+        let _ = SelectObject(dc, old_font);
+    }
+}
 
+unsafe fn paint_combo_selection_item_to_dc(item: HWND, palette: Palette, dc: HDC) {
+    let Ok(combo) = GetParent(item) else {
+        return;
+    };
+    if combo.0.is_null() || !is_drop_down_list(combo) {
+        return;
+    }
+    let mut client = RECT::default();
+    if GetClientRect(item, &mut client).is_err() || client.right <= client.left {
+        return;
+    }
+    fill(dc, &client, combo_closed_surface(combo, palette));
+    draw_combo_selected_text(combo, dc, client, palette);
+}
+
+unsafe fn repaint_combo_selection_item_now(item: HWND, palette: Palette) {
+    paint_combo_selection_item_window(item, palette);
+    if let Ok(combo) = GetParent(item) {
+        if !combo.0.is_null() && is_drop_down_list(combo) {
+            repaint_combo_closed_now(combo, palette);
+        }
+    }
+}
+
+/// Paints both the client and non-client pixels of USER32's closed selection child.
+///
+/// Reduced WinPE USER32 builds keep a focus underline in the child's non-client bottom band.
+/// Painting only `GetDC(item)` therefore leaves a blue line while focused and a dark line after
+/// focus moves away. A window DC lets the deterministic closed-field surface replace that band in
+/// the same synchronous transaction as the parent ComboBox frame.
+unsafe fn paint_combo_selection_item_window(item: HWND, palette: Palette) {
+    let Ok(combo) = GetParent(item) else {
+        return;
+    };
+    if combo.0.is_null() || !is_drop_down_list(combo) {
+        return;
+    }
+
+    let mut window = RECT::default();
+    if GetWindowRect(item, &mut window).is_err() {
+        return;
+    }
+    let width = window.right - window.left;
+    let height = window.bottom - window.top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    let dc = GetWindowDC(item);
+    if dc.is_invalid() {
+        return;
+    }
+    let bounds = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+    fill(dc, &bounds, combo_closed_surface(combo, palette));
+    draw_combo_selected_text(combo, dc, bounds, palette);
+    let _ = ReleaseDC(item, dc);
+}
+
+unsafe fn repaint_combo_closed_now(combo: HWND, palette: Palette) {
+    let dc = GetWindowDC(combo);
+    if !dc.is_invalid() {
+        paint_combo_closed_window_to_dc(combo, palette, dc);
+        let _ = ReleaseDC(combo, dc);
+    }
+    paint_rounded_control_frame(combo, palette);
+}
+
+unsafe fn paint_combo_closed_to_dc(hwnd: HWND, palette: Palette, dc: HDC) {
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let mut client = RECT::default();
+    if GetClientRect(hwnd, &mut client).is_err() {
+        return;
+    }
+    let available_height = (client.bottom - client.top).max(1);
+    client.bottom = client.top
+        + combo_closed_height(hwnd, InnoMetrics::for_dpi(dpi).field_height).min(available_height);
+    paint_combo_closed_bounds_to_dc(hwnd, palette, dc, client);
+}
+
+unsafe fn paint_combo_closed_window_to_dc(hwnd: HWND, palette: Palette, dc: HDC) {
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let mut window = RECT::default();
+    if GetWindowRect(hwnd, &mut window).is_err() {
+        return;
+    }
+    let width = (window.right - window.left).max(1);
+    let available_height = (window.bottom - window.top).max(1);
+    let bounds = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: combo_closed_height(hwnd, InnoMetrics::for_dpi(dpi).field_height)
+            .min(available_height),
+    };
+    paint_combo_closed_bounds_to_dc(hwnd, palette, dc, bounds);
+}
+
+unsafe fn paint_combo_closed_bounds_to_dc(hwnd: HWND, palette: Palette, dc: HDC, client: RECT) {
     let mut info = COMBOBOXINFO {
         cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
         ..Default::default()
@@ -1737,17 +2759,6 @@ unsafe fn paint_combo_closed_to_dc(hwnd: HWND, palette: Palette, dc: HDC) {
         return;
     }
     let dpi = GetDpiForWindow(hwnd).max(96);
-    let mut client = RECT::default();
-    if GetClientRect(hwnd, &mut client).is_err() {
-        return;
-    }
-    // For CBS_DROPDOWNLIST, GetClientRect/GetWindowRect can describe the complete expanded list
-    // height supplied to CreateWindow/MoveWindow. Only paint the actual closed selection field
-    // calculated by USER32 for the installed font and DPI; a fixed top crop shifts the field and
-    // its text upward on systems whose native closed height is larger than our logical baseline.
-    let available_height = (client.bottom - client.top).max(1);
-    client.bottom = client.top
-        + combo_closed_height(hwnd, InnoMetrics::for_dpi(dpi).field_height).min(available_height);
     // The native arrow width is stable, but COMBOBOXINFO rectangle origins differ across the
     // USER32 implementations we support. Rebuild client-local rectangles from the actual HWND
     // so the compatibility surface always covers the complete closed control.
@@ -1770,40 +2781,10 @@ unsafe fn paint_combo_closed_to_dc(hwnd: HWND, palette: Palette, dc: HDC) {
         return;
     }
 
-    // USER32 themes the arrow button on hover, while this compatibility overlay owns only the
-    // selection field. Use the same control-wide hot state here so the middle can never remain
-    // white/idle beside a highlighted arrow on Windows 10.
-    let pointer_inside = {
-        let mut pointer = POINT::default();
-        let mut window = RECT::default();
-        GetCursorPos(&mut pointer).is_ok()
-            && GetWindowRect(hwnd, &mut window).is_ok()
-            && pointer.x >= window.left
-            && pointer.x < window.right
-            && pointer.y >= window.top
-            && pointer.y < window.bottom
-    };
-    let hot = pointer_inside || !GetPropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY).is_invalid();
-    let dropped = info.stateButton.0 & STATE_SYSTEM_PRESSED != 0
-        || SendMessageW(hwnd, CB_GETDROPPEDSTATE, WPARAM(0), LPARAM(0)).0 != 0;
-    let surface = if dropped {
-        if palette.dark {
-            palette.button_pressed
-        } else {
-            // Sampled from the Common Controls 6.0 Windows 11 pressed ComboBox arrow surface.
-            rgb(204, 228, 247)
-        }
-    } else if hot && IsWindowEnabled(hwnd).as_bool() {
-        if palette.dark {
-            palette.button_hot
-        } else {
-            // Keep the selection field identical to the native v6 arrow hover surface instead of
-            // the nearly indistinguishable generic #F9F9F9 command-button hover colour.
-            rgb(229, 241, 251)
-        }
-    } else {
-        palette.button
-    };
+    // Use one surface decision for the parent, its selection child and the native-arrow-sized
+    // compatibility glyph. This prevents WinPE from showing a differently coloured seam.
+    let surface = combo_closed_surface(hwnd, palette);
+    fill(dc, &client, surface);
     fill(dc, &field, surface);
     fill(dc, &button, surface);
 
@@ -1830,56 +2811,7 @@ unsafe fn paint_combo_closed_to_dc(hwnd: HWND, palette: Palette, dc: HDC) {
         let _ = DeleteObject(arrow_pen);
     }
 
-    let selected = SendMessageW(hwnd, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
-    if selected != CB_ERR {
-        let length = SendMessageW(hwnd, CB_GETLBTEXTLEN, WPARAM(selected as usize), LPARAM(0)).0;
-        if length >= 0 {
-            let mut text = vec![0u16; length as usize + 1];
-            let copied = SendMessageW(
-                hwnd,
-                CB_GETLBTEXT,
-                WPARAM(selected as usize),
-                LPARAM(text.as_mut_ptr() as isize),
-            )
-            .0
-            .max(0) as usize;
-            text.truncate(copied.min(text.len()));
-            let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
-            let old_font = (font.0 != 0).then(|| {
-                SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _))
-            });
-            let _ = SetBkMode(dc, TRANSPARENT);
-            let _ = SetTextColor(
-                dc,
-                if IsWindowEnabled(hwnd).as_bool() {
-                    palette.text
-                } else {
-                    palette.text_disabled
-                },
-            );
-            let mut text_rect = field;
-            text_rect.left += scale(6, dpi);
-            text_rect.right -= scale(3, dpi);
-            let mut text_metrics = windows::Win32::Graphics::Gdi::TEXTMETRICW::default();
-            let measured = GetTextMetricsW(dc, &mut text_metrics).as_bool();
-            if measured {
-                let available = (text_rect.bottom - text_rect.top).max(0);
-                let text_height = text_metrics.tmHeight.clamp(1, available.max(1));
-                let spare = available.saturating_sub(text_height);
-                text_rect.top += (spare + 1) / 2;
-                text_rect.bottom = text_rect.top + text_height;
-            }
-            let flags = if measured {
-                DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX
-            } else {
-                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX
-            };
-            let _ = DrawTextW(dc, &mut text, &mut text_rect, flags);
-            if let Some(old_font) = old_font {
-                let _ = SelectObject(dc, old_font);
-            }
-        }
-    }
+    draw_combo_selected_text(hwnd, dc, field, palette);
 }
 
 unsafe fn draw_rounded_control_frame_to_dc(
@@ -1917,16 +2849,38 @@ unsafe fn draw_rounded_control_frame_to_dc(
     let interactive_field =
         is_combo_class(&class_name) || (is_edit_class(&class_name) && is_single_line_edit(hwnd));
     let hot = !GetPropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY).is_invalid();
-    let focused = GetFocus() == hwnd;
+    let focus = GetFocus();
+    let focused = focus == hwnd
+        || if is_combo_class(&class_name) && is_drop_down_list(hwnd) {
+            let mut info = COMBOBOXINFO {
+                cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+                ..Default::default()
+            };
+            GetComboBoxInfo(hwnd, &mut info).is_ok()
+                && !info.hwndItem.0.is_null()
+                && focus == info.hwndItem
+        } else {
+            false
+        };
+    let combo_active = is_combo_class(&class_name)
+        && matches!(
+            combo_closed_state(hwnd),
+            ComboClosedState::Hot | ComboClosedState::Dropped
+        );
     let border = if !IsWindowEnabled(hwnd).as_bool() {
-        palette.border
-    } else if interactive_field && focused {
+        palette.control_border()
+    } else if interactive_field && (focused || combo_active) {
         palette.accent_border
     } else if interactive_field && hot {
         palette.separator
     } else {
-        palette.border
+        palette.control_border()
     };
+    // CreateRoundRectRgn/FrameRgn is an integer region operation and therefore cannot be the
+    // visible outline: at 96-200 DPI it produces the grainy staircase reported by the user.  The
+    // deterministic coverage calculation paints the straight stroke and every corner sample. A
+    // material child keeps DWM's black glass key outside the curve instead of inventing a solid
+    // fallback tile, while the absence of a rounded HRGN preserves all partially covered pixels.
     draw_antialiased_control_frame(dc, rect, geometry, interior, border, palette.window);
 }
 
@@ -2033,11 +2987,19 @@ unsafe fn paint_list_box_rows(hwnd: HWND, palette: Palette) {
         let _ = SetTextColor(dc, text_color);
         row.left += inset;
         row.right -= inset;
-        let _ = DrawTextW(
+        text.truncate(
+            text.iter()
+                .position(|value| *value == 0)
+                .unwrap_or(text.len()),
+        );
+        draw_alpha_composited_text(
+            hwnd,
             dc,
-            &mut text,
+            &text,
             &mut row,
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+            text_color,
+            palette.uses_system_backdrop_surface() && !palette.dark,
         );
     }
     if let Some(old_font) = old_font {
@@ -2058,9 +3020,14 @@ unsafe extern "system" fn list_view_parent_subclass(
         WM_NOTIFY if lparam.0 != 0 => {
             let draw = &mut *(lparam.0 as *mut NMLVCUSTOMDRAW);
             let dark_flag = 1usize << (usize::BITS - 1);
-            let list = HWND((reference_data & !dark_flag) as *mut _);
+            let backdrop_flag = 1usize << (usize::BITS - 2);
+            let list = HWND((reference_data & !(dark_flag | backdrop_flag)) as *mut _);
             if draw.nmcd.hdr.hwndFrom == list && draw.nmcd.hdr.code == NM_CUSTOMDRAW {
-                let palette = palette_from_reference(usize::from(reference_data & dark_flag != 0));
+                let palette = palette_from_reference(
+                    (usize::from(reference_data & dark_flag != 0) * PALETTE_REFERENCE_DARK)
+                        | (usize::from(reference_data & backdrop_flag != 0)
+                            * PALETTE_REFERENCE_SYSTEM_BACKDROP),
+                );
                 if draw.nmcd.dwDrawStage == CDDS_PREPAINT {
                     return LRESULT(CDRF_NOTIFYITEMDRAW as isize);
                 }
@@ -2084,7 +3051,10 @@ unsafe extern "system" fn list_view_parent_subclass(
                     )
                     .0;
                     let selected = item_state & LVIS_SELECTED != 0;
-                    if selected && paint_selected_list_view_row(list, draw, palette) {
+                    let alpha_composited = palette.uses_system_backdrop_surface() && !palette.dark;
+                    if (selected || alpha_composited)
+                        && paint_list_view_row(list, draw, palette, selected)
+                    {
                         // Windows 11's v6 ItemsView theme paints COLOR_HIGHLIGHT over clrTextBk
                         // after NM_CUSTOMDRAW.  Skip only that one selected row after reproducing
                         // its report-mode text layout; every unselected row remains native.
@@ -2104,10 +3074,11 @@ unsafe extern "system" fn list_view_parent_subclass(
     }
 }
 
-unsafe fn paint_selected_list_view_row(
+unsafe fn paint_list_view_row(
     list: HWND,
     draw: &mut NMLVCUSTOMDRAW,
     palette: Palette,
+    selected: bool,
 ) -> bool {
     const LVM_GETHEADER: u32 = 0x101f;
     const LVM_GETITEMRECT: u32 = 0x100e;
@@ -2146,7 +3117,7 @@ unsafe fn paint_selected_list_view_row(
         return false;
     }
 
-    let (text_color, selection_fill) = list_view_row_colors(palette, true);
+    let (text_color, selection_fill) = list_view_row_colors(palette, selected);
     fill(draw.nmcd.hdc, &row, selection_fill);
 
     let font = SendMessageW(list, WM_GETFONT, WPARAM(0), LPARAM(0));
@@ -2224,11 +3195,13 @@ unsafe fn paint_selected_list_view_row(
             text_rect.left += scale(24, dpi);
         }
         text_rect.right -= inset.min((text_rect.right - text_rect.left).max(0));
-        let _ = DrawTextW(
+        draw_opaque_surface_text(
             draw.nmcd.hdc,
-            &mut text,
+            &text,
             &mut text_rect,
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+            text_color,
+            selection_fill,
         );
     }
 
@@ -2273,6 +3246,20 @@ const fn list_view_custom_draw_state(snapshot: u32) -> u32 {
     snapshot & !(CDIS_SELECTED | CDIS_FOCUS | CDIS_HOT)
 }
 
+fn list_view_checkbox_rect(row: RECT, dpi: u32) -> RECT {
+    let slot_width = scale(24, dpi).max(1);
+    let row_height = (row.bottom - row.top).max(1);
+    let size = scale(13, dpi).max(1).min(slot_width).min(row_height);
+    let left = row.left + (slot_width - size) / 2;
+    let top = row.top + (row_height - size) / 2;
+    RECT {
+        left,
+        top,
+        right: left + size,
+        bottom: top + size,
+    }
+}
+
 unsafe fn paint_list_view_checkboxes(hwnd: HWND, palette: Palette) {
     const LVIS_STATEIMAGEMASK: isize = 0xf000;
     let top = SendMessageW(hwnd, 0x1027, WPARAM(0), LPARAM(0)).0.max(0) as i32; // TOPINDEX
@@ -2286,7 +3273,10 @@ unsafe fn paint_list_view_checkboxes(hwnd: HWND, palette: Palette) {
         return;
     }
     let dpi = GetDpiForWindow(hwnd).max(96);
-    let size = scale(14, dpi).max(10);
+    let control_state = ControlState {
+        disabled: !IsWindowEnabled(hwnd).as_bool(),
+        ..ControlState::default()
+    };
     for index in top..(top + visible + 1).min(count) {
         let state = SendMessageW(
             hwnd,
@@ -2329,51 +3319,17 @@ unsafe fn paint_list_view_checkboxes(hwnd: HWND, palette: Palette) {
             right: row.left + scale(24, dpi),
             bottom: row.bottom,
         };
-        fill(
-            dc,
-            &slot,
-            if selected {
-                palette.accent_fill
-            } else {
-                palette.edit
-            },
-        );
-        let top = row.top + ((row.bottom - row.top - size) / 2).max(0);
-        let left = row.left + scale(4, dpi);
-        let box_rect = RECT {
-            left,
-            top,
-            right: left + size,
-            bottom: top + size,
-        };
+        let background = list_view_row_colors(palette, selected).1;
+        fill(dc, &slot, background);
+        let box_rect = list_view_checkbox_rect(row, dpi);
         let checked = state_image == 2;
-        fill(
-            dc,
-            &box_rect,
-            if checked {
-                palette.progress
-            } else {
-                palette.edit
-            },
-        );
-        stroke(
+        draw_embedded_button_glyph(
             dc,
             box_rect,
-            if checked {
-                palette.progress
-            } else {
-                palette.text_secondary
-            },
+            embedded_button_glyph(palette.dark, dpi, control_state, checked),
+            background,
+            None,
         );
-        if checked {
-            let pen = CreatePen(PEN_STYLE(0), scale(2, dpi).max(1), COLORREF(0x00ff_ffff));
-            let old_pen = SelectObject(dc, pen);
-            let _ = MoveToEx(dc, left + size / 5, top + size / 2, None);
-            let _ = LineTo(dc, left + size * 2 / 5, top + size * 3 / 4);
-            let _ = LineTo(dc, left + size * 4 / 5, top + size / 4);
-            let _ = SelectObject(dc, old_pen);
-            let _ = DeleteObject(pen);
-        }
     }
     let _ = windows::Win32::Graphics::Gdi::ReleaseDC(hwnd, dc);
 }
@@ -2688,6 +3644,10 @@ fn scale(value: i32, dpi: u32) -> i32 {
 }
 
 unsafe fn fill(dc: windows::Win32::Graphics::Gdi::HDC, rect: &RECT, color: COLORREF) {
+    if color.0 != 0 {
+        fill_alpha_opaque_rect(dc, rect, color);
+        return;
+    }
     let brush = CreateSolidBrush(color);
     let _ = FillRect(dc, rect, brush);
     let _ = DeleteObject(brush);
@@ -2737,6 +3697,7 @@ pub struct Brushes {
     pub window: HBRUSH,
     pub nav: HBRUSH,
     pub edit: HBRUSH,
+    pub list: HBRUSH,
 }
 
 impl Brushes {
@@ -2745,7 +3706,8 @@ impl Brushes {
             Self {
                 window: CreateSolidBrush(palette.window),
                 nav: CreateSolidBrush(palette.nav),
-                edit: CreateSolidBrush(palette.edit),
+                edit: CreateSolidBrush(palette.edit_brush_color()),
+                list: CreateSolidBrush(palette.edit),
             }
         }
     }
@@ -2757,6 +3719,7 @@ impl Drop for Brushes {
             let _ = DeleteObject(self.window);
             let _ = DeleteObject(self.nav);
             let _ = DeleteObject(self.edit);
+            let _ = DeleteObject(self.list);
         }
     }
 }
@@ -2773,11 +3736,102 @@ mod tests {
         assert_eq!(Palette::LIGHT.separator, rgb(222, 222, 222));
         assert_eq!(Palette::LIGHT.accent_fill, rgb(0, 95, 184));
         assert_eq!(Palette::DARK.window, rgb(43, 43, 43));
-        assert_eq!(Palette::DARK.edit, rgb(31, 31, 31));
-        assert_eq!(Palette::DARK.separator, rgb(81, 81, 81));
+        assert_eq!(Palette::DARK.edit, rgb(28, 28, 28));
+        assert_eq!(Palette::DARK.button, rgb(48, 48, 48));
+        assert_eq!(Palette::DARK.separator, rgb(72, 72, 72));
         assert_eq!(Palette::DARK.accent_border, rgb(66, 149, 192));
         assert_eq!(Palette::DARK.highlight_fill, rgb(76, 194, 255));
         assert_eq!(Palette::DARK.highlight_border, rgb(76, 194, 255));
+    }
+
+    #[test]
+    fn subclass_palette_reference_preserves_system_backdrop_surface() {
+        for base in [Palette::LIGHT, Palette::DARK] {
+            let normal = palette_from_reference(palette_reference(base));
+            assert_eq!(normal.dark, base.dark);
+            assert_eq!(normal.window, base.window);
+            assert_eq!(normal.nav, base.nav);
+            assert_eq!(normal.edit, base.edit);
+
+            let material = base.with_system_backdrop_surface();
+            let background = base.system_backdrop_edge_fallback();
+            let normal_surface = base.material_surface_visual(MaterialSurfaceState::Normal);
+            let hot_surface = base.material_surface_visual(MaterialSurfaceState::Hot);
+            let pressed_surface = base.material_surface_visual(MaterialSurfaceState::Pressed);
+            assert_eq!(
+                material.edit,
+                composite_color(normal_surface.fill, normal_surface.fill_alpha, background)
+            );
+            assert_eq!(material.button, material.edit);
+            assert_eq!(
+                material.button_hot,
+                composite_color(hot_surface.fill, hot_surface.fill_alpha, background)
+            );
+            assert_eq!(
+                material.button_pressed,
+                composite_color(pressed_surface.fill, pressed_surface.fill_alpha, background)
+            );
+            assert_eq!(
+                material.border,
+                composite_color(
+                    normal_surface.border,
+                    normal_surface.border_alpha,
+                    background
+                )
+            );
+            assert_eq!(material.separator, material.border);
+            assert_eq!(material.text, base.text);
+            let restored = palette_from_reference(palette_reference(material));
+            assert_eq!(restored.dark, base.dark);
+            assert_eq!(restored.window, COLORREF(0));
+            assert_eq!(restored.nav, COLORREF(0));
+            assert_eq!(restored.edit, material.edit);
+            assert_eq!(restored.button, material.button);
+            assert_eq!(restored.text, material.text);
+            assert_eq!(
+                material.system_backdrop_edge_fallback(),
+                if base.dark {
+                    rgb(32, 32, 32)
+                } else {
+                    rgb(243, 243, 243)
+                }
+            );
+            assert_eq!(material.control_border(), material.border);
+            assert_eq!(
+                material.edit_brush_color(),
+                subtract_color(material.edit, material.system_backdrop_edge_fallback())
+            );
+            assert_eq!(
+                material.foreground_black(),
+                if base.dark {
+                    rgb(1, 1, 1)
+                } else {
+                    rgb(24, 24, 24)
+                }
+            );
+        }
+        assert_eq!(Palette::LIGHT.foreground_black(), rgb(0, 0, 0));
+        assert_eq!(Palette::DARK.foreground_black(), rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn opaque_black_glyph_pixels_do_not_become_dwm_glass_holes() {
+        assert_eq!(
+            preserve_visible_black_on_system_backdrop(0, 255, 0, 0, 0),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            preserve_visible_black_on_system_backdrop(0, 0, 0, 0, 0),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            preserve_visible_black_on_system_backdrop(0, 255, 3, 4, 5),
+            (3, 4, 5)
+        );
+        assert_eq!(
+            preserve_visible_black_on_system_backdrop(rgb(249, 249, 249).0, 255, 0, 0, 0),
+            (0, 0, 0)
+        );
     }
 
     #[test]
@@ -2909,6 +3963,18 @@ mod tests {
     }
 
     #[test]
+    fn combo_closed_height_uses_the_shared_field_baseline_at_every_supported_dpi() {
+        for dpi in [96, 120, 144, 168, 192] {
+            let requested = InnoMetrics::for_dpi(dpi).field_height;
+            assert_eq!(combo_closed_visual_height(requested, dpi), requested);
+            // A taller COMBOBOXINFO measurement must never leak into the visible HWND region.
+            assert_eq!(combo_closed_visual_height(requested, dpi), scale(23, dpi));
+        }
+        assert_eq!(combo_closed_visual_height(0, 96), scale(18, 96));
+        assert_eq!(combo_closed_visual_height(1000, 192), scale(36, 192));
+    }
+
+    #[test]
     fn native_scrollbar_messages_require_the_rounded_frame_to_be_painted_last() {
         for message in [
             0x00a1, 0x00a2, 0x00a3, 0x0113, 0x0114, 0x0115, 0x020a, 0x020e, 0x02a0,
@@ -3035,6 +4101,19 @@ mod tests {
     }
 
     #[test]
+    fn light_material_checkbox_keeps_the_embedded_shape_but_not_black_corner_texels() {
+        assert_eq!(
+            checkbox_material_fallback(Palette::LIGHT.with_system_backdrop_surface()),
+            Some(rgb(243, 243, 243))
+        );
+        assert_eq!(
+            checkbox_material_fallback(Palette::DARK.with_system_backdrop_surface()),
+            Some(rgb(32, 32, 32))
+        );
+        assert_eq!(checkbox_material_fallback(Palette::LIGHT), None);
+    }
+
+    #[test]
     fn radio_geometry_fails_closed_for_empty_and_clamps_tiny_controls() {
         assert_eq!(radio_geometry(0, 24, 96), None);
         assert_eq!(radio_geometry(100, 0, 96), None);
@@ -3042,6 +4121,27 @@ mod tests {
         assert_eq!(geometry.glyph.right, 5);
         assert_eq!(geometry.glyph.bottom, 5);
         assert!(geometry.text.left <= 7);
+    }
+
+    #[test]
+    fn list_view_checkbox_uses_the_regular_checkbox_size_and_stays_in_its_slot() {
+        for dpi in [96, 120, 144, 168, 192] {
+            let row = RECT {
+                left: 7,
+                top: 11,
+                right: 407,
+                bottom: 11 + scale(24, dpi),
+            };
+            let rect = list_view_checkbox_rect(row, dpi);
+            let expected_size = scale(13, dpi);
+            assert_eq!(rect.right - rect.left, expected_size);
+            assert_eq!(rect.bottom - rect.top, expected_size);
+            assert_eq!(rect.top - row.top, (scale(24, dpi) - expected_size) / 2);
+            assert!(rect.left >= row.left);
+            assert!(rect.right <= row.left + scale(24, dpi));
+            assert!(rect.top >= row.top);
+            assert!(rect.bottom <= row.bottom);
+        }
     }
 
     #[test]
@@ -3090,11 +4190,51 @@ mod tests {
         );
         for dark in [false, true] {
             for dpi in [96, 120, 144, 192] {
-                for kind in [ThemedButtonKind::CheckBox, ThemedButtonKind::RadioButton] {
-                    let glyph = embedded_button_glyph(dark, dpi, kind, normal, true);
-                    assert_eq!(glyph.width, scale(13, dpi));
-                    assert_eq!(glyph.height, scale(13, dpi));
-                    assert_eq!(glyph.bgra.len(), (glyph.width * glyph.height * 4) as usize);
+                let glyph = embedded_button_glyph(dark, dpi, normal, true);
+                assert_eq!(glyph.width, scale(13, dpi));
+                assert_eq!(glyph.height, scale(13, dpi));
+                assert_eq!(glyph.bgra.len(), (glyph.width * glyph.height * 4) as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn generated_radio_glyphs_are_symmetric_and_light_mode_has_no_black_spurs() {
+        for side in [13, 16, 17, 20, 23, 26] {
+            for palette in [Palette::LIGHT, Palette::DARK] {
+                for checked in [false, true] {
+                    for state in [
+                        ControlState::default(),
+                        ControlState {
+                            hot: true,
+                            ..ControlState::default()
+                        },
+                        ControlState {
+                            pressed: true,
+                            ..ControlState::default()
+                        },
+                        ControlState {
+                            disabled: true,
+                            ..ControlState::default()
+                        },
+                    ] {
+                        let pixels = radio_glyph_bgra(side, palette, state, checked);
+                        let pixel = |x: i32, y: i32| {
+                            let offset = ((y * side + x) * 4) as usize;
+                            &pixels[offset..offset + 4]
+                        };
+                        assert_eq!(pixels.len(), (side * side * 4) as usize);
+                        for y in 0..side {
+                            for x in 0..side {
+                                assert_eq!(pixel(x, y), pixel(side - 1 - x, y));
+                                assert_eq!(pixel(x, y), pixel(x, side - 1 - y));
+                                assert_eq!(pixel(x, y)[3], 255);
+                                if !palette.dark {
+                                    assert_ne!(&pixel(x, y)[0..3], &[0, 0, 0]);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

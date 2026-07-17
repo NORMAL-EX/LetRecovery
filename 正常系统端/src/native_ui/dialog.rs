@@ -8,7 +8,7 @@ use std::mem::size_of;
 use std::sync::OnceLock;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC,
@@ -25,15 +25,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
     GetClassNameW, GetClientRect, GetMessageW, GetParent, GetWindowLongPtrW, GetWindowRect,
     IsDialogMessageW, IsWindow, IsWindowVisible, LoadCursorW, MoveWindow, RegisterClassExW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    GWLP_USERDATA, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DPICHANGED,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    SendMessageW, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    GWLP_USERDATA, GWL_EXSTYLE, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, LWA_ALPHA, MSG,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+    WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL,
+    WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSEXW, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME,
+    WS_EX_LAYERED, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::controls::{child, draw_inno_button, wide, ButtonRole, InnoMetrics};
@@ -50,6 +51,8 @@ const ID_DESCRIPTION: u16 = 61_001;
 const ID_PRIMARY: u16 = 61_002;
 const ID_SECONDARY: u16 = 61_003;
 const ID_CANCEL: u16 = 61_004;
+/// Alpha zero makes layered pixels input-transparent; the staging surface must remain hit-testable.
+pub(crate) const FIRST_PRESENTATION_ALPHA: u8 = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LogicalRect {
@@ -242,6 +245,8 @@ struct DialogState {
     labels: [String; 5],
     handles: Option<Handles>,
     result: Option<DialogResult>,
+    first_presentation_pending: bool,
+    first_presentation_transparent: bool,
 }
 
 impl DialogState {
@@ -264,6 +269,8 @@ impl DialogState {
             ],
             handles: None,
             result: None,
+            first_presentation_pending: true,
+            first_presentation_transparent: false,
         }
     }
 
@@ -556,7 +563,7 @@ impl DialogShell {
         let x = work.left + ((work.right - work.left - size.width) / 2).max(0);
         let y = work.top + ((work.bottom - work.top - size.height) / 2).max(0);
         let hwnd = CreateWindowExW(
-            WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
+            WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT | WS_EX_LAYERED,
             DIALOG_CLASS,
             PCWSTR(title.as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
@@ -570,6 +577,12 @@ impl DialogShell {
             Some(state.as_mut() as *mut DialogState as *const _),
         )?;
         state.hwnd = hwnd;
+        // Zero-alpha layered pixels are intentionally mouse-transparent. Keep one non-zero alpha
+        // step during first-frame staging so a fast click can never reach the owner or an unrelated
+        // window underneath this dialog.
+        state.first_presentation_transparent =
+            SetLayeredWindowAttributes(hwnd, COLORREF(0), FIRST_PRESENTATION_ALPHA, LWA_ALPHA)
+                .is_ok();
         // A NULL WM_SETICON lParam removes the requested per-window icon. Clear both sizes and
         // refresh the hidden dialog's non-client frame before it can be shown. This keeps the
         // normal-height dialog caption while leaving the main-window class and icons untouched.
@@ -622,7 +635,7 @@ impl DialogShell {
         // top-level window is still hidden, so USER32 never exposes the common-control defaults
         // (white empty ListView bodies, black header/check text, or the default GUI font).
         prepare_dialog_descendants(&self.state);
-        let first_visible_frame = !IsWindowVisible(self.state.hwnd).as_bool();
+        let first_visible_frame = self.state.first_presentation_pending;
         let _ = ShowWindow(self.state.hwnd, SW_SHOW);
         if first_visible_frame {
             // Paint the complete dialog once before the owner starts its asynchronous inventory.
@@ -632,8 +645,31 @@ impl DialogShell {
                 self.state.hwnd,
                 None,
                 None,
-                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
             );
+            if self.state.first_presentation_transparent {
+                let _ = SetLayeredWindowAttributes(self.state.hwnd, COLORREF(0), 255, LWA_ALPHA);
+                // The transparent layer exists only to hide the incomplete first native frame.
+                // Remove it once presentation is complete so later relayout/redraw operations do
+                // not make the whole tool window blink out on WinPE or desktop Windows.
+                let ex_style = GetWindowLongPtrW(self.state.hwnd, GWL_EXSTYLE);
+                let _ = SetWindowLongPtrW(
+                    self.state.hwnd,
+                    GWL_EXSTYLE,
+                    ex_style & !(WS_EX_LAYERED.0 as isize),
+                );
+                let _ = SetWindowPos(
+                    self.state.hwnd,
+                    HWND::default(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                );
+                self.state.first_presentation_transparent = false;
+            }
+            self.state.first_presentation_pending = false;
         }
         if let Some(handles) = &self.state.handles {
             let _ = SetFocus(handles.primary);
@@ -925,12 +961,21 @@ unsafe extern "system" fn dialog_proc(
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
-        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+        WM_CTLCOLOREDIT => {
+            if let Some(state) = state {
+                let dc = HDC(wparam.0 as *mut _);
+                let _ = SetTextColor(dc, state.palette.text);
+                let _ = SetBkColor(dc, state.palette.edit_brush_color());
+                return LRESULT(state.brushes.edit.0 as isize);
+            }
+            DefWindowProcW(hwnd, message, wparam, lparam)
+        }
+        WM_CTLCOLORLISTBOX => {
             if let Some(state) = state {
                 let dc = HDC(wparam.0 as *mut _);
                 let _ = SetTextColor(dc, state.palette.text);
                 let _ = SetBkColor(dc, state.palette.edit);
-                return LRESULT(state.brushes.edit.0 as isize);
+                return LRESULT(state.brushes.list.0 as isize);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
@@ -1148,5 +1193,10 @@ mod tests {
             layout.content.y,
             layout.description.y + layout.description.height + 8
         );
+    }
+
+    #[test]
+    fn first_frame_staging_remains_hit_testable() {
+        assert_ne!(FIRST_PRESENTATION_ALPHA, 0);
     }
 }
