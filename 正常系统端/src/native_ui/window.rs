@@ -33,18 +33,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetClientRect, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, IsWindowVisible, KillTimer,
     LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE, CBS_DROPDOWNLIST, CREATESTRUCTW,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GWLP_USERDATA, HICON, HMENU,
-    ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, MINMAXINFO, MSG,
-    SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
+    SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE,
+    CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE,
+    ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW,
+    IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG, SM_CXICON, SM_CXSCREEN,
+    SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
     WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCCREATE, WM_NOTIFY, WM_PAINT,
-    WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCREATE,
+    WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_CONTROLPARENT, WS_EX_LAYERED, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::backdrop;
@@ -1218,6 +1219,7 @@ struct NativeWindow {
     palette: theme::Palette,
     brushes: Brushes,
     backdrop_active: bool,
+    window_active: bool,
     handles: Option<Handles>,
     app_config: crate::core::app_config::AppConfig,
     partitions: Vec<crate::core::disk::Partition>,
@@ -1391,6 +1393,7 @@ impl NativeWindow {
             palette,
             brushes: Brushes::new(palette),
             backdrop_active: false,
+            window_active: false,
             handles: None,
             app_config,
             partitions,
@@ -2447,11 +2450,8 @@ impl NativeWindow {
         }
     }
 
-    const fn uses_system_backdrop_surface(&self) -> bool {
-        // DWM owns the active/inactive transition. Keeping the child surfaces translucent makes
-        // them reveal DWM's neutral inactive fallback automatically and avoids re-entering
-        // Common Controls from WM_ACTIVATE to reinstall themes.
-        self.backdrop_active
+    fn uses_system_backdrop_surface(&self) -> bool {
+        backdrop::controls_use_mica(self.backdrop_active, self.window_active)
     }
 
     unsafe fn apply_experimental_window_backdrop(&mut self, hwnd: HWND) {
@@ -2478,6 +2478,16 @@ impl NativeWindow {
         // atomic so pages and their scrollbars cannot expose a mixture of old and new colours.
         let redraw = redraw::suspend(hwnd);
         self.palette = palette;
+        self.apply_native_dark_theme(hwnd);
+        redraw::resume(hwnd, redraw);
+    }
+
+    unsafe fn refresh_window_activation(&mut self, hwnd: HWND, active: bool) {
+        self.window_active = active;
+        // DWM switches an inactive Mica top-level window to a neutral fallback. Publish the
+        // matching ordinary child-control palette in the same frozen transaction; otherwise the
+        // title/client lose their material while buttons and fields retain translucent colours.
+        let redraw = redraw::suspend(hwnd);
         self.apply_native_dark_theme(hwnd);
         redraw::resume(hwnd, redraw);
     }
@@ -9502,6 +9512,19 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
+        // Keep the first child-control paint transaction outside the visible DWM surface. A
+        // non-zero alpha still owns hit testing, unlike alpha=0, while making USER32's stock
+        // white Edit/Combo/STATIC intermediate pixels effectively invisible. Reduced WinPE
+        // implementations may reject layered attributes; in that case the synchronous redraw
+        // below remains the supported fallback.
+        let original_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let _ = SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            original_ex_style | WS_EX_LAYERED.0 as isize,
+        );
+        let first_frame_layered =
+            SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA).is_ok();
         let _ = ShowWindow(hwnd, SW_SHOW);
         // WinPE's reduced USER32/UxTheme implementation can defer the first paint of child
         // controls until later messages. If we enter the message loop immediately, the
@@ -9516,6 +9539,25 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
             None,
             RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         );
+        if first_frame_layered {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, original_ex_style);
+            let _ = SetWindowPos(
+                hwnd,
+                HWND::default(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = RedrawWindow(
+                hwnd,
+                None,
+                None,
+                RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            );
+        }
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&message);
@@ -9593,6 +9635,16 @@ unsafe extern "system" fn window_proc(
                 (*minmax).ptMinTrackSize.y = minimum_height;
             }
             LRESULT(0)
+        }
+        WM_NCACTIVATE => {
+            let result = DefWindowProcW(hwnd, message, wparam, lparam);
+            if let Some(state) = state {
+                // This is the exact state DWM uses for the active/inactive title bar. Keep child
+                // material surfaces in lockstep even on shells that do not deliver a useful
+                // WM_ACTIVATE transition to this process.
+                state.refresh_window_activation(hwnd, wparam.0 != 0);
+            }
+            result
         }
         WM_SIZE => {
             if let Some(state) = state {

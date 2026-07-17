@@ -31,10 +31,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_USERDATA, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE,
     WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DPICHANGED,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL, WM_KEYDOWN, WM_NCACTIVATE, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::controls::{child, draw_inno_button, wide, ButtonRole, InnoMetrics};
@@ -241,6 +242,7 @@ struct DialogState {
     palette: Palette,
     brushes: Brushes,
     backdrop_active: bool,
+    window_active: bool,
     font: HFONT,
     heading_font: HFONT,
     labels: [String; 5],
@@ -259,6 +261,7 @@ impl DialogState {
             palette,
             brushes: Brushes::new(palette),
             backdrop_active: false,
+            window_active: false,
             font: HFONT::default(),
             heading_font: HFONT::default(),
             labels: [
@@ -330,12 +333,21 @@ impl DialogState {
                 false
             }
         };
-        self.palette = if self.backdrop_active {
+        self.palette = if backdrop::controls_use_mica(self.backdrop_active, self.window_active) {
             base.with_system_backdrop_surface()
         } else {
             base
         };
         self.brushes = Brushes::new(self.palette);
+    }
+
+    unsafe fn refresh_window_activation(&mut self, active: bool) {
+        self.window_active = active;
+        let redraw = redraw::suspend(self.hwnd);
+        self.refresh_palette_and_backdrop();
+        self.apply_theme();
+        prepare_dialog_descendants(self);
+        redraw::resume(self.hwnd, redraw);
     }
 
     unsafe fn create_fonts(&mut self) {
@@ -875,6 +887,13 @@ unsafe extern "system" fn dialog_proc(
             } else {
                 LRESULT(0)
             }
+        }
+        WM_NCACTIVATE => {
+            let result = DefWindowProcW(hwnd, message, wparam, lparam);
+            if let Some(state) = state {
+                state.refresh_window_activation(wparam.0 != 0);
+            }
+            result
         }
         WM_SIZE => {
             if let Some(state) = state {

@@ -4,12 +4,12 @@
 
 ## 原生界面闪烁与切换
 
-- [x] ~~修复“硬件信息”页 ListView 持续闪烁；确认后台硬件数据更新、表头、滚动和窗口遮挡恢复时均不会形成重绘循环。~~
-  - 整批删除/插入在同一窗口消息内完成后仅执行一次同步 `RedrawWindow`；避免对子 ListView 使用会切换 `WS_VISIBLE` 的 `WM_SETREDRAW`，ListView 与 Header 也不再互相触发整表失效。
+- [ ] 修复“硬件信息”页和其他 ListView 在拖动右侧滚动条时持续闪烁；后台批量更新、表头、滚动和窗口遮挡恢复都不得形成整表重绘循环。
+  - 当前缺陷已由用户实机确认：`WM_VSCROLL` 高频拖动路径仍会让完整 ListView 失效，上一轮的“滚动不会闪烁”结论无效。
 - [x] ~~修复“系统安装”页切换安装分区时 ListView 和其他页面控件闪烁；以不会闪烁的“系统备份”页为对照，限制选择通知引发的状态更新和失效区域。~~
   - 只接受 `LVIF_STATE` 中 `LVIS_SELECTED` 的真实转换，并把同一次选择产生的旧行取消/新行选中通知合并为一条异步页面事务；纯逻辑测试覆盖无关状态和文本通知。
-- [x] ~~复核页面切换的合成提交：页面必须完成显隐、布局和状态更新后一次呈现，不显示逐控件渲染的中间帧。~~
-  - 页面在根窗口及当前可见后代暂停重绘期间完成状态、显隐和布局，再一次性同步发布；移除 `WS_EX_COMPOSITED`，避免 Edit 光标重画扩大成整棵控件树的逐层合成。明暗 Mica 回归中，硬件页和安装页各连续 8 帧均像素一致。
+- [ ] 重新修复并复核页面/主题切换的合成提交：不得显示 STATIC 白色矩形、消失文字、过亮字段或逐控件渲染的中间帧。
+  - 用户浅色实机截图已证明多个 STATIC 文本区域会变成无字白块；先前只比较稳定期连续帧，漏掉切换瞬间，不能作为通过依据。
 
 ## Mica、激活状态与兼容边界
 
@@ -20,18 +20,19 @@
 - [x] ~~实验性全窗口 Mica 关闭时，标题栏仍遵循 Windows 11 的系统标题栏/Mica 行为，客户区保持普通主题。~~
   - 关闭实验选项时显式设置 `DWMSBT_AUTO` 并撤销客户区 frame，由 DWM 只决定默认标题栏背景。
 - [x] ~~顶层窗口的 Mica 与 Windows 激活状态同步：窗口失去激活后由系统决定标题栏/背景表现，子控件不得继续显示成“独立悬浮的 Mica”。~~
-  - 激活/失活完全交给 DWM 的 Mica 中性回退；不在 `WM_ACTIVATE` 中重装整棵控件主题，材质子表面始终服从同一个顶层 backdrop 状态。
+  - 主窗口和工具对话框以各自 `WM_NCACTIVATE` 的标题栏激活态为准，在冻结事务中同步切换材质/普通控件调色板；不得用消息过渡期可能滞后的 `GetForegroundWindow` 推断。
 - [x] ~~在不支持 DWM Mica 的系统或 DWM 请求失败时，全部控件可靠回退普通不透明主题；不得出现“窗口没有 Mica、控件却仍像 Mica”的混合状态。~~
-  - 只有 `DwmSetWindowAttribute` 和全客户区 frame 都成功才启用材质调色板；失败立即恢复 `DWMSBT_AUTO`、零 frame 和普通不透明控件主题。
+  - 只有 DWM 合成开启、`DwmSetWindowAttribute` 成功、`DwmGetWindowAttribute` 回读为 `DWMSBT_MAINWINDOW` 且全客户区 frame 成功，激活窗口才启用材质调色板；失败立即恢复 `DWMSBT_AUTO`、零 frame 和普通不透明控件主题。
 - [x] ~~明确阻止 PE 端启用或模拟 Mica；PE 只使用其受支持的普通不透明原生主题。~~
-  - 主窗口和工具对话框在请求 DWM 前均检查 PE 环境；PE 自身原生 UI 不引用 backdrop 模块。
+  - 主窗口和工具对话框在请求 DWM 前均检查 PE 环境；`SystemDrive=X:` 的非管理员视觉模拟已确认即使配置为 `mica`，按钮与字段仍使用普通不透明调色板；PE 自身原生 UI 不引用 backdrop 模块。
 
 ## 验证、文档与发布包
 
 - [x] ~~使用微软官方文档核对 ListView 双缓冲、重绘事务、DWM 系统背景、激活状态和主题回退方案，并在实现文档中记录采用的公开接口与限制。~~
   - 已在 `docs/EXPERIMENTAL_WINDOW_BACKDROPS.md` 记录公开接口、激活语义、批量重绘、Header 所有权、滚动条限制与官方链接。
 - [ ] 完成正常端明/暗主题、Mica 开/关、窗口激活/失活、安装页选择、硬件信息页和工具对话框的实机截图/交互回归；如仍可见瑕疵，不得划掉对应事项。
-- [x] ~~运行仓库要求的格式、Check、Clippy 和测试；复核 `AGENTS.md` 职责与安全约束。~~
-  - `fmt --check`、workspace check、严格 Clippy、workspace test no-run、`lr-core` 151 项、PE 61 项、正常端 423 项均通过；2 项明确标注的宿主集成测试保持 ignored。未新增或移动 `.rs`，已同步更新现有职责与重绘约束。
-- [x] ~~构建正常系统端 release，核对大小与 SHA-256 后原子更新 `pkg/LetRecovery.exe`；`pkg/` 不加入 Git。~~
-  - 已用同目录临时文件校验后通过 `MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH)` 原子替换；新文件 7,661,568 字节，SHA-256 `89D179219879AA2C4F14E05EAEBD3489907FA3CA97330AD5BC9089DE61BEF71B`。
+  - 本轮已实测深色 Mica 主窗口失活/重新激活和 `SystemDrive=X:` 的 PE 回退；浅色、Mica 关闭、工具对话框及仍开放的闪烁项尚未完成，因此本项保持未勾选。
+- [x] ~~本轮修复完成后重新运行仓库要求的格式、Check、Clippy 和测试；复核 `AGENTS.md` 职责与安全约束。~~
+  - `cargo fmt --all --check`、workspace Check、严格 Clippy、workspace no-run、`lr-core`、PE 与正常端测试均通过；职责目录已同步 DWM 回读、`WM_NCACTIVATE` 门禁与首帧非零 alpha 屏障。
+- [ ] 本轮修复通过瞬时帧和滚动交互复核后重新构建正常系统端 release，核对大小与 SHA-256 后原子更新 `pkg/LetRecovery.exe`；`pkg/` 不加入 Git。
+  - 本轮 Mica 门禁修复已构建 release 并原子同步 `pkg/LetRecovery.exe`（7,662,080 字节，SHA-256 `C38A0ACFD8261A0B233EF2E78E1488BA5A58E4F400D16D70B8734D4C83E5CEDC`）；滚动和浅色瞬时帧仍开放，因此总项不划掉。
