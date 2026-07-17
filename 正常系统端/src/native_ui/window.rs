@@ -2496,7 +2496,6 @@ impl NativeWindow {
             None,
             RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         );
-        theme::commit_redirected_edit_surfaces(hwnd);
     }
 
     unsafe fn populate_partitions(&self, list: HWND, add_columns: bool) {
@@ -9126,7 +9125,6 @@ impl NativeWindow {
             None,
             RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         );
-        theme::commit_redirected_edit_surfaces(hwnd);
     }
 
     unsafe fn save_hardware_report(&self, hwnd: HWND) {
@@ -9480,7 +9478,6 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
             None,
             RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         );
-        theme::commit_redirected_edit_surfaces(hwnd);
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&message);
@@ -10357,7 +10354,7 @@ unsafe extern "system" fn window_proc(
                 let control = HWND(lparam.0 as *mut _);
                 let palette = state.control_palette();
                 let background = palette.edit_brush_color_for(control);
-                let _ = SetTextColor(dc, palette.text);
+                let _ = SetTextColor(dc, palette.edit_text_color_for(control));
                 let _ = SetBkColor(dc, background);
                 let brush = if background == palette.edit {
                     state.brushes.edit_opaque
@@ -10393,7 +10390,7 @@ unsafe extern "system" fn window_proc(
                     let _ = SetTextColor(
                         dc,
                         if enabled {
-                            palette.text
+                            palette.edit_text_color_for(control)
                         } else {
                             palette.text_disabled
                         },

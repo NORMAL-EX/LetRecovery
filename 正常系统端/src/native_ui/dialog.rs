@@ -940,7 +940,7 @@ unsafe extern "system" fn dialog_proc(
                 let dc = HDC(wparam.0 as *mut _);
                 let control = HWND(lparam.0 as *mut _);
                 let background = state.palette.edit_brush_color_for(control);
-                let _ = SetTextColor(dc, state.palette.text);
+                let _ = SetTextColor(dc, state.palette.edit_text_color_for(control));
                 let _ = SetBkColor(dc, background);
                 let brush = if background == state.palette.edit {
                     state.brushes.edit_opaque
