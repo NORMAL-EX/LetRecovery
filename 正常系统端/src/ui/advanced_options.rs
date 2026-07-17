@@ -816,37 +816,72 @@ log=0
         software_hive: &str,
         system_hive: &str,
     ) {
-        let storage_drivers_dir = crate::utils::path::get_drivers_dir().join("storage_controller");
-        if storage_drivers_dir.is_dir() {
+        let hardware_ids = match lr_core::driver::list_present_hardware_ids() {
+            Ok(hardware_ids) => hardware_ids,
+            Err(error) => {
+                log::warn!(
+                    "[ADVANCED] storage-controller hardware enumeration failed; skipping built-in drivers: {error}"
+                );
+                return;
+            }
+        };
+        let packages = lr_core::storage_driver_match::select_builtin_storage_driver_packages(
+            hardware_ids.iter().map(String::as_str),
+        );
+        if packages.is_empty() {
             log::info!(
-                "[ADVANCED] 导入磁盘控制器驱动: {}",
-                storage_drivers_dir.display()
+                "[ADVANCED] no supported Intel VMD controller is present; built-in storage drivers were not staged"
             );
-
-            // 先卸载注册表，因为 DISM 可能需要独占访问
-            let _ = OfflineRegistry::unload_hive("pc-soft");
-            let _ = OfflineRegistry::unload_hive("pc-sys");
-            if default_loaded {
-                let _ = OfflineRegistry::unload_hive("pc-default");
-            }
-
-            let dism = crate::core::dism::Dism::new();
-            let image_path = format!("{}\\", target_partition);
-            let storage_drivers_path = storage_drivers_dir.to_string_lossy().to_string();
-            match dism.add_drivers_offline(&image_path, &storage_drivers_path) {
-                Ok(_) => log::info!("[ADVANCED] 磁盘控制器驱动导入成功"),
-                Err(e) => log::error!("[ADVANCED] 磁盘控制器驱动导入失败: {} (继续执行)", e),
-            }
-
-            // 重新加载注册表
-            let _ = OfflineRegistry::load_hive("pc-soft", software_hive);
-            let _ = OfflineRegistry::load_hive("pc-sys", system_hive);
-        } else {
-            log::warn!(
-                "[ADVANCED] 未找到磁盘控制器驱动目录: {}",
-                storage_drivers_dir.display()
-            );
+            return;
         }
+
+        let storage_drivers_dir = crate::utils::path::get_drivers_dir().join("storage_controller");
+        let package_dirs = packages
+            .into_iter()
+            .map(|package| storage_drivers_dir.join(package.directory_name()))
+            .filter(|directory| {
+                if directory.is_dir() {
+                    true
+                } else {
+                    log::warn!(
+                        "[ADVANCED] matched storage-controller package is unavailable: {}",
+                        directory.display()
+                    );
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+        if package_dirs.is_empty() {
+            return;
+        }
+
+        log::info!(
+            "[ADVANCED] staging {} hardware-matched Intel VMD package(s)",
+            package_dirs.len()
+        );
+        let _ = OfflineRegistry::unload_hive("pc-soft");
+        let _ = OfflineRegistry::unload_hive("pc-sys");
+        if default_loaded {
+            let _ = OfflineRegistry::unload_hive("pc-default");
+        }
+
+        let dism = crate::core::dism::Dism::new();
+        let image_path = format!("{}\\", target_partition);
+        for package_dir in package_dirs {
+            match dism.add_drivers_offline(&image_path, &package_dir.to_string_lossy()) {
+                Ok(_) => log::info!(
+                    "[ADVANCED] hardware-matched storage driver staged: {}",
+                    package_dir.display()
+                ),
+                Err(error) => log::error!(
+                    "[ADVANCED] matched storage driver staging failed for {}: {error}",
+                    package_dir.display()
+                ),
+            }
+        }
+
+        let _ = OfflineRegistry::load_hive("pc-soft", software_hive);
+        let _ = OfflineRegistry::load_hive("pc-sys", system_hive);
     }
 
     /// 14. 导入注册表文件 - 实际导入到离线注册表

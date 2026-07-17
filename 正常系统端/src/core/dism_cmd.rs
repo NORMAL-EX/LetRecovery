@@ -223,6 +223,11 @@ impl DismCmd {
         force_unsigned: bool,
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
+        // Do not defer an invalid boot-start driver to Boot Manager. DISM's /ForceUnsigned can
+        // report success while Secure Boot later stops the installed OS with 0xc0000428.
+        if force_unsigned {
+            bail!("refusing to add unsigned offline drivers");
+        }
         // 规范化路径（确保以反斜杠结尾，与 PE 端保持一致）
         let image_path = Self::normalize_image_path(image_path);
         let driver_path_normalized = driver_path.trim().to_string();
@@ -259,10 +264,6 @@ impl DismCmd {
             args.push("/Recurse".to_string());
         }
 
-        if force_unsigned {
-            args.push("/ForceUnsigned".to_string());
-        }
-
         // 执行命令
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         self.execute_with_progress_args(&args_ref, progress_tx, &tr!("驱动添加"))
@@ -283,7 +284,7 @@ impl DismCmd {
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
         // 直接使用 /Recurse 参数一次性添加整个目录
-        self.add_driver_offline(image_path, driver_dir, true, true, progress_tx)
+        self.add_driver_offline(image_path, driver_dir, true, false, progress_tx)
     }
 
     // ========================================================================
@@ -974,6 +975,15 @@ mod tests {
             "D:\\Windows\\"
         );
         assert_eq!(DismCmd::normalize_image_path("  C:\\Test  "), "C:\\Test\\");
+    }
+
+    #[test]
+    fn unsigned_driver_override_is_rejected_before_path_or_process_access() {
+        let dism = DismCmd::new().expect("DISM command boundary should initialize");
+        let error = dism
+            .add_driver_offline(r"Z:\missing-image", r"Z:\missing-driver", true, true, None)
+            .expect_err("/ForceUnsigned must be rejected");
+        assert!(error.to_string().contains("unsigned offline drivers"));
     }
 
     #[test]

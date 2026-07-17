@@ -823,6 +823,8 @@
     "未检测到显卡设备": "No graphics device detected.",
     "未检测到标准系统镜像，显示所有分卷": "No standard system image detected. Showing all volumes.",
     "未检测到网络适配器": "No network adapter detected.",
+    "未检测到唯一匹配的 Intel VMD 控制器，已拒绝导入随包存储驱动。": "No uniquely matching Intel VMD controller was detected, so bundled storage-driver import was refused.",
+    "匹配的 Intel VMD 驱动包不存在。": "The matching Intel VMD driver package is missing.",
     "未知": "Unknown",
     "未知CPU": "Unknown CPU",
     "未设置密码保护": "No password protection set.",
@@ -2149,6 +2151,13 @@
     "同时移除 NVIDIA 软件": "Also remove NVIDIA software",
     "应用筛选": "Application filter",
     "说明": "Description",
-    "我了解此操作的影响": "I understand the effects of this operation"
+    "我了解此操作的影响": "I understand the effects of this operation",
+    "XP/2003 安装源校验通过": "The XP/2003 setup source passed validation",
+    "正在暂存 XP/2003 安装源...": "Staging the XP/2003 setup source...",
+    "自定义 XP 应答文件名无效: {}": "The custom XP answer-file name is invalid: {}",
+    "XP/2003 安装源校验失败: {}": "XP/2003 setup source validation failed: {}",
+    "正在准备 XP/2003 文本模式安装...": "Preparing XP/2003 text-mode setup...",
+    "准备 XP/2003 文本模式安装失败: {}": "Failed to prepare XP/2003 text-mode setup: {}",
+    "XP/2003 文本模式安装已准备完成，请重启计算机继续安装。": "XP/2003 text-mode setup is ready. Restart the computer to continue."
   }
 }

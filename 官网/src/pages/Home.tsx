@@ -176,9 +176,9 @@ const Home: React.FC = () => {
 
           {/* 产品截图 */}
           <div className="relative w-full">
-            <div className="overflow-hidden rounded-xl border bg-card bg-clip-padding shadow-xs dark:bg-clip-border">
+            <div className="overflow-hidden rounded-xl border bg-card bg-clip-padding shadow-xs dark:bg-clip-border" style={{borderRadius:'8px'}}>
               <ImageWithLoading
-                src="https://pic1.imgdb.cn/item/6a339a3591b65c4475ab67b2.png"
+                src="https://pic1.imgdb.cn/i/033qPBQZnTXGJuJeaS28Tb.png"
                 alt={t.home.screenshotAlt}
                 className="h-auto w-full"
                 wrapperClassName="w-full"

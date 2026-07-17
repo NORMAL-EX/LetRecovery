@@ -311,7 +311,7 @@ impl AppConfig {
     /// 设置界面语言并保存
     ///
     /// # Arguments
-    /// * `language_code` - 语言代码（如 "zh-CN", "en-US"）
+    /// * `language_code` - 语言代码（如 "zh-CN", "zh-TW", "en-US"）
     pub fn set_language(&mut self, language_code: &str) {
         self.language = language_code.to_string();
         // 切换运行时语言

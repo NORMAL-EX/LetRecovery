@@ -194,6 +194,13 @@ jobs:
           Write-Host "Using PE-side exe: $peExe"
           Copy-Item -Force $peExe $dst
           Write-Host "Replaced: $dst"
+          # The PE client is native Win32-only. Remove the legacy Mesa shim from the base WIM so
+          # release artifacts do not retain an unused OpenGL runtime after replacing the old EXE.
+          $legacyOpenGl = Join-Path $mount "Program Files\LetRecoveryPE\opengl32.dll"
+          if (Test-Path -LiteralPath $legacyOpenGl) {
+            Remove-Item -LiteralPath $legacyOpenGl -Force
+            Write-Host "Removed legacy OpenGL runtime: $legacyOpenGl"
+          }
           $pcaSource = "pkg\bin\pca2023"
           $pcaDestination = Join-Path $mount "Program Files\LetRecoveryPE\bin\pca2023"
           New-Item -ItemType Directory -Force -Path $pcaDestination | Out-Null

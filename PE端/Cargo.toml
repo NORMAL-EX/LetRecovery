@@ -14,10 +14,6 @@ description = "LetRecovery PE安装助手"
 non-elevated-tests = []
 
 [dependencies]
-# GUI
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
-egui = "0.31"
-
 # 序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -69,7 +65,6 @@ thiserror = "1"
 
 # 其他工具
 walkdir = "2"
-image = "0.25"
 
 [build-dependencies]
 winres = "0.1"

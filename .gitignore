@@ -23,3 +23,18 @@ Thumbs.db
 # Local installer toolchain and build output
 /installer/output/
 /installer/tools/
+
+# QA screenshots
+qa_*.png
+qa-*.png
+native-ui-*.png
+
+# Build artifacts
+*.exe
+*.7z
+pkg/
+log/
+.cloudpe-work/
+
+# Local config
+config.json

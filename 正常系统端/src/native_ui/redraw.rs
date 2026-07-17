@@ -78,6 +78,20 @@ pub(crate) unsafe fn resume_client(root: HWND, transaction: Option<SuspendedRedr
     );
 }
 
+/// Publishes one complete existing control tree without toggling `WM_SETREDRAW` on every child.
+///
+/// This path is for activation-only palette changes: no HWND is moved, hidden or recreated. Using
+/// the page-layout transaction here would restore each independently redirected child in sequence,
+/// which is visible as a control-by-control Mica transition.
+pub(crate) unsafe fn publish_existing_tree(root: HWND) {
+    let _ = RedrawWindow(
+        root,
+        None,
+        None,
+        RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+    );
+}
+
 unsafe fn resume_with_flags(
     root: HWND,
     transaction: Option<SuspendedRedrawTree>,

@@ -222,6 +222,8 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         win7_fix_storage_bsod: advanced.win7_fix_storage_bsod,
         wim_engine: lr_core::active_engine().as_u8(),
         is_xp: spec.is_xp,
+        is_xp_i386: false,
+        xp_source_arch: String::new(),
         xp_inject_usb3_driver: advanced.xp_inject_usb3_driver,
         xp_inject_nvme_driver: advanced.xp_inject_nvme_driver,
         run_diskpart_scripts: false,

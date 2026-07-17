@@ -1,35 +1,5 @@
 use crate::core::config::OperationType;
 
-/// Explicit staging route while the PE progress pages are still rendered by eframe.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum UiBackendRoute {
-    NativeShellPreview,
-    #[default]
-    NativeProgress,
-    LegacyProgress,
-}
-
-impl UiBackendRoute {
-    pub fn from_args(args: &[String]) -> Self {
-        if args.iter().any(|arg| {
-            arg.eq_ignore_ascii_case("/LEGACYEGUIPROGRESS") || arg == "--legacy-egui-progress"
-        }) {
-            Self::LegacyProgress
-        } else if args.iter().any(|arg| {
-            arg.eq_ignore_ascii_case("/NATIVEUIPROGRESS") || arg == "--native-ui-progress"
-        }) {
-            Self::NativeProgress
-        } else if args
-            .iter()
-            .any(|arg| arg.eq_ignore_ascii_case("/NATIVEUISHELL") || arg == "--native-ui-shell")
-        {
-            Self::NativeShellPreview
-        } else {
-            Self::NativeProgress
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NativePage {
     #[default]
@@ -109,26 +79,6 @@ impl<W> NativeWindowState<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn native_progress_is_default_and_legacy_fallback_is_explicit() {
-        assert_eq!(
-            UiBackendRoute::from_args(&[]),
-            UiBackendRoute::NativeProgress
-        );
-        assert_eq!(
-            UiBackendRoute::from_args(&["app.exe".into(), "--native-ui-shell".into()]),
-            UiBackendRoute::NativeShellPreview
-        );
-        assert_eq!(
-            UiBackendRoute::from_args(&["app.exe".into(), "--native-ui-progress".into()]),
-            UiBackendRoute::NativeProgress
-        );
-        assert_eq!(
-            UiBackendRoute::from_args(&["app.exe".into(), "--legacy-egui-progress".into()]),
-            UiBackendRoute::LegacyProgress
-        );
-    }
 
     #[test]
     fn page_navigation_preserves_owned_workflow_state() {

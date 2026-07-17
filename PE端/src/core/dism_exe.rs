@@ -388,6 +388,11 @@ impl DismExe {
         force_unsigned: bool,
         progress_tx: Option<Sender<DismExeProgress>>,
     ) -> Result<()> {
+        // Never bypass catalog validation for an offline target. A rejected boot-start driver
+        // otherwise becomes an unbootable installation instead of an actionable import error.
+        if force_unsigned {
+            bail!("refusing to add unsigned offline drivers");
+        }
         log::info!(
             "[DISM.EXE] 添加驱动到离线系统: {} -> {}",
             driver_path,
@@ -422,10 +427,6 @@ impl DismExe {
         }
 
         args.push(format!("/scratchdir:{}", scratch_dir));
-
-        if force_unsigned {
-            args.push("/ForceUnsigned".to_string());
-        }
 
         // 转换为 &str 切片
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -643,5 +644,14 @@ mod tests {
         let output = "Line 1\nError: Something went wrong\nDetails here\nMore info\nLast line";
         let error = DismExe::extract_error_from_output(output);
         assert!(error.contains("Error:"));
+    }
+
+    #[test]
+    fn unsigned_driver_override_is_rejected_before_path_or_process_access() {
+        let dism = DismExe::new().expect("DISM command boundary should initialize");
+        let error = dism
+            .add_driver_offline(r"Z:\missing-image", r"Z:\missing-driver", true, true, None)
+            .expect_err("/ForceUnsigned must be rejected");
+        assert!(error.to_string().contains("unsigned offline drivers"));
     }
 }

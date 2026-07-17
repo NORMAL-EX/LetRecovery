@@ -98,6 +98,26 @@ fn load_language_internal(manager: &mut I18nManager, language_code: &str) {
         return;
     }
 
+    // PE must not depend on a separately injected language catalog.  Windows NLS supplies the
+    // complete character conversion, while an optional file can override individual terms.
+    if language_code.eq_ignore_ascii_case("zh-TW") {
+        manager.current_language = String::from("zh-TW");
+        manager.translations.clear();
+        let lang_file = get_lang_dir().join("zh-TW.json");
+        if let Ok(content) = std::fs::read_to_string(&lang_file) {
+            match serde_json::from_str::<LanguageFile>(&content) {
+                Ok(language) => manager.translations = language.data,
+                Err(error) => log::warn!(
+                    "解析繁體中文覆写文件失败: {} - {}，继续使用内置繁體中文",
+                    lang_file.display(),
+                    error
+                ),
+            }
+        }
+        log::info!("语言设置为繁體中文（内置 Windows NLS 转换）");
+        return;
+    }
+
     // 尝试加载语言文件
     let lang_dir = get_lang_dir();
     let lang_file = lang_dir.join(format!("{}.json", language_code));
@@ -237,17 +257,20 @@ pub fn translate(text: &str) -> String {
     let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
     let guard = manager.read();
 
-    // 如果是简体中文或没有翻译表，直接返回原文
-    if guard.current_language == "zh-CN" || guard.translations.is_empty() {
+    // 简体中文直接使用源字符串。
+    if guard.current_language == "zh-CN" {
         return text.to_string();
     }
 
-    // 查找翻译
-    guard
-        .translations
-        .get(text)
-        .cloned()
-        .unwrap_or_else(|| text.to_string())
+    if let Some(translated) = guard.translations.get(text) {
+        return translated.clone();
+    }
+
+    if guard.current_language.eq_ignore_ascii_case("zh-TW") {
+        return lr_core::traditional_chinese::to_traditional_chinese(text);
+    }
+
+    text.to_string()
 }
 
 /// 扫描可用语言
@@ -261,6 +284,11 @@ pub fn scan_available_languages() -> Vec<LanguageInfo> {
         code: String::from("zh-CN"),
         display_name: String::from("简体中文 - 中华人民共和国"),
         author: String::from("内置"),
+    });
+    languages.push(LanguageInfo {
+        code: String::from("zh-TW"),
+        display_name: String::from("繁體中文 - 中國台灣"),
+        author: String::from("LetRecovery / Windows NLS"),
     });
 
     let lang_dir = get_lang_dir();
@@ -291,8 +319,8 @@ pub fn scan_available_languages() -> Vec<LanguageInfo> {
             None => continue,
         };
 
-        // 跳过zh-CN（已经作为内置语言添加）
-        if code == "zh-CN" {
+        // 两种中文都已作为内置语言添加；同名文件只作为运行时词汇覆盖。
+        if code.eq_ignore_ascii_case("zh-CN") || code.eq_ignore_ascii_case("zh-TW") {
             continue;
         }
 
@@ -316,8 +344,8 @@ pub fn scan_available_languages() -> Vec<LanguageInfo> {
         }
     }
 
-    // 按显示名称排序（简体中文保持在首位）
-    languages[1..].sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    // 按显示名称排序（内置简体、繁体中文保持在前两位）
+    languages[2..].sort_by(|a, b| a.display_name.cmp(&b.display_name));
 
     languages
 }
@@ -413,6 +441,18 @@ mod tests {
     fn test_default_language() {
         init("");
         assert_eq!(current_language(), "zh-CN");
+    }
+
+    #[test]
+    fn traditional_chinese_survives_without_an_external_pe_catalog() {
+        assert_eq!(
+            lr_core::traditional_chinese::to_traditional_chinese("系统安装与网络设置"),
+            "系統安裝與網路設定"
+        );
+        let languages = scan_available_languages();
+        assert!(languages.iter().any(|language| {
+            language.code == "zh-TW" && language.display_name == "繁體中文 - 中國台灣"
+        }));
     }
 
     #[test]

@@ -31,3 +31,27 @@ The original notices are retained under
 3. Extract `libwim-15.dll`, record its SHA-256, and replace the repository copy.
 4. Copy the release's license notices without modification.
 5. Update this document and run the Rust workspace tests before release.
+
+## Intel Rapid Storage Technology VMD drivers
+
+The release package contains two Microsoft Update Catalog driver packages under
+`pkg/bin/drivers/storage_controller/`. LetRecovery never recursively stages the
+whole directory: `lr-core::storage_driver_match` selects a package only when
+SetupAPI reports a matching Intel PCI hardware ID. AMD, Apple, VirtIO and
+unknown controllers select nothing.
+
+| Package path | Version | Microsoft Catalog update ID | Covered primary IDs | Source CAB SHA-256 |
+| --- | --- | --- | --- | --- |
+| `intel-vmd-11th` | 20.2.4.1019 | `d4c52691-b507-4a37-bce7-b018cd40b4d9` | `8086:9A0B` (plus managed `09AB`) | `913A94E9E292EA984F9150D093456FF8595E6CF4AEA3943801A5F2801781E00D` |
+| `intel-vmd-current` | 20.2.12.1036 | `d3ccf9fc-2543-4b7b-9ff0-369264a693be` | `8086:467F`, `A77F`, `7D0B`, `AD0B` | `A5DCE6B59B3775D2F0519EECA69A5EF8754B0AB147474377C2684C6D9E8B47D9` |
+
+The source catalog searches, exact per-file SHA-256 values, signature notes and
+Intel license links are retained in each package's `NOTICE.txt`. The CAT and SYS
+files were verified as `Valid` and issued by Microsoft Windows Hardware
+Compatibility Publisher before packaging. The INF itself is catalog-signed and
+therefore does not carry a standalone Authenticode signature.
+
+The retired blanket package directories (`18`, `19`, `20`, `AMD`, `Applessd`,
+`iastorE` and `viostor`) must not be restored. Windows 7 UefiSeven, USB3 and NVMe
+compatibility payloads were also removed; XP/2003-specific driver resources are
+separate and remain supported.

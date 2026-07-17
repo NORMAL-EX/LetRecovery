@@ -2,8 +2,8 @@
 //!
 //! The phase ordering and fail-closed gates live in `native_install_executor`;
 //! this module reuses the established image, XP, boot and advanced-option
-//! implementations.  Desktop-to-PE staging remains deliberately unsupported
-//! here until its complete transactional workflow is migrated.
+//! implementations. Desktop-to-PE staging includes both regular image files
+//! and session-isolated XP/2003 text-mode source directories.
 
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -45,6 +45,7 @@ pub struct ProductionInstallBackend {
     pe_display_name: Option<String>,
     data_partition: Option<String>,
     staged_image_name: Option<String>,
+    staged_xp_source_arch: Option<String>,
     bitlocker_decryption_volumes: Vec<char>,
 }
 
@@ -60,6 +61,7 @@ impl ProductionInstallBackend {
             pe_display_name: None,
             data_partition: None,
             staged_image_name: None,
+            staged_xp_source_arch: None,
             bitlocker_decryption_volumes: Vec::new(),
         }
     }
@@ -366,9 +368,26 @@ impl ProductionInstallBackend {
         &mut self,
         intent: &StartInstallIntent,
     ) -> Result<(), InstallBackendError> {
-        let image_size = std::fs::metadata(&intent.image_path)
-            .map_err(|error| Self::error("inspect_source_image", error))?
-            .len();
+        let image_size = if intent.options.is_xp_i386 {
+            let source = Path::new(&intent.image_path);
+            let arch = lr_core::xp_i386::validate_i386_source(source)
+                .map_err(|error| Self::error("invalid_xp_source", error))?;
+            let mut size = Self::directory_size_checked(source)?;
+            if arch == "AMD64" {
+                let sibling = source
+                    .parent()
+                    .map(|parent| parent.join("I386"))
+                    .filter(|path| path.is_dir());
+                if let Some(sibling) = sibling {
+                    size = size.saturating_add(Self::directory_size_checked(&sibling)?);
+                }
+            }
+            size.saturating_add(64 * 1024 * 1024)
+        } else {
+            std::fs::metadata(&intent.image_path)
+                .map_err(|error| Self::error("inspect_source_image", error))?
+                .len()
+        };
         let selected =
             DiskManager::find_suitable_data_partition(&intent.target_partition, image_size)
                 .map_err(|error| Self::error("select_data_partition", error))?
@@ -408,6 +427,18 @@ impl ProductionInstallBackend {
                 "cancelled",
                 "source image verification was cancelled before it started",
             ));
+        }
+
+        if intent.options.is_xp_i386 {
+            lr_core::xp_i386::validate_i386_source(Path::new(&intent.image_path))
+                .map_err(|error| Self::error("invalid_xp_source", error))?;
+            Self::report(
+                reporter,
+                InstallExecutionPhase::VerifySourceImage,
+                100,
+                crate::tr!("XP/2003 安装源校验通过"),
+            );
+            return Ok(());
         }
 
         let (progress_tx, progress_rx) = mpsc::channel();
@@ -474,6 +505,9 @@ impl ProductionInstallBackend {
         reporter: &mut dyn InstallExecutionReporter,
         cancellation: &dyn InstallCancellation,
     ) -> Result<(), InstallBackendError> {
+        if intent.options.is_xp_i386 {
+            return self.copy_xp_source(intent, reporter, cancellation);
+        }
         let file_name = Path::new(&intent.image_path)
             .file_name()
             .and_then(|name| name.to_str())
@@ -540,6 +574,186 @@ impl ProductionInstallBackend {
             ));
         }
         self.staged_image_name = Some(file_name);
+        Ok(())
+    }
+
+    fn directory_size_checked(source: &Path) -> Result<u64, InstallBackendError> {
+        let metadata = std::fs::symlink_metadata(source)
+            .map_err(|error| Self::error("inspect_xp_source", error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(InstallBackendError::new(
+                "unsafe_xp_source_entry",
+                format!(
+                    "XP source is not an ordinary directory: {}",
+                    source.display()
+                ),
+            ));
+        }
+        let mut size = 0_u64;
+        for entry in
+            std::fs::read_dir(source).map_err(|error| Self::error("read_xp_source", error))?
+        {
+            let entry = entry.map_err(|error| Self::error("read_xp_source_entry", error))?;
+            let metadata = entry
+                .metadata()
+                .map_err(|error| Self::error("inspect_xp_source_entry", error))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| Self::error("inspect_xp_source_entry", error))?;
+            if file_type.is_symlink() {
+                return Err(InstallBackendError::new(
+                    "unsafe_xp_source_entry",
+                    format!("XP source contains a link: {}", entry.path().display()),
+                ));
+            }
+            if file_type.is_dir() {
+                size = size.saturating_add(Self::directory_size_checked(&entry.path())?);
+            } else if file_type.is_file() {
+                size = size.saturating_add(metadata.len());
+            } else {
+                return Err(InstallBackendError::new(
+                    "unsafe_xp_source_entry",
+                    format!(
+                        "XP source contains a special entry: {}",
+                        entry.path().display()
+                    ),
+                ));
+            }
+        }
+        Ok(size)
+    }
+
+    fn copy_xp_tree(
+        source: &Path,
+        destination: &Path,
+        total: u64,
+        copied: &mut u64,
+        reporter: &mut dyn InstallExecutionReporter,
+        cancellation: &dyn InstallCancellation,
+    ) -> Result<(), InstallBackendError> {
+        std::fs::create_dir_all(destination)
+            .map_err(|error| Self::error("create_staged_xp_directory", error))?;
+        for entry in
+            std::fs::read_dir(source).map_err(|error| Self::error("read_xp_source", error))?
+        {
+            if cancellation.is_cancelled() {
+                return Err(InstallBackendError::new(
+                    "cancelled",
+                    "XP source copy was cancelled",
+                ));
+            }
+            let entry = entry.map_err(|error| Self::error("read_xp_source_entry", error))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| Self::error("inspect_xp_source_entry", error))?;
+            let target = destination.join(entry.file_name());
+            if file_type.is_symlink() {
+                return Err(InstallBackendError::new(
+                    "unsafe_xp_source_entry",
+                    format!("XP source contains a link: {}", entry.path().display()),
+                ));
+            }
+            if file_type.is_dir() {
+                Self::copy_xp_tree(
+                    &entry.path(),
+                    &target,
+                    total,
+                    copied,
+                    reporter,
+                    cancellation,
+                )?;
+            } else if file_type.is_file() {
+                let bytes = std::fs::copy(entry.path(), &target)
+                    .map_err(|error| Self::error("copy_xp_source_file", error))?;
+                *copied = copied.saturating_add(bytes);
+                let percentage = if total == 0 {
+                    100
+                } else {
+                    ((copied.saturating_mul(100) / total).min(100)) as u8
+                };
+                Self::report(
+                    reporter,
+                    InstallExecutionPhase::CopySourceImage,
+                    percentage,
+                    crate::tr!("正在暂存 XP/2003 安装源..."),
+                );
+            } else {
+                return Err(InstallBackendError::new(
+                    "unsafe_xp_source_entry",
+                    format!(
+                        "XP source contains a special entry: {}",
+                        entry.path().display()
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_xp_source(
+        &mut self,
+        intent: &StartInstallIntent,
+        reporter: &mut dyn InstallExecutionReporter,
+        cancellation: &dyn InstallCancellation,
+    ) -> Result<(), InstallBackendError> {
+        let source = Path::new(&intent.image_path);
+        let arch = lr_core::xp_i386::validate_i386_source(source)
+            .map_err(|error| Self::error("invalid_xp_source", error))?;
+        let sibling_i386 = (arch == "AMD64")
+            .then(|| source.parent().map(|parent| parent.join("I386")))
+            .flatten()
+            .filter(|path| path.is_dir());
+        let mut total = Self::directory_size_checked(source)?;
+        if let Some(sibling) = sibling_i386.as_ref() {
+            total = total.saturating_add(Self::directory_size_checked(sibling)?);
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Self::error("stage_xp_clock", error))?
+            .as_nanos();
+        let root_name = format!("xp-source-{}-{nonce}", std::process::id());
+        let data_dir = PathBuf::from(self.data_dir()?);
+        let final_root = data_dir.join(&root_name);
+        let temporary_root = data_dir.join(format!(".{root_name}.partial"));
+        let mut copied = 0_u64;
+        let result = (|| {
+            Self::copy_xp_tree(
+                source,
+                &temporary_root.join(arch),
+                total,
+                &mut copied,
+                reporter,
+                cancellation,
+            )?;
+            if let Some(sibling) = sibling_i386.as_ref() {
+                Self::copy_xp_tree(
+                    sibling,
+                    &temporary_root.join("I386"),
+                    total,
+                    &mut copied,
+                    reporter,
+                    cancellation,
+                )?;
+            }
+            if copied != total {
+                return Err(InstallBackendError::new(
+                    "staged_xp_source_size_mismatch",
+                    format!("expected {total} bytes, copied {copied} bytes"),
+                ));
+            }
+            lr_core::xp_i386::validate_i386_source(&temporary_root.join(arch))
+                .map_err(|error| Self::error("staged_xp_source_invalid", error))?;
+            std::fs::rename(&temporary_root, &final_root)
+                .map_err(|error| Self::error("commit_staged_xp_source", error))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&temporary_root);
+        }
+        result?;
+        self.staged_image_name = Some(root_name);
+        self.staged_xp_source_arch = Some(arch.to_string());
         Ok(())
     }
 
@@ -616,8 +830,16 @@ impl ProductionInstallBackend {
             target_build: package.target().build,
             target_architecture: package.target().architecture,
         });
-        let config =
+        let mut config =
             intent.to_install_config(staged_name, lr_core::active_engine().as_u8(), pca.as_ref());
+        if intent.options.is_xp_i386 {
+            config.xp_source_arch = self.staged_xp_source_arch.clone().ok_or_else(|| {
+                InstallBackendError::new(
+                    "staged_xp_arch_missing",
+                    "XP source architecture has not been staged",
+                )
+            })?;
+        }
         super::install_config::ConfigFileManager::write_install_config(
             &intent.target_partition,
             self.data_partition()?,

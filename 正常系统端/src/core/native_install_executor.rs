@@ -88,6 +88,49 @@ impl InstallExecutionPhase {
                 | Self::VerifySourceImage
         )
     }
+
+    /// Maps per-phase progress onto a duration-weighted overall band. WIM/GHO/XP application and
+    /// source copying dominate elapsed time; short safety checks and finalization intentionally do
+    /// not receive equal shares merely because they are separate phases.
+    pub const fn weighted_overall_progress(self, phase_progress: u8) -> u8 {
+        let (start, end) = match self {
+            Self::InspectBitLocker => (0u8, 1u8),
+            Self::AwaitBitLockerDecryption => (1, 3),
+            Self::VerifyPcaBeforeDiskWrite => (1, 3),
+            Self::ResolveStableTarget => (3, 4),
+            Self::RunDiskpartScripts => (4, 6),
+            Self::ResolveTargetAfterDiskpart => (6, 7),
+            Self::FormatTarget => (7, 10),
+            Self::ExportHostDrivers => (10, 14),
+            Self::ApplyXpTextModeSource | Self::ApplyGhostImage | Self::ApplyWimImage => (14, 84),
+            Self::ProcessDrivers => (84, 90),
+            Self::RepairBoot => (90, 96),
+            Self::ApplyAdvancedOptions => (96, 99),
+            Self::FinishDirectInstall => (99, 100),
+            Self::VerifyPeEnvironment => (3, 5),
+            Self::InstallPeBootEntry => (5, 8),
+            Self::SelectDataPartition => (8, 9),
+            Self::PersistPcaCompatibilityPackage => (9, 12),
+            Self::ExportDriversToPeData => (12, 20),
+            Self::VerifySourceImage => (20, 30),
+            Self::CopySourceImage => (30, 86),
+            Self::StageUefiSeven | Self::StageUserDrivers => (86, 93),
+            Self::WritePeInstallConfig => (93, 98),
+            Self::ReadyToRebootIntoPe => (98, 100),
+        };
+        let progress = if phase_progress > 100 {
+            100
+        } else {
+            phase_progress
+        };
+        let span = end.saturating_sub(start) as u16;
+        let value = start as u16 + span * progress as u16 / 100;
+        if value > 100 {
+            100
+        } else {
+            value as u8
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -425,6 +468,26 @@ impl NativeInstallExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_application_owns_most_of_direct_install_progress() {
+        assert_eq!(
+            InstallExecutionPhase::FormatTarget.weighted_overall_progress(100),
+            10
+        );
+        assert_eq!(
+            InstallExecutionPhase::ApplyWimImage.weighted_overall_progress(0),
+            14
+        );
+        assert_eq!(
+            InstallExecutionPhase::ApplyWimImage.weighted_overall_progress(50),
+            49
+        );
+        assert_eq!(
+            InstallExecutionPhase::ApplyWimImage.weighted_overall_progress(100),
+            84
+        );
+    }
     use crate::core::native_install_controller::InstallOptions;
     use crate::core::ui_state::{AdvancedOptionsData, BootModeSelection, DriverAction};
     use lr_core::boot_pca::BootPcaMode;

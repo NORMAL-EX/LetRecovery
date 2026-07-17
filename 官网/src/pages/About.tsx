@@ -66,7 +66,7 @@ const About: React.FC = () => {
                   </a>
                   <span aria-hidden="true">+</span>
                   <a
-                    href="/docs/guide/terms"
+                    href="#/docs/guide/terms"
                     className="underline underline-offset-4 hover:text-primary"
                   >
                     {t.about.additionalTerms}

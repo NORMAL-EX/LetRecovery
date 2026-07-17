@@ -2536,9 +2536,8 @@ impl NativeWindow {
         let enabled = backdrop::mica_session_enabled(
             requested == ExperimentalWindowBackdrop::Mica,
             endpoint_supports_mica,
-            self.window_active,
         );
-        match backdrop::apply_mica(hwnd, enabled) {
+        match backdrop::apply_mica(hwnd, enabled, self.window_active) {
             Ok(active) => self.backdrop_active = active,
             Err(error) => {
                 self.backdrop_active = false;
@@ -2565,20 +2564,14 @@ impl NativeWindow {
             return;
         }
         self.window_active = active;
-        // Inactive must be byte-for-byte the same visual mode as disabling the experiment: AUTO
-        // backdrop, zero client frame and the ordinary palette.
-        let redraw = redraw::suspend(hwnd);
-        // Activation never changes the system light/dark bit or any control geometry. Applying the
-        // full theme path here used to request/reset Mica twice, call SetWindowTheme on every HWND
-        // and issue Edit SWP_FRAMECHANGED, producing a whole-page flash and visibly moving only the
-        // text. Switch DWM once, then update palette-bearing subclass data without rebuilding the
-        // native control tree. The remaining compositor-owned transition is tracked separately:
-        // USER32/DWM can still expose a 0-16 ms intermediate frame while changing activation.
+        // Change the top-level DWM state once, then publish the existing children as one tree.
+        // The former suspend/resume path restored separately redirected child HWNDs sequentially.
         self.apply_experimental_window_backdrop(hwnd);
         let control_palette = self.control_palette();
         self.brushes = Brushes::new(control_palette);
         theme::refresh_material_palette_to_descendants(hwnd, control_palette);
-        redraw::resume(hwnd, redraw);
+        redraw::publish_existing_tree(hwnd);
+        backdrop::flush_composition();
     }
 
     unsafe fn populate_partitions(&self, list: HWND, add_columns: bool) {
@@ -9738,12 +9731,13 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_NCACTIVATE => {
+            let result = DefWindowProcW(hwnd, message, wparam, lparam);
             if let Some(state) = state {
-                // This is the exact state DWM uses for the active/inactive title bar. Keep child
-                // material surfaces in lockstep while USER32 commits that state.
+                // Let DWM commit its native active/inactive Mica state first, then publish the
+                // already-existing child tree once with the matching control palette.
                 state.refresh_window_activation(hwnd, wparam.0 != 0);
             }
-            DefWindowProcW(hwnd, message, wparam, lparam)
+            result
         }
         WM_SIZE => {
             if let Some(state) = state {

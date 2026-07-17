@@ -1,4 +1,4 @@
-//! PE worker workflows kept separate from the egui application shell.
+//! PE worker workflows kept separate from the native Win32 presentation layer.
 
 mod backup;
 mod expand;

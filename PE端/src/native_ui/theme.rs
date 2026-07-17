@@ -23,7 +23,7 @@ impl ThemeMode {
     }
 }
 
-/// Inno Setup 6.7 Modern Windows 11 colour roles, kept independent from egui global style.
+/// Inno Setup 6.7 Modern Windows 11 colour roles for the PE native window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub dark: bool,

@@ -25,6 +25,7 @@ regex = "1"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_Security_WinTrust",

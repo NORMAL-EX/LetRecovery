@@ -45,6 +45,58 @@ pub fn is_valid_i386(dir: &Path) -> bool {
         && dir.join("ntdetect.com").exists()
 }
 
+const REQUIRED_SOURCE_FILES: [&[&str]; 5] = [
+    &["biosinfo.inf"],
+    &["setupdd.sy_"],
+    &["ntkrnlmp.ex_"],
+    &["ntfs.sy_", "ntfs.sys"],
+    &["setupreg.hiv"],
+];
+
+/// Read-only, fail-closed validation for an original XP/2003 text-mode source.
+///
+/// The source directory itself must be named `I386` or `AMD64`. This function performs no target
+/// disk access and is therefore suitable for the desktop staging gate and the PE preflight gate.
+pub fn validate_i386_source(dir: &Path) -> Result<&'static str, String> {
+    let architecture = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_uppercase)
+        .ok_or_else(|| format!("XP/2003 安装源目录名无效: {}", dir.display()))?;
+    let architecture = match architecture.as_str() {
+        "I386" => "I386",
+        "AMD64" => "AMD64",
+        _ => {
+            return Err(format!(
+                "XP/2003 文本模式安装源必须是 I386 或 AMD64 目录: {}",
+                dir.display()
+            ));
+        }
+    };
+    if !dir.is_dir() {
+        return Err(format!("找不到 XP/2003 安装源目录: {}", dir.display()));
+    }
+
+    let missing: Vec<String> = [
+        &["setupldr.bin"][..],
+        &["txtsetup.sif"][..],
+        &["ntdetect.com"][..],
+    ]
+    .into_iter()
+    .chain(REQUIRED_SOURCE_FILES)
+    .filter(|names| !names.iter().any(|name| dir.join(name).is_file()))
+    .map(|names| names.join("/"))
+    .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "源 {} 缺少文本安装必需文件: {}。这不是完整的 XP/2003 安装源。",
+            dir.display(),
+            missing.join(", ")
+        ));
+    }
+    Ok(architecture)
+}
+
 /// 从 i386 源目录做硬盘文本安装准备。成功后重启即进入 XP 文本安装。
 ///
 /// - `i386_src`：i386 目录（如挂载 ISO 的 `G:\I386`，或已复制到数据分区的副本）。
@@ -58,6 +110,7 @@ pub fn install_from_i386(
     bin_dir: &Path,
     custom_sif: Option<&Path>,
 ) -> Result<String, String> {
+    validate_i386_source(i386_src)?;
     let win = win_partition.trim_end_matches('\\'); // "C:"
     let mut log = String::new();
 
@@ -703,6 +756,38 @@ InstallDefaultComponents=Yes\r\n"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_preflight_accepts_complete_i386_and_rejects_incomplete_media() {
+        let root = std::env::temp_dir().join(format!(
+            "letrecovery-xp-source-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("I386");
+        std::fs::create_dir_all(&source).unwrap();
+        for name in [
+            "setupldr.bin",
+            "txtsetup.sif",
+            "ntdetect.com",
+            "biosinfo.inf",
+            "setupdd.sy_",
+            "ntkrnlmp.ex_",
+            "ntfs.sy_",
+            "setupreg.hiv",
+        ] {
+            std::fs::write(source.join(name), b"test").unwrap();
+        }
+        assert_eq!(validate_i386_source(&source).unwrap(), "I386");
+        std::fs::remove_file(source.join("setupreg.hiv")).unwrap();
+        assert!(validate_i386_source(&source)
+            .unwrap_err()
+            .contains("setupreg.hiv"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn diskpart_reported_failure_negative_detection() {

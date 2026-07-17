@@ -5,7 +5,7 @@
 ## 原生界面闪烁与切换
 
 - [ ] 修复窗口激活/失活以及启用/关闭实验性 Mica 时的整窗闪烁；不做固定时长动画，DWM backdrop、客户区 frame、控件调色板和最终重绘必须在一次最终帧事务中发布。
-  - 已移除一次激活事务内的重复 backdrop 申请和全树 `SetWindowTheme`/`SWP_FRAMECHANGED`，现在只更新现有子类调色板引用；稳定帧不再发生文字位置变化，但浅色重新激活的 0–16ms 捕获仍可见局部 STATIC/字段中间帧，因此本项不得划掉。
+  - 已移除一次激活事务内的全树 `SetWindowTheme`/`SWP_FRAMECHANGED` 和逐个子 HWND 的 `WM_SETREDRAW` 恢复；当前实现保留已验证的 `DWMSBT_MAINWINDOW` 会话，仅在激活时把 DWM frame 扩展到完整客户区、失活时收回为零，并在普通/材质调色板切换后一次发布现有控件树和调用 `DwmFlush`。先前 AUTO/MAINWINDOW 反复切换方案的 0–16ms 捕获仍出现黑块或洗白中间帧，已回退；最新 frame-only 方案已通过编译和纯逻辑测试，但自动实窗瞬时帧复测被本机 Codex 提权使用额度阻止，因此本项不得划掉，也不得宣称视觉问题已经彻底解决。
 - [ ] 修复“硬件信息”页和其他 ListView 在拖动右侧滚动条时持续闪烁；后台批量更新、表头、滚动和窗口遮挡恢复都不得形成整表重绘循环。
   - 当前缺陷已由用户实机确认：`WM_VSCROLL` 高频拖动路径仍会让完整 ListView 失效，上一轮的“滚动不会闪烁”结论无效。
 - [x] ~~修复“系统安装”页切换安装分区时 ListView 和其他页面控件闪烁；以不会闪烁的“系统备份”页为对照，限制选择通知引发的状态更新和失效区域。~~
@@ -16,7 +16,7 @@
 ## Mica、激活状态与兼容边界
 
 - [x] ~~修复浅色 Mica 下单行 Edit 已输入文字变成近白色的问题；必须与普通浅色按钮文字保持同等可读的深色前景，同时保留原生光标、选择、IME 和无障碍行为。~~
-  - USER32 仍负责原生文字、光标、选择、IME 和无障碍绘制；提交到扩展 DWM frame 前改用 32 位 BGRA DIB，并在 `GdiFlush` 后把整帧 Alpha 修复为 255，一次 `AlphaBlend` 发布。`WM_CHAR`、粘贴、删除、替换、撤销和 IME 合成等直接改变可见文本的消息在默认处理后同步重新发布最终 BGRA 帧，避免“输入时白、停止输入后黑”。浅色 Mica 实窗输入截图已确认聚焦、光标可见且正文保持深色。
+  - USER32 仍负责文本缓冲、光标、选择、IME、键盘命中和无障碍语义；最终可见字段改为在一个完整 32 位 BGRA DIB 中同时填充背景并按原生文本缓冲绘制深色正文，`GdiFlush` 后修复整帧 Alpha，再用一次 `SetDIBitsToDevice` 发布。`WM_CHAR`、`WM_UNICHAR`、粘贴、删除、替换、撤销和 IME 合成等消息先交给默认过程更新原生状态，随后同步发布最终帧；禁止在该路径发送 `WM_SETREDRAW(FALSE)`，因为系统会暂时移除 `WS_VISIBLE` 并让本次同步绘制漏掉 Edit。真实 `SendInput` 的浅色 Mica 实窗帧已确认输入过程中正文保持深色、背景铺满且基线稳定；选区高亮、长文本水平滚动与 IME 候选交互仍需加入完整实机回归矩阵。
 - [x] ~~修复浅色 Mica 下闭合 ComboBox 的下拉箭头变成近白色、与字段背景失去对比的问题；正文、箭头和圆角外框必须使用同一最终表面状态。~~
   - 闭合箭头改为 4×4 子像素覆盖率生成的预乘 Alpha BGRA 图元，不再以 Alpha 未定义的 GDI 线直接画入扩展 frame；浅色 Mica 展开与闭合实机截图均确认箭头为可读深色。
 - [x] ~~修复浅色 Mica 下 ListView 仅已有行使用材质色、行下方空白客户区仍被库存画刷刷成纯白的问题；完整列表客户区、表头和未选中行必须保持一致的材质表面，且不得重新引入滚动闪烁。~~
@@ -27,8 +27,8 @@
   - 深色 ListView 使用受支持的 `DarkMode_Explorer` 主题族；保留 comctl32 v6 原生滚动条，不使用只覆盖 4.71–5.82 的 FlatSB 颜色接口。
 - [x] ~~实验性全窗口 Mica 关闭时，标题栏仍遵循 Windows 11 的系统标题栏/Mica 行为，客户区保持普通主题。~~
   - 关闭实验选项时显式设置 `DWMSBT_AUTO` 并撤销客户区 frame，由 DWM 只决定默认标题栏背景。
-- [x] ~~顶层窗口的 Mica 与 Windows 激活状态同步：窗口失去激活后由系统决定标题栏/背景表现，子控件不得继续显示成“独立悬浮的 Mica”。~~
-  - 主窗口和工具对话框以各自 `WM_NCACTIVATE` 的标题栏激活态为准；失活同步设置 `DWMSBT_AUTO`、撤销全客户区 frame 并恢复普通主题，重新激活后再申请和回读 Mica，不得只换控件色或用滞后的 `GetForegroundWindow` 推断。
+- [ ] 顶层窗口的 Mica 与 Windows 激活状态同步：窗口失去激活后客户区应与关闭实验性 Mica 一样使用普通不透明主题，子控件不得继续显示成“独立悬浮的 Mica”，重新激活也不得闪烁。
+  - 主窗口和工具对话框以各自 `WM_NCACTIVATE` 为准；当前保留已回读确认的 `DWMSBT_MAINWINDOW` 会话，失活只撤销全客户区 frame 并恢复普通调色板，重新激活再扩展 frame，避免每次焦点变化重启 backdrop。纯逻辑测试和编译已通过，但最新实现的激活/失活瞬时帧尚未完成实窗复核，因此保持未完成。
 - [x] ~~在不支持 DWM Mica 的系统或 DWM 请求失败时，全部控件可靠回退普通不透明主题；不得出现“窗口没有 Mica、控件却仍像 Mica”的混合状态。~~
   - 只有 DWM 合成开启、`DwmSetWindowAttribute` 成功、`DwmGetWindowAttribute` 回读为 `DWMSBT_MAINWINDOW` 且全客户区 frame 成功，激活窗口才启用材质调色板；失败立即恢复 `DWMSBT_AUTO`、零 frame 和普通不透明控件主题。
 - [x] ~~明确阻止 PE 端启用或模拟 Mica；PE 只使用其受支持的普通不透明原生主题。~~
@@ -57,4 +57,4 @@
 - [x] ~~本轮修复完成后重新运行仓库要求的格式、Check、Clippy 和测试；复核 `AGENTS.md` 职责与安全约束。~~
   - `cargo fmt --all --check`、workspace Check、严格 Clippy、workspace no-run、`lr-core`、PE 与正常端测试均通过；职责目录已同步 DWM 回读、`WM_NCACTIVATE` 门禁与首帧非零 alpha 屏障。
 - [ ] 本轮修复通过瞬时帧和滚动交互复核后重新构建正常系统端 release，核对大小与 SHA-256 后原子更新 `pkg/LetRecovery.exe`；`pkg/` 不加入 Git。
-  - 本轮浅色输入文字、非空列表尾部和激活轻量刷新已构建 release 并原子同步 `pkg/LetRecovery.exe`（7,668,736 字节，SHA-256 `5EC38274537FFB8E4156812DCCB3990F1CB3C9C380C3EE33646611A4CAD8885A`）；浅色/深色输入与稳定激活帧已实机复核，但 0–16ms 激活中间帧、滚动闪烁、Mica 明确关闭及工具对话框矩阵仍开放，因此总项不划掉。
+  - 最新源码已成功构建 release：`target/release/LetRecovery.exe` 为 7,667,712 字节，SHA-256 `394A878B76BE58D59F92B3BBF5E57E3D0EE0849878A9D80D4E817117FC49F131`。尝试通过同目录临时文件校验后原子替换 `pkg/LetRecovery.exe` 时被当前 Codex 提权/使用额度拒绝，未执行替换；`pkg` 仍为旧的 7,668,736 字节、SHA-256 `5EC38274537FFB8E4156812DCCB3990F1CB3C9C380C3EE33646611A4CAD8885A`。此外最新 frame-only 激活方案的 0–16ms 实窗复核仍被同一环境限制阻塞，因此本项保持未完成。

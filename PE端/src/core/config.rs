@@ -107,6 +107,11 @@ pub struct InstallConfig {
     /// 目标镜像是否为 XP/2003：为真时写 XP 引导（ntldr/boot.ini 或 UEFI/GPT）而非 bcdboot。
     pub is_xp: bool,
 
+    /// Original I386/AMD64 text-mode media staged as a directory by the desktop client.
+    pub is_xp_i386: bool,
+    /// Safe single directory component beneath the staged source root (`I386` or `AMD64`).
+    pub xp_source_arch: String,
+
     // XP 专用选项（仅 is_xp 为真时生效）
     /// XP 注入 USB3(xHCI) 驱动（默认勾选）
     pub xp_inject_usb3_driver: bool,
@@ -131,7 +136,7 @@ pub struct InstallConfig {
     /// 兼容包绑定的目标 WIM architecture 值。
     pub pca_compat_target_architecture: u16,
 
-    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    /// 界面语言代码（如 "zh-TW"、"en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
 }
 
@@ -197,7 +202,7 @@ pub struct BackupConfig {
     /// WIM 镜像引擎：0=libwim（默认），1=wimgapi。由正常系统端随重启传入。
     pub wim_engine: u8,
 
-    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    /// 界面语言代码（如 "zh-TW"、"en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
 }
 
@@ -248,6 +253,30 @@ impl ConfigFileManager {
         lr_core::download_integrity::validate_download_filename(file_name)
             .map_err(|error| anyhow::anyhow!("无效的暂存文件名 {file_name:?}: {error}"))?;
         Ok(Path::new(data_dir).join(file_name))
+    }
+
+    /// Resolve a two-level staged XP source while keeping both INI-controlled path components
+    /// confined to the LetRecovery data directory.
+    pub fn resolve_staged_xp_source(
+        data_dir: &str,
+        source_root: &str,
+        source_arch: &str,
+    ) -> Result<PathBuf> {
+        for (field, value) in [("ImagePath", source_root), ("XpSourceArch", source_arch)] {
+            lr_core::download_integrity::validate_download_filename(value).map_err(|error| {
+                anyhow::anyhow!("无效的 XP 暂存目录字段 {field}={value:?}: {error}")
+            })?;
+        }
+        if !matches!(source_arch.to_ascii_uppercase().as_str(), "I386" | "AMD64") {
+            anyhow::bail!("XpSourceArch 必须是 I386 或 AMD64");
+        }
+        let path = Path::new(data_dir).join(source_root).join(source_arch);
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("读取 XP 暂存源失败: {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("XP 暂存源不是普通目录: {}", path.display());
+        }
+        Ok(path)
     }
 
     fn normalize_partition(partition: &str) -> String {
@@ -640,6 +669,8 @@ impl ConfigFileManager {
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "IsXp" => config.is_xp = value.parse().unwrap_or(false),
+                    "IsXpI386" => config.is_xp_i386 = value.parse().unwrap_or(false),
+                    "XpSourceArch" => config.xp_source_arch = value.to_string(),
                     "RunDiskpartScripts" => {
                         config.run_diskpart_scripts = value.parse().unwrap_or(false)
                     }
@@ -767,6 +798,8 @@ mod tests {
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
         assert!(config.pca_compat_package.is_empty());
         assert_eq!(config.pca_compat_image_index, 0);
+        assert!(!config.is_xp_i386);
+        assert!(config.xp_source_arch.is_empty());
     }
 
     #[test]
@@ -787,6 +820,40 @@ mod tests {
         assert_eq!(config.pca_compat_target_build, 19045);
         assert_eq!(config.pca_compat_target_architecture, 9);
     }
+
+    #[test]
+    fn resolves_only_confined_staged_xp_source_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "letrecovery-pe-xp-resolver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("xp-source-session").join("I386");
+        std::fs::create_dir_all(&source).unwrap();
+        assert_eq!(
+            ConfigFileManager::resolve_staged_xp_source(
+                &root.to_string_lossy(),
+                "xp-source-session",
+                "I386"
+            )
+            .unwrap(),
+            source
+        );
+        assert!(
+            ConfigFileManager::resolve_staged_xp_source(&root.to_string_lossy(), "..", "I386")
+                .is_err()
+        );
+        assert!(ConfigFileManager::resolve_staged_xp_source(
+            &root.to_string_lossy(),
+            "xp-source-session",
+            "system32"
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// 操作类型
@@ -806,6 +873,6 @@ pub struct ExpandConfig {
     pub target_size_mb: u64,
     /// WIM 引擎选择（与其它流程一致）：0=libwim，1=wimgapi。
     pub wim_engine: u8,
-    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    /// 界面语言代码（如 "zh-TW"、"en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
 }

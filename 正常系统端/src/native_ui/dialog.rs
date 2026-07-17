@@ -326,9 +326,8 @@ impl DialogState {
         let enabled = backdrop::mica_session_enabled(
             requested == ExperimentalWindowBackdrop::Mica,
             endpoint_supports_mica,
-            self.window_active,
         );
-        self.backdrop_active = match backdrop::apply_mica(self.hwnd, enabled) {
+        self.backdrop_active = match backdrop::apply_mica(self.hwnd, enabled, self.window_active) {
             Ok(active) => active,
             Err(error) => {
                 if enabled {
@@ -350,10 +349,10 @@ impl DialogState {
             return;
         }
         self.window_active = active;
-        let redraw = redraw::suspend(self.hwnd);
         self.refresh_palette_and_backdrop();
         refresh_material_palette_to_descendants(self.hwnd, self.palette);
-        redraw::resume(self.hwnd, redraw);
+        redraw::publish_existing_tree(self.hwnd);
+        backdrop::flush_composition();
     }
 
     unsafe fn create_fonts(&mut self) {
@@ -895,10 +894,11 @@ unsafe extern "system" fn dialog_proc(
             }
         }
         WM_NCACTIVATE => {
+            let result = DefWindowProcW(hwnd, message, wparam, lparam);
             if let Some(state) = state {
                 state.refresh_window_activation(wparam.0 != 0);
             }
-            DefWindowProcW(hwnd, message, wparam, lparam)
+            result
         }
         WM_SIZE => {
             if let Some(state) = state {

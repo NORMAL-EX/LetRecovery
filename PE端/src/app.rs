@@ -3,12 +3,10 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use eframe::egui;
-
 use crate::core::config::{ConfigFileManager, OperationType};
 use crate::core::dism::DismProgress;
 use crate::tr;
-use crate::ui::progress::{BackupStep, InstallStep, ProgressState, ProgressUI};
+use crate::ui::progress::{BackupStep, InstallStep, ProgressState};
 use crate::utils::reboot_pe;
 use crate::workflow_journal::PeWorkflowJournal;
 use crate::workflow_journal::RecoveryCheckpointSnapshot;
@@ -82,98 +80,7 @@ pub(crate) struct WorkflowRecoverySnapshot {
     pub worker_finished: bool,
 }
 
-pub struct App {
-    session: WorkflowSession,
-}
-
-impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // 设置中文字体
-        Self::setup_fonts(&cc.egui_ctx);
-
-        Self {
-            session: WorkflowSession::new(),
-        }
-    }
-
-    /// 设置中文字体（从当前运行系统的 Fonts 目录加载微软雅黑）
-    ///
-    /// 不写死盘符：PE 的系统盘不一定是 X:，应根据正在运行系统的 Windows 目录
-    /// 动态解析字体路径。
-    fn setup_fonts(ctx: &egui::Context) {
-        let mut fonts = egui::FontDefinitions::default();
-
-        // 候选字体路径：优先用 %SystemRoot%（指向当前运行系统的 Windows 目录），
-        // 再用 PE 系统盘探测结果，最后回退到常见盘符。
-        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-
-        if let Ok(system_root) = std::env::var("SystemRoot") {
-            candidates.push(
-                std::path::Path::new(&system_root)
-                    .join("Fonts")
-                    .join("msyh.ttc"),
-            );
-            candidates.push(
-                std::path::Path::new(&system_root)
-                    .join("Fonts")
-                    .join("msyh.ttf"),
-            );
-        }
-        if let Some(drive) = crate::core::system_utils::get_pe_system_drive() {
-            candidates.push(std::path::PathBuf::from(format!(
-                "{}\\Windows\\Fonts\\msyh.ttc",
-                drive
-            )));
-            candidates.push(std::path::PathBuf::from(format!(
-                "{}\\Windows\\Fonts\\msyh.ttf",
-                drive
-            )));
-        }
-        // 最后兜底：常见 PE/系统盘符
-        for d in ["X", "Y", "Z", "W", "C"] {
-            candidates.push(std::path::PathBuf::from(format!(
-                "{}:\\Windows\\Fonts\\msyh.ttc",
-                d
-            )));
-        }
-
-        let mut loaded = false;
-        for font_path in &candidates {
-            if let Ok(font_data) = std::fs::read(font_path) {
-                fonts.font_data.insert(
-                    "msyh".to_owned(),
-                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
-                );
-                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    family.insert(0, "msyh".to_owned());
-                } else {
-                    log::warn!("字体族 Proportional 不存在，无法插入中文字体");
-                }
-                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    family.insert(0, "msyh".to_owned());
-                } else {
-                    log::warn!("字体族 Monospace 不存在，无法插入中文字体");
-                }
-                log::info!("已加载中文字体: {}", font_path.display());
-                loaded = true;
-                break;
-            }
-        }
-
-        if !loaded {
-            log::warn!("未能从任何候选路径加载中文字体（msyh.ttc/ttf）");
-        }
-
-        ctx.set_fonts(fonts);
-    }
-}
-
 impl WorkflowSession {
-    pub(crate) fn new() -> Self {
-        let operation_type = ConfigFileManager::detect_operation_type();
-        Self::new_for_operation(operation_type)
-    }
-
     pub(crate) fn new_for_operation(operation_type: Option<OperationType>) -> Self {
         let workflow_journal = operation_type.and_then(|operation_type| {
             match PeWorkflowJournal::create(operation_type) {
@@ -339,29 +246,6 @@ impl WorkflowSession {
     }
 }
 
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 启动工作线程
-        if !self.session.started {
-            self.session.start_worker();
-        }
-
-        // 处理消息
-        self.session.process_messages();
-        let _ = self.session.reap_worker_if_finished();
-
-        // 绘制界面
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Ok(state) = self.session.progress_state.lock() {
-                ProgressUI::show(ui, &state);
-            }
-        });
-
-        // 持续刷新
-        ctx.request_repaint();
-    }
-}
-
 /// 执行安装工作流
 fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     use crate::core::bcdedit::BootManager;
@@ -394,10 +278,17 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     log::info!("目标分区: {}", config.target_partition);
     log::info!("镜像文件: {}", config.image_path);
 
-    // Resolve only a single staged file name. A modified INI must not be able to escape the
-    // LetRecovery data directory before image verification or disk writes.
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-    let image_path = match ConfigFileManager::resolve_staged_file(&data_dir, &config.image_path) {
+    let resolved_source = if config.is_xp_i386 {
+        ConfigFileManager::resolve_staged_xp_source(
+            &data_dir,
+            &config.image_path,
+            &config.xp_source_arch,
+        )
+    } else {
+        ConfigFileManager::resolve_staged_file(&data_dir, &config.image_path)
+    };
+    let image_path = match resolved_source {
         Ok(path) => path.to_string_lossy().into_owned(),
         Err(error) => {
             let _ = tx.send(WorkerMessage::Failed(tr!(
@@ -418,7 +309,33 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     // Step 0: 校验镜像完整性（WIM/ESD）。放在格式化之前——镜像损坏就提前失败，
     // 不会白白格式化目标盘，也能给出明确“镜像损坏”而不是释放到一半才崩。
     // GHO 不是 WIM，跳过 wimlib 校验。
-    if !config.is_gho {
+    let xp_custom_sif = if config.is_xp_i386 && !config.custom_unattend_file.is_empty() {
+        match ConfigFileManager::resolve_staged_file(&data_dir, &config.custom_unattend_file) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                let _ = tx.send(WorkerMessage::Failed(tr!(
+                    "自定义 XP 应答文件名无效: {}",
+                    error
+                )));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if config.is_xp_i386 {
+        if let Err(error) =
+            lr_core::xp_i386::validate_i386_source(std::path::Path::new(&image_path))
+        {
+            let _ = tx.send(WorkerMessage::Failed(tr!(
+                "XP/2003 安装源校验失败: {}",
+                error
+            )));
+            return;
+        }
+    }
+
+    if !config.is_gho && !config.is_xp_i386 {
         let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::VerifyImage));
         let _ = tx.send(WorkerMessage::SetStatus(tr!(
             "正在校验系统镜像完整性（可能需要几分钟）..."
@@ -461,19 +378,23 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
                 return;
             }
         };
-    let pca_compat_package = match crate::core::pca_preflight::verify_before_disk_write(
-        &image_path,
-        config.volume_index,
-        config.is_gho,
-        config.is_xp,
-        config.boot_mode != 2,
-        config.boot_pca_mode,
-        staged_pca_compat.as_ref(),
-    ) {
-        Ok(package) => package,
-        Err(error) => {
-            let _ = tx.send(WorkerMessage::Failed(error));
-            return;
+    let pca_compat_package = if config.is_xp_i386 {
+        None
+    } else {
+        match crate::core::pca_preflight::verify_before_disk_write(
+            &image_path,
+            config.volume_index,
+            config.is_gho,
+            config.is_xp,
+            config.boot_mode != 2,
+            config.boot_pca_mode,
+            staged_pca_compat.as_ref(),
+        ) {
+            Ok(package) => package,
+            Err(error) => {
+                let _ = tx.send(WorkerMessage::Failed(error));
+                return;
+            }
         }
     };
 
@@ -518,6 +439,40 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     // Step 2: 释放镜像
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::ApplyImage));
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在释放系统镜像...")));
+
+    if config.is_xp_i386 {
+        let _ = tx.send(WorkerMessage::SetStatus(tr!(
+            "正在准备 XP/2003 文本模式安装..."
+        )));
+        match lr_core::xp_i386::install_from_i386(
+            std::path::Path::new(&image_path),
+            &target_partition,
+            &crate::utils::path::get_bin_dir(),
+            xp_custom_sif.as_deref(),
+        ) {
+            Ok(log_output) => log::info!("[PE安装/XP文本模式] {log_output}"),
+            Err(error) => {
+                let _ = tx.send(WorkerMessage::Failed(tr!(
+                    "准备 XP/2003 文本模式安装失败: {}",
+                    error
+                )));
+                return;
+            }
+        }
+        let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Cleanup));
+        ConfigFileManager::cleanup_all(&data_partition, &target_partition);
+        if let Err(error) =
+            DiskManager::cleanup_auto_created_partition_and_extend(&target_partition)
+        {
+            log::warn!("[PE安装/XP文本模式] 清理自动数据分区失败: {error}");
+        }
+        let _ = tx.send(WorkerMessage::SetProgress(100));
+        let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Complete));
+        let _ = tx.send(WorkerMessage::Completed);
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        reboot_pe();
+        return;
+    }
 
     let apply_dir = format!("{}\\", target_partition);
     log::info!(

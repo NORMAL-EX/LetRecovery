@@ -7,14 +7,14 @@ use windows::Win32::Graphics::Dwm::{
     DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
-    AlphaBlend, BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC,
-    CreateDIBSection, CreatePen, CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint,
-    FillRect, GdiFlush, GetTextMetricsW, GetWindowDC, InvalidateRect, RedrawWindow, ReleaseDC,
-    RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor,
-    SetWindowRgn, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    BLENDFUNCTION, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
-    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE,
-    RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
+    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateDIBSection, CreatePen, CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject,
+    DrawTextW, EndPaint, FillRect, GdiFlush, GetTextMetricsW, GetWindowDC, InvalidateRect,
+    RedrawWindow, ReleaseDC, RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice,
+    SetStretchBltMode, SetTextColor, SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, DT_WORDBREAK, HALFTONE, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME,
+    RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     GetComboBoxInfo, SetWindowTheme, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT,
@@ -34,12 +34,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetPropW,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret,
     PostMessageW, RemovePropW, SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret,
-    GWL_EXSTYLE, GWL_STYLE, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND,
-    WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
-    WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE,
-    WS_EX_LAYERED,
+    GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY,
+    WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER,
+    WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_EX_LAYERED,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
@@ -238,9 +237,15 @@ impl Palette {
     }
 
     /// The atomic Edit painter repairs every output pixel to opaque BGRA after USER32 renders it,
-    /// so the ordinary theme foreground is safe even when the parent window uses Mica.
+    /// but the classic child target DC still treats exact black as the extended-frame glass key.
+    /// Use the same near-black foreground as material labels in light mode; visually it matches
+    /// ordinary button text while remaining an opaque DWM contribution.
     pub(crate) const fn edit_text_color(self) -> COLORREF {
-        self.text
+        if self.uses_system_backdrop_surface() && !self.dark {
+            self.foreground_black()
+        } else {
+            self.text
+        }
     }
 
     pub(crate) unsafe fn edit_text_color_for(self, _control: HWND) -> COLORREF {
@@ -660,8 +665,12 @@ unsafe fn paint_backdrop_static(hwnd: HWND, palette: Palette) {
             _ => windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0),
         };
         let dpi = GetDpiForWindow(hwnd).max(96);
-        if style & 0x0200 != 0 || height <= scale(36, dpi) {
+        if style & 0x0200 != 0 {
             flags |= DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
+        } else if height <= scale(36, dpi) {
+            // Match the stock SS_LEFT baseline used without Mica. Vertically centring every short
+            // STATIC only in the material painter made all labels jump down on activation.
+            flags |= DT_SINGLELINE | DT_END_ELLIPSIS;
         } else {
             flags |= DT_WORDBREAK;
         }
@@ -2087,64 +2096,6 @@ unsafe fn paint_list_view_trailing_body(hwnd: HWND, palette: Palette) {
     }
 }
 
-unsafe fn inset_edit_client_rect(hwnd: HWND, rect: &mut RECT, dpi: u32) {
-    let width = (rect.right - rect.left).max(0);
-    let height = (rect.bottom - rect.top).max(0);
-    let Some(geometry) = rounded_control_frame_geometry(width, height, dpi.max(96)) else {
-        return;
-    };
-    // A native Edit always paints a rectangular client background. Keep that rectangle out of
-    // the complete left/right arc area; otherwise its later WM_PAINT covers the antialiased corner
-    // pixels that were produced during WM_NCPAINT. Vertically only the real one-pixel frame band is
-    // reserved so the native text/caret retains the full single-line height and stays centred.
-    if width > geometry.radius.saturating_mul(2) {
-        rect.left += geometry.radius;
-        rect.right -= geometry.radius;
-    }
-    if height > geometry.side_band.saturating_mul(2) {
-        // A borderless single-line Edit anchors its text at the top of the client rectangle; merely
-        // centring the HWND does not vertically centre the glyphs.  Derive the real YaHei line
-        // height and centre a native Edit client band around it. USER32 still owns the text,
-        // selection, caret and IME, and no EM_SETRECT/multiline emulation is involved.
-        let dc = GetWindowDC(hwnd);
-        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
-        let old_font = (!dc.0.is_null() && font.0 != 0)
-            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
-        let mut text_metrics = windows::Win32::Graphics::Gdi::TEXTMETRICW::default();
-        let measured = !dc.0.is_null() && GetTextMetricsW(dc, &mut text_metrics).as_bool();
-        if let Some(old_font) = old_font {
-            let _ = SelectObject(dc, old_font);
-        }
-        if !dc.0.is_null() {
-            let _ = ReleaseDC(hwnd, dc);
-        }
-        let minimum_band = geometry.side_band.saturating_mul(2);
-        let desired_height = if measured {
-            (text_metrics.tmHeight + scale(2, dpi)).clamp(minimum_band.max(1), height)
-        } else {
-            height.saturating_sub(minimum_band).max(1)
-        };
-        // Put an odd spare pixel above the native text band. Integer truncation here makes the
-        // glyph/caret sit one pixel too high inside the 23px Windows field at 96 DPI.
-        // tmInternalLeading is whitespace reserved above the visible glyphs.  Centering the raw
-        // tmHeight rectangle therefore leaves Chinese/Latin glyphs visibly high even though the
-        // caret rectangle itself is centred. Compensate only within the available non-client
-        // slack; USER32 still draws the native text, caret, selection and IME composition.
-        let available_slack = height.saturating_sub(desired_height);
-        let visual_leading = if measured {
-            // YaHei's internal leading is only partly visible above its actual glyph bounds.
-            // Applying half of it over-corrects the baseline and leaves a visibly thinner lower
-            // inset. One quarter matches the rasterized glyph box while retaining a centred caret.
-            (text_metrics.tmInternalLeading.max(0) + 3) / 4
-        } else {
-            0
-        };
-        let top_inset = ((available_slack + 1) / 2 + visual_leading).min(available_slack);
-        rect.top += top_inset;
-        rect.bottom = rect.top + desired_height;
-    }
-}
-
 unsafe extern "system" fn single_line_edit_subclass(
     hwnd: HWND,
     message: u32,
@@ -2159,19 +2110,6 @@ unsafe extern "system" fn single_line_edit_subclass(
             paint_single_line_edit_client_atomic(hwnd, palette);
             paint_rounded_control_frame(hwnd, palette);
             LRESULT(0)
-        }
-        WM_NCCALCSIZE => {
-            let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            if lparam.0 != 0 {
-                if wparam.0 != 0 {
-                    let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
-                    inset_edit_client_rect(hwnd, &mut params.rgrc[0], GetDpiForWindow(hwnd));
-                } else {
-                    let rect = &mut *(lparam.0 as *mut RECT);
-                    inset_edit_client_rect(hwnd, rect, GetDpiForWindow(hwnd));
-                }
-            }
-            result
         }
         WM_NCPAINT => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -2192,16 +2130,16 @@ unsafe extern "system" fn single_line_edit_subclass(
         }
         message if edit_message_may_change_visible_text(message, wparam.0) => {
             // USER32 performs user-initiated Edit operations synchronously and can draw the new
-            // glyphs directly before the next WM_PAINT. On a DWM-extended client that direct GDI
-            // path has no valid alpha byte, so light-theme black text becomes a white/transparent
-            // interim frame while typing. Let USER32 update its text buffer first, then force our
-            // opaque BGRA painter to publish the final field before this input message returns.
+            // glyphs directly before the next WM_PAINT. Let it update the native text/selection
+            // state first, then synchronously replace the visible field with one complete BGRA
+            // frame. Do not send WM_SETREDRAW(FALSE) here: Windows removes WS_VISIBLE while redraw
+            // is disabled, which makes the immediate final paint miss this child altogether.
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             let _ = RedrawWindow(
                 hwnd,
                 None,
                 None,
-                RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+                RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
             );
             result
         }
@@ -2234,6 +2172,7 @@ const fn edit_message_may_change_visible_text(message: u32, wparam: usize) -> bo
         0x000c // WM_SETTEXT
             | 0x00c2 // EM_REPLACESEL
             | 0x0102 // WM_CHAR (including Backspace)
+            | 0x0109 // WM_UNICHAR
             | 0x010f // WM_IME_COMPOSITION
             | 0x0300 // WM_CUT
             | 0x0302 // WM_PASTE
@@ -2242,9 +2181,8 @@ const fn edit_message_may_change_visible_text(message: u32, wparam: usize) -> bo
     ) || (message == WM_KEYDOWN && wparam == 0x2e) // VK_DELETE
 }
 
-/// Paints the stock Edit client into one compatible bitmap and publishes it atomically. USER32
-/// still owns text, selection, password, IME and background rendering; avoiding a second UxTheme
-/// buffered surface prevents DWM from briefly presenting an empty redirected Edit child.
+/// Publishes the complete Edit background and current native text buffer as one opaque BGRA frame.
+/// USER32 continues to own input state, selection, caret, IME, hit testing and accessibility.
 unsafe fn paint_single_line_edit_client_atomic(hwnd: HWND, palette: Palette) {
     const WM_PRINTCLIENT: u32 = 0x0318;
     const PRF_CLIENT: isize = 0x0000_0004;
@@ -2294,12 +2232,11 @@ unsafe fn paint_single_line_edit_client_atomic(hwnd: HWND, palette: Palette) {
             let background = CreateSolidBrush(palette.edit);
             let _ = FillRect(buffer_dc, &client, background);
             let _ = DeleteObject(background);
-            let _ = DefSubclassProc(
-                hwnd,
-                WM_PRINTCLIENT,
-                WPARAM(buffer_dc.0 as usize),
-                LPARAM(PRF_CLIENT),
-            );
+            // The native Edit remains the input, text-buffer, caret, IME, selection and
+            // accessibility owner. Only its final visible text is rasterized into the same opaque
+            // BGRA frame as the field: GDI glyphs painted directly into a full-client DWM frame
+            // otherwise become the glass key on supported light-Mica builds.
+            paint_single_line_edit_text_to_dc(hwnd, buffer_dc, client, palette);
             let _ = GdiFlush();
             // GDI leaves the alpha byte undefined/zero. On an extended DWM frame that turns the
             // correctly black light-theme glyphs into transparent holes. The complete Edit client
@@ -2312,23 +2249,19 @@ unsafe fn paint_single_line_edit_client_atomic(hwnd: HWND, palette: Palette) {
             {
                 pixel[3] = 255;
             }
-            let _ = AlphaBlend(
+            let _ = SetDIBitsToDevice(
                 target_dc,
                 client.left,
                 client.top,
-                width,
-                height,
-                buffer_dc,
+                width as u32,
+                height as u32,
                 0,
                 0,
-                width,
-                height,
-                BLENDFUNCTION {
-                    BlendOp: AC_SRC_OVER as u8,
-                    BlendFlags: 0,
-                    SourceConstantAlpha: 255,
-                    AlphaFormat: AC_SRC_ALPHA as u8,
-                },
+                0,
+                height as u32,
+                bits.cast_const(),
+                &bitmap_info,
+                DIB_RGB_COLORS,
             );
             let _ = SelectObject(buffer_dc, old_bitmap);
         } else {
@@ -2347,6 +2280,38 @@ unsafe fn paint_single_line_edit_client_atomic(hwnd: HWND, palette: Palette) {
         }
     }
     let _ = EndPaint(hwnd, &paint);
+}
+
+unsafe fn paint_single_line_edit_text_to_dc(
+    hwnd: HWND,
+    dc: HDC,
+    mut client: RECT,
+    palette: Palette,
+) {
+    let length = GetWindowTextLengthW(hwnd).max(0) as usize;
+    let mut text = vec![0u16; length + 1];
+    let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
+    text.truncate(copied);
+    if text.is_empty() {
+        return;
+    }
+    let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+    let old_font = (font.0 != 0)
+        .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
+    let _ = SetBkMode(dc, TRANSPARENT);
+    let _ = SetTextColor(dc, palette.edit_text_color_for(hwnd));
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    client.left += scale(8, dpi);
+    client.right -= scale(8, dpi);
+    let _ = DrawTextW(
+        dc,
+        &mut text,
+        &mut client,
+        DT_NOPREFIX | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+    );
+    if let Some(old_font) = old_font {
+        let _ = SelectObject(dc, old_font);
+    }
 }
 
 unsafe extern "system" fn combo_selection_item_subclass(
@@ -2650,95 +2615,8 @@ unsafe fn paint_rounded_control_frame(hwnd: HWND, palette: Palette) {
     } else {
         palette.edit
     };
-    if is_edit_class(&class_name) && is_single_line_edit(hwnd) {
-        paint_single_line_edit_nonclient_bands(dc, hwnd, palette.edit_brush_color_for(hwnd));
-    }
     draw_rounded_control_frame_to_dc(dc, hwnd, palette, interior);
     let _ = ReleaseDC(hwnd, dc);
-}
-
-unsafe fn paint_single_line_edit_nonclient_bands(dc: HDC, hwnd: HWND, interior: COLORREF) {
-    let mut window = RECT::default();
-    if GetWindowRect(hwnd, &mut window).is_err() {
-        return;
-    }
-    let width = (window.right - window.left).max(0);
-    let height = (window.bottom - window.top).max(0);
-    if rounded_control_frame_geometry(width, height, GetDpiForWindow(hwnd).max(96)).is_none() {
-        return;
-    }
-    let mut client = RECT::default();
-    if GetClientRect(hwnd, &mut client).is_err() {
-        return;
-    }
-    let mut client_top_left = POINT {
-        x: client.left,
-        y: client.top,
-    };
-    let mut client_bottom_right = POINT {
-        x: client.right,
-        y: client.bottom,
-    };
-    if !ClientToScreen(hwnd, &mut client_top_left).as_bool()
-        || !ClientToScreen(hwnd, &mut client_bottom_right).as_bool()
-    {
-        return;
-    }
-    let client_left = (client_top_left.x - window.left).clamp(0, width);
-    let client_top = (client_top_left.y - window.top).clamp(0, height);
-    let client_right = (client_bottom_right.x - window.left).clamp(client_left, width);
-    let client_bottom = (client_bottom_right.y - window.top).clamp(client_top, height);
-
-    // WM_NCCALCSIZE deliberately reserves all four bands around the native Edit client: the side
-    // bands protect the rounded corners, while the top and bottom bands vertically centre the real
-    // USER32 text/caret. Paint every reserved pixel before the antialiased frame. Filling only the
-    // side bands leaves DefSubclassProc's host-theme colour in the top/bottom bands, which appears
-    // as a pair of bright inner lines in dark mode.
-    let brush = CreateSolidBrush(interior);
-    if brush.0.is_null() {
-        return;
-    }
-    let _ = FillRect(
-        dc,
-        &RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: client_top,
-        },
-        brush,
-    );
-    let _ = FillRect(
-        dc,
-        &RECT {
-            left: 0,
-            top: client_bottom,
-            right: width,
-            bottom: height,
-        },
-        brush,
-    );
-    let _ = FillRect(
-        dc,
-        &RECT {
-            left: 0,
-            top: client_top,
-            right: client_left,
-            bottom: client_bottom,
-        },
-        brush,
-    );
-    let _ = FillRect(
-        dc,
-        &RECT {
-            left: client_right,
-            top: client_top,
-            right: width,
-            bottom: client_bottom,
-        },
-        brush,
-    );
-    let _ = DeleteObject(brush);
 }
 
 unsafe fn is_drop_down_list(hwnd: HWND) -> bool {
@@ -4285,7 +4163,7 @@ mod tests {
     fn native_edit_text_stays_visible_on_light_and_dark_material() {
         let light = Palette::LIGHT.with_system_backdrop_surface();
         let dark = Palette::DARK.with_system_backdrop_surface();
-        assert_eq!(light.edit_text_color(), Palette::LIGHT.text);
+        assert_eq!(light.edit_text_color(), rgb(24, 24, 24));
         assert_eq!(light.edit_brush_color(), light.edit);
         assert_eq!(dark.edit_text_color(), dark.text);
     }
@@ -4770,7 +4648,7 @@ mod tests {
     #[test]
     fn edit_mutation_messages_are_republished_before_returning_to_dwm() {
         for message in [
-            0x000c, 0x00c2, 0x0102, 0x010f, 0x0300, 0x0302, 0x0303, 0x0304,
+            0x000c, 0x00c2, 0x0102, 0x0109, 0x010f, 0x0300, 0x0302, 0x0303, 0x0304,
         ] {
             assert!(edit_message_may_change_visible_text(message, 0));
         }

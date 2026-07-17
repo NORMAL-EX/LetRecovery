@@ -1,7 +1,3 @@
-use egui::{Color32, RichText};
-
-use crate::tr;
-
 /// 安装/备份步骤
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallStep {
@@ -33,11 +29,6 @@ impl InstallStep {
         }
     }
 
-    /// 返回当前界面语言下的步骤名称，避免把动态步骤键作为格式参数后漏译。
-    pub fn localized_name(&self) -> String {
-        tr!(self.name())
-    }
-
     pub fn index(&self) -> usize {
         match self {
             InstallStep::VerifyImage => 0,
@@ -53,10 +44,6 @@ impl InstallStep {
         }
     }
 
-    pub fn total() -> usize {
-        10
-    }
-
     pub fn all() -> Vec<InstallStep> {
         vec![
             InstallStep::VerifyImage,
@@ -70,6 +57,24 @@ impl InstallStep {
             InstallStep::Cleanup,
             InstallStep::Complete,
         ]
+    }
+
+    /// Overall progress is weighted by expected wall-clock cost. Image application owns most of
+    /// the bar; fast validation/format/boot steps must not make the UI jump to 50% before the long
+    /// operation has even started.
+    const fn overall_range(self) -> (u8, u8) {
+        match self {
+            Self::VerifyImage => (0, 3),
+            Self::FormatPartition => (3, 7),
+            Self::ApplyImage => (7, 82),
+            Self::ImportDrivers => (82, 88),
+            Self::InstallCabPackages => (88, 92),
+            Self::RepairBoot => (92, 96),
+            Self::ApplyAdvancedOptions => (96, 98),
+            Self::GenerateUnattend => (98, 99),
+            Self::Cleanup => (99, 100),
+            Self::Complete => (100, 100),
+        }
     }
 }
 
@@ -96,11 +101,6 @@ impl BackupStep {
         }
     }
 
-    /// 返回当前界面语言下的步骤名称，供 egui 与原生进度页共用。
-    pub fn localized_name(&self) -> String {
-        tr!(self.name())
-    }
-
     pub fn index(&self) -> usize {
         match self {
             BackupStep::ReadConfig => 0,
@@ -112,10 +112,6 @@ impl BackupStep {
         }
     }
 
-    pub fn total() -> usize {
-        6
-    }
-
     pub fn all() -> Vec<BackupStep> {
         vec![
             BackupStep::ReadConfig,
@@ -125,6 +121,34 @@ impl BackupStep {
             BackupStep::Cleanup,
             BackupStep::Complete,
         ]
+    }
+
+    /// Capture dominates backup duration; setup and cleanup deliberately occupy only a few points.
+    const fn overall_range(self) -> (u8, u8) {
+        match self {
+            Self::ReadConfig => (0, 3),
+            Self::CaptureImage => (3, 93),
+            Self::VerifyBackup => (93, 97),
+            Self::RepairBoot => (97, 99),
+            Self::Cleanup => (99, 100),
+            Self::Complete => (100, 100),
+        }
+    }
+}
+
+const fn weighted_progress(range: (u8, u8), step_progress: u8) -> u8 {
+    let (start, end) = range;
+    let span = end.saturating_sub(start) as u16;
+    let progress = if step_progress > 100 {
+        100
+    } else {
+        step_progress
+    };
+    let value = start as u16 + (span * progress as u16) / 100;
+    if value > 100 {
+        100
+    } else {
+        value as u8
     }
 }
 
@@ -238,17 +262,13 @@ impl ProgressState {
             return;
         }
         if self.is_install_mode {
-            let step_idx = self.current_install_step.index();
-            let total = InstallStep::total();
-            let base = (step_idx * 100) / total;
-            let step_contribution = (self.step_progress as usize) / total;
-            self.overall_progress = (base + step_contribution).min(100) as u8;
+            self.overall_progress = weighted_progress(
+                self.current_install_step.overall_range(),
+                self.step_progress,
+            );
         } else {
-            let step_idx = self.current_backup_step.index();
-            let total = BackupStep::total();
-            let base = (step_idx * 100) / total;
-            let step_contribution = (self.step_progress as usize) / total;
-            self.overall_progress = (base + step_contribution).min(100) as u8;
+            self.overall_progress =
+                weighted_progress(self.current_backup_step.overall_range(), self.step_progress);
         }
     }
 
@@ -274,197 +294,9 @@ impl ProgressState {
     }
 }
 
-/// 进度界面组件
-pub struct ProgressUI;
-
-impl ProgressUI {
-    /// 绘制进度界面
-    pub fn show(ui: &mut egui::Ui, state: &ProgressState) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(20.0);
-
-            // 标题
-            let title = if state.is_expand_mode {
-                tr!("LetRecovery PE 扩容助手")
-            } else if state.is_install_mode {
-                tr!("LetRecovery PE 安装助手")
-            } else {
-                tr!("LetRecovery PE 备份助手")
-            };
-            ui.heading(RichText::new(title).size(24.0).strong());
-
-            ui.add_space(30.0);
-
-            // 当前步骤（扩容模式无步骤列表，跳过）
-            if !state.is_expand_mode {
-                let current_step_text = if !state.has_current_step {
-                    tr!("正在准备操作...")
-                } else if state.is_install_mode {
-                    tr!(
-                        "当前步骤: [{}]",
-                        state.current_install_step.localized_name()
-                    )
-                } else {
-                    tr!("当前步骤: [{}]", state.current_backup_step.localized_name())
-                };
-                ui.label(
-                    RichText::new(current_step_text)
-                        .size(16.0)
-                        .color(Color32::from_rgb(100, 180, 255)),
-                );
-
-                ui.add_space(20.0);
-
-                // 步骤进度条
-                ui.horizontal(|ui| {
-                    ui.label(tr!("步骤进度:"));
-                    let progress = state.step_progress as f32 / 100.0;
-                    let available_width = ui.available_width();
-                    ui.add(
-                        egui::ProgressBar::new(progress)
-                            .desired_width(available_width)
-                            .show_percentage(),
-                    );
-                });
-
-                ui.add_space(10.0);
-            }
-
-            // 总体进度条
-            ui.horizontal(|ui| {
-                ui.label(tr!("总体进度:"));
-                let progress = state.overall_progress as f32 / 100.0;
-                let available_width = ui.available_width();
-                ui.add(
-                    egui::ProgressBar::new(progress)
-                        .desired_width(available_width)
-                        .show_percentage(),
-                );
-            });
-
-            ui.add_space(30.0);
-
-            // 分隔线
-            ui.separator();
-
-            ui.add_space(20.0);
-
-            // 步骤列表（扩容模式不显示）
-            if !state.is_expand_mode {
-                if state.is_install_mode {
-                    Self::show_install_steps(ui, state);
-                } else {
-                    Self::show_backup_steps(ui, state);
-                }
-            }
-
-            // 状态消息
-            if !state.status_message.is_empty() {
-                ui.add_space(20.0);
-                ui.label(
-                    RichText::new(&state.status_message)
-                        .size(14.0)
-                        .color(Color32::from_rgb(180, 180, 180)),
-                );
-            }
-
-            // 错误信息
-            if let Some(ref error) = state.error_message {
-                ui.add_space(20.0);
-                ui.label(
-                    RichText::new(tr!("错误: {}", error))
-                        .size(14.0)
-                        .color(Color32::from_rgb(255, 100, 100)),
-                );
-            }
-
-            // 完成提示
-            if state.is_completed {
-                ui.add_space(30.0);
-                let message = if state.is_expand_mode {
-                    tr!("系统盘扩容完成！即将重启...")
-                } else if state.is_install_mode {
-                    tr!("系统安装完成！即将重启...")
-                } else {
-                    tr!("系统备份完成！即将重启...")
-                };
-                ui.label(
-                    RichText::new(message)
-                        .size(18.0)
-                        .color(Color32::from_rgb(100, 255, 100))
-                        .strong(),
-                );
-            }
-        });
-    }
-
-    /// 显示安装步骤列表
-    fn show_install_steps(ui: &mut egui::Ui, state: &ProgressState) {
-        let current_idx = state.current_install_step.index();
-
-        for step in InstallStep::all() {
-            let idx = step.index();
-            let status = if !state.has_current_step {
-                StepStatus::Pending
-            } else if state.is_failed && idx == current_idx {
-                StepStatus::Failed
-            } else if idx < current_idx || (idx == current_idx && state.step_progress == 100) {
-                StepStatus::Completed
-            } else if idx == current_idx {
-                StepStatus::InProgress
-            } else {
-                StepStatus::Pending
-            };
-
-            Self::show_step_item(ui, &step.localized_name(), status);
-        }
-    }
-
-    /// 显示备份步骤列表
-    fn show_backup_steps(ui: &mut egui::Ui, state: &ProgressState) {
-        let current_idx = state.current_backup_step.index();
-
-        for step in BackupStep::all() {
-            let idx = step.index();
-            let status = if !state.has_current_step {
-                StepStatus::Pending
-            } else if state.is_failed && idx == current_idx {
-                StepStatus::Failed
-            } else if idx < current_idx || (idx == current_idx && state.step_progress == 100) {
-                StepStatus::Completed
-            } else if idx == current_idx {
-                StepStatus::InProgress
-            } else {
-                StepStatus::Pending
-            };
-
-            Self::show_step_item(ui, &step.localized_name(), status);
-        }
-    }
-
-    /// 显示单个步骤项
-    fn show_step_item(ui: &mut egui::Ui, name: &str, status: StepStatus) {
-        ui.horizontal(|ui| {
-            ui.add_space(50.0);
-
-            let (icon, color) = match status {
-                StepStatus::Completed => ("OK", Color32::from_rgb(100, 255, 100)),
-                StepStatus::InProgress => (">>", Color32::from_rgb(255, 180, 50)),
-                StepStatus::Pending => ("  ", Color32::from_rgb(128, 128, 128)),
-                StepStatus::Failed => ("!!", Color32::from_rgb(255, 100, 100)),
-            };
-
-            ui.label(RichText::new(icon).size(14.0).color(color).monospace());
-            ui.add_space(10.0);
-            ui.label(RichText::new(name).size(14.0).color(color));
-        });
-        ui.add_space(5.0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{BackupStep, InstallStep};
+    use super::{BackupStep, InstallStep, ProgressState};
     use crate::utils::i18n::LanguageFile;
 
     #[test]
@@ -484,5 +316,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing en-US progress step translation: {key}"));
             assert_ne!(translation, key, "progress step must not remain Chinese");
         }
+    }
+
+    #[test]
+    fn image_work_owns_the_majority_of_install_and_backup_progress() {
+        let mut install = ProgressState::new_install();
+        install.set_install_step(InstallStep::ApplyImage);
+        assert_eq!(install.overall_progress, 7);
+        install.set_step_progress(50);
+        assert_eq!(install.overall_progress, 44);
+        install.set_step_progress(100);
+        assert_eq!(install.overall_progress, 82);
+
+        let mut backup = ProgressState::new_backup();
+        backup.set_backup_step(BackupStep::CaptureImage);
+        assert_eq!(backup.overall_progress, 3);
+        backup.set_step_progress(50);
+        assert_eq!(backup.overall_progress, 48);
+        backup.set_step_progress(100);
+        assert_eq!(backup.overall_progress, 93);
     }
 }

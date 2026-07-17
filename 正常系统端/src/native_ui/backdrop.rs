@@ -7,7 +7,7 @@ use std::mem::size_of;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmIsCompositionEnabled,
+    DwmExtendFrameIntoClientArea, DwmFlush, DwmGetWindowAttribute, DwmIsCompositionEnabled,
     DwmSetWindowAttribute, DWMSBT_AUTO, DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWM_SYSTEMBACKDROP_TYPE,
 };
@@ -18,7 +18,11 @@ use windows::Win32::UI::Controls::MARGINS;
 /// Both DWM calls are part of one logical request.  A partial failure is reset to the ordinary
 /// non-material state before the error is returned, preventing a black glass client without a
 /// matching system backdrop.
-pub(crate) unsafe fn apply_mica(hwnd: HWND, enabled: bool) -> windows::core::Result<bool> {
+pub(crate) unsafe fn apply_mica(
+    hwnd: HWND,
+    enabled: bool,
+    extend_into_client: bool,
+) -> windows::core::Result<bool> {
     let composition_enabled = DwmIsCompositionEnabled()?;
     if !composition_enabled.as_bool() {
         return Ok(false);
@@ -61,7 +65,7 @@ pub(crate) unsafe fn apply_mica(hwnd: HWND, enabled: bool) -> windows::core::Res
         }
     }
 
-    let margins = if enabled {
+    let margins = if enabled && extend_into_client {
         MARGINS {
             cxLeftWidth: -1,
             cxRightWidth: -1,
@@ -84,26 +88,27 @@ pub(crate) unsafe fn apply_mica(hwnd: HWND, enabled: bool) -> windows::core::Res
         }
         return Err(error);
     }
-    Ok(enabled)
+    Ok(enabled && extend_into_client)
+}
+
+/// Waits until DWM has presented this thread's queued backdrop/surface changes. Activation changes
+/// otherwise return while old child surfaces and the new backdrop can still share one compositor
+/// frame.
+pub(crate) unsafe fn flush_composition() {
+    let _ = DwmFlush();
 }
 
 /// Child HWNDs may use material contribution colours only while their own top-level window has a
-/// confirmed DWM backdrop and is active. DWM changes an inactive Mica window to its neutral
-/// fallback; keeping translucent child surfaces at that point creates the false-Mica controls
-/// visible in front of an ordinary inactive window.
+/// confirmed DWM backdrop and is active. DWM itself keeps the Mica session alive and changes an
+/// inactive window to its neutral fallback; only the child palette follows `window_active`.
 pub(crate) const fn controls_use_mica(backdrop_available: bool, window_active: bool) -> bool {
     backdrop_available && window_active
 }
 
-/// A full-client material exists only while it was requested, the current endpoint supports DWM
-/// Mica, and this exact top-level window is active. Inactive windows deliberately execute the
-/// same AUTO/zero-frame path as an explicitly disabled Mica setting.
-pub(crate) const fn mica_session_enabled(
-    requested: bool,
-    endpoint_supports_mica: bool,
-    window_active: bool,
-) -> bool {
-    requested && endpoint_supports_mica && window_active
+/// Keep the supported backdrop session installed while only the client extension follows focus.
+/// This avoids restarting DWMSBT_MAINWINDOW during every WM_NCACTIVATE transaction.
+pub(crate) const fn mica_session_enabled(requested: bool, endpoint_supports_mica: bool) -> bool {
+    requested && endpoint_supports_mica
 }
 
 #[cfg(test)]
@@ -125,10 +130,9 @@ mod tests {
     }
 
     #[test]
-    fn a_mica_session_requires_request_endpoint_support_and_window_activation() {
-        assert!(mica_session_enabled(true, true, true));
-        assert!(!mica_session_enabled(false, true, true));
-        assert!(!mica_session_enabled(true, false, true));
-        assert!(!mica_session_enabled(true, true, false));
+    fn a_mica_session_requires_request_and_endpoint_support_not_activation() {
+        assert!(mica_session_enabled(true, true));
+        assert!(!mica_session_enabled(false, true));
+        assert!(!mica_session_enabled(true, false));
     }
 }

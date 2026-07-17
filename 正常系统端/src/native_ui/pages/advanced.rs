@@ -9,7 +9,7 @@ use std::mem::size_of;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
-use windows::Win32::UI::Controls::{SetScrollInfo, SetWindowTheme};
+use windows::Win32::UI::Controls::SetScrollInfo;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VSCROLL,
 };
 
-use super::super::controls::{center_single_line_edit_in_row, child, wide};
+use super::super::controls::{center_single_line_edit_in_row, child, wide, InnoMetrics};
 use super::super::theme::{apply_control_theme, NativeControlKind, Palette};
 use crate::core::ui_state::AdvancedOptionsData;
 
@@ -591,17 +591,26 @@ impl AdvancedPage {
     }
 
     pub unsafe fn apply_theme(&self, palette: Palette) {
-        let button_theme = if palette.dark {
-            w!("DarkMode_Explorer")
-        } else {
-            w!("Explorer")
-        };
         for control in self.checkbox_controls() {
-            let _ = SetWindowTheme(control, button_theme, PCWSTR::null());
+            // Reuse the shared checkbox/radio subclass instead of relying on USER32 to recolour
+            // captions after a live light/dark switch.  The host theme commonly updates the
+            // glyph while leaving the BUTTON caption cached in the previous (black) colour.
+            apply_control_theme(control, palette, NativeControlKind::General);
         }
         for pair in self.check_edits() {
             apply_control_theme(pair.edit, palette, NativeControlKind::Field);
         }
+    }
+
+    /// Returns whether `control` toggles one of the conditional Edit/Browse rows.
+    ///
+    /// The checkbox is parented to the page viewport, so its `BN_CLICKED` notification is
+    /// forwarded to the top-level window.  Keeping ownership testing here avoids coupling the
+    /// controller to the page's generated control IDs.
+    pub fn owns_dependency_toggle(&self, control: HWND) -> bool {
+        self.check_edits()
+            .into_iter()
+            .any(|pair| pair.check == control)
     }
 
     pub unsafe fn apply_font(&self, font: HFONT, heading_font: HFONT) {
@@ -1163,25 +1172,28 @@ unsafe fn layout_heading(control: HWND, x: i32, y: &mut i32, width: i32, dpi: u3
 
 unsafe fn layout_check(control: HWND, x: i32, y: &mut i32, width: i32, dpi: u32) {
     let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
-    let _ = MoveWindow(control, x, *y, width, s(22), true);
+    // Match the 24 px checkbox HWND used by the main install page. The shared 13 px glyph is then
+    // centred against the same client height instead of looking vertically tighter on this page.
+    let _ = MoveWindow(control, x, *y, width, s(24), true);
     *y += s(24);
 }
 
 unsafe fn layout_pair(pair: CheckEdit, x: i32, y: &mut i32, width: i32, dpi: u32) {
     let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
-    let _ = MoveWindow(pair.check, x, *y, width, s(22), true);
-    *y += s(23);
+    let field_height = InnoMetrics::for_dpi(dpi).field_height;
+    let _ = MoveWindow(pair.check, x, *y, width, s(24), true);
+    *y += s(24);
     let browse_width = pair.browse.map_or(0, |_| s(76));
     let browse_gap = pair.browse.map_or(0, |_| s(6));
     let edit_width = (width - s(20) - browse_width - browse_gap).max(0);
-    let _ = MoveWindow(pair.edit, x + s(20), *y, edit_width, s(24), true);
+    let _ = MoveWindow(pair.edit, x + s(20), *y, edit_width, field_height, true);
     if let Some(browse) = pair.browse {
         let _ = MoveWindow(
             browse.button,
             x + s(20) + edit_width + browse_gap,
             *y,
             browse_width,
-            s(24),
+            field_height,
             true,
         );
     }

@@ -68,7 +68,6 @@ pub enum InstallValidationError {
     PcaDetectionPending,
     InvalidPcaSelection,
     XpI386RequiresLegacyMbr,
-    XpI386CurrentSystemRequiresPe,
 }
 
 impl std::fmt::Display for InstallValidationError {
@@ -89,9 +88,6 @@ impl std::fmt::Display for InstallValidationError {
             Self::InvalidPcaSelection => crate::tr!("所选 PCA 启动签名与系统镜像不兼容。"),
             Self::XpI386RequiresLegacyMbr => {
                 crate::tr!("XP 文本模式安装需要 Legacy/MBR 目标。")
-            }
-            Self::XpI386CurrentSystemRequiresPe => {
-                crate::tr!("XP 文本模式不能在桌面环境覆盖当前系统分区。")
             }
         };
         formatter.write_str(&message)
@@ -198,11 +194,6 @@ impl NativeInstallState {
                 || self.prefs.boot_mode == BootModeSelection::UEFI;
             if explicit_or_known_uefi && !self.advanced_options_enabled {
                 return Err(InstallValidationError::XpI386RequiresLegacyMbr);
-            }
-            // Preserve the legacy safety gate: this media is not staged through
-            // the normal desktop-to-PE workflow. The user must already be in PE.
-            if !self.is_pe_environment && target.is_current_system {
-                return Err(InstallValidationError::XpI386CurrentSystemRequiresPe);
             }
         }
 
@@ -357,6 +348,8 @@ impl StartInstallIntent {
             win7_fix_storage_bsod: advanced.win7_fix_storage_bsod,
             wim_engine,
             is_xp: self.options.is_xp,
+            is_xp_i386: self.options.is_xp_i386,
+            xp_source_arch: String::new(),
             xp_inject_usb3_driver: advanced.xp_inject_usb3_driver,
             xp_inject_nvme_driver: advanced.xp_inject_nvme_driver,
             run_diskpart_scripts: self.options.run_diskpart_scripts,
@@ -461,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn xp_i386_keeps_legacy_mbr_and_current_system_guards() {
+    fn xp_i386_current_system_routes_through_selected_pe() {
         let mut state = base_state();
         state.xp_i386_source = Some("F:\\I386".to_string());
         state.selected_image = None;
@@ -474,10 +467,12 @@ mod tests {
         state.target.as_mut().unwrap().is_current_system = true;
         assert_eq!(
             state.start_intent().unwrap_err(),
-            InstallValidationError::XpI386CurrentSystemRequiresPe
+            InstallValidationError::PeUnavailable
         );
-        state.is_pe_environment = true;
+        state.pe_available = true;
+        state.selected_pe = Some(0);
         let intent = state.start_intent().unwrap();
+        assert_eq!(intent.mode, InstallMode::ViaPe);
         assert!(intent.options.is_xp_i386);
         assert!(intent.options.advanced_options.xp_inject_usb3_driver);
         assert!(intent.options.advanced_options.xp_inject_nvme_driver);
@@ -574,6 +569,7 @@ mod tests {
         assert_eq!(config.driver_action_mode, 2);
         assert_eq!(config.custom_username, "LetRecovery");
         assert!(config.run_diskpart_scripts);
+        assert!(!config.is_xp_i386);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
         assert_eq!(config.pca_compat_target_build, 26_100);
     }

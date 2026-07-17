@@ -244,13 +244,44 @@ pub fn apply_advanced_options(
 
     // 10. 导入磁盘控制器驱动（Win10/Win11 x64）
     if config.import_storage_controller_drivers {
+        let hardware_ids = match lr_core::driver::list_present_hardware_ids() {
+            Ok(hardware_ids) => hardware_ids,
+            Err(error) => {
+                log::warn!(
+                    "[ADVANCED] storage-controller hardware enumeration failed; skipping built-in drivers: {error}"
+                );
+                Vec::new()
+            }
+        };
+        let packages = lr_core::storage_driver_match::select_builtin_storage_driver_packages(
+            hardware_ids.iter().map(String::as_str),
+        );
         let storage_drivers_dir = path::get_exe_dir()
             .join("drivers")
             .join("storage_controller");
-        if storage_drivers_dir.is_dir() {
+        let package_dirs = packages
+            .into_iter()
+            .map(|package| storage_drivers_dir.join(package.directory_name()))
+            .filter(|directory| {
+                if directory.is_dir() {
+                    true
+                } else {
+                    log::warn!(
+                        "[ADVANCED] matched storage-controller package is unavailable: {}",
+                        directory.display()
+                    );
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+        if package_dirs.is_empty() {
             log::info!(
-                "[ADVANCED] 导入磁盘控制器驱动: {}",
-                storage_drivers_dir.display()
+                "[ADVANCED] no supported Intel VMD controller is present; built-in storage drivers were not staged"
+            );
+        } else {
+            log::info!(
+                "[ADVANCED] staging {} hardware-matched Intel VMD package(s)",
+                package_dirs.len()
             );
 
             // 先卸载注册表，因为驱动注入可能需要独占访问
@@ -262,10 +293,17 @@ pub fn apply_advanced_options(
 
             let dism = Dism::new();
             let image_path = format!("{}\\", target_partition);
-            let storage_drivers_path = storage_drivers_dir.to_string_lossy().to_string();
-            match dism.add_drivers_offline(&image_path, &storage_drivers_path) {
-                Ok(_) => log::info!("[ADVANCED] 磁盘控制器驱动导入成功"),
-                Err(e) => log::warn!("[ADVANCED] 磁盘控制器驱动导入失败: {}", e),
+            for package_dir in package_dirs {
+                match dism.add_drivers_offline(&image_path, &package_dir.to_string_lossy()) {
+                    Ok(_) => log::info!(
+                        "[ADVANCED] hardware-matched storage driver staged: {}",
+                        package_dir.display()
+                    ),
+                    Err(error) => log::warn!(
+                        "[ADVANCED] matched storage driver staging failed for {}: {error}",
+                        package_dir.display()
+                    ),
+                }
             }
 
             // 重新加载注册表
@@ -274,11 +312,6 @@ pub fn apply_advanced_options(
             if default_loaded {
                 let _ = OfflineRegistry::load_hive("pc-default", &default_hive);
             }
-        } else {
-            log::warn!(
-                "[ADVANCED] 未找到磁盘控制器驱动目录: {}",
-                storage_drivers_dir.display()
-            );
         }
     }
 

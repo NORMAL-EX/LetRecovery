@@ -27,6 +27,8 @@ pub mod reboot;
 pub mod registry;
 pub mod sam;
 pub mod scoped_temp_file;
+pub mod storage_driver_match;
+pub mod traditional_chinese;
 pub mod wim_engine;
 pub mod wimgapi;
 pub mod wimlib;

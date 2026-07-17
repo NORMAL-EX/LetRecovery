@@ -220,6 +220,11 @@ pub struct InstallConfig {
     /// 目标镜像是否为 XP/2003（NT 5.x）。为真时 PE 端写 XP 引导（ntldr/boot.ini 或 UEFI/GPT）而非 bcdboot。
     pub is_xp: bool,
 
+    /// Original I386/AMD64 text-mode media staged as a directory for PE execution.
+    pub is_xp_i386: bool,
+    /// Safe single directory component beneath the staged source root (`I386` or `AMD64`).
+    pub xp_source_arch: String,
+
     // XP 专用选项（仅 is_xp 为真时生效；AHCI 始终注入，无开关）
     /// XP 注入 USB3(xHCI) 驱动（检测到 XP 时默认勾选）
     pub xp_inject_usb3_driver: bool,
@@ -356,6 +361,7 @@ impl ConfigFileManager {
             ("OriginalGUID", config.original_guid.as_str()),
             ("TargetPartition", config.target_partition.as_str()),
             ("ImagePath", config.image_path.as_str()),
+            ("XpSourceArch", config.xp_source_arch.as_str()),
             ("PcaCompatPackage", config.pca_compat_package.as_str()),
             ("PcaCompatSha256", config.pca_compat_sha256.as_str()),
             ("CustomUsername", config.custom_username.as_str()),
@@ -817,6 +823,8 @@ ImagePath={}
 IsGho={}
 WimEngine={}
 IsXp={}
+IsXpI386={}
+XpSourceArch={}
 RunDiskpartScripts={}
 BootMode={}
 BootPcaMode={}
@@ -865,6 +873,8 @@ XpInjectNvmeDriver={}
             config.is_gho,
             config.wim_engine,
             config.is_xp,
+            config.is_xp_i386,
+            config.xp_source_arch,
             config.run_diskpart_scripts,
             config.boot_mode,
             config.boot_pca_mode.as_config_value(),
@@ -950,6 +960,8 @@ Language={}
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "IsXp" => config.is_xp = value.parse().unwrap_or(false),
+                    "IsXpI386" => config.is_xp_i386 = value.parse().unwrap_or(false),
+                    "XpSourceArch" => config.xp_source_arch = value.to_string(),
                     "RunDiskpartScripts" => {
                         config.run_diskpart_scripts = value.parse().unwrap_or(false)
                     }
@@ -1124,6 +1136,8 @@ mod tests {
         assert_eq!(config.volume_index, 3);
         assert_eq!(config.boot_mode, 0);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
+        assert!(!config.is_xp_i386);
+        assert!(config.xp_source_arch.is_empty());
     }
 
     #[test]
@@ -1136,6 +1150,8 @@ mod tests {
             pca_compat_image_index: 1,
             pca_compat_target_build: 19045,
             pca_compat_target_architecture: 9,
+            is_xp_i386: true,
+            xp_source_arch: "I386".to_string(),
             ..InstallConfig::default()
         };
 
@@ -1149,6 +1165,8 @@ mod tests {
         assert_eq!(parsed.pca_compat_image_index, 1);
         assert_eq!(parsed.pca_compat_target_build, 19045);
         assert_eq!(parsed.pca_compat_target_architecture, 9);
+        assert!(parsed.is_xp_i386);
+        assert_eq!(parsed.xp_source_arch, "I386");
     }
 
     #[test]

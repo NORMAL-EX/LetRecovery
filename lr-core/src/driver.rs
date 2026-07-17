@@ -351,6 +351,50 @@ impl SetupApi {
         Ok(drivers)
     }
 
+    /// Enumerates hardware IDs for every present device, including devices that do not yet have
+    /// an INF bound in the running Windows or WinPE environment.
+    fn enumerate_present_hardware_ids(&self) -> Result<Vec<String>> {
+        let mut hardware_ids = Vec::new();
+        let dev_info = unsafe {
+            (self.get_class_devs)(
+                null_mut(),
+                null_mut(),
+                HWND::default(),
+                DIGCF_PRESENT | DIGCF_ALLCLASSES,
+            )
+        };
+        if dev_info.is_null() || dev_info == (-1isize as *mut c_void) {
+            bail!("SetupDiGetClassDevsW 失败: {}", get_last_error());
+        }
+
+        let mut index = 0u32;
+        loop {
+            let mut dev_info_data = SpDevInfoData::default();
+            let result = unsafe { (self.enum_device_info)(dev_info, index, &mut dev_info_data) };
+            if result.0 == 0 {
+                if get_last_error() == ERROR_NO_MORE_ITEMS {
+                    break;
+                }
+                index += 1;
+                continue;
+            }
+
+            if let Some(hardware_id) =
+                self.get_device_property_string(dev_info, &dev_info_data, SPDRP_HARDWAREID)
+            {
+                if !hardware_id.trim().is_empty() {
+                    hardware_ids.push(hardware_id);
+                }
+            }
+            index += 1;
+        }
+
+        unsafe {
+            let _ = (self.destroy_device_info_list)(dev_info);
+        }
+        Ok(hardware_ids)
+    }
+
     /// 安装 INF 驱动文件到驱动存储
     fn install_inf(&self, inf_path: &Path) -> Result<String> {
         let wide_path = path_to_wide(inf_path);
@@ -480,6 +524,11 @@ impl DriverManager {
     /// 枚举系统中所有已安装的驱动
     pub fn enumerate_all_drivers(&self) -> Result<Vec<DriverInfo>> {
         self.setup_api.enumerate_drivers()
+    }
+
+    /// Enumerates present-device hardware IDs even when a device has no installed driver yet.
+    pub fn enumerate_present_hardware_ids(&self) -> Result<Vec<String>> {
+        self.setup_api.enumerate_present_hardware_ids()
     }
 
     /// 枚举第三方 (OEM) 驱动
@@ -1355,6 +1404,12 @@ pub fn list_oem_drivers() -> Result<Vec<DriverInfo>> {
 pub fn list_all_drivers() -> Result<Vec<DriverInfo>> {
     let manager = DriverManager::new()?;
     manager.enumerate_all_drivers()
+}
+
+/// 枚举当前存在设备的硬件 ID，包括尚未绑定 INF 的设备。
+pub fn list_present_hardware_ids() -> Result<Vec<String>> {
+    let manager = DriverManager::new()?;
+    manager.enumerate_present_hardware_ids()
 }
 
 #[cfg(test)]
