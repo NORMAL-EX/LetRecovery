@@ -210,6 +210,14 @@ impl HardwareInfoPage {
     }
 
     pub unsafe fn set_rows(&self, rows: Vec<HardwareInfoRow>) {
+        #[cfg(feature = "non-elevated-tests")]
+        let rows = if std::env::var_os("LETRECOVERY_UI_QA_LONG_LIST").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            qa_long_hardware_rows()
+        } else {
+            rows
+        };
         // Hardware enumeration can complete while this page is already visible. All mutations run
         // inside the current window message and are published with one synchronous final redraw.
         // Do not toggle WM_SETREDRAW on this child: DefWindowProc implements it by changing
@@ -308,6 +316,19 @@ impl HardwareInfoPage {
         }
         apply_control_theme(self.save, palette, NativeControlKind::General);
     }
+}
+
+#[cfg(feature = "non-elevated-tests")]
+fn qa_long_hardware_rows() -> Vec<HardwareInfoRow> {
+    (1..=120)
+        .map(|index| {
+            HardwareInfoRow::new(
+                format!("QA category {:02}", (index - 1) / 10 + 1),
+                format!("Scrollable hardware row {index:03}"),
+                format!("Deterministic preview value {index:03}"),
+            )
+        })
+        .collect()
 }
 
 /// Formats the report as human-readable sections rather than repeating the ListView's three
@@ -1501,6 +1522,15 @@ unsafe fn set_text(hwnd: HWND, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "non-elevated-tests")]
+    #[test]
+    fn qa_scroll_fixture_is_long_and_deterministic() {
+        let rows = qa_long_hardware_rows();
+        assert_eq!(rows.len(), 120);
+        assert_eq!(rows[0].item, "Scrollable hardware row 001");
+        assert_eq!(rows[119].value, "Deterministic preview value 120");
+    }
 
     #[test]
     fn info_commands_are_stable_and_side_effect_free() {

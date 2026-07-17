@@ -8,13 +8,13 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
-    CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
-    GdiFlush, GetTextMetricsW, GetWindowDC, InvalidateRect, LineTo, MoveToEx, RedrawWindow,
-    ReleaseDC, RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode,
-    SetTextColor, SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    DT_WORDBREAK, HALFTONE, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME,
-    RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
+    CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GdiFlush,
+    GetTextMetricsW, GetWindowDC, InvalidateRect, LineTo, MoveToEx, RedrawWindow, ReleaseDC,
+    RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor,
+    SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER,
+    DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE,
+    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE,
+    RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     GetComboBoxInfo, SetWindowTheme, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT,
@@ -240,12 +240,12 @@ impl Palette {
         }
     }
 
-    pub(crate) unsafe fn edit_brush_color_for(self, control: HWND) -> COLORREF {
-        if edit_uses_opaque_buffer(control) {
-            self.edit
-        } else {
-            self.edit_brush_color()
-        }
+    pub(crate) unsafe fn edit_brush_color_for(self, _control: HWND) -> COLORREF {
+        // A compatible bitmap plus BitBlt makes the Edit update atomic, but it does not turn a
+        // classic child HWND into an independent opaque-alpha surface. DWM still resolves those
+        // RGB values over the extended frame, so always submit the material contribution rather
+        // than the already-resolved field colour; otherwise dark fields are composited twice.
+        self.edit_brush_color()
     }
 
     /// Black GDI text is the DWM glass key when the frame covers the full client area. Use the
@@ -259,12 +259,8 @@ impl Palette {
         }
     }
 
-    pub(crate) unsafe fn edit_text_color_for(self, control: HWND) -> COLORREF {
-        if edit_uses_opaque_buffer(control) {
-            self.text
-        } else {
-            self.edit_text_color()
-        }
+    pub(crate) unsafe fn edit_text_color_for(self, _control: HWND) -> COLORREF {
+        self.edit_text_color()
     }
 
     /// Opaque colour used only while rasterizing an antialiased edge on a stock child HWND.
@@ -662,64 +658,44 @@ unsafe fn paint_backdrop_static(hwnd: HWND, palette: Palette) {
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
     if width > 0 && height > 0 {
-        let buffer_dc = CreateCompatibleDC(dc);
-        let bitmap = CreateCompatibleBitmap(dc, width, height);
-        if !buffer_dc.is_invalid() && !bitmap.is_invalid() {
-            let old_bitmap = SelectObject(buffer_dc, bitmap);
-            let background = CreateSolidBrush(palette.system_backdrop_edge_fallback());
-            let local = RECT {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            };
-            let _ = FillRect(buffer_dc, &local, background);
-            let _ = DeleteObject(background);
-            let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
-            let old_font = (font.0 != 0).then(|| {
-                SelectObject(
-                    buffer_dc,
-                    windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _),
-                )
-            });
-            let _ = SetBkMode(buffer_dc, TRANSPARENT);
-            let _ = SetTextColor(
-                buffer_dc,
-                if IsWindowEnabled(hwnd).as_bool() {
-                    palette.foreground_black()
-                } else {
-                    palette.text_disabled
-                },
-            );
-            let mut draw_rect = local;
-            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-            let mut flags = DT_NOPREFIX;
-            flags |= match style & 0x3 {
-                1 => DT_CENTER,
-                2 => DT_RIGHT,
-                _ => windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0),
-            };
-            let dpi = GetDpiForWindow(hwnd).max(96);
-            if style & 0x0200 != 0 || height <= scale(36, dpi) {
-                flags |= DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
+        // A solid fallback fill turns every label HWND into the white rectangles visible in the
+        // user's light-Mica screenshot whenever DWM drops the dark glyph contribution. Clear the
+        // child to the real glass key, then publish only a premultiplied glyph mask. The parent
+        // backdrop remains visible around the text and no opaque intermediate label can exist.
+        let glass = CreateSolidBrush(COLORREF(0));
+        let _ = FillRect(dc, &rect, glass);
+        let _ = DeleteObject(glass);
+        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+        let old_font = (font.0 != 0)
+            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let mut flags = DT_NOPREFIX;
+        flags |= match style & 0x3 {
+            1 => DT_CENTER,
+            2 => DT_RIGHT,
+            _ => windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0),
+        };
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        if style & 0x0200 != 0 || height <= scale(36, dpi) {
+            flags |= DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
+        } else {
+            flags |= DT_WORDBREAK;
+        }
+        draw_alpha_composited_text(
+            hwnd,
+            dc,
+            &text,
+            &mut rect,
+            flags,
+            if IsWindowEnabled(hwnd).as_bool() {
+                palette.foreground_black()
             } else {
-                flags |= DT_WORDBREAK;
-            }
-            if !text.is_empty() {
-                let _ = DrawTextW(buffer_dc, &mut text, &mut draw_rect, flags);
-            }
-            let _ = GdiFlush();
-            let _ = BitBlt(dc, 0, 0, width, height, buffer_dc, 0, 0, SRCCOPY);
-            if let Some(old_font) = old_font {
-                let _ = SelectObject(buffer_dc, old_font);
-            }
-            let _ = SelectObject(buffer_dc, old_bitmap);
-        }
-        if !bitmap.is_invalid() {
-            let _ = DeleteObject(bitmap);
-        }
-        if !buffer_dc.is_invalid() {
-            let _ = DeleteDC(buffer_dc);
+                palette.text_disabled
+            },
+            true,
+        );
+        if let Some(old_font) = old_font {
+            let _ = SelectObject(dc, old_font);
         }
     }
     let _ = EndPaint(hwnd, &paint);
@@ -973,7 +949,6 @@ const CHECK_BOX_SUBCLASS_ID: usize = 0x4c52_4342;
 const RADIO_BUTTON_SUBCLASS_ID: usize = 0x4c52_5242;
 const ROUNDED_CONTROL_SUBCLASS_ID: usize = 0x4c52_5243;
 const SINGLE_LINE_EDIT_SUBCLASS_ID: usize = 0x4c52_4544;
-const EDIT_OPAQUE_BUFFER_PROPERTY: PCWSTR = w!("LetRecovery.InnoEdit.OpaqueBuffer");
 const COMBO_SELECTION_ITEM_SUBCLASS_ID: usize = 0x4c52_4353;
 const LIST_BOX_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoListBox.HotItem");
 const ROUNDED_CONTROL_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoControl.Hot");
@@ -1005,19 +980,6 @@ const fn native_scrollbar_may_repaint_frame(message: u32) -> bool {
             | 0x020a // WM_MOUSEWHEEL
             | 0x020e // WM_MOUSEHWHEEL
             | 0x02a0 // WM_NCMOUSEHOVER
-    )
-}
-
-/// Messages that change the visible ListView origin.  Comctl32 normally scrolls these by moving
-/// existing client pixels and invalidating only the newly exposed strip.  Our rounded frame is an
-/// overlay, so allowing that optimisation to reuse it copies frame pixels into item rows.
-const fn list_view_scrolls_client_pixels(message: u32) -> bool {
-    matches!(
-        message,
-        0x0114 // WM_HSCROLL
-            | 0x0115 // WM_VSCROLL
-            | 0x020a // WM_MOUSEWHEEL
-            | 0x020e // WM_MOUSEHWHEEL
     )
 }
 
@@ -1948,29 +1910,14 @@ unsafe extern "system" fn list_view_subclass(
             result
         }
         message if native_scrollbar_may_repaint_frame(message) => {
-            let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            // UxTheme drives native scrollbar hover transitions with WM_TIMER. Invalidating the
-            // complete report for every animation tick makes both the header and rows flash, but
-            // letting the timer finish untouched can overwrite one 8x8 rounded corner in light
-            // mode. Restore only the authoritative frame pixels synchronously: no update region,
-            // header paint or row paint is generated.
-            if message == 0x0113 {
-                repaint_list_view_header_now(hwnd);
-                paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
-                return result;
-            }
-            if list_view_scrolls_client_pixels(message) {
-                // Repaint the complete report after USER32/comctl32 finishes the scroll.  The
-                // control already uses LVS_EX_DOUBLEBUFFER and WM_ERASEBKGND fills the active
-                // palette, so this clears stale row/frame pixels without a white intermediate
-                // frame.  Painting only the exposed strip is what produced the repeated lines.
-                let _ = InvalidateRect(hwnd, None, false);
-            }
-            // Keep the native scrollbar and its accessibility/interaction semantics.  Only the
-            // deterministic outer frame is painted last so hover and scroll animation cannot
-            // expose square corners or class-brush pixels in either theme.
-            redraw_control_frame(hwnd);
-            result
+            // SB_THUMBTRACK can arrive many times per second. Comctl32 already scrolls its
+            // double-buffered client and invalidates only the newly exposed strip; invalidating
+            // the complete report here made every thumb movement repaint all rows and the header.
+            // Even drawing our frame directly from inside this high-frequency message races the
+            // ListView's redirected client and its separate Header child, exposing alternating
+            // header-less DWM frames. Leave the entire scroll transaction to comctl32; its normal
+            // WM_NCPAINT/WM_PAINT paths restore the deterministic frame after the scroll update.
+            DefSubclassProc(hwnd, message, wparam, lparam)
         }
         WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -2066,7 +2013,7 @@ unsafe extern "system" fn single_line_edit_subclass(
     match message {
         WM_PAINT => {
             let palette = palette_from_reference(reference_data);
-            paint_single_line_edit_client_opaque(hwnd, palette);
+            paint_single_line_edit_client_atomic(hwnd, palette);
             paint_rounded_control_frame(hwnd, palette);
             LRESULT(0)
         }
@@ -2111,7 +2058,6 @@ unsafe extern "system" fn single_line_edit_subclass(
             result
         }
         WM_NCDESTROY => {
-            let _ = RemovePropW(hwnd, EDIT_OPAQUE_BUFFER_PROPERTY);
             let _ = RemovePropW(hwnd, ROUNDED_CONTROL_HOT_PROPERTY);
             let _ = RemoveWindowSubclass(
                 hwnd,
@@ -2127,7 +2073,7 @@ unsafe extern "system" fn single_line_edit_subclass(
 /// Paints the stock Edit client into one compatible bitmap and publishes it atomically. USER32
 /// still owns text, selection, password, IME and background rendering; avoiding a second UxTheme
 /// buffered surface prevents DWM from briefly presenting an empty redirected Edit child.
-unsafe fn paint_single_line_edit_client_opaque(hwnd: HWND, palette: Palette) {
+unsafe fn paint_single_line_edit_client_atomic(hwnd: HWND, palette: Palette) {
     const WM_PRINTCLIENT: u32 = 0x0318;
     const PRF_CLIENT: isize = 0x0000_0004;
 
@@ -2149,21 +2095,15 @@ unsafe fn paint_single_line_edit_client_opaque(hwnd: HWND, palette: Palette) {
         );
         if !buffer_dc.is_invalid() && !bitmap.is_invalid() {
             let old_bitmap = SelectObject(buffer_dc, bitmap);
-            let background = CreateSolidBrush(palette.edit);
+            let background = CreateSolidBrush(palette.edit_brush_color());
             let _ = FillRect(buffer_dc, &client, background);
             let _ = DeleteObject(background);
-            let _ = SetPropW(
-                hwnd,
-                EDIT_OPAQUE_BUFFER_PROPERTY,
-                HANDLE(std::ptr::dangling_mut()),
-            );
             let _ = DefSubclassProc(
                 hwnd,
                 WM_PRINTCLIENT,
                 WPARAM(buffer_dc.0 as usize),
                 LPARAM(PRF_CLIENT),
             );
-            let _ = RemovePropW(hwnd, EDIT_OPAQUE_BUFFER_PROPERTY);
             let _ = GdiFlush();
             let _ = BitBlt(
                 target_dc,
@@ -2193,10 +2133,6 @@ unsafe fn paint_single_line_edit_client_opaque(hwnd: HWND, palette: Palette) {
         }
     }
     let _ = EndPaint(hwnd, &paint);
-}
-
-unsafe fn edit_uses_opaque_buffer(hwnd: HWND) -> bool {
-    !GetPropW(hwnd, EDIT_OPAQUE_BUFFER_PROPERTY).is_invalid()
 }
 
 unsafe extern "system" fn combo_selection_item_subclass(
