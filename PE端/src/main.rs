@@ -9,8 +9,6 @@ mod utils;
 mod workflow_journal;
 mod workflows;
 
-use eframe::egui;
-
 /// 日志文件路径：优先 exe 同目录；取不到则退回当前目录。
 fn log_file_path() -> std::path::PathBuf {
     std::env::current_exe()
@@ -97,6 +95,64 @@ fn install_panic_hook() {
     }));
 }
 
+/// Loads a hardware-matched Intel VMD package into the running WinPE before any volume scan.
+/// Drvload is the Microsoft-supported runtime path; this does not persist a driver in the PE WIM.
+fn load_matching_vmd_driver_into_running_pe() {
+    let hardware_ids = match lr_core::driver::list_present_hardware_ids() {
+        Ok(hardware_ids) => hardware_ids,
+        Err(error) => {
+            log::warn!("[VMD/PE] present-device enumeration failed: {error}");
+            return;
+        }
+    };
+    let packages = lr_core::storage_driver_match::select_builtin_storage_driver_packages(
+        hardware_ids.iter().map(String::as_str),
+    );
+    if packages.is_empty() {
+        log::info!("[VMD/PE] no supported Intel VMD controller is present");
+        return;
+    }
+
+    let package_root = utils::path::get_exe_dir()
+        .join("drivers")
+        .join("storage_controller");
+    for package in packages {
+        let inf = package_root
+            .join(package.directory_name())
+            .join("iaStorVD.inf");
+        let is_regular_file = inf
+            .symlink_metadata()
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false);
+        if !is_regular_file {
+            log::error!("[VMD/PE] matched VMD INF is unavailable: {}", inf.display());
+            continue;
+        }
+
+        let request = lr_core::command::CommandRequest::new("drvload.exe").arg(&inf);
+        match lr_core::command::execute_request(&lr_core::command::SystemCommandExecutor, &request)
+        {
+            Ok(outcome) if outcome.succeeded() => {
+                log::info!("[VMD/PE] runtime VMD driver loaded: {}", inf.display());
+            }
+            Ok(outcome) => {
+                log::error!(
+                    "[VMD/PE] drvload rejected {} (exit {:?}): {}",
+                    inf.display(),
+                    outcome.exit_code(),
+                    String::from_utf8_lossy(outcome.stderr()).trim()
+                );
+            }
+            Err(error) => {
+                log::error!(
+                    "[VMD/PE] failed to start drvload for {}: {error}",
+                    inf.display()
+                );
+            }
+        }
+    }
+}
+
 /// 探测界面语言：从（正常系统端随重启写入的）配置文件读取 Language 字段。
 /// 找不到数据分区或配置时返回空串（即简体中文内置）。
 fn detect_ui_language() -> String {
@@ -121,7 +177,7 @@ fn detect_ui_language() -> String {
     }
 }
 
-fn main() -> eframe::Result<()> {
+fn main() -> anyhow::Result<()> {
     // 初始化日志：写入到 exe 同目录的 LetRecoveryPE.log。
     // PE 下 GUI 程序没有控制台，stderr 会被直接丢弃，必须落盘才能事后排查“怎么死的”。
     init_file_logger();
@@ -136,8 +192,24 @@ fn main() -> eframe::Result<()> {
         log_file_path().display()
     );
 
-    // 检查命令行参数
+    // Deterministic, side-effect-free visual entry for the native PE progress shell. It must run
+    // before driver loading, BitLocker passthrough and task discovery so desktop QA cannot touch
+    // the host storage stack. Release builds do not contain this branch.
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(feature = "non-elevated-tests")]
+    if args.iter().any(|arg| arg == "--ui-progress-preview") {
+        utils::i18n::init("");
+        native_ui::progress::run_preview(core::config::OperationType::Install)
+            .map_err(anyhow::Error::new)?;
+        return Ok(());
+    }
+
+    // VMD storage must be visible before BitLocker passthrough, marker discovery or any partition
+    // inventory. A matched package is loaded into this booted PE only; offline Windows receives
+    // the same package later through the signed DISM boundary.
+    load_matching_vmd_driver_into_running_pe();
+
+    // 检查命令行参数
     log::info!("命令行参数: {:?}", args);
 
     // 【关键】BitLocker 密钥透传解锁必须在**任何**操作类型检测之前执行。
@@ -199,93 +271,20 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    // Explicit staged routes keep the legacy renderer as a safe fallback. The P3 native progress
-    // window creates its shared WorkflowSession only after every HWND exists, so a construction
-    // error can fall back here without ever starting a second worker.
-    match native_ui::state::UiBackendRoute::from_args(&args) {
-        native_ui::state::UiBackendRoute::NativeProgress => {
-            if let Some(operation_type) = core::config::ConfigFileManager::detect_operation_type() {
-                log::info!("进入 PE 原生 P3 进度界面");
-                match native_ui::progress::run(operation_type) {
-                    Ok(()) => return Ok(()),
-                    Err(error) if error.safe_to_fallback() => {
-                        log::error!("PE 原生进度窗口启动前失败，回退兼容进度界面: {error}");
-                    }
-                    Err(error) => {
-                        log::error!(
-                            "PE 原生进度窗口消息循环在任务启动后失败，禁止重复启动兼容工作线程: {error}"
-                        );
-                        return Ok(());
-                    }
-                }
-            } else {
-                log::warn!("原生进度路由未检测到任务，回退兼容进度界面");
-            }
-        }
-        native_ui::state::UiBackendRoute::NativeShellPreview => {
-            let workflow = native_ui::state::WorkflowKind::from(
-                core::config::ConfigFileManager::detect_operation_type(),
-            );
-            log::info!("进入 PE 原生窗口 P2 分阶段预览，关闭后继续兼容进度界面");
-            if let Err(error) = native_ui::window::run_shell_preview(workflow) {
-                log::error!("PE 原生窗口初始化失败，回退兼容进度界面: {error}");
-            }
-        }
-        native_ui::state::UiBackendRoute::LegacyProgress => {}
-    }
-
-    run_legacy_progress_ui()
-}
-
-/// Existing progress renderer retained as the explicit compatibility route until P3 migrates the
-/// install, backup and expand progress pages together with their worker message ownership.
-fn run_legacy_progress_ui() -> eframe::Result<()> {
-    log::info!("初始化兼容 GUI 进度界面...");
-
-    // 加载图标
-    let icon = load_icon();
-
-    // 设置窗口选项 - 窗口不可关闭，不可调整大小
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 500.0])
-            .with_min_inner_size([600.0, 500.0])
-            .with_max_inner_size([600.0, 500.0])
-            .with_resizable(false)
-            .with_maximize_button(false)
-            .with_minimize_button(false)
-            .with_close_button(false)
-            .with_icon(icon),
-        centered: true,
-        ..Default::default()
+    let Some(operation_type) = core::config::ConfigFileManager::detect_operation_type() else {
+        log::warn!("PE 原生界面未检测到安装、备份或扩容任务");
+        show_error_message(&tr!(
+            "未检测到安装或备份配置文件。\n\n请确保已正确准备配置文件后重试。"
+        ));
+        return Ok(());
     };
 
-    // 运行应用
-    eframe::run_native(
-        "LetRecovery PE",
-        options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
-    )
-}
-
-/// 加载图标
-fn load_icon() -> egui::IconData {
-    // 使用内嵌的图标数据（编译时嵌入）
-    const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.png");
-
-    // 从内嵌的PNG数据加载图标
-    if let Ok(image) = image::load_from_memory(ICON_BYTES) {
-        let image = image.to_rgba8();
-        let (width, height) = image.dimensions();
-        return egui::IconData {
-            rgba: image.into_raw(),
-            width,
-            height,
-        };
+    log::info!("进入 PE 原生 Win32 进度界面");
+    if let Err(error) = native_ui::progress::run(operation_type) {
+        log::error!("PE 原生 Win32 进度界面运行失败: {error}");
+        show_error_message(&tr!("启动失败: {} - {}", "LetRecovery PE", error));
     }
-
-    // 如果解析失败，返回默认图标
-    egui::IconData::default()
+    Ok(())
 }
 
 /// BitLocker 密钥透传解锁。
@@ -421,7 +420,7 @@ fn try_unlock_manage_bde(drive: &str, recovery_key: &str) -> bool {
 }
 
 /// 命令行模式执行
-fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
+fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
     use core::bcdedit::BootManager;
     use core::config::ConfigFileManager;
     use core::disk::DiskManager;
@@ -475,11 +474,17 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
         log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
 
-        // Resolve only a single staged file name. A modified INI must not be able to escape the
-        // LetRecovery data directory before image verification or disk writes.
         let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-        let image_path = match ConfigFileManager::resolve_staged_file(&data_dir, &config.image_path)
-        {
+        let resolved_source = if config.is_xp_i386 {
+            ConfigFileManager::resolve_staged_xp_source(
+                &data_dir,
+                &config.image_path,
+                &config.xp_source_arch,
+            )
+        } else {
+            ConfigFileManager::resolve_staged_file(&data_dir, &config.image_path)
+        };
+        let image_path = match resolved_source {
             Ok(path) => path.to_string_lossy().into_owned(),
             Err(error) => {
                 log::error!("[PE INSTALL] 错误: {error}");
@@ -497,7 +502,27 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         log::info!("[PE INSTALL] 完整镜像路径: {}", image_path);
 
         // Step 0: 校验镜像完整性（WIM/ESD；GHO 跳过）——放在格式化之前，坏镜像不糟蹋目标盘
-        if !config.is_gho {
+        let xp_custom_sif = if config.is_xp_i386 && !config.custom_unattend_file.is_empty() {
+            match ConfigFileManager::resolve_staged_file(&data_dir, &config.custom_unattend_file) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    show_error_message(&tr!("自定义 XP 应答文件名无效: {}", error));
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+        if config.is_xp_i386 {
+            if let Err(error) =
+                lr_core::xp_i386::validate_i386_source(std::path::Path::new(&image_path))
+            {
+                show_error_message(&tr!("XP/2003 安装源校验失败: {}", error));
+                return Ok(());
+            }
+        }
+
+        if !config.is_gho && !config.is_xp_i386 {
             log::info!("[PE INSTALL] Step 0: 校验镜像完整性");
             log::info!("[PE安装/CLI] 开始校验镜像: {}", image_path);
             let dism = Dism::new();
@@ -523,19 +548,23 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
                     return Ok(());
                 }
             };
-        let pca_compat_package = match core::pca_preflight::verify_before_disk_write(
-            &image_path,
-            config.volume_index,
-            config.is_gho,
-            config.is_xp,
-            config.boot_mode != 2,
-            config.boot_pca_mode,
-            staged_pca_compat.as_ref(),
-        ) {
-            Ok(package) => package,
-            Err(error) => {
-                show_error_message(&error);
-                return Ok(());
+        let pca_compat_package = if config.is_xp_i386 {
+            None
+        } else {
+            match core::pca_preflight::verify_before_disk_write(
+                &image_path,
+                config.volume_index,
+                config.is_gho,
+                config.is_xp,
+                config.boot_mode != 2,
+                config.boot_pca_mode,
+                staged_pca_compat.as_ref(),
+            ) {
+                Ok(package) => package,
+                Err(error) => {
+                    show_error_message(&error);
+                    return Ok(());
+                }
             }
         };
 
@@ -561,6 +590,37 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
         // Step 2: 释放镜像
         log::info!("[PE INSTALL] Step 2: 释放镜像");
+        if config.is_xp_i386 {
+            match lr_core::xp_i386::install_from_i386(
+                std::path::Path::new(&image_path),
+                &target_partition,
+                &utils::path::get_bin_dir(),
+                xp_custom_sif.as_deref(),
+            ) {
+                Ok(log_output) => log::info!("[PE INSTALL/XP TEXTMODE] {log_output}"),
+                Err(error) => {
+                    show_error_message(&tr!("准备 XP/2003 文本模式安装失败: {}", error));
+                    return Ok(());
+                }
+            }
+            ConfigFileManager::cleanup_all(&data_partition, &target_partition);
+            if let Err(error) =
+                DiskManager::cleanup_auto_created_partition_and_extend(&target_partition)
+            {
+                log::warn!("[PE INSTALL/XP TEXTMODE] cleanup failed: {error}");
+            }
+            if config.auto_reboot {
+                let _ = utils::command::new_command("shutdown")
+                    .args(["/r", "/t", "10", "/c", "LetRecovery XP/2003 setup is ready"])
+                    .spawn();
+            } else {
+                show_success_message(&tr!(
+                    "XP/2003 文本模式安装已准备完成，请重启计算机继续安装。"
+                ));
+            }
+            return Ok(());
+        }
+
         let apply_dir = format!("{}\\", target_partition);
 
         let apply_result = if config.is_gho {

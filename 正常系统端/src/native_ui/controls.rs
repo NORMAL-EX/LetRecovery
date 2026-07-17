@@ -821,78 +821,144 @@ pub unsafe fn draw_progress(
     if width == 0 || height == 0 {
         return;
     }
-
-    // Draw the complete control off-screen. Progress updates arrive several times per second and
-    // painting the track and fill directly exposes the intermediate empty track as a bright flash.
-    let memory_dc = CreateCompatibleDC(dc);
-    let bitmap = CreateCompatibleBitmap(dc, width, height);
-    if memory_dc.is_invalid() || bitmap.is_invalid() {
-        if !memory_dc.is_invalid() {
-            let _ = DeleteDC(memory_dc);
-        }
-        if !bitmap.is_invalid() {
-            let _ = DeleteObject(bitmap);
-        }
-        return;
-    }
-    let old_bitmap = SelectObject(memory_dc, bitmap);
-    let local = RECT {
-        left: 0,
-        top: 0,
-        right: width,
-        bottom: height,
-    };
     let radius = ((height * 5 + 8) / 16).clamp(2, (height / 2).max(2));
-    fill_solid_rect(memory_dc, &local, palette.window);
-    fill_round_rect_antialiased(
-        memory_dc,
-        local,
-        radius,
-        palette.edit,
-        palette.border,
-        palette.window,
-    );
-
     let inner_width = (width - 2).max(0);
     let filled = if total == 0 {
         0
     } else {
         ((inner_width as u64).saturating_mul(completed.min(total)) / total) as i32
     };
-    if filled == 0 {
-        let _ = BitBlt(
-            dc, rect.left, rect.top, width, height, memory_dc, 0, 0, SRCCOPY,
-        );
-        let _ = SelectObject(memory_dc, old_bitmap);
-        let _ = DeleteObject(bitmap);
-        let _ = DeleteDC(memory_dc);
-        return;
-    }
     let color = match role {
         ProgressRole::Normal | ProgressRole::Success => palette.progress,
         ProgressRole::Error => rgb(196, 43, 28),
         ProgressRole::Paused => rgb(247, 153, 52),
     };
-    let fill = RECT {
-        left: 1,
-        top: 1,
-        right: 1 + filled,
-        bottom: height - 1,
-    };
-    fill_round_rect_antialiased(
-        memory_dc,
-        fill,
-        radius.saturating_sub(1),
-        color,
-        color,
-        palette.edit,
+    let pixels = render_progress_pixels(width, height, radius, filled, color, palette);
+    let info = top_down_bgra_bitmap_info(width, height);
+    let _ = StretchDIBits(
+        dc,
+        rect.left,
+        rect.top,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height,
+        Some(pixels.as_ptr().cast()),
+        &info,
+        DIB_RGB_COLORS,
+        SRCCOPY,
     );
-    let _ = BitBlt(
-        dc, rect.left, rect.top, width, height, memory_dc, 0, 0, SRCCOPY,
-    );
-    let _ = SelectObject(memory_dc, old_bitmap);
-    let _ = DeleteObject(bitmap);
-    let _ = DeleteDC(memory_dc);
+}
+
+fn render_progress_pixels(
+    width: i32,
+    height: i32,
+    radius: i32,
+    filled: i32,
+    fill_color: COLORREF,
+    palette: Palette,
+) -> Vec<u8> {
+    const SAMPLE_GRID: usize = 4;
+    let colors = [
+        colorref_rgb(palette.window),
+        colorref_rgb(palette.border),
+        colorref_rgb(palette.edit),
+        colorref_rgb(fill_color),
+    ];
+    let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+    let sample_count = (SAMPLE_GRID * SAMPLE_GRID) as u32;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let mut red = 0_u32;
+            let mut green = 0_u32;
+            let mut blue = 0_u32;
+            for sample_y in 0..SAMPLE_GRID {
+                for sample_x in 0..SAMPLE_GRID {
+                    let px = x as f64 + (sample_x as f64 + 0.5) / SAMPLE_GRID as f64;
+                    let py = y as f64 + (sample_y as f64 + 0.5) / SAMPLE_GRID as f64;
+                    let color =
+                        colors[progress_sample_layer(px, py, width, height, radius, filled)];
+                    red += u32::from(color.0);
+                    green += u32::from(color.1);
+                    blue += u32::from(color.2);
+                }
+            }
+            let offset = (y * width as usize + x) * 4;
+            pixels[offset] = ((blue + sample_count / 2) / sample_count) as u8;
+            pixels[offset + 1] = ((green + sample_count / 2) / sample_count) as u8;
+            pixels[offset + 2] = ((red + sample_count / 2) / sample_count) as u8;
+            pixels[offset + 3] = 255;
+        }
+    }
+    pixels
+}
+
+fn progress_sample_layer(
+    x: f64,
+    y: f64,
+    width: i32,
+    height: i32,
+    radius: i32,
+    filled: i32,
+) -> usize {
+    if !point_in_rounded_rect(x, y, 0.0, 0.0, width as f64, height as f64, radius as f64) {
+        return 0;
+    }
+    let inner_right = (width - 1).max(1) as f64;
+    let inner_bottom = (height - 1).max(1) as f64;
+    if !point_in_rounded_rect(
+        x,
+        y,
+        1.0,
+        1.0,
+        inner_right,
+        inner_bottom,
+        radius.saturating_sub(1) as f64,
+    ) {
+        return 1;
+    }
+    if filled > 0 {
+        let fill_right = (1 + filled).min(width - 1).max(1) as f64;
+        let fill_radius = radius
+            .saturating_sub(1)
+            .min(filled / 2)
+            .min((height - 2).max(0) / 2) as f64;
+        if point_in_rounded_rect(x, y, 1.0, 1.0, fill_right, inner_bottom, fill_radius) {
+            return 3;
+        }
+    }
+    2
+}
+
+fn point_in_rounded_rect(
+    x: f64,
+    y: f64,
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+    radius: f64,
+) -> bool {
+    if x < left || x >= right || y < top || y >= bottom {
+        return false;
+    }
+    let radius = radius.max(0.0).min((right - left).min(bottom - top) / 2.0);
+    if radius == 0.0 {
+        return true;
+    }
+    let nearest_x = x.clamp(left + radius, right - radius);
+    let nearest_y = y.clamp(top + radius, bottom - radius);
+    (x - nearest_x).powi(2) + (y - nearest_y).powi(2) <= radius * radius
+}
+
+fn colorref_rgb(color: COLORREF) -> (u8, u8, u8) {
+    (
+        (color.0 & 0xff) as u8,
+        ((color.0 >> 8) & 0xff) as u8,
+        ((color.0 >> 16) & 0xff) as u8,
+    )
 }
 
 unsafe fn fill_round_rect(dc: HDC, rect: RECT, radius: i32, fill: COLORREF, border: COLORREF) {
@@ -2177,5 +2243,17 @@ mod tests {
         assert_eq!(surface.text, expected.text);
         assert_eq!(surface.fill_alpha, 255);
         assert_eq!(surface.border_alpha, 255);
+    }
+
+    #[test]
+    fn progress_raster_preserves_window_color_outside_rounded_track() {
+        let pixels = render_progress_pixels(80, 16, 5, 20, Palette::DARK.progress, Palette::DARK);
+        let (red, green, blue) = colorref_rgb(Palette::DARK.window);
+        assert_eq!(&pixels[..4], &[blue, green, red, 255]);
+        let fill_offset = (8 * 80 + 4) * 4;
+        assert_ne!(
+            &pixels[fill_offset..fill_offset + 4],
+            &[blue, green, red, 255]
+        );
     }
 }

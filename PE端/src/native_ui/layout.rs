@@ -43,8 +43,9 @@ pub(crate) fn progress_geometry(
     let width = width.max(1);
     let height = height.max(1);
     let scale = |value| scaled(value, dpi);
-    let pad = scale(20).min((width / 16).max(8));
-    let content_width = (width - pad * 2).max(1);
+    let outer_pad = scale(20).min((width / 16).max(8));
+    let content_width = (width - outer_pad * 2).max(1).min(scale(720));
+    let pad = (width - content_width) / 2;
     let top = scale(16).min(24);
     let gap = scale(6).min(12);
     let line_height = scale(22);
@@ -73,27 +74,10 @@ pub(crate) fn progress_geometry(
     let content_budget = (command_top - top - gap).max(1);
     let compact_step = has_step && content_budget < full_mandatory_height;
     let flow_gap = if compact_step { scale(4).min(8) } else { gap };
-    let mandatory_height = title_height
-        + flow_gap
-        + if has_step {
-            if compact_step {
-                line_height + flow_gap
-            } else {
-                line_height + flow_gap + bar_height + flow_gap
-            }
-        } else {
-            0
-        }
-        + line_height
-        + flow_gap
-        + bar_height
-        + flow_gap
-        + status_minimum;
-    // Reserve the final flow gap above the command bar before deciding whether the optional
-    // subtitle fits. Without this reservation the 624x378@192 client can admit the subtitle
-    // by only a few pixels and then squeeze the required one-line status region.
-    let available_height = (command_top - top - flow_gap).max(1);
-    let show_subtitle = available_height >= mandatory_height + subtitle_height + flow_gap;
+    // The running page deliberately omits the redundant "do not close" subtitle. Keeping this
+    // geometry slot disabled also moves the current-step caption closer to the title as a single
+    // compact hierarchy instead of leaving an unexplained blank row.
+    let show_subtitle = false;
 
     let title = PixelRect {
         x: pad,
@@ -118,20 +102,21 @@ pub(crate) fn progress_geometry(
         let caption = PixelRect {
             x: pad,
             y,
-            width: (content_width - percent_width - flow_gap).max(1),
+            width: content_width,
             height: line_height,
         };
-        let percent = PixelRect {
-            x: width - pad - percent_width,
-            y,
-            width: percent_width,
-            height: line_height,
-        };
+        let bar_y = y + line_height + flow_gap;
         let bar = PixelRect {
             x: pad,
-            y: y + line_height + flow_gap,
-            width: content_width,
+            y: bar_y,
+            width: (content_width - percent_width - flow_gap).max(1),
             height: bar_height,
+        };
+        let percent = PixelRect {
+            x: bar.right() + flow_gap,
+            y: bar_y - (line_height - bar_height).max(0) / 2,
+            width: percent_width,
+            height: line_height,
         };
         (caption, percent, bar)
     };
@@ -155,21 +140,19 @@ pub(crate) fn progress_geometry(
     let (overall_caption, overall_percent, overall_bar) = group(cursor);
     cursor = overall_bar.bottom();
 
-    let status_bottom = (command_top - flow_gap).max(cursor + 1);
-    let desired_status_height = scale(44).max(status_minimum);
-    let status_top = (status_bottom - desired_status_height).max(cursor + flow_gap);
+    let status_bottom = (command_top - flow_gap).max(cursor);
     let status = PixelRect {
         x: pad,
-        y: status_top,
+        y: status_bottom,
         width: content_width,
-        height: (status_bottom - status_top).max(1),
+        height: 0,
     };
-    let rows_top = (cursor + flow_gap).min(status.y);
+    let rows_top = (cursor + scale(18)).min(status_bottom);
     let rows = PixelRect {
         x: pad,
         y: rows_top,
         width: content_width,
-        height: (status.y - flow_gap - rows_top).max(0),
+        height: (status_bottom - rows_top).max(0),
     };
 
     ProgressGeometry {
@@ -330,6 +313,17 @@ pub(crate) fn clamp_rect_to_work_area(rect: PixelRect, work: PixelRect) -> Pixel
     }
 }
 
+pub(crate) fn centered_rect_in_work_area(width: i32, height: i32, work: PixelRect) -> PixelRect {
+    let width = width.max(1).min(work.width.max(1));
+    let height = height.max(1).min(work.height.max(1));
+    PixelRect {
+        x: work.x + (work.width - width) / 2,
+        y: work.y + (work.height - height) / 2,
+        width,
+        height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,14 +345,10 @@ mod tests {
                 for has_step in [false, true] {
                     let layout = progress_geometry(width, height, dpi, has_step);
                     assert!(layout.title.bottom() <= layout.command.y);
-                    assert!(layout.overall_bar.bottom() <= layout.status.y);
+                    assert!(layout.overall_bar.bottom() <= layout.rows.y);
                     assert!(layout.status.bottom() <= layout.command.y);
-                    assert!(
-                        layout.status.height >= minimum_status_height(dpi),
-                        "status height {} is below minimum {} at {width}x{height}@{dpi} with has_step={has_step}: {layout:?}",
-                        layout.status.height,
-                        minimum_status_height(dpi),
-                    );
+                    assert_eq!(layout.status.height, 0);
+                    assert!(layout.rows.bottom() <= layout.command.y);
                     if let Some(step) = layout.step_caption {
                         assert!(step.height > 0);
                         assert!(step.bottom() <= layout.overall_caption.y);
@@ -403,6 +393,26 @@ mod tests {
             work,
         );
         assert_eq!(clamped, work);
+    }
+
+    #[test]
+    fn preferred_window_is_centered_inside_offset_work_area() {
+        let work = PixelRect {
+            x: 1920,
+            y: 40,
+            width: 1280,
+            height: 680,
+        };
+        assert_eq!(
+            centered_rect_in_work_area(800, 600, work),
+            PixelRect {
+                x: 2160,
+                y: 80,
+                width: 800,
+                height: 600,
+            }
+        );
+        assert_eq!(centered_rect_in_work_area(1600, 900, work), work);
     }
 
     #[test]

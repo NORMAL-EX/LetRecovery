@@ -1,13 +1,13 @@
 use std::fmt;
 use std::mem::size_of;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, DeleteObject, EndPaint, FillRect, InvalidateRect, SetBkColor, SetBkMode,
-    SetTextColor, HBRUSH, HDC, HFONT, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, DeleteObject, EndPaint, FillRect, GetDC, InvalidateRect, ReleaseDC, SetBkColor,
+    SetBkMode, SetTextColor, HBRUSH, HDC, HFONT, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -24,13 +24,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, KillTimer, LoadCursorW, MoveWindow, PeekMessageW,
     PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
     SetWindowTextW, ShowWindow, TranslateMessage, BN_CLICKED, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
-    GWLP_USERDATA, GWL_STYLE, HMENU, IDC_ARROW, MINMAXINFO, MSG, PM_REMOVE, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
+    CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, MINMAXINFO,
+    MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SETICON, WM_SIZE, WM_TIMER, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use crate::app::{WorkflowRecoverySnapshot, WorkflowSession};
@@ -38,8 +37,9 @@ use crate::core::config::{ConfigFileManager, OperationType};
 use crate::ui::progress::{BackupStep, InstallStep, ProgressState, StepStatus};
 
 use super::controls::{
-    create_control, create_ui_font, create_ui_font_for_role, draw_inno_button, draw_progress,
-    measured_button_width, wide, NativeControlKind, UiFontRole,
+    create_control, create_ui_font, create_ui_font_for_role, draw_indeterminate_ring,
+    draw_inno_button, draw_progress, draw_step_status_icon, measured_button_width, wide,
+    NativeControlKind, StepStatusIcon, UiFontRole,
 };
 use super::details::{page_content, AdvancedOptionsSummary, DetailsPane};
 use super::layout::{command_bar_geometry, progress_geometry, PixelRect};
@@ -47,11 +47,14 @@ use super::state::{NativePage, NativeWindowState, WorkflowKind};
 use super::theme::{ThemeBrushes, ThemeContext};
 use super::window::{
     apply_title_bar_theme, clamp_window_to_work_area, drain_pending_quit_message,
-    fit_window_to_work_area, monitor_work_area, scaled,
+    fit_window_to_work_area, load_application_icons, monitor_work_area, scaled,
 };
 
 const CLASS_NAME: PCWSTR = w!("LetRecovery.PE.Native.Progress");
-const TIMER_ID: usize = 1;
+const WORKER_TIMER_ID: usize = 1;
+const ANIMATION_TIMER_ID: usize = 2;
+const WORKER_POLL_INTERVAL_MS: u32 = 50;
+const ANIMATION_FRAME_INTERVAL_MS: u32 = 16;
 const ID_CLOSE: u16 = 2001;
 const ID_BACK: u16 = 2002;
 const ID_DETAILS: u16 = 2003;
@@ -59,30 +62,20 @@ const MIN_WIDTH: i32 = 680;
 const MIN_HEIGHT: i32 = 500;
 const PREFERRED_WIDTH: i32 = 800;
 const PREFERRED_HEIGHT: i32 = 600;
+const SS_CENTER_STYLE: u32 = 0x0000_0001;
 
 #[derive(Debug)]
 pub struct ProgressRunError {
     source: windows::core::Error,
-    worker_started: bool,
 }
 
 impl ProgressRunError {
     fn before_worker(source: windows::core::Error) -> Self {
-        Self {
-            source,
-            worker_started: false,
-        }
+        Self { source }
     }
 
     fn after_worker(source: windows::core::Error) -> Self {
-        Self {
-            source,
-            worker_started: true,
-        }
-    }
-
-    pub fn safe_to_fallback(&self) -> bool {
-        !self.worker_started
+        Self { source }
     }
 }
 
@@ -219,6 +212,7 @@ fn step_status(index: usize, current: usize, progress: u8, failed: bool) -> Step
 
 struct NativeProgressWindow {
     operation_type: OperationType,
+    start_worker: bool,
     state: NativeWindowState<Option<WorkflowSession>>,
     presentation: ProgressPresentation,
     worker_finished: bool,
@@ -240,6 +234,9 @@ struct NativeProgressWindow {
     details_pane: Option<DetailsPane>,
     advanced_options: Option<AdvancedOptionsSummary>,
     row_labels: Vec<HWND>,
+    row_icons: Vec<RECT>,
+    spinner_started: Instant,
+    spinner_rect: RECT,
     step_bar: RECT,
     overall_bar: RECT,
 }
@@ -249,14 +246,24 @@ impl NativeProgressWindow {
         operation_type: OperationType,
         dpi: u32,
         advanced_options: Option<AdvancedOptionsSummary>,
+        start_worker: bool,
     ) -> Self {
-        let progress = initial_progress(operation_type);
+        let mut progress = initial_progress(operation_type);
+        if !start_worker {
+            match operation_type {
+                OperationType::Install => progress.set_install_step(InstallStep::ApplyImage),
+                OperationType::Backup => progress.set_backup_step(BackupStep::CaptureImage),
+                OperationType::Expand => {}
+            }
+            progress.set_step_progress(5);
+        }
         let presentation = ProgressPresentation::from_state(&progress);
         let mut state = NativeWindowState::new(None);
         state.navigate(NativePage::Progress);
         let theme = ThemeContext::detect(dpi);
         Self {
             operation_type,
+            start_worker,
             state,
             presentation,
             worker_finished: false,
@@ -278,19 +285,25 @@ impl NativeProgressWindow {
             details_pane: None,
             advanced_options,
             row_labels: Vec::new(),
+            row_icons: Vec::new(),
+            spinner_started: Instant::now(),
+            spinner_rect: RECT::default(),
             step_bar: RECT::default(),
             overall_bar: RECT::default(),
         }
     }
 
     unsafe fn create_children(&mut self, hwnd: HWND) -> windows::core::Result<()> {
-        self.title = create_static(hwnd, 2101, &progress_title(self.presentation.workflow))?;
-        self.subtitle = create_static(hwnd, 2102, &progress_subtitle(self.presentation.workflow))?;
-        self.step_caption = create_static(hwnd, 2103, &crate::tr!("当前步骤"))?;
+        self.title =
+            create_centered_static(hwnd, 2101, &progress_title(self.presentation.workflow))?;
+        self.subtitle = HWND::default();
+        self.step_caption = create_centered_static(hwnd, 2103, &crate::tr!("当前步骤"))?;
         self.step_percent = create_static(hwnd, 2104, "0%")?;
         self.overall_caption = create_static(hwnd, 2105, &crate::tr!("总体进度"))?;
         self.overall_percent = create_static(hwnd, 2106, "0%")?;
-        self.status = create_scrollable_status(hwnd, 2107, self.theme)?;
+        // The progress page is deliberately read-only and compact. Detailed diagnostics remain in
+        // the log instead of a disabled multiline Edit that looks interactive in WinPE.
+        self.status = HWND::default();
         self.footer_status = create_static(hwnd, 2108, &crate::tr!("操作进行中"))?;
         self.back = create_control(
             hwnd,
@@ -314,31 +327,36 @@ impl NativeProgressWindow {
             self.theme,
         )?;
         let _ = EnableWindow(self.close, false);
-        let _ = ShowWindow(self.back, SW_HIDE);
+        for control in [self.back, self.details_button, self.close] {
+            let _ = ShowWindow(control, SW_HIDE);
+        }
         for (index, _) in self.presentation.rows.iter().enumerate() {
             self.row_labels
                 .push(create_static(hwnd, 2200 + index as u16, "")?);
+            self.row_icons.push(RECT::default());
         }
         self.details_pane = Some(DetailsPane::create(hwnd, self.theme)?);
         self.apply_fonts();
         self.layout(hwnd);
         self.render_full_presentation(hwnd);
 
-        if SetTimer(hwnd, TIMER_ID, 50, None) == 0 {
+        if SetTimer(hwnd, ANIMATION_TIMER_ID, ANIMATION_FRAME_INTERVAL_MS, None) == 0 {
             return Err(windows::core::Error::from_win32());
         }
-        let mut session = WorkflowSession::new_for_operation(Some(self.operation_type));
-        session.start_worker();
-        self.state.workflow = Some(session);
+        if self.start_worker {
+            if SetTimer(hwnd, WORKER_TIMER_ID, WORKER_POLL_INTERVAL_MS, None) == 0 {
+                let _ = KillTimer(hwnd, ANIMATION_TIMER_ID);
+                return Err(windows::core::Error::from_win32());
+            }
+            let mut session = WorkflowSession::new_for_operation(Some(self.operation_type));
+            session.start_worker();
+            self.state.workflow = Some(session);
+        }
         Ok(())
     }
 
     unsafe fn render_full_presentation(&self, hwnd: HWND) {
-        let step = self
-            .presentation
-            .current_step
-            .map(|step| crate::tr!("当前步骤：{}", crate::tr!(step)))
-            .unwrap_or_else(|| crate::tr!("正在准备操作..."));
+        let step = current_step_text(self.presentation.current_step);
         set_text(self.step_caption, &step);
         set_text(
             self.step_percent,
@@ -356,10 +374,7 @@ impl NativeProgressWindow {
         set_text(self.status, &status);
         set_text(self.footer_status, &self.footer_text());
         for (label, row) in self.row_labels.iter().zip(&self.presentation.rows) {
-            set_text(
-                *label,
-                &format!("{}  {}", step_marker(row.status), crate::tr!(row.name)),
-            );
+            set_text(*label, &crate::tr!(row.name));
         }
         let _ = EnableWindow(self.close, self.can_close());
         self.update_command_bar();
@@ -381,7 +396,6 @@ impl NativeProgressWindow {
             self.step_percent,
             self.overall_caption,
             self.overall_percent,
-            self.status,
             self.footer_status,
             self.back,
             self.details_button,
@@ -443,11 +457,9 @@ impl NativeProgressWindow {
 
     unsafe fn apply_presentation(&mut self, hwnd: HWND, next: ProgressPresentation) {
         if self.presentation.current_step != next.current_step {
-            let text = next
-                .current_step
-                .map(|step| crate::tr!("当前步骤：{}", crate::tr!(step)))
-                .unwrap_or_else(|| crate::tr!("正在准备操作..."));
+            let text = current_step_text(next.current_step);
             set_text(self.step_caption, &text);
+            self.layout(hwnd);
         }
         if self.presentation.step_progress != next.step_progress {
             set_text(self.step_percent, &format!("{}%", next.step_progress));
@@ -468,10 +480,10 @@ impl NativeProgressWindow {
         }
         if self.presentation.rows != next.rows {
             for (label, row) in self.row_labels.iter().zip(&next.rows) {
-                set_text(
-                    *label,
-                    &format!("{}  {}", step_marker(row.status), crate::tr!(row.name)),
-                );
+                set_text(*label, &crate::tr!(row.name));
+            }
+            for icon in &self.row_icons {
+                let _ = InvalidateRect(hwnd, Some(icon), false);
             }
         }
         let terminal_changed = self.presentation.terminal != next.terminal;
@@ -550,7 +562,6 @@ impl NativeProgressWindow {
             self.step_percent,
             self.overall_caption,
             self.overall_percent,
-            self.status,
         ]
         .into_iter()
         .chain(self.row_labels.iter().copied())
@@ -590,6 +601,12 @@ impl NativeProgressWindow {
     }
 
     unsafe fn update_command_bar(&self) {
+        if self.state.page == NativePage::Progress {
+            for control in [self.back, self.details_button, self.close] {
+                let _ = ShowWindow(control, SW_HIDE);
+            }
+            return;
+        }
         let detail_target = self.details_target();
         let _ = ShowWindow(
             self.back,
@@ -651,26 +668,46 @@ impl NativeProgressWindow {
         move_pixel_control(self.overall_caption, layout.overall_caption);
         move_pixel_control(self.overall_percent, layout.overall_percent);
         self.overall_bar = pixel_rect(layout.overall_bar);
-        move_pixel_control(self.status, layout.status);
-
         let line_height = scaled(22, self.theme.dpi);
         let per_column = (layout.rows.height / line_height).max(0) as usize;
         let visible_count = self.row_labels.len().min(per_column.saturating_mul(2));
         let columns = if visible_count > per_column { 2 } else { 1 };
         let column_width = layout.rows.width / columns;
+        let icon_size = scaled(16, self.theme.dpi);
+        let icon_gap = scaled(10, self.theme.dpi);
+        let row_indent = scaled(32, self.theme.dpi);
+        self.spinner_rect = RECT::default();
         for (index, label) in self.row_labels.iter().enumerate() {
             if index < visible_count && per_column > 0 {
                 let column = index / per_column;
                 let row = index % per_column;
+                let column_x = layout.rows.x + column as i32 * column_width;
+                let icon_top =
+                    layout.rows.y + row as i32 * line_height + (line_height - icon_size).max(0) / 2;
+                self.row_icons[index] = RECT {
+                    left: column_x + row_indent,
+                    top: icon_top,
+                    right: column_x + row_indent + icon_size,
+                    bottom: icon_top + icon_size,
+                };
+                if self.presentation.rows[index].status == StepStatus::InProgress {
+                    self.spinner_rect = self.row_icons[index];
+                }
                 move_control(
                     *label,
-                    layout.rows.x + column as i32 * column_width,
+                    column_x + row_indent + icon_size + icon_gap,
                     layout.rows.y + row as i32 * line_height,
-                    (column_width - self.theme.metrics.item_gap).max(1),
+                    (column_width
+                        - row_indent
+                        - icon_size
+                        - icon_gap
+                        - self.theme.metrics.item_gap)
+                        .max(1),
                     line_height,
                 );
                 let _ = ShowWindow(*label, SW_SHOW);
             } else {
+                self.row_icons[index] = RECT::default();
                 let _ = ShowWindow(*label, SW_HIDE);
             }
         }
@@ -718,6 +755,22 @@ impl NativeProgressWindow {
         );
         let details_visible = self.details_target().is_some();
         let back_visible = self.state.page != NativePage::Progress;
+        if self.state.page == NativePage::Progress {
+            for control in [self.back, self.details_button, self.close] {
+                let _ = ShowWindow(control, SW_HIDE);
+            }
+            move_pixel_control(
+                self.footer_status,
+                PixelRect {
+                    x: layout.pad,
+                    y: layout.command.y + (layout.command.height - button_height).max(0) / 2,
+                    width: (layout.command.width - layout.pad * 2).max(1),
+                    height: button_height.min(layout.command.height).max(1),
+                },
+            );
+            let _ = ShowWindow(self.footer_status, SW_SHOW);
+            return;
+        }
         let command = command_bar_geometry(
             layout.command,
             layout.pad,
@@ -761,6 +814,15 @@ impl Drop for NativeProgressWindow {
 }
 
 pub fn run(operation_type: OperationType) -> Result<(), ProgressRunError> {
+    run_internal(operation_type, true)
+}
+
+#[cfg(feature = "non-elevated-tests")]
+pub fn run_preview(operation_type: OperationType) -> Result<(), ProgressRunError> {
+    run_internal(operation_type, false)
+}
+
+fn run_internal(operation_type: OperationType, start_worker: bool) -> Result<(), ProgressRunError> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let controls = INITCOMMONCONTROLSEX {
@@ -769,12 +831,16 @@ pub fn run(operation_type: OperationType) -> Result<(), ProgressRunError> {
         };
         let _ = InitCommonControlsEx(&controls);
         let instance = GetModuleHandleW(None).map_err(ProgressRunError::before_worker)?;
+        let (large_icon, small_icon) = load_application_icons(HINSTANCE(instance.0))
+            .map_err(ProgressRunError::before_worker)?;
         let class = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(window_proc),
             hInstance: HINSTANCE(instance.0),
             hCursor: LoadCursorW(None, IDC_ARROW).map_err(ProgressRunError::before_worker)?,
+            hIcon: large_icon,
+            hIconSm: small_icon,
             hbrBackground: HBRUSH::default(),
             lpszClassName: CLASS_NAME,
             ..Default::default()
@@ -798,6 +864,7 @@ pub fn run(operation_type: OperationType) -> Result<(), ProgressRunError> {
             operation_type,
             dpi,
             advanced_options,
+            start_worker,
         ));
         let screen_width = GetSystemMetrics(SM_CXSCREEN).max(1);
         let screen_height = GetSystemMetrics(SM_CYSCREEN).max(1);
@@ -824,6 +891,18 @@ pub fn run(operation_type: OperationType) -> Result<(), ProgressRunError> {
                 return Err(ProgressRunError::before_worker(error));
             }
         };
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            WPARAM(ICON_BIG as usize),
+            LPARAM(large_icon.0 as isize),
+        );
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            WPARAM(ICON_SMALL as usize),
+            LPARAM(small_icon.0 as isize),
+        );
         apply_title_bar_theme(hwnd, window.theme.mode);
         let actual_dpi = GetDpiForWindow(hwnd).max(96);
         if actual_dpi != dpi {
@@ -878,20 +957,18 @@ fn initial_progress(operation_type: OperationType) -> ProgressState {
 
 fn progress_title(workflow: WorkflowKind) -> String {
     match workflow {
-        WorkflowKind::Install => crate::tr!("正在安装"),
-        WorkflowKind::Backup => crate::tr!("正在备份"),
-        WorkflowKind::Expand => crate::tr!("正在扩容"),
+        WorkflowKind::Install => crate::tr!("LetRecovery PE 安装助手"),
+        WorkflowKind::Backup => crate::tr!("LetRecovery PE 备份助手"),
+        WorkflowKind::Expand => crate::tr!("LetRecovery PE 扩容助手"),
         WorkflowKind::Missing => crate::tr!("LetRecovery PE"),
     }
 }
 
-fn progress_subtitle(workflow: WorkflowKind) -> String {
-    match workflow {
-        WorkflowKind::Install => crate::tr!("正在安装 Windows，请勿关闭程序。"),
-        WorkflowKind::Backup => crate::tr!("正在创建系统备份，请勿关闭程序。"),
-        WorkflowKind::Expand => crate::tr!("正在无损扩大系统盘，请勿关闭程序。"),
-        WorkflowKind::Missing => crate::tr!("未检测到可执行的 PE 任务。"),
-    }
+fn current_step_text(step: Option<&str>) -> String {
+    let name = step
+        .map(|step| crate::tr!(step))
+        .unwrap_or_else(|| crate::tr!("正在准备操作..."));
+    format!("{}：[{}]", crate::tr!("当前步骤"), name)
 }
 
 fn terminal_status_text(terminal: ProgressTerminal) -> String {
@@ -910,12 +987,12 @@ fn terminal_footer_text(terminal: ProgressTerminal) -> String {
     }
 }
 
-fn step_marker(status: StepStatus) -> &'static str {
+fn step_status_icon(status: StepStatus) -> StepStatusIcon {
     match status {
-        StepStatus::Completed => "✓",
-        StepStatus::InProgress => "›",
-        StepStatus::Pending => "·",
-        StepStatus::Failed => "!",
+        StepStatus::Pending => StepStatusIcon::Pending,
+        StepStatus::InProgress => StepStatusIcon::Current,
+        StepStatus::Completed => StepStatusIcon::Success,
+        StepStatus::Failed => StepStatusIcon::Error,
     }
 }
 
@@ -937,29 +1014,22 @@ unsafe fn create_static(parent: HWND, id: u16, text: &str) -> windows::core::Res
     )
 }
 
-unsafe fn create_scrollable_status(
-    parent: HWND,
-    id: u16,
-    theme: ThemeContext,
-) -> windows::core::Result<HWND> {
-    let control = create_control(parent, id, NativeControlKind::Edit, "", theme)?;
-    let style = GetWindowLongPtrW(control, GWL_STYLE);
-    let style = (style & !(ES_AUTOHSCROLL as isize))
-        | ES_MULTILINE as isize
-        | ES_READONLY as isize
-        | ES_AUTOVSCROLL as isize
-        | WS_VSCROLL.0 as isize;
-    SetWindowLongPtrW(control, GWL_STYLE, style);
-    let _ = SetWindowPos(
-        control,
-        HWND::default(),
+unsafe fn create_centered_static(parent: HWND, id: u16, text: &str) -> windows::core::Result<HWND> {
+    let text = wide(text);
+    CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        w!("STATIC"),
+        PCWSTR(text.as_ptr()),
+        WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | SS_CENTER_STYLE),
         0,
         0,
         0,
         0,
-        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    Ok(control)
+        parent,
+        HMENU(id as isize as *mut _),
+        HINSTANCE::default(),
+        None,
+    )
 }
 
 unsafe fn set_text(control: HWND, text: &str) {
@@ -1016,9 +1086,29 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
-        WM_TIMER if wparam.0 == TIMER_ID => {
+        WM_TIMER if wparam.0 == WORKER_TIMER_ID => {
             if let Some(window) = window {
                 window.poll_worker(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == ANIMATION_TIMER_ID => {
+            if let Some(window) = window {
+                if window.state.page == NativePage::Progress
+                    && window.presentation.terminal == ProgressTerminal::Running
+                    && window.spinner_rect.right > window.spinner_rect.left
+                {
+                    let dc = GetDC(hwnd);
+                    if !dc.is_invalid() {
+                        draw_indeterminate_ring(
+                            dc,
+                            window.spinner_rect,
+                            window.spinner_started.elapsed().as_secs_f64(),
+                            window.theme.palette,
+                        );
+                        let _ = ReleaseDC(hwnd, dc);
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -1097,20 +1187,6 @@ unsafe extern "system" fn window_proc(
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
-        WM_CTLCOLOREDIT => {
-            if let Some(window) = window {
-                let dc = HDC(wparam.0 as *mut _);
-                let color = if window.presentation.terminal == ProgressTerminal::Failed {
-                    window.theme.palette.error
-                } else {
-                    window.theme.palette.text
-                };
-                let _ = SetTextColor(dc, color);
-                let _ = SetBkColor(dc, window.theme.palette.edit);
-                return LRESULT(window.brushes.edit.0 as isize);
-            }
-            DefWindowProcW(hwnd, message, wparam, lparam)
-        }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             if let Some(window) = window {
                 let source = HWND(lparam.0 as *mut _);
@@ -1162,25 +1238,52 @@ unsafe extern "system" fn window_proc(
                         window.presentation.overall_progress,
                         window.theme.palette,
                     );
+                    for (icon, row) in window.row_icons.iter().zip(&window.presentation.rows) {
+                        if icon.right <= icon.left || icon.bottom <= icon.top {
+                            continue;
+                        }
+                        if row.status == StepStatus::InProgress
+                            && window.presentation.terminal == ProgressTerminal::Running
+                        {
+                            draw_indeterminate_ring(
+                                dc,
+                                *icon,
+                                window.spinner_started.elapsed().as_secs_f64(),
+                                window.theme.palette,
+                            );
+                        } else {
+                            let status = step_status_icon(row.status);
+                            draw_step_status_icon(dc, *icon, status, window.theme.palette);
+                        }
+                    }
                 }
                 let mut client = RECT::default();
                 let _ = GetClientRect(hwnd, &mut client);
-                let command_top = progress_geometry(
+                let layout = progress_geometry(
                     client.right,
                     client.bottom,
                     window.theme.dpi,
                     window.presentation.workflow != WorkflowKind::Expand,
-                )
-                .command
-                .y;
+                );
+                let command_top = layout.command.y;
+                let separator_brush =
+                    windows::Win32::Graphics::Gdi::CreateSolidBrush(window.theme.palette.separator);
+                if window.state.page == NativePage::Progress && layout.rows.height > 0 {
+                    let list_separator_y = layout.rows.y - scaled(9, window.theme.dpi);
+                    let list_separator = RECT {
+                        left: layout.pad,
+                        top: list_separator_y,
+                        right: client.right - layout.pad,
+                        bottom: list_separator_y + window.theme.metrics.separator_thickness,
+                    };
+                    let _ = FillRect(dc, &list_separator, separator_brush);
+                }
                 let separator = RECT {
                     left: 0,
                     top: command_top,
                     right: client.right,
                     bottom: command_top + window.theme.metrics.separator_thickness,
                 };
-                let separator_brush =
-                    windows::Win32::Graphics::Gdi::CreateSolidBrush(window.theme.palette.separator);
                 let _ = FillRect(dc, &separator, separator_brush);
                 let _ = DeleteObject(separator_brush);
                 let _ = EndPaint(hwnd, &paint);
@@ -1196,7 +1299,8 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            let _ = KillTimer(hwnd, TIMER_ID);
+            let _ = KillTimer(hwnd, WORKER_TIMER_ID);
+            let _ = KillTimer(hwnd, ANIMATION_TIMER_ID);
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -1254,9 +1358,12 @@ mod tests {
     }
 
     #[test]
-    fn progress_marker_never_encodes_terminal_bar_colour() {
-        assert_eq!(step_marker(StepStatus::Completed), "✓");
-        assert_eq!(step_marker(StepStatus::Failed), "!");
+    fn progress_status_uses_vector_semantic_icons_without_font_markers() {
+        assert_eq!(
+            step_status_icon(StepStatus::Completed),
+            StepStatusIcon::Success
+        );
+        assert_eq!(step_status_icon(StepStatus::Failed), StepStatusIcon::Error);
         assert_eq!(
             crate::native_ui::theme::Palette::DARK.progress,
             crate::native_ui::theme::Palette::LIGHT.progress

@@ -18,22 +18,25 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, LoadCursorW, MoveWindow, PeekMessageW,
-    PostQuitMessage, RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, BN_CLICKED, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    GWLP_USERDATA, HMENU, IDC_ARROW, MINMAXINFO, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SETTINGCHANGE,
-    WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, LoadCursorW, LoadImageW, MoveWindow,
+    PeekMessageW, PostQuitMessage, RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, BN_CLICKED, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    GWLP_USERDATA, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LR_SHARED,
+    MINMAXINFO, MSG, PM_REMOVE, SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN,
+    SM_CYSMICON, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT,
+    WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use super::controls::{
     apply_theme as apply_control_theme, create_control, create_ui_font, create_ui_font_for_role,
     draw_inno_button, measured_button_width, wide, NativeControlKind, UiFontRole,
 };
-use super::layout::{clamp_rect_to_work_area, shell_geometry, PixelRect};
+use super::layout::{
+    centered_rect_in_work_area, clamp_rect_to_work_area, shell_geometry, PixelRect,
+};
 use super::state::{NativeWindowState, WorkflowKind};
 use super::theme::{ThemeBrushes, ThemeContext, ThemeMode};
 
@@ -241,12 +244,15 @@ pub fn run_shell_preview(workflow: WorkflowKind) -> windows::core::Result<ShellE
         let _ = InitCommonControlsEx(&controls);
         let instance = GetModuleHandleW(None)?;
         let cursor = LoadCursorW(None, IDC_ARROW)?;
+        let (large_icon, small_icon) = load_application_icons(HINSTANCE(instance.0))?;
         let class = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(window_proc),
             hInstance: HINSTANCE(instance.0),
             hCursor: cursor,
+            hIcon: large_icon,
+            hIconSm: small_icon,
             hbrBackground: HBRUSH::default(),
             lpszClassName: CLASS_NAME,
             ..Default::default()
@@ -288,6 +294,18 @@ pub fn run_shell_preview(workflow: WorkflowKind) -> windows::core::Result<ShellE
                 return Err(error);
             }
         };
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            WPARAM(ICON_BIG as usize),
+            LPARAM(large_icon.0 as isize),
+        );
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            WPARAM(ICON_SMALL as usize),
+            LPARAM(small_icon.0 as isize),
+        );
         apply_title_bar_theme(hwnd, shell.theme.mode);
         let actual_dpi = GetDpiForWindow(hwnd).max(96);
         if actual_dpi != initial_dpi {
@@ -389,23 +407,15 @@ pub(crate) unsafe fn fit_window_to_work_area(
     dpi: u32,
 ) {
     let work = monitor_work_area(hwnd);
-    let mut current = RECT::default();
-    if GetWindowRect(hwnd, &mut current).is_err() {
-        return;
-    }
     let work = PixelRect {
         x: work.left,
         y: work.top,
         width: (work.right - work.left).max(1),
         height: (work.bottom - work.top).max(1),
     };
-    let fitted = clamp_rect_to_work_area(
-        PixelRect {
-            x: current.left,
-            y: current.top,
-            width: scaled(preferred_width, dpi).min(work.width),
-            height: scaled(preferred_height, dpi).min(work.height),
-        },
+    let fitted = centered_rect_in_work_area(
+        scaled(preferred_width, dpi),
+        scaled(preferred_height, dpi),
         work,
     );
     let _ = SetWindowPos(
@@ -417,6 +427,30 @@ pub(crate) unsafe fn fit_window_to_work_area(
         fitted.height,
         SWP_NOACTIVATE | SWP_NOZORDER,
     );
+}
+
+pub(crate) unsafe fn load_application_icons(
+    instance: HINSTANCE,
+) -> windows::core::Result<(HICON, HICON)> {
+    const APPLICATION_ICON_ID: usize = 1;
+    let resource = PCWSTR(APPLICATION_ICON_ID as *const u16);
+    let large = LoadImageW(
+        instance,
+        resource,
+        IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON),
+        GetSystemMetrics(SM_CYICON),
+        LR_SHARED,
+    )?;
+    let small = LoadImageW(
+        instance,
+        resource,
+        IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON),
+        GetSystemMetrics(SM_CYSMICON),
+        LR_SHARED,
+    )?;
+    Ok((HICON(large.0), HICON(small.0)))
 }
 
 pub(crate) unsafe fn clamp_window_to_work_area(hwnd: HWND) {

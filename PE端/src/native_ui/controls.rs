@@ -7,9 +7,10 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush,
-    DeleteDC, DeleteObject, DrawTextW, FillRect, GetBrushOrgEx, GetTextExtentPoint32W, GetWindowDC,
-    InvalidateRect, LineTo, MoveToEx, ReleaseDC, RoundRect, SelectObject, SetBkMode, SetBrushOrgEx,
-    SetStretchBltMode, SetTextColor, StretchBlt, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
+    DeleteDC, DeleteObject, DrawTextW, Ellipse, FillRect, GetBrushOrgEx, GetTextExtentPoint32W,
+    GetWindowDC, InvalidateRect, LineTo, MoveToEx, ReleaseDC, RoundRect, SelectObject, SetBkMode,
+    SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchBlt, StretchDIBits, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, FW_NORMAL, HALFTONE, HDC, HFONT, HGDIOBJ, PEN_STYLE, SRCCOPY,
     STRETCH_BLT_MODE, TRANSPARENT,
 };
@@ -76,6 +77,14 @@ pub enum RoundedControlRole {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepStatusIcon {
+    Pending,
+    Current,
+    Success,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoundedControlSpec {
     pub radius: i32,
     pub supersample: u32,
@@ -109,8 +118,316 @@ pub unsafe fn draw_progress(dc: HDC, rect: RECT, percent: u8, palette: Palette) 
     if width == 0 || height == 0 {
         return;
     }
+    let radius = ((height * 5 + 8) / 16).clamp(2, (height / 2).max(2));
+    let inner_width = (width - 2).max(0);
+    let filled = inner_width.saturating_mul(i32::from(percent.min(100))) / 100;
+    let pixels = render_progress_pixels(width, height, radius, filled, palette);
+    let info = top_down_bgra_bitmap_info(width, height);
+    let _ = StretchDIBits(
+        dc,
+        rect.left,
+        rect.top,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height,
+        Some(pixels.as_ptr().cast()),
+        &info,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
+}
+
+fn render_progress_pixels(
+    width: i32,
+    height: i32,
+    radius: i32,
+    filled: i32,
+    palette: Palette,
+) -> Vec<u8> {
+    const SAMPLE_GRID: usize = 4;
+    let colors = [
+        colorref_rgb(palette.window),
+        colorref_rgb(palette.border),
+        colorref_rgb(palette.edit),
+        colorref_rgb(palette.progress),
+    ];
+    let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+    let sample_count = (SAMPLE_GRID * SAMPLE_GRID) as u32;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let mut red = 0_u32;
+            let mut green = 0_u32;
+            let mut blue = 0_u32;
+            for sample_y in 0..SAMPLE_GRID {
+                for sample_x in 0..SAMPLE_GRID {
+                    let px = x as f64 + (sample_x as f64 + 0.5) / SAMPLE_GRID as f64;
+                    let py = y as f64 + (sample_y as f64 + 0.5) / SAMPLE_GRID as f64;
+                    let layer = progress_sample_layer(px, py, width, height, radius, filled);
+                    let color = colors[layer];
+                    red += u32::from(color.0);
+                    green += u32::from(color.1);
+                    blue += u32::from(color.2);
+                }
+            }
+            let offset = (y * width as usize + x) * 4;
+            pixels[offset] = ((blue + sample_count / 2) / sample_count) as u8;
+            pixels[offset + 1] = ((green + sample_count / 2) / sample_count) as u8;
+            pixels[offset + 2] = ((red + sample_count / 2) / sample_count) as u8;
+            pixels[offset + 3] = 255;
+        }
+    }
+    pixels
+}
+
+fn progress_sample_layer(
+    x: f64,
+    y: f64,
+    width: i32,
+    height: i32,
+    radius: i32,
+    filled: i32,
+) -> usize {
+    if !point_in_rounded_rect(x, y, 0.0, 0.0, width as f64, height as f64, radius as f64) {
+        return 0;
+    }
+    let inner_right = (width - 1).max(1) as f64;
+    let inner_bottom = (height - 1).max(1) as f64;
+    if !point_in_rounded_rect(
+        x,
+        y,
+        1.0,
+        1.0,
+        inner_right,
+        inner_bottom,
+        radius.saturating_sub(1) as f64,
+    ) {
+        return 1;
+    }
+    if filled > 0 {
+        let fill_right = (1 + filled).min(width - 1).max(1) as f64;
+        let fill_radius = radius
+            .saturating_sub(1)
+            .min(filled / 2)
+            .min((height - 2).max(0) / 2) as f64;
+        if point_in_rounded_rect(x, y, 1.0, 1.0, fill_right, inner_bottom, fill_radius) {
+            return 3;
+        }
+    }
+    2
+}
+
+fn point_in_rounded_rect(
+    x: f64,
+    y: f64,
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+    radius: f64,
+) -> bool {
+    if x < left || x >= right || y < top || y >= bottom {
+        return false;
+    }
+    let radius = radius.max(0.0).min((right - left).min(bottom - top) / 2.0);
+    if radius == 0.0 {
+        return true;
+    }
+    let nearest_x = x.clamp(left + radius, right - radius);
+    let nearest_y = y.clamp(top + radius, bottom - radius);
+    squared_distance(x, y, nearest_x, nearest_y) <= radius * radius
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProgressRingFrame {
+    pub start_radians: f64,
+    pub sweep_radians: f64,
+}
+
+/// Reproduces Cloud-MGR's two-second linear ProgressRing timeline.
+///
+/// Its 16×16 source geometry uses a radius of 7, a dash length of 0.01→21.99→0.01 and
+/// rotation of 0→450°→1080°. The returned angles use the screen coordinate system, where
+/// increasing angles move clockwise because Y grows downwards.
+pub fn progress_ring_frame(elapsed_seconds: f64) -> ProgressRingFrame {
+    let phase = elapsed_seconds.rem_euclid(2.0) / 2.0;
+    let (dash, rotation) = if phase < 0.5 {
+        let factor = phase / 0.5;
+        (0.01 + (21.99 - 0.01) * factor, 450.0 * factor)
+    } else {
+        let factor = (phase - 0.5) / 0.5;
+        (
+            21.99 + (0.01 - 21.99) * factor,
+            450.0 + (1080.0 - 450.0) * factor,
+        )
+    };
+    ProgressRingFrame {
+        start_radians: (rotation - 90.0).to_radians(),
+        sweep_radians: (dash / (2.0 * std::f64::consts::PI * 7.0) * 2.0 * std::f64::consts::PI)
+            .clamp(0.0, 2.0 * std::f64::consts::PI),
+    }
+}
+
+/// Draws the Cloud-MGR indeterminate ring with analytic supersampling and true circular caps.
+///
+/// GDI polylines visibly facet at this 16–24 px size. This painter instead measures coverage for
+/// every destination pixel, composites one opaque BGRA frame, and transfers it in a single blit.
+///
+/// # Safety
+///
+/// `dc` must remain a valid writable device context for this call and `rect` must describe a
+/// drawable region in it. The function retains neither the DC nor the temporary pixel buffer.
+pub unsafe fn draw_indeterminate_ring(dc: HDC, rect: RECT, elapsed_seconds: f64, palette: Palette) {
+    const SAMPLE_GRID: usize = 8;
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let size = width.min(height) as f64;
+    let cx = width as f64 / 2.0;
+    let cy = height as f64 / 2.0;
+    let radius = size * 7.0 / 16.0;
+    let half_thickness = size * 1.5 / 16.0 / 2.0;
+    let frame = progress_ring_frame(elapsed_seconds);
+    let start_cap = (
+        cx + radius * frame.start_radians.cos(),
+        cy + radius * frame.start_radians.sin(),
+    );
+    let end_angle = frame.start_radians + frame.sweep_radians;
+    let end_cap = (cx + radius * end_angle.cos(), cy + radius * end_angle.sin());
+    let arc = RoundArcGeometry {
+        center: (cx, cy),
+        radius,
+        half_thickness,
+        frame,
+        start_cap,
+        end_cap,
+    };
+    let background = colorref_rgb(palette.window);
+    let foreground = colorref_rgb(palette.accent_border);
+    let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+    let sample_count = (SAMPLE_GRID * SAMPLE_GRID) as u32;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let mut covered = 0_u32;
+            for sample_y in 0..SAMPLE_GRID {
+                for sample_x in 0..SAMPLE_GRID {
+                    let px = x as f64 + (sample_x as f64 + 0.5) / SAMPLE_GRID as f64;
+                    let py = y as f64 + (sample_y as f64 + 0.5) / SAMPLE_GRID as f64;
+                    if point_in_round_arc(px, py, &arc) {
+                        covered += 1;
+                    }
+                }
+            }
+            let offset = (y * width as usize + x) * 4;
+            let red = blend_channel(background.0, foreground.0, covered, sample_count);
+            let green = blend_channel(background.1, foreground.1, covered, sample_count);
+            let blue = blend_channel(background.2, foreground.2, covered, sample_count);
+            pixels[offset] = blue;
+            pixels[offset + 1] = green;
+            pixels[offset + 2] = red;
+            pixels[offset + 3] = 255;
+        }
+    }
+    let info = top_down_bgra_bitmap_info(width, height);
+    let _ = StretchDIBits(
+        dc,
+        rect.left,
+        rect.top,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height,
+        Some(pixels.as_ptr().cast()),
+        &info,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RoundArcGeometry {
+    center: (f64, f64),
+    radius: f64,
+    half_thickness: f64,
+    frame: ProgressRingFrame,
+    start_cap: (f64, f64),
+    end_cap: (f64, f64),
+}
+
+fn point_in_round_arc(x: f64, y: f64, arc: &RoundArcGeometry) -> bool {
+    let cap_radius_squared = arc.half_thickness * arc.half_thickness;
+    let in_start_cap =
+        squared_distance(x, y, arc.start_cap.0, arc.start_cap.1) <= cap_radius_squared;
+    let in_end_cap = squared_distance(x, y, arc.end_cap.0, arc.end_cap.1) <= cap_radius_squared;
+    if in_start_cap || in_end_cap {
+        return true;
+    }
+    let dx = x - arc.center.0;
+    let dy = y - arc.center.1;
+    let distance = dx.hypot(dy);
+    if (distance - arc.radius).abs() > arc.half_thickness {
+        return false;
+    }
+    let relative = (dy.atan2(dx) - arc.frame.start_radians).rem_euclid(2.0 * std::f64::consts::PI);
+    relative <= arc.frame.sweep_radians
+}
+
+fn squared_distance(x: f64, y: f64, other_x: f64, other_y: f64) -> f64 {
+    (x - other_x).powi(2) + (y - other_y).powi(2)
+}
+
+fn colorref_rgb(color: COLORREF) -> (u8, u8, u8) {
+    (
+        (color.0 & 0xff) as u8,
+        ((color.0 >> 8) & 0xff) as u8,
+        ((color.0 >> 16) & 0xff) as u8,
+    )
+}
+
+fn blend_channel(background: u8, foreground: u8, coverage: u32, total: u32) -> u8 {
+    ((u32::from(foreground) * coverage + u32::from(background) * (total - coverage) + total / 2)
+        / total) as u8
+}
+
+fn top_down_bgra_bitmap_info(width: i32, height: i32) -> BITMAPINFO {
+    BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: (width * height * 4) as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Draws the 16px Cloud-MGR semantic badge family without font glyph dependencies.
+///
+/// # Safety
+///
+/// `dc` must remain a valid writable device context for this call and `rect` must describe a
+/// drawable region in it. The function retains no GDI handle after returning.
+pub unsafe fn draw_step_status_icon(dc: HDC, rect: RECT, status: StepStatusIcon, palette: Palette) {
+    const SCALE: i32 = 4;
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let high_width = width.saturating_mul(SCALE);
+    let high_height = height.saturating_mul(SCALE);
     let memory_dc = CreateCompatibleDC(dc);
-    let bitmap = CreateCompatibleBitmap(dc, width, height);
+    let bitmap = CreateCompatibleBitmap(dc, high_width, high_height);
     if memory_dc.is_invalid() || bitmap.is_invalid() {
         if !memory_dc.is_invalid() {
             let _ = DeleteDC(memory_dc);
@@ -121,43 +438,102 @@ pub unsafe fn draw_progress(dc: HDC, rect: RECT, percent: u8, palette: Palette) 
         return;
     }
     let old_bitmap = SelectObject(memory_dc, bitmap);
-    let local = RECT {
-        left: 0,
-        top: 0,
-        right: width,
-        bottom: height,
-    };
-    let radius = ((height * 5 + 8) / 16).clamp(2, (height / 2).max(2));
-    fill_solid_rect(memory_dc, &local, palette.window);
-    fill_round_rect_antialiased(
+    fill_solid_rect(
         memory_dc,
-        local,
-        radius,
-        palette.edit,
-        palette.border,
+        &RECT {
+            left: 0,
+            top: 0,
+            right: high_width,
+            bottom: high_height,
+        },
         palette.window,
     );
+    let background = match status {
+        StepStatusIcon::Pending => palette.text_disabled,
+        StepStatusIcon::Current => palette.accent_border,
+        StepStatusIcon::Success => palette.progress,
+        StepStatusIcon::Error => palette.error,
+    };
+    let pen_width = SCALE.max(1);
+    let pen = CreatePen(PEN_STYLE(0), pen_width, background);
+    let brush = CreateSolidBrush(background);
+    let old_pen = SelectObject(memory_dc, pen);
+    let old_brush = SelectObject(memory_dc, brush);
+    let inset = SCALE;
+    let _ = Ellipse(
+        memory_dc,
+        inset,
+        inset,
+        high_width - inset,
+        high_height - inset,
+    );
 
-    let inner_width = (width - 2).max(0);
-    let filled = inner_width.saturating_mul(i32::from(percent.min(100))) / 100;
-    if filled > 0 {
-        let fill = RECT {
-            left: 1,
-            top: 1,
-            right: 1 + filled,
-            bottom: height - 1,
-        };
-        fill_round_rect_antialiased(
+    if matches!(status, StepStatusIcon::Pending) {
+        let inner = CreateSolidBrush(palette.window);
+        let old_inner = SelectObject(memory_dc, inner);
+        let inner_inset = SCALE * 2;
+        let _ = Ellipse(
             memory_dc,
-            fill,
-            radius.saturating_sub(1),
-            palette.progress,
-            palette.progress,
-            palette.edit,
+            inner_inset,
+            inner_inset,
+            high_width - inner_inset,
+            high_height - inner_inset,
         );
+        let _ = SelectObject(memory_dc, old_inner);
+        let _ = DeleteObject(inner);
+    } else {
+        let symbol = if palette.dark {
+            rgb(0, 0, 0)
+        } else {
+            rgb(255, 255, 255)
+        };
+        let symbol_pen = CreatePen(PEN_STYLE(0), (SCALE * 3 / 2).max(1), symbol);
+        let old_symbol_pen = SelectObject(memory_dc, symbol_pen);
+        let cx = high_width / 2;
+        let cy = high_height / 2;
+        let half = (high_width.min(high_height) * 3 / 16).max(SCALE);
+        match status {
+            StepStatusIcon::Success => {
+                let _ = MoveToEx(memory_dc, cx - half, cy, None);
+                let _ = LineTo(memory_dc, cx - half / 4, cy + half * 3 / 4);
+                let _ = LineTo(memory_dc, cx + half, cy - half * 3 / 4);
+            }
+            StepStatusIcon::Error => {
+                let _ = MoveToEx(memory_dc, cx - half, cy - half, None);
+                let _ = LineTo(memory_dc, cx + half, cy + half);
+                let _ = MoveToEx(memory_dc, cx + half, cy - half, None);
+                let _ = LineTo(memory_dc, cx - half, cy + half);
+            }
+            StepStatusIcon::Current => {
+                let dot = (SCALE * 2).max(2);
+                let dot_brush = CreateSolidBrush(symbol);
+                let old_dot = SelectObject(memory_dc, dot_brush);
+                let _ = Ellipse(memory_dc, cx - dot, cy - dot, cx + dot, cy + dot);
+                let _ = SelectObject(memory_dc, old_dot);
+                let _ = DeleteObject(dot_brush);
+            }
+            StepStatusIcon::Pending => {}
+        }
+        let _ = SelectObject(memory_dc, old_symbol_pen);
+        let _ = DeleteObject(symbol_pen);
     }
-    let _ = BitBlt(
-        dc, rect.left, rect.top, width, height, memory_dc, 0, 0, SRCCOPY,
+    let _ = SelectObject(memory_dc, old_brush);
+    let _ = SelectObject(memory_dc, old_pen);
+    let _ = DeleteObject(brush);
+    let _ = DeleteObject(pen);
+    let _ = SetStretchBltMode(dc, HALFTONE);
+    let _ = StretchBlt(
+        dc,
+        rect.left,
+        rect.top,
+        width,
+        height,
+        memory_dc,
+        0,
+        0,
+        high_width,
+        high_height,
+        SRCCOPY,
     );
     let _ = SelectObject(memory_dc, old_bitmap);
     let _ = DeleteObject(bitmap);
@@ -1664,5 +2040,54 @@ mod tests {
     fn heading_font_role_is_distinct_without_changing_the_font_family_contract() {
         assert_ne!(UiFontRole::Body, UiFontRole::Heading);
         assert_eq!(MICROSOFT_YAHEI_UI, "Microsoft YaHei UI");
+    }
+
+    #[test]
+    fn progress_ring_preserves_cloud_mgr_two_second_keyframes() {
+        let start = progress_ring_frame(0.0);
+        let midpoint = progress_ring_frame(1.0);
+        let repeated = progress_ring_frame(2.0);
+        assert!((start.start_radians + std::f64::consts::FRAC_PI_2).abs() < 1.0e-9);
+        assert!(start.sweep_radians > 0.0 && start.sweep_radians < 0.01);
+        assert!((midpoint.start_radians - 2.0 * std::f64::consts::PI).abs() < 1.0e-9);
+        assert!((midpoint.sweep_radians - std::f64::consts::PI).abs() < 0.01);
+        assert_eq!(start, repeated);
+    }
+
+    #[test]
+    fn progress_ring_round_caps_remain_visible_at_minimum_dash() {
+        let frame = progress_ring_frame(0.0);
+        let radius = 7.0;
+        let cap = (
+            8.0 + radius * frame.start_radians.cos(),
+            8.0 + radius * frame.start_radians.sin(),
+        );
+        let end_angle = frame.start_radians + frame.sweep_radians;
+        let end_cap = (
+            8.0 + radius * end_angle.cos(),
+            8.0 + radius * end_angle.sin(),
+        );
+        let arc = RoundArcGeometry {
+            center: (8.0, 8.0),
+            radius,
+            half_thickness: 0.75,
+            frame,
+            start_cap: cap,
+            end_cap,
+        };
+        assert!(point_in_round_arc(cap.0, cap.1, &arc));
+        assert!(!point_in_round_arc(8.0, 8.0, &arc));
+    }
+
+    #[test]
+    fn progress_raster_preserves_window_color_outside_rounded_track() {
+        let pixels = render_progress_pixels(80, 16, 5, 20, Palette::DARK);
+        let (red, green, blue) = colorref_rgb(Palette::DARK.window);
+        assert_eq!(&pixels[..4], &[blue, green, red, 255]);
+        let fill_offset = (8 * 80 + 4) * 4;
+        assert_ne!(
+            &pixels[fill_offset..fill_offset + 4],
+            &[blue, green, red, 255]
+        );
     }
 }
