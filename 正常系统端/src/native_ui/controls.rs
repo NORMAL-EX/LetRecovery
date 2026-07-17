@@ -1994,9 +1994,12 @@ mod tests {
         let material = Palette::DARK.with_system_backdrop_surface();
         let normal =
             button_surface_visual(material, ButtonRole::Secondary, ControlState::default());
-        assert_eq!(normal.fill, rgb(130, 165, 255));
-        assert_eq!(normal.fill_alpha, 73);
-        assert_eq!(normal.border_alpha, 82);
+        let expected = Palette::DARK.material_surface_visual(MaterialSurfaceState::Normal);
+        assert_eq!(normal.fill, expected.fill);
+        assert_eq!(normal.border, expected.border);
+        assert_eq!(normal.fill_alpha, expected.fill_alpha);
+        assert_eq!(normal.border_alpha, expected.border_alpha);
+        assert!((170..255).contains(&normal.fill_alpha));
 
         let hot = button_surface_visual(
             material,
@@ -2013,12 +2016,9 @@ mod tests {
         assert_eq!(primary.fill_alpha, 255);
         assert_eq!(primary.border_alpha, 255);
 
-        let composite = |source: u32, alpha: u32, background: u32| {
-            (source * alpha + background * (255 - alpha) + 127) / 255
-        };
-        assert_eq!(composite(130, 73, 32), 60);
-        assert_eq!(composite(165, 73, 32), 70);
-        assert_eq!(composite(255, 73, 32), 96);
+        // Resolving the current overlay against the documented dark Mica neutral keeps the
+        // original cool blue-grey depth without collapsing into an opaque solid button.
+        assert_eq!(material.button, rgb(60, 72, 94));
     }
 
     #[test]

@@ -13,8 +13,8 @@ use windows::Win32::Graphics::Gdi::{
     SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor, SetWindowRgn,
     StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER,
     DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE,
-    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW,
-    SRCCOPY, TRANSPARENT,
+    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE,
+    RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     GetComboBoxInfo, SetWindowTheme, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT,
@@ -31,12 +31,13 @@ use windows::Win32::UI::WindowsAndMessaging::WS_VSCROLL;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetPropW,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret,
-    PostMessageW, RemovePropW, SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret,
-    GWL_EXSTYLE, GWL_STYLE, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND,
-    WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
-    WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER, WS_EX_CLIENTEDGE,
+    PostMessageW, RemovePropW, SendMessageW, SetLayeredWindowAttributes, SetPropW,
+    SetWindowLongPtrW, SetWindowPos, ShowCaret, GWL_EXSTYLE, GWL_STYLE, LWA_ALPHA,
+    NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY,
+    WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE,
+    WM_THEMECHANGED, WS_BORDER, WS_EX_CLIENTEDGE, WS_EX_LAYERED,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
@@ -183,29 +184,34 @@ impl Palette {
     ) -> MaterialSurfaceVisual {
         if self.dark {
             let (fill, fill_alpha) = match state {
-                MaterialSurfaceState::Normal => (rgb(130, 165, 255), 73),
-                MaterialSurfaceState::Hot => (rgb(150, 185, 255), 96),
-                MaterialSurfaceState::Pressed => (rgb(110, 140, 220), 72),
-                MaterialSurfaceState::Disabled => (rgb(150, 175, 220), 38),
+                // Mica is the base layer, not the control surface itself. Keep enough opacity
+                // that dark controls remain distinct from the wallpaper while preserving the
+                // cool blue-grey material tint used by the original audited UI.
+                MaterialSurfaceState::Normal => (rgb(72, 88, 120), 180),
+                MaterialSurfaceState::Hot => (rgb(85, 105, 145), 200),
+                MaterialSurfaceState::Pressed => (rgb(60, 75, 105), 190),
+                MaterialSurfaceState::Disabled => (rgb(86, 98, 122), 112),
             };
             MaterialSurfaceVisual {
                 fill,
-                border: rgb(183, 200, 240),
+                border: rgb(145, 165, 205),
                 fill_alpha,
-                border_alpha: 82,
+                border_alpha: 130,
             }
         } else {
             let (fill, fill_alpha) = match state {
-                MaterialSurfaceState::Normal => (rgb(255, 255, 255), 142),
-                MaterialSurfaceState::Hot => (rgb(255, 255, 255), 180),
-                MaterialSurfaceState::Pressed => (rgb(215, 224, 234), 150),
-                MaterialSurfaceState::Disabled => (rgb(255, 255, 255), 80),
+                // Pure white over light Mica reads as a solid rectangle. A cooler, lower-alpha
+                // surface leaves the material perceptible without sacrificing field contrast.
+                MaterialSurfaceState::Normal => (rgb(232, 239, 248), 118),
+                MaterialSurfaceState::Hot => (rgb(238, 244, 252), 145),
+                MaterialSurfaceState::Pressed => (rgb(214, 224, 236), 138),
+                MaterialSurfaceState::Disabled => (rgb(235, 240, 247), 76),
             };
             MaterialSurfaceVisual {
                 fill,
                 border: rgb(113, 131, 154),
                 fill_alpha,
-                border_alpha: 45,
+                border_alpha: 64,
             }
         }
     }
@@ -223,6 +229,14 @@ impl Palette {
             subtract_color(self.edit, self.system_backdrop_edge_fallback())
         } else {
             self.edit
+        }
+    }
+
+    pub(crate) unsafe fn edit_brush_color_for(self, control: HWND) -> COLORREF {
+        if GetWindowLongPtrW(control, GWL_EXSTYLE) & WS_EX_LAYERED.0 as isize != 0 {
+            self.edit
+        } else {
+            self.edit_brush_color()
         }
     }
 
@@ -373,6 +387,7 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
         // can never overwrite the rounded corners during typing, focus or caret updates.
         let _ = SetWindowTheme(control, w!(""), w!(""));
         apply_borderless_style(control);
+        configure_edit_backdrop_redirection(control, palette);
         let _ = RemoveWindowSubclass(
             control,
             Some(rounded_control_subclass),
@@ -554,6 +569,40 @@ pub unsafe fn apply_backdrop_composition_to_descendants(root: HWND, palette: Pal
         Some(prepare_backdrop_descendant),
         LPARAM(reference as isize),
     );
+}
+
+/// Commits every material Edit's redirected bitmap after its parent becomes visible.
+///
+/// Layered windows retain a system-owned off-screen image, and Windows is not required to request
+/// another paint merely because that stored image becomes exposed. Theme installation happens
+/// while the parent redraw transaction is suspended, so each redirected Edit needs one explicit
+/// erase/non-client/client update after the parent transaction has been published. Mouse movement
+/// must never be the event that makes a field first appear or adopt its new theme.
+pub unsafe fn commit_redirected_edit_surfaces(root: HWND) {
+    let _ = EnumChildWindows(root, Some(commit_redirected_edit_surface), LPARAM(0));
+}
+
+unsafe extern "system" fn commit_redirected_edit_surface(hwnd: HWND, _lparam: LPARAM) -> BOOL {
+    if redirected_edit_requires_commit(
+        &control_class_name(hwnd),
+        is_single_line_edit(hwnd),
+        GetWindowLongPtrW(hwnd, GWL_EXSTYLE),
+    ) {
+        // Reassert opacity only after the HWND is visible; this initializes the redirected bitmap
+        // on builds that defer it while an ancestor has WM_SETREDRAW disabled.
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW,
+        );
+    }
+    BOOL(1)
+}
+
+fn redirected_edit_requires_commit(class_name: &str, single_line: bool, ex_style: isize) -> bool {
+    is_edit_class(class_name) && single_line && ex_style & WS_EX_LAYERED.0 as isize != 0
 }
 
 unsafe extern "system" fn prepare_backdrop_descendant(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -1930,8 +1979,9 @@ unsafe extern "system" fn single_line_edit_subclass(
             // WinPE can show a newly laid-out Edit without issuing another effective WM_NCPAINT.
             // Let USER32 paint the native text, selection, caret and background first, then paint
             // the deterministic frame last so the initial visible frame matches the hover repaint.
+            let palette = palette_from_reference(reference_data);
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            paint_rounded_control_frame(hwnd, palette);
             result
         }
         WM_NCCALCSIZE => {
@@ -2289,7 +2339,7 @@ unsafe fn paint_rounded_control_frame(hwnd: HWND, palette: Palette) {
         palette.edit
     };
     if is_edit_class(&class_name) && is_single_line_edit(hwnd) {
-        paint_single_line_edit_nonclient_bands(dc, hwnd, palette.edit_brush_color());
+        paint_single_line_edit_nonclient_bands(dc, hwnd, palette.edit_brush_color_for(hwnd));
     }
     draw_rounded_control_frame_to_dc(dc, hwnd, palette, interior);
     let _ = ReleaseDC(hwnd, dc);
@@ -2470,9 +2520,25 @@ unsafe fn clip_combo_to_closed_field(hwnd: HWND, _palette: Palette) {
 ///
 /// A GDI region has no partial coverage and cannot represent the visible antialiased edge. The
 /// deterministic last-paint transaction replaces the small exterior corner pixels instead.
-unsafe fn apply_material_rounded_control_region(hwnd: HWND, palette: Palette) {
-    let _ = palette;
+unsafe fn apply_material_rounded_control_region(hwnd: HWND, _palette: Palette) {
     clear_control_window_region(hwnd);
+}
+
+unsafe fn configure_edit_backdrop_redirection(hwnd: HWND, palette: Palette) {
+    let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    let desired = if palette.uses_system_backdrop_surface() {
+        current | WS_EX_LAYERED.0 as isize
+    } else {
+        current & !(WS_EX_LAYERED.0 as isize)
+    };
+    if desired != current {
+        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired);
+    }
+    if palette.uses_system_backdrop_surface() {
+        // No colour key is used: global alpha 255 makes this native Edit fully opaque and keeps
+        // every pixel hit-testable while USER32 continues to draw text, selection, caret and IME.
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+    }
 }
 
 unsafe fn clear_control_window_region(hwnd: HWND) {
@@ -2877,11 +2943,23 @@ unsafe fn draw_rounded_control_frame_to_dc(
         palette.control_border()
     };
     // CreateRoundRectRgn/FrameRgn is an integer region operation and therefore cannot be the
-    // visible outline: at 96-200 DPI it produces the grainy staircase reported by the user.  The
+    // visible outline: at 96-200 DPI it produces the grainy staircase reported by the user. The
     // deterministic coverage calculation paints the straight stroke and every corner sample. A
-    // material child keeps DWM's black glass key outside the curve instead of inventing a solid
-    // fallback tile, while the absence of a rounded HRGN preserves all partially covered pixels.
-    draw_antialiased_control_frame(dc, rect, geometry, interior, border, palette.window);
+    // fully opaque redirected Edit cannot publish DWM's black glass key without turning it into a
+    // visible black corner, so premix only those exterior samples with the documented neutral
+    // fallback. Other controls still expose the real parent glass key outside the curve.
+    let redirected_edit = is_edit_class(&class_name)
+        && GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED.0 as isize != 0;
+    let exterior = rounded_control_exterior(palette, redirected_edit);
+    draw_antialiased_control_frame(dc, rect, geometry, interior, border, exterior);
+}
+
+const fn rounded_control_exterior(palette: Palette, redirected_edit: bool) -> COLORREF {
+    if redirected_edit && palette.uses_system_backdrop_surface() {
+        palette.system_backdrop_edge_fallback()
+    } else {
+        palette.window
+    }
 }
 
 unsafe fn is_list_box(hwnd: HWND) -> bool {
@@ -3697,6 +3775,7 @@ pub struct Brushes {
     pub window: HBRUSH,
     pub nav: HBRUSH,
     pub edit: HBRUSH,
+    pub edit_opaque: HBRUSH,
     pub list: HBRUSH,
 }
 
@@ -3707,6 +3786,7 @@ impl Brushes {
                 window: CreateSolidBrush(palette.window),
                 nav: CreateSolidBrush(palette.nav),
                 edit: CreateSolidBrush(palette.edit_brush_color()),
+                edit_opaque: CreateSolidBrush(palette.edit),
                 list: CreateSolidBrush(palette.edit),
             }
         }
@@ -3719,6 +3799,7 @@ impl Drop for Brushes {
             let _ = DeleteObject(self.window);
             let _ = DeleteObject(self.nav);
             let _ = DeleteObject(self.edit);
+            let _ = DeleteObject(self.edit_opaque);
             let _ = DeleteObject(self.list);
         }
     }
@@ -3812,6 +3893,50 @@ mod tests {
         }
         assert_eq!(Palette::LIGHT.foreground_black(), rgb(0, 0, 0));
         assert_eq!(Palette::DARK.foreground_black(), rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn material_controls_keep_theme_specific_depth_without_pure_white_surfaces() {
+        let dark = Palette::DARK.material_surface_visual(MaterialSurfaceState::Normal);
+        let light = Palette::LIGHT.material_surface_visual(MaterialSurfaceState::Normal);
+        assert!(dark.fill_alpha >= 170);
+        assert!(dark.border_alpha >= 100);
+        assert!(light.fill_alpha < dark.fill_alpha);
+        assert_ne!(light.fill, rgb(255, 255, 255));
+        assert!(light.border_alpha >= 60);
+    }
+
+    #[test]
+    fn redirected_edit_uses_neutral_antialiased_corners_without_a_binary_region() {
+        for base in [Palette::LIGHT, Palette::DARK] {
+            let material = base.with_system_backdrop_surface();
+            assert_eq!(
+                rounded_control_exterior(material, true),
+                material.system_backdrop_edge_fallback()
+            );
+            assert_eq!(rounded_control_exterior(material, false), COLORREF(0));
+            assert_eq!(rounded_control_exterior(base, true), base.window);
+        }
+    }
+
+    #[test]
+    fn only_layered_single_line_edits_enter_the_post_transaction_commit() {
+        assert!(redirected_edit_requires_commit(
+            "Edit",
+            true,
+            WS_EX_LAYERED.0 as isize
+        ));
+        assert!(!redirected_edit_requires_commit("Edit", true, 0));
+        assert!(!redirected_edit_requires_commit(
+            "Edit",
+            false,
+            WS_EX_LAYERED.0 as isize
+        ));
+        assert!(!redirected_edit_requires_commit(
+            "ComboBox",
+            true,
+            WS_EX_LAYERED.0 as isize
+        ));
     }
 
     #[test]

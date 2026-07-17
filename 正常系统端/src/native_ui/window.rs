@@ -37,25 +37,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetClientRect, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, IsWindowVisible, KillTimer,
     LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE,
-    CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE,
-    ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW,
-    IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG, SM_CXICON, SM_CXSCREEN,
-    SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
+    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE, CBS_DROPDOWNLIST, CREATESTRUCTW,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GWLP_USERDATA, HICON, HMENU,
+    ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, MINMAXINFO, MSG,
+    SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
     WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM,
     WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCCREATE, WM_NOTIFY, WM_PAINT,
-    WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_CONTROLPARENT, WS_EX_LAYERED, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WM_SETFONT, WM_SETICON, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::controls::{center_single_line_edit_in_row, child, draw_inno_button, wide, ButtonRole};
-use super::dialog::{
-    DialogButtons, DialogResult, DialogShell, DialogSpec, FIRST_PRESENTATION_ALPHA,
-};
+use super::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
 use super::driver_transfer_dialog::NativeDriverTransferDialog;
 use super::layout::{centered_control_y_ceil, measure_text, measured_button_width, LayoutMetrics};
 use super::pages::advanced::{
@@ -2489,16 +2486,17 @@ impl NativeWindow {
         // WM_THEMECHANGED invalidates cached UxTheme handles even when the light/dark bit did not
         // change.  Reapply the complete control tree every time, but keep the visible transition
         // atomic so pages and their scrollbars cannot expose a mixture of old and new colours.
-        let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
+        let _ = SendMessageW(hwnd, WM_SETREDRAW, WPARAM(0), LPARAM(0));
         self.palette = palette;
         self.apply_native_dark_theme(hwnd);
-        let _ = SendMessageW(hwnd, 0x000B, WPARAM(1), LPARAM(0)); // WM_SETREDRAW(TRUE)
+        let _ = SendMessageW(hwnd, WM_SETREDRAW, WPARAM(1), LPARAM(0));
         let _ = RedrawWindow(
             hwnd,
             None,
             None,
             RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         );
+        theme::commit_redirected_edit_surfaces(hwnd);
     }
 
     unsafe fn populate_partitions(&self, list: HWND, add_columns: bool) {
@@ -8954,6 +8952,10 @@ impl NativeWindow {
     }
 
     unsafe fn relocalize_after_language_change(&mut self, hwnd: HWND) {
+        // SetWindowText, ComboBox resets and ListView repopulation each invalidate their own
+        // native HWND. Keep those intermediate mixed-language frames hidden and publish one
+        // complete non-client/client/descendant transaction after layout has stabilised.
+        let _ = SendMessageW(hwnd, 0x000B, WPARAM(0), LPARAM(0)); // WM_SETREDRAW(FALSE)
         set_text(hwnd, &crate::tr!("LetRecovery - Windows系统一键重装工具"));
         if let Some(handles) = &self.handles {
             for (control, label) in handles.nav.into_iter().zip([
@@ -9117,7 +9119,14 @@ impl NativeWindow {
         self.update_system_status();
         self.select_page(hwnd, self.page);
         self.layout(hwnd);
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = SendMessageW(hwnd, WM_SETREDRAW, WPARAM(1), LPARAM(0));
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+        theme::commit_redirected_edit_surfaces(hwnd);
     }
 
     unsafe fn save_hardware_report(&self, hwnd: HWND) {
@@ -9416,7 +9425,7 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
         let (window_width, window_height) =
             preferred_window_size(initial_dpi, screen_width, screen_height);
         let hwnd = CreateWindowExW(
-            WS_EX_CONTROLPARENT | WS_EX_LAYERED,
+            WS_EX_CONTROLPARENT,
             CLASS_NAME,
             PCWSTR(title.as_ptr()),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
@@ -9429,14 +9438,6 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
             HINSTANCE(instance.0),
             Some((&mut *state as *mut NativeWindow).cast()),
         )?;
-        // WinPE may present stock child-control surfaces between ShowWindow and the first complete
-        // WM_PAINT pass. A global alpha of zero is not safe here: USER32 deliberately lets mouse
-        // input pass through zero-alpha layered pixels to whatever window is underneath. Alpha 1
-        // remains visually imperceptible while keeping the complete LetRecovery window hit-testable
-        // throughout the synchronous first-frame transaction.
-        let staged_near_transparent =
-            SetLayeredWindowAttributes(hwnd, COLORREF(0), FIRST_PRESENTATION_ALPHA, LWA_ALPHA)
-                .is_ok();
         let _ = SendMessageW(
             hwnd,
             WM_SETICON,
@@ -9479,27 +9480,7 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
             None,
             RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         );
-        if staged_near_transparent {
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-            // Layering is only a first-presentation staging mechanism. Keeping the top-level
-            // window layered makes later WM_SETREDRAW-based page switches transiently lose their
-            // redirected surface on some USER32/DWM combinations, which looks like the entire
-            // application disappears and reappears. Return to a normal opaque HWND immediately
-            // after the fully painted first frame has been revealed.
-            let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style & !(WS_EX_LAYERED.0 as isize));
-            // Flush USER32's cached non-client and hit-test state immediately. The next real click
-            // must observe a normal opaque top-level window, never the retired layered surface.
-            let _ = SetWindowPos(
-                hwnd,
-                HWND::default(),
-                0,
-                0,
-                0,
-                0,
-                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-            );
-        }
+        theme::commit_redirected_edit_surfaces(hwnd);
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&message);
@@ -10373,10 +10354,17 @@ unsafe extern "system" fn window_proc(
         WM_CTLCOLOREDIT => {
             if let Some(state) = state {
                 let dc = HDC(wparam.0 as *mut _);
+                let control = HWND(lparam.0 as *mut _);
                 let palette = state.control_palette();
+                let background = palette.edit_brush_color_for(control);
                 let _ = SetTextColor(dc, palette.text);
-                let _ = SetBkColor(dc, palette.edit_brush_color());
-                return LRESULT(state.brushes.edit.0 as isize);
+                let _ = SetBkColor(dc, background);
+                let brush = if background == palette.edit {
+                    state.brushes.edit_opaque
+                } else {
+                    state.brushes.edit
+                };
+                return LRESULT(brush.0 as isize);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
@@ -10401,6 +10389,7 @@ unsafe extern "system" fn window_proc(
                 if control_has_class(control, "Edit") {
                     let palette = state.control_palette();
                     let enabled = IsWindowEnabled(control).as_bool();
+                    let background = palette.edit_brush_color_for(control);
                     let _ = SetTextColor(
                         dc,
                         if enabled {
@@ -10409,8 +10398,13 @@ unsafe extern "system" fn window_proc(
                             palette.text_disabled
                         },
                     );
-                    let _ = SetBkColor(dc, palette.edit_brush_color());
-                    return LRESULT(state.brushes.edit.0 as isize);
+                    let _ = SetBkColor(dc, background);
+                    let brush = if background == palette.edit {
+                        state.brushes.edit_opaque
+                    } else {
+                        state.brushes.edit
+                    };
+                    return LRESULT(brush.0 as isize);
                 }
                 let _ = SetTextColor(dc, state.control_palette().text);
                 let _ = SetBkColor(
