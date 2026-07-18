@@ -181,6 +181,13 @@ const fn list_view_selection_state_changed(changed: u32, old_state: u32, new_sta
     changed & LVIF_STATE.0 != 0 && (old_state ^ new_state) & LVIS_SELECTED.0 != 0
 }
 
+const fn unattended_checked_for_source_preference(
+    configured_preference: bool,
+    source_has_unattend: bool,
+) -> bool {
+    configured_preference && !source_has_unattend
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PartitionSelectionKey {
     letter: String,
@@ -645,10 +652,10 @@ mod layout_tests {
         list_view_selection_state_changed, minimum_window_size, page_switch_requires_full_layout,
         pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
         pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
-        tool_backend_result_succeeded, BitLockerGateCompletion, InstallControlSnapshot, Page,
-        PcaTargetContext, PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED,
-        DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT,
-        LVIS_SELECTED,
+        tool_backend_result_succeeded, unattended_checked_for_source_preference,
+        BitLockerGateCompletion, InstallControlSnapshot, Page, PcaTargetContext, PcaTargetKey,
+        PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
+        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_executor::{DownloadFailureStage, DownloadWorkerError};
@@ -709,6 +716,14 @@ mod layout_tests {
             0,
             LVIS_SELECTED.0
         ));
+    }
+
+    #[test]
+    fn unattended_default_uses_configured_preference_and_selected_source_only() {
+        assert!(unattended_checked_for_source_preference(true, false));
+        assert!(!unattended_checked_for_source_preference(false, false));
+        assert!(!unattended_checked_for_source_preference(true, true));
+        assert!(!unattended_checked_for_source_preference(false, true));
     }
 
     #[test]
@@ -1330,7 +1345,6 @@ struct NativeWindow {
     advanced_defaults_target: Option<String>,
     custom_unattend_path: String,
     custom_unattend_error: Option<String>,
-    target_has_unattend: bool,
     source_has_unattend: bool,
     pca_firmware: Option<lr_core::boot_pca::FirmwarePcaInfo>,
     pca_detection_pending: bool,
@@ -1505,7 +1519,6 @@ impl NativeWindow {
             advanced_defaults_target: None,
             custom_unattend_path: String::new(),
             custom_unattend_error: None,
-            target_has_unattend: false,
             source_has_unattend: false,
             pca_firmware: None,
             pca_detection_pending: false,
@@ -4038,16 +4051,6 @@ impl NativeWindow {
     unsafe fn handle_install_partition_changed(&mut self, hwnd: HWND) {
         let Some(handles) = &self.handles else { return };
         let target = self.selected_install_target();
-        #[cfg(not(feature = "non-elevated-tests"))]
-        {
-            self.target_has_unattend = target
-                .as_ref()
-                .is_some_and(|target| target_contains_unattend(&target.partition));
-        }
-        #[cfg(feature = "non-elevated-tests")]
-        {
-            self.target_has_unattend = false;
-        }
         if target
             .as_ref()
             .is_some_and(|target| target.is_current_system || target.has_windows)
@@ -4077,17 +4080,9 @@ impl NativeWindow {
 
     unsafe fn update_unattend_conflict(&mut self) {
         let Some(handles) = &self.handles else { return };
-        let formatting = SendMessageW(handles.format, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
-        let blocked = self.target_has_unattend && !formatting;
-        let _ = EnableWindow(handles.unattend, !blocked);
-        if blocked {
-            let _ = SendMessageW(handles.unattend, 0x00F1, WPARAM(0), LPARAM(0));
-            self.app_config.install_prefs.unattended_install = false;
-            set_text(
-                handles.status,
-                &crate::tr!("目标分区已存在无人值守配置；启用格式化后才能使用新的无人值守设置。"),
-            );
-        }
+        // 目标安装分区中的 Panther/Sysprep 文件属于旧系统，格式化后会被删除，不能
+        // 用来推断本次所选镜像是否自带应答文件。冲突判断只看源镜像/安装介质。
+        let _ = EnableWindow(handles.unattend, true);
         self.update_unattend_controls_visibility();
     }
 
@@ -4216,14 +4211,16 @@ impl NativeWindow {
 
     unsafe fn apply_unattend_default(&mut self) {
         let Some(handles) = self.handles else { return };
-        let enabled = !(self.target_has_unattend || self.source_has_unattend);
+        let enabled = unattended_checked_for_source_preference(
+            self.app_config.install_prefs.unattended_install,
+            self.source_has_unattend,
+        );
         let _ = SendMessageW(
             handles.unattend,
             0x00F1,
             WPARAM(usize::from(enabled)),
             LPARAM(0),
         );
-        self.app_config.install_prefs.unattended_install = enabled;
         self.update_unattend_controls_visibility();
     }
 
@@ -9592,20 +9589,6 @@ unsafe fn discard_stale_inspected_source(
             log::warn!("清理过期镜像请求的 ISO 挂载失败: {error}");
         }
     }
-}
-
-#[cfg(not(feature = "non-elevated-tests"))]
-fn target_contains_unattend(volume: &str) -> bool {
-    let root = std::path::PathBuf::from(format!("{}\\", volume.trim_end_matches(['\\', '/'])));
-    [
-        "unattend.xml",
-        "autounattend.xml",
-        "Windows\\Panther\\unattend.xml",
-        "Windows\\Panther\\Unattend\\unattend.xml",
-        "Windows\\System32\\Sysprep\\unattend.xml",
-    ]
-    .iter()
-    .any(|relative| root.join(relative).is_file())
 }
 
 #[cfg(not(feature = "non-elevated-tests"))]
