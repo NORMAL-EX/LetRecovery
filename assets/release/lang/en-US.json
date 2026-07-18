@@ -2160,6 +2160,10 @@
     "XP/2003 安装源校验失败: {}": "XP/2003 setup source validation failed: {}",
     "正在准备 XP/2003 文本模式安装...": "Preparing XP/2003 text-mode setup...",
     "准备 XP/2003 文本模式安装失败: {}": "Failed to prepare XP/2003 text-mode setup: {}",
-    "XP/2003 文本模式安装已准备完成，请重启计算机继续安装。": "XP/2003 text-mode setup is ready. Restart the computer to continue."
+    "XP/2003 文本模式安装已准备完成，请重启计算机继续安装。": "XP/2003 text-mode setup is ready. Restart the computer to continue.",
+    "清理安装临时分区并合并空间失败: {}": "Failed to remove the temporary setup partition and merge its space: {}",
+    "应用自定义无人值守配置失败: {}": "Failed to apply the custom unattended setup configuration: {}",
+    "应用自定义无人值守文件失败: {}": "Failed to apply the custom unattended setup file: {}",
+    "生成无人值守配置失败: {}": "Failed to generate the unattended setup configuration: {}"
   }
 }

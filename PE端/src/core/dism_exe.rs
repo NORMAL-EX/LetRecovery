@@ -28,6 +28,99 @@ pub struct DismExeProgress {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineInternationalSettings {
+    pub ui_language: String,
+    pub system_locale: String,
+    pub user_locale: String,
+    pub input_locale: String,
+    pub time_zone: String,
+}
+
+fn field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let (name, value) = line.split_once(':')?;
+    name.trim()
+        .eq_ignore_ascii_case(field)
+        .then_some(value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn valid_locale_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 35
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+}
+
+fn valid_input_locale(value: &str) -> bool {
+    let Some((language, keyboard)) = value.split_once(':') else {
+        return valid_locale_name(value);
+    };
+    language.len() == 4
+        && keyboard.len() == 8
+        && language
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        && keyboard
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+fn parse_offline_international_settings(output: &str) -> Result<OfflineInternationalSettings> {
+    let mut ui_language = None;
+    let mut system_locale = None;
+    let mut user_locale = None;
+    let mut input_locale = None;
+    let mut time_zone = None;
+
+    for line in output.lines() {
+        ui_language = ui_language
+            .or_else(|| field_value(line, "Default system UI language").map(str::to_string));
+        system_locale =
+            system_locale.or_else(|| field_value(line, "System locale").map(str::to_string));
+        user_locale = user_locale.or_else(|| field_value(line, "User locale").map(str::to_string));
+        time_zone =
+            time_zone.or_else(|| field_value(line, "Default time zone").map(str::to_string));
+        if input_locale.is_none() {
+            input_locale = field_value(line, "Active keyboard(s)")
+                .and_then(|value| value.split([',', ';', ' ']).find(|item| !item.is_empty()))
+                .map(str::to_string);
+        }
+    }
+
+    let ui_language = ui_language
+        .filter(|value| valid_locale_name(value))
+        .ok_or_else(|| anyhow::anyhow!("DISM /Get-Intl 未返回有效的默认系统 UI 语言"))?;
+    let system_locale = system_locale
+        .filter(|value| valid_locale_name(value))
+        .ok_or_else(|| anyhow::anyhow!("DISM /Get-Intl 未返回有效的系统区域设置"))?;
+    let user_locale = user_locale.unwrap_or_else(|| ui_language.clone());
+    if !valid_locale_name(&user_locale) {
+        anyhow::bail!("DISM /Get-Intl 返回了无效的用户区域设置: {user_locale}");
+    }
+    let input_locale = input_locale
+        .filter(|value| valid_input_locale(value))
+        .ok_or_else(|| anyhow::anyhow!("DISM /Get-Intl 未返回有效的活动键盘布局"))?;
+    let time_zone = time_zone
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && !value
+                    .chars()
+                    .any(|character| matches!(character, '<' | '>'))
+        })
+        .ok_or_else(|| anyhow::anyhow!("DISM /Get-Intl 未返回有效的默认时区"))?;
+
+    Ok(OfflineInternationalSettings {
+        ui_language,
+        system_locale,
+        user_locale,
+        input_locale,
+        time_zone,
+    })
+}
+
 /// DISM.exe 执行器
 ///
 /// 封装了使用 dism.exe 命令行工具进行离线镜像服务的所有操作。
@@ -293,6 +386,22 @@ impl DismExe {
 
         log::info!("[DISM.EXE] 操作成功完成");
         Ok(stdout_text)
+    }
+
+    /// 只读查询已经释放到目标分区的 Windows 国际化默认值。
+    /// 这些值必须写入 oobeSystem，避免 Windows 11 因语言或键盘仍待确认而重新进入用户 OOBE。
+    pub fn get_offline_international_settings(
+        &self,
+        image_path: &str,
+    ) -> Result<OfflineInternationalSettings> {
+        let normalized_image = if image_path.ends_with('\\') {
+            image_path.to_string()
+        } else {
+            format!("{}\\", image_path)
+        };
+        let image_arg = format!("/Image:{normalized_image}");
+        let output = self.execute_with_progress(&["/English", &image_arg, "/Get-Intl"], None)?;
+        parse_offline_international_settings(&output)
     }
 
     /// 解析 DISM 输出中的进度信息
@@ -644,6 +753,32 @@ mod tests {
         let output = "Line 1\nError: Something went wrong\nDetails here\nMore info\nLast line";
         let error = DismExe::extract_error_from_output(output);
         assert!(error.contains("Error:"));
+    }
+
+    #[test]
+    fn parses_offline_international_settings_for_chinese_image() {
+        let output = r#"
+Default system UI language : zh-CN
+System locale : zh-CN
+Default time zone : China Standard Time
+Active keyboard(s) : 0804:00000804
+Keyboard layered driver : Not installed.
+"#;
+        let settings = parse_offline_international_settings(output).unwrap();
+        assert_eq!(settings.ui_language, "zh-CN");
+        assert_eq!(settings.system_locale, "zh-CN");
+        assert_eq!(settings.user_locale, "zh-CN");
+        assert_eq!(settings.input_locale, "0804:00000804");
+        assert_eq!(settings.time_zone, "China Standard Time");
+    }
+
+    #[test]
+    fn rejects_incomplete_offline_international_settings() {
+        let error = parse_offline_international_settings(
+            "Default system UI language : en-US\nSystem locale : en-US\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("活动键盘布局"));
     }
 
     #[test]

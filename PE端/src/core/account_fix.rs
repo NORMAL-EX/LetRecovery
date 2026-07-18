@@ -15,7 +15,8 @@
 //! 2) 非空密码清除层（仅在已知用户名时触发）：离线把目标账户在 SAM 中的 NT/LM
 //!    hash 长度清零（等效空密码）并启用账户——该逻辑已收纳到共享库
 //!    `lr_core::sam::clear_account_password`（含强制备份、成功后删除备份等安全措施）。
-//!    sysprep 镜像里目标账户尚未创建 → 无匹配 → 自动空操作，故对装机无副作用。
+//!    该兜底只用于完整备份/未 sysprep 镜像；处于 reseal-to-OOBE 状态的安装镜像
+//!    必须完全交给 unattend 创建账户，不能提前写 Winlogon 自动登录状态。
 
 use anyhow::Result;
 use std::path::Path;
@@ -33,14 +34,73 @@ fn software_hive_path(target_partition: &str) -> String {
     format!("{}\\Windows\\System32\\config\\SOFTWARE", target_partition)
 }
 
+fn image_state_needs_legacy_login_fallback(image_state: &str) -> bool {
+    image_state
+        .trim()
+        .eq_ignore_ascii_case("IMAGE_STATE_COMPLETE")
+}
+
+fn should_apply_legacy_login_fallback(target_partition: &str, force: bool) -> Result<bool> {
+    if force {
+        return Ok(true);
+    }
+
+    let software_hive = software_hive_path(target_partition);
+    if !Path::new(&software_hive).exists() {
+        anyhow::bail!("{}", tr!("目标 SOFTWARE 配置单元不存在: {}", software_hive));
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let hive_name = format!("LR_STATE_{}_{}", std::process::id(), nonce);
+    OfflineRegistry::load_hive(&hive_name, &software_hive)?;
+    let state_key = format!(
+        "HKLM\\{}\\Microsoft\\Windows\\CurrentVersion\\Setup\\State",
+        hive_name
+    );
+    let query_result = OfflineRegistry::query_string(&state_key, "ImageState");
+    let unload_result = OfflineRegistry::unload_hive(&hive_name);
+    unload_result?;
+
+    match query_result {
+        Ok(image_state) => {
+            let apply = image_state_needs_legacy_login_fallback(&image_state);
+            log::info!(
+                "[LOGIN] 目标镜像 ImageState={}，离线登录兜底={}",
+                image_state,
+                apply
+            );
+            Ok(apply)
+        }
+        Err(error) => {
+            log::warn!(
+                "[LOGIN] 无法确认目标镜像 ImageState，安全跳过离线自动登录兜底: {}",
+                error
+            );
+            Ok(false)
+        }
+    }
+}
+
 /// 应用离线登录兜底设置。
 ///
 /// - `target_partition`：目标系统盘，形如 `"C:"`。
 /// - `username`：期望自动登录的用户名；为空时仅放开空密码策略，不配置自动登录
 ///   （避免对未知账户强行设置自动登录导致登录失败循环）。
 ///
+/// `force_legacy_fallback` 仅供 GHO、XP/2003 等明确不会进入现代 OOBE 的路径使用。
 /// 任一步失败都不会中断安装，调用方按需记录日志即可。
-pub fn ensure_offline_login(target_partition: &str, username: &str) -> Result<()> {
+pub fn ensure_offline_login(
+    target_partition: &str,
+    username: &str,
+    force_legacy_fallback: bool,
+) -> Result<()> {
+    if !should_apply_legacy_login_fallback(target_partition, force_legacy_fallback)? {
+        log::info!("[LOGIN] 安装镜像将进入 OOBE，跳过离线 Winlogon/SAM 登录兜底");
+        return Ok(());
+    }
+
     let system_hive = system_hive_path(target_partition);
     let software_hive = software_hive_path(target_partition);
 
@@ -93,4 +153,23 @@ pub fn ensure_offline_login(target_partition: &str, username: &str) -> Result<()
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_state_needs_legacy_login_fallback;
+
+    #[test]
+    fn only_complete_images_use_legacy_login_fallback() {
+        assert!(image_state_needs_legacy_login_fallback(
+            "IMAGE_STATE_COMPLETE"
+        ));
+        assert!(!image_state_needs_legacy_login_fallback(
+            "IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE"
+        ));
+        assert!(!image_state_needs_legacy_login_fallback(
+            "IMAGE_STATE_SPECIALIZE_RESEAL_TO_OOBE"
+        ));
+        assert!(!image_state_needs_legacy_login_fallback("UNKNOWN"));
+    }
 }

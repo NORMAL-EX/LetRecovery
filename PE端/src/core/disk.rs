@@ -2,9 +2,16 @@ use anyhow::Result;
 use lr_core::command::{CommandExecutor, CommandOutcome, CommandRequest, SystemCommandExecutor};
 use std::path::{Path, PathBuf};
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
+    CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, SetVolumeLabelW,
+    FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
+use windows::Win32::System::Ioctl::{
+    IOCTL_DISK_GET_PARTITION_INFO_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER, PARTITION_INFORMATION_EX,
+    STORAGE_DEVICE_NUMBER,
+};
+use windows::Win32::System::IO::DeviceIoControl;
 
 use crate::tr;
 use crate::utils::command::new_command;
@@ -12,6 +19,8 @@ use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
 
 const DRIVE_FIXED: u32 = 3;
+const FORMAT_TEMP_LABEL: &str = "LetRecovery";
+const MAX_ADJACENCY_GAP_BYTES: u64 = 1024 * 1024;
 
 /// 自动创建分区的标志文件名
 pub const AUTO_CREATED_PARTITION_MARKER: &str = "LetRecovery_AutoCreated.marker";
@@ -87,9 +96,172 @@ pub struct PartitionDetail {
     pub partition_number: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartitionGeometry {
+    disk_number: u32,
+    partition_number: u32,
+    starting_offset: u64,
+    partition_length: u64,
+}
+
+impl PartitionGeometry {
+    fn end_offset(self) -> Option<u64> {
+        self.starting_offset.checked_add(self.partition_length)
+    }
+}
+
+fn partitions_are_physically_adjacent(
+    target: PartitionGeometry,
+    temporary: PartitionGeometry,
+) -> bool {
+    if target.disk_number != temporary.disk_number
+        || target.partition_number == temporary.partition_number
+    {
+        return false;
+    }
+    let Some(target_end) = target.end_offset() else {
+        return false;
+    };
+    temporary
+        .starting_offset
+        .checked_sub(target_end)
+        .is_some_and(|gap| gap <= MAX_ADJACENCY_GAP_BYTES)
+}
+
 pub struct DiskManager;
 
 impl DiskManager {
+    fn partition_geometry(drive: &str) -> Result<PartitionGeometry> {
+        let letter = drive
+            .chars()
+            .next()
+            .filter(|character| character.is_ascii_alphabetic())
+            .ok_or_else(|| anyhow::anyhow!("无效的分区盘符: {drive}"))?
+            .to_ascii_uppercase();
+        let device_path = format!(r"\\.\{}:", letter);
+        let wide_device_path: Vec<u16> = device_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide_device_path.as_ptr()),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                HANDLE::default(),
+            )
+        }
+        .map_err(|error| anyhow::anyhow!("打开卷 {letter}: 查询分区身份失败: {error}"))?;
+
+        let result = (|| {
+            let mut device_number = STORAGE_DEVICE_NUMBER::default();
+            let mut bytes_returned = 0u32;
+            unsafe {
+                DeviceIoControl(
+                    handle,
+                    IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                    None,
+                    0,
+                    Some((&mut device_number as *mut STORAGE_DEVICE_NUMBER).cast()),
+                    std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
+                    Some(&mut bytes_returned),
+                    None,
+                )
+            }
+            .map_err(|error| anyhow::anyhow!("查询卷 {letter}: 的磁盘号和分区号失败: {error}"))?;
+            if bytes_returned < std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32 {
+                anyhow::bail!("查询卷 {letter}: 的磁盘身份返回数据不完整");
+            }
+
+            let mut partition_info = PARTITION_INFORMATION_EX::default();
+            bytes_returned = 0;
+            unsafe {
+                DeviceIoControl(
+                    handle,
+                    IOCTL_DISK_GET_PARTITION_INFO_EX,
+                    None,
+                    0,
+                    Some((&mut partition_info as *mut PARTITION_INFORMATION_EX).cast()),
+                    std::mem::size_of::<PARTITION_INFORMATION_EX>() as u32,
+                    Some(&mut bytes_returned),
+                    None,
+                )
+            }
+            .map_err(|error| anyhow::anyhow!("查询卷 {letter}: 的分区几何信息失败: {error}"))?;
+            if bytes_returned < std::mem::size_of::<PARTITION_INFORMATION_EX>() as u32 {
+                anyhow::bail!("查询卷 {letter}: 的分区几何信息返回数据不完整");
+            }
+            if partition_info.StartingOffset < 0 || partition_info.PartitionLength <= 0 {
+                anyhow::bail!("卷 {letter}: 返回了无效的分区几何信息");
+            }
+            if device_number.PartitionNumber != partition_info.PartitionNumber {
+                anyhow::bail!(
+                    "卷 {letter}: 的分区身份不一致（storage={}，disk={}）",
+                    device_number.PartitionNumber,
+                    partition_info.PartitionNumber
+                );
+            }
+
+            Ok(PartitionGeometry {
+                disk_number: device_number.DeviceNumber,
+                partition_number: partition_info.PartitionNumber,
+                starting_offset: partition_info.StartingOffset as u64,
+                partition_length: partition_info.PartitionLength as u64,
+            })
+        })();
+
+        if let Err(error) = unsafe { CloseHandle(handle) } {
+            log::warn!("关闭卷 {}: 查询句柄失败: {}", letter, error);
+        }
+        result
+    }
+
+    fn set_and_verify_volume_label(drive: &str, volume_label: &str) -> Result<()> {
+        let root = format!("{}\\", drive.trim_end_matches('\\'));
+        let wide_root: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_label: Vec<u16> = volume_label
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe { SetVolumeLabelW(PCWSTR(wide_root.as_ptr()), PCWSTR(wide_label.as_ptr())) }
+            .map_err(|error| anyhow::anyhow!("设置卷标“{volume_label}”失败: {error}"))?;
+
+        let mut actual_label = vec![0u16; 261];
+        unsafe {
+            GetVolumeInformationW(
+                PCWSTR(wide_root.as_ptr()),
+                Some(&mut actual_label),
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .map_err(|error| anyhow::anyhow!("读取格式化后的卷标失败: {error}"))?;
+        let actual_label = String::from_utf16_lossy(&actual_label)
+            .trim_end_matches('\0')
+            .to_string();
+        if actual_label != volume_label {
+            anyhow::bail!(
+                "卷标写入校验失败：期望“{}”，实际“{}”",
+                volume_label,
+                actual_label
+            );
+        }
+        Ok(())
+    }
+
+    fn format_diskpart_script(drive_letter: char) -> String {
+        format!(
+            "select volume {}\r\nformat fs=ntfs label=\"{}\" quick override\r\nexit\r\n",
+            drive_letter, FORMAT_TEMP_LABEL
+        )
+    }
+
     fn format_failure_hint() -> String {
         tr!(
             "可能原因:\n- 目标盘质量较差或已损坏（坏盘/扩容盘/掉盘）\n- 磁盘存在坏道、I/O 错误或 CRC 错误\n- 数据线、USB 口、硬盘盒或供电不稳定\n- 分区被占用、写保护或分区表异常"
@@ -265,8 +437,17 @@ impl DiskManager {
 
     /// 获取分区表类型和分区号 (GPT/MBR)
     fn get_partition_style(drive: &str) -> PartitionDetail {
-        // PE环境下直接使用 diskpart
-        Self::get_partition_style_diskpart(drive)
+        match Self::partition_geometry(drive) {
+            Ok(geometry) => PartitionDetail {
+                style: Self::get_disk_partition_style(geometry.disk_number),
+                disk_number: Some(geometry.disk_number),
+                partition_number: Some(geometry.partition_number),
+            },
+            Err(error) => {
+                log::warn!("[disk] Win32 分区身份查询失败，回退 DiskPart: {}", error);
+                Self::get_partition_style_diskpart(drive)
+            }
+        }
     }
 
     /// 使用 diskpart 获取分区信息（备用方法）
@@ -381,10 +562,9 @@ impl DiskManager {
         let vol_label = spec.volume_label().unwrap_or("本地磁盘");
 
         // 使用 diskpart 格式化，避免 format.com 在 PE 中的交互和参数兼容问题
-        let script = format!(
-            "select volume {}\r\nformat fs=ntfs label=\"{}\" quick override\r\nexit\r\n",
-            drive_letter, vol_label
-        );
+        // DiskPart 脚本由窄字节命令行工具按当前 OEM 代码页读取。这里只写 ASCII 临时卷标，
+        // 格式化成功后再通过 SetVolumeLabelW 写入并校验用户的 Unicode 卷标。
+        let script = Self::format_diskpart_script(drive_letter);
         let cmd_args = format!("diskpart format {}", drive);
 
         log::info!("执行命令: {}", cmd_args);
@@ -439,6 +619,7 @@ impl DiskManager {
 
         if has_success_indicator && !has_error_indicator {
             log::info!("分区 {} 格式化成功", drive);
+            Self::set_and_verify_volume_label(&drive, vol_label)?;
             Ok(stdout)
         } else {
             let diskpart_detail = if !combined.trim().is_empty() {
@@ -446,9 +627,10 @@ impl DiskManager {
             } else {
                 tr!("diskpart 无输出，格式化失败。请确认该分区未被占用后重试。")
             };
-            match Self::format_partition_with_format_command(&drive, vol_label) {
+            match Self::format_partition_with_format_command(&drive, FORMAT_TEMP_LABEL) {
                 Ok(format_stdout) => {
                     log::info!("[FORMAT] DiskPart 失败后 fallback format 成功");
+                    Self::set_and_verify_volume_label(&drive, vol_label)?;
                     Ok(format!("{}\n{}", stdout.trim(), format_stdout.trim()))
                 }
                 Err(format_detail) => {
@@ -599,7 +781,7 @@ impl DiskManager {
     /// 流程：
     /// 1. 找到自动创建的分区
     /// 2. 确认该分区和目标分区在同一个磁盘上
-    /// 3. 检查分区号，确保临时分区在目标分区之后（相邻性检查）
+    /// 3. 通过 Win32 分区偏移和长度确认临时分区位于目标分区紧邻后方
     /// 4. 记录目标分区当前大小
     /// 5. 删除该分区
     /// 6. 刷新磁盘信息
@@ -618,7 +800,7 @@ impl DiskManager {
         log::info!("[CLEANUP] ========================================");
 
         // 查找自动创建的分区
-        let (auto_letter, auto_disk_num_opt, marker_source) =
+        let (auto_letter, _auto_disk_num_opt, marker_source) =
             match Self::find_auto_created_partition() {
                 Some(info) => info,
                 None => {
@@ -627,44 +809,36 @@ impl DiskManager {
                 }
             };
 
-        // 获取自动创建分区的详细信息
-        let auto_detail = Self::get_partition_style(&format!("{}:", auto_letter));
-        let auto_disk_num = match auto_disk_num_opt.or(auto_detail.disk_number) {
-            Some(num) => num,
-            None => {
-                anyhow::bail!(
-                    "[CLEANUP] 无法获取自动创建分区 {} 的磁盘号，已取消删除",
-                    auto_letter
-                );
-            }
-        };
-        let auto_part_num = auto_detail.partition_number;
+        let auto_geometry =
+            Self::partition_geometry(&format!("{}:", auto_letter)).map_err(|error| {
+                anyhow::anyhow!(
+                    "[CLEANUP] 无法可靠获取自动创建分区 {}: 的身份和几何信息，已取消删除: {}",
+                    auto_letter,
+                    error
+                )
+            })?;
 
         log::info!(
             "[CLEANUP] 找到自动创建的分区: {}:, 磁盘 {}, 分区号 {:?}",
             auto_letter,
-            auto_disk_num,
-            auto_part_num
+            auto_geometry.disk_number,
+            auto_geometry.partition_number
         );
 
-        // 获取目标分区所在的磁盘号和分区号
-        let target_detail = Self::get_partition_style(&format!("{}:", target_letter));
-        let target_disk_num = match target_detail.disk_number {
-            Some(num) => num,
-            None => {
-                anyhow::bail!(
-                    "[CLEANUP] 无法获取目标分区 {} 的磁盘号，已取消删除自动创建分区",
-                    target_letter
-                );
-            }
-        };
-        let target_part_num = target_detail.partition_number;
+        let target_geometry =
+            Self::partition_geometry(&format!("{}:", target_letter)).map_err(|error| {
+                anyhow::anyhow!(
+                    "[CLEANUP] 无法可靠获取目标分区 {}: 的身份和几何信息，已取消删除: {}",
+                    target_letter,
+                    error
+                )
+            })?;
 
         log::info!(
             "[CLEANUP] 目标分区: {}:, 磁盘 {}, 分区号 {:?}",
             target_letter,
-            target_disk_num,
-            target_part_num
+            target_geometry.disk_number,
+            target_geometry.partition_number
         );
 
         let source_letter = marker_source.ok_or_else(|| {
@@ -683,33 +857,29 @@ impl DiskManager {
         }
 
         // 检查是否在同一磁盘
-        if auto_disk_num != target_disk_num {
+        if auto_geometry.disk_number != target_geometry.disk_number {
             anyhow::bail!(
                 "[CLEANUP] 自动创建的分区 (磁盘{}) 和目标分区 (磁盘{}) 不在同一磁盘，已取消删除",
-                auto_disk_num,
-                target_disk_num
+                auto_geometry.disk_number,
+                target_geometry.disk_number
             );
         }
 
-        // 检查分区相邻性：临时分区应该在目标分区之后
-        // diskpart extend 只能向后扩展到相邻的未分配空间
-        let target_pn = target_part_num.ok_or_else(|| {
-            anyhow::anyhow!("[CLEANUP] 无法获取目标分区号，已取消删除自动创建分区")
-        })?;
-        let auto_pn = auto_part_num
-            .ok_or_else(|| anyhow::anyhow!("[CLEANUP] 无法获取自动创建分区号，已取消删除"))?;
-
-        if auto_pn != target_pn + 1 {
+        // DiskPart extend 只能使用目标分区物理末端之后的相邻未分配空间。分区号不能证明
+        // 物理相邻，因此必须使用 IOCTL 返回的起始偏移和长度做 fail-closed 检查。
+        if !partitions_are_physically_adjacent(target_geometry, auto_geometry) {
             anyhow::bail!(
-                "[CLEANUP] 自动创建分区 (分区号{}) 不是目标分区 (分区号{}) 的紧邻后方分区，已取消删除",
-                auto_pn,
-                target_pn
+                "[CLEANUP] 自动创建分区 {}: 不是目标分区 {}: 的物理紧邻后方分区，已取消删除",
+                auto_letter,
+                target_letter
             );
         }
         log::info!(
-            "[CLEANUP] 分区相邻性检查通过：目标分区{} -> 临时分区{}",
-            target_pn,
-            auto_pn
+            "[CLEANUP] 物理相邻性检查通过：目标分区{} (末端={:?}) -> 临时分区{} (起点={})",
+            target_geometry.partition_number,
+            target_geometry.end_offset(),
+            auto_geometry.partition_number,
+            auto_geometry.starting_offset
         );
 
         // 删除自动创建分区并扩展目标分区
@@ -718,7 +888,12 @@ impl DiskManager {
             auto_letter,
             target_letter
         );
-        Self::delete_partition_and_extend(auto_letter, target_letter, auto_disk_num)
+        Self::delete_partition_and_extend(
+            auto_letter,
+            target_letter,
+            auto_geometry,
+            target_geometry,
+        )
     }
 
     /// 删除指定盘符的分区
@@ -764,8 +939,17 @@ impl DiskManager {
     fn delete_partition_and_extend(
         auto_letter: char,
         target_letter: char,
-        disk_num: u32,
+        expected_auto: PartitionGeometry,
+        expected_target: PartitionGeometry,
     ) -> Result<()> {
+        // 在不可逆删除前重新打开两个卷并比对稳定身份和几何信息，防止扫描后盘符变化、
+        // 磁盘插拔或分区表被其它进程修改而删错目标。
+        let current_auto = Self::partition_geometry(&format!("{}:", auto_letter))?;
+        let current_target = Self::partition_geometry(&format!("{}:", target_letter))?;
+        if current_auto != expected_auto || current_target != expected_target {
+            anyhow::bail!("[CLEANUP] 删除前分区身份或几何信息发生变化，已取消删除");
+        }
+
         // 记录扩展前的分区大小
         let size_before = Self::get_partition_size_mb(target_letter);
         log::info!("[CLEANUP] 扩展前目标分区大小: {:?} MB", size_before);
@@ -773,7 +957,10 @@ impl DiskManager {
         // Step 1: 删除分区
         log::info!("[CLEANUP] Step 1: 删除分区 {}:", auto_letter);
 
-        let delete_script = format!("select volume {}\ndelete partition override", auto_letter);
+        let delete_script = format!(
+            "select disk {}\nselect partition {}\ndelete partition override",
+            expected_auto.disk_number, expected_auto.partition_number
+        );
         let output_text = Self::execute_diskpart_checked("lr-delete-and-extend", &delete_script)?;
         log::info!("[CLEANUP] 删除分区输出: {}", output_text);
 
@@ -803,7 +990,7 @@ impl DiskManager {
             );
 
             // 尝试扩展
-            match Self::try_extend_volume_enhanced(target_letter, disk_num) {
+            match Self::try_extend_volume_enhanced(target_letter, expected_target.disk_number) {
                 Ok(_) => {
                     // 验证扩展是否成功
                     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -1004,7 +1191,67 @@ impl DiskManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{diskpart_reports_no_space, diskpart_reports_success, DiskManager, PartitionStyle};
+    use super::{
+        diskpart_reports_no_space, diskpart_reports_success, partitions_are_physically_adjacent,
+        DiskManager, PartitionGeometry, PartitionStyle, FORMAT_TEMP_LABEL,
+    };
+
+    fn geometry(
+        disk_number: u32,
+        partition_number: u32,
+        starting_offset: u64,
+        partition_length: u64,
+    ) -> PartitionGeometry {
+        PartitionGeometry {
+            disk_number,
+            partition_number,
+            starting_offset,
+            partition_length,
+        }
+    }
+
+    #[test]
+    fn validates_physical_partition_adjacency_from_offsets() {
+        let target = geometry(0, 2, 1024 * 1024, 40 * 1024 * 1024);
+        assert!(partitions_are_physically_adjacent(
+            target,
+            geometry(0, 3, target.end_offset().unwrap(), 10 * 1024 * 1024)
+        ));
+        assert!(partitions_are_physically_adjacent(
+            target,
+            geometry(
+                0,
+                7,
+                target.end_offset().unwrap() + 1024 * 1024,
+                10 * 1024 * 1024
+            )
+        ));
+        assert!(!partitions_are_physically_adjacent(
+            target,
+            geometry(
+                0,
+                3,
+                target.end_offset().unwrap() + 2 * 1024 * 1024,
+                10 * 1024 * 1024
+            )
+        ));
+        assert!(!partitions_are_physically_adjacent(
+            target,
+            geometry(1, 3, target.end_offset().unwrap(), 10 * 1024 * 1024)
+        ));
+        assert!(!partitions_are_physically_adjacent(
+            geometry(0, 2, u64::MAX - 10, 20),
+            geometry(0, 3, u64::MAX, 1)
+        ));
+    }
+
+    #[test]
+    fn diskpart_format_script_never_contains_the_user_unicode_label() {
+        let script = DiskManager::format_diskpart_script('C');
+        assert!(script.is_ascii());
+        assert!(script.contains(FORMAT_TEMP_LABEL));
+        assert!(!script.contains("uac主播"));
+    }
 
     #[test]
     fn parses_diskpart_unique_ids_without_depending_on_language() {

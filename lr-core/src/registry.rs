@@ -7,7 +7,51 @@ use crate::encoding::gbk_to_utf8;
 
 pub struct OfflineRegistry;
 
+fn parse_string_query_output(output: &str, value_name: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        for value_type in ["REG_SZ", "REG_EXPAND_SZ"] {
+            let Some(type_offset) = trimmed.find(value_type) else {
+                continue;
+            };
+            if !trimmed[..type_offset]
+                .trim()
+                .eq_ignore_ascii_case(value_name)
+            {
+                continue;
+            }
+            let value = trimmed[type_offset + value_type.len()..].trim();
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 impl OfflineRegistry {
+    /// 读取字符串值。查询失败和值不存在均返回带上下文的错误，调用方不能把未知状态当成功。
+    pub fn query_string(key_path: &str, value_name: &str) -> Result<String> {
+        let output = new_command("reg.exe")
+            .args(["query", key_path, "/v", value_name])
+            .output()?;
+        let stdout = gbk_to_utf8(&output.stdout);
+        let stderr = gbk_to_utf8(&output.stderr);
+        if !output.status.success() {
+            anyhow::bail!(
+                "Failed to query registry value {}\\{}: {}",
+                key_path,
+                value_name,
+                stderr.trim()
+            );
+        }
+        parse_string_query_output(&stdout, value_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Registry query did not return {}\\{} as a string value",
+                key_path,
+                value_name
+            )
+        })
+    }
+
     /// 加载离线注册表配置单元
     pub fn load_hive(hive_name: &str, hive_file: &str) -> Result<()> {
         let key_path = format!("HKLM\\{}", hive_name);
@@ -163,5 +207,24 @@ impl OfflineRegistry {
             anyhow::bail!("Failed to import reg file: {}", stderr);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_string_query_output;
+
+    #[test]
+    fn parses_reg_query_string_without_losing_spaces() {
+        let output = "HKEY_LOCAL_MACHINE\\LR_TEST\\Setup\\State\r\n    ImageState    REG_SZ    IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE\r\n    ProductName    REG_SZ    Windows 11 专业版\r\n";
+        assert_eq!(
+            parse_string_query_output(output, "ImageState").as_deref(),
+            Some("IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE")
+        );
+        assert_eq!(
+            parse_string_query_output(output, "ProductName").as_deref(),
+            Some("Windows 11 专业版")
+        );
+        assert_eq!(parse_string_query_output(output, "Missing"), None);
     }
 }

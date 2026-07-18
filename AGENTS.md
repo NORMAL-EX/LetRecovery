@@ -226,7 +226,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `lr-core/src/pca_compat.rs`：按目标 WIM 架构和启动资源族选择内置 PCA2023 离线 WIM，执行大小、SHA-256、签名、架构校验、安全暂存及 EFI_EX/FONTS_EX/boot.stl 白名单注入。
 - `lr-core/src/pca_preflight.rs`：PCA2011/PCA2023 写盘前只读策略，检查受支持系统版本和 x86/x64 架构，提取并验证所选 WIM/ESD/SWM 卷的 EFI 引导源，对不可预检镜像失败关闭。
 - `lr-core/src/reboot.rs`：结束 PE 的 `pecmd.exe`；名字为历史兼容，模块本身不执行系统重启。
-- `lr-core/src/registry.rs`：通过 `reg.exe` 管理离线注册表配置单元和值。
+- `lr-core/src/registry.rs`：通过 `reg.exe` 管理离线注册表配置单元和值，并提供带输出类型校验的字符串只读查询，供两端在修改前判定离线系统状态。
 - `lr-core/src/sam.rs`：离线 SAM 账户枚举、清空密码和启用账户，包含二进制结构解析。
 - `lr-core/src/scoped_temp_file.rs`：碰撞安全临时普通文件、名称验证和 Drop 清理。
 - `lr-core/src/storage_driver_match.rs`：把 SetupAPI 当前 PCI 硬件 ID 纯函数映射到第 11 代或当前 Intel VMD 随包目录；严格匹配 `VEN/DEV` 边界，AMD、Apple、VirtIO、相似前缀和未知控制器返回空选择。
@@ -438,20 +438,20 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 ### PE 端入口与核心
 
 - `PE端/build.rs`：生成 PE 程序资源、清单、图标和可复现构建版本；release 禁止测试权限 feature。
-- `PE端/src/main.rs`：PE 进程入口、文件日志、panic 记录、语言检测、BitLocker 密钥透传解锁、CLI、工作流模块声明和原生 Win32 窗口启动；在任何卷、BitLocker 或任务标记扫描前枚举包括未绑定 INF 设备在内的当前 PCI 硬件 ID，只对匹配 Intel VMD 包调用一次受控 `drvload.exe`，失败保留诊断且不得尝试其它控制器包；CLI 与 GUI 共用安全暂存路径解析、XML 转义无人值守生成、配置卷标和受控 DiskPart 脚本语义，原版 XP 目录源在格式化前复验并调用共享文本模式引擎后直接清理/重启，禁止维护绕过这些约束的重复安装实现；安装、备份、扩容 GUI 只路由到原生进度页，不再编译或接受 egui/eframe/OpenGL 兼容回退参数，窗口启动或消息循环失败时必须记录并停止，禁止重复启动 worker；`non-elevated-tests` 独有的 `--ui-progress-preview` 必须在驱动加载、BitLocker、任务发现和 worker 之前进入无副作用预览，release 不得包含该分支。
-- `PE端/src/app.rs`：PE 安装主工作流、对用户名等动态值执行 XML 转义的共享无人值守生成和共享 `WorkflowSession`；镜像与自定义无人值守文件只能由配置数据目录和经安全文件名校验的相对文件名解析，XP 目录型源必须额外校验会话根和 I386/AMD64 子目录并在格式化前复验关键文件，禁止绝对路径或目录穿越；XP 文本模式部署完成后跳过不适用的 WIM 驱动、PCA、BCDBoot 和 Vista+ 无人值守阶段；该会话集中持有单一 worker 启动门、消息接收器、进度状态、只读恢复摘要、可查询完成状态并仅在完成后回收的 worker 句柄及持久化工作流观察器，只由原生 Win32 进度页消费且不得由渲染层另行启动工作流；收到完成/失败消息只代表展示终态，不能在清理、延迟或重启等 worker 尾部退出前关闭进程；消息通道在未收到终态时断开必须合成本地化失败并记录 journal，避免把 worker 崩溃伪装成成功。
+- `PE端/src/main.rs`：PE 进程入口、文件日志、panic 记录、语言检测、BitLocker 密钥透传解锁、CLI、工作流模块声明和原生 Win32 窗口启动；在任何卷、BitLocker 或任务标记扫描前枚举包括未绑定 INF 设备在内的当前 PCI 硬件 ID，只对匹配 Intel VMD 包调用一次受控 `drvload.exe`，失败保留诊断且不得尝试其它控制器包；CLI 与 GUI 共用安全暂存路径解析、XML 转义无人值守生成、配置卷标和受控 DiskPart 脚本语义，原版 XP 目录源在格式化前复验并调用共享文本模式引擎；安装临时分区必须先成功删除并把空间扩展回目标卷，才能删除 marker/配置并报告完成或重启，禁止把清理失败降级为警告；安装、备份、扩容 GUI 只路由到原生进度页，不再编译或接受 egui/eframe/OpenGL 兼容回退参数，窗口启动或消息循环失败时必须记录并停止，禁止重复启动 worker；`non-elevated-tests` 独有的 `--ui-progress-preview` 必须在驱动加载、BitLocker、任务发现和 worker 之前进入无副作用预览，release 不得包含该分支。
+- `PE端/src/app.rs`：PE 安装主工作流、对用户名等动态值执行 XML 转义的共享无人值守生成和共享 `WorkflowSession`；Windows 10/11 内置无人值守必须读取已释放镜像的 UI 语言、系统/用户区域、键盘和时区并完整写入 `oobeSystem`，不得使用只对 Server 生效的 `HideLocalAccountScreen` 或已弃用的 SkipOOBE 项；镜像与自定义无人值守文件只能由配置数据目录和经安全文件名校验的相对文件名解析，XP 目录型源必须额外校验会话根和 I386/AMD64 子目录并在格式化前复验关键文件，禁止绝对路径或目录穿越；XP 文本模式部署完成后跳过不适用的 WIM 驱动、PCA、BCDBoot 和 Vista+ 无人值守阶段；内置/自定义无人值守生成和安装临时分区回收失败必须进入失败终态，不得继续报告完成或重启；该会话集中持有单一 worker 启动门、消息接收器、进度状态、只读恢复摘要、可查询完成状态并仅在完成后回收的 worker 句柄及持久化工作流观察器，只由原生 Win32 进度页消费且不得由渲染层另行启动工作流；收到完成/失败消息只代表展示终态，不能在清理、延迟或重启等 worker 尾部退出前关闭进程；消息通道在未收到终态时断开必须合成本地化失败并记录 journal，避免把 worker 崩溃伪装成成功。
 - `PE端/src/workflow_journal.rs`：把 PE 安装/备份/扩容消息映射到原子检查点，识别上次中断，并在失败时生成脱敏支持包；向原生恢复页只暴露状态、步骤、修订号、中断标记和支持摘要可用性，不暴露保存路径或业务敏感值；记录失败不阻断原流程。
 - `PE端/src/workflows/mod.rs`：PE worker 工作流模块边界和受限再导出。
 - `PE端/src/workflows/backup.rs`：PE 备份配置读取、WIM/ESD/SWM/GHO 分发、进度转发、产物验证、引导清理和重启协调。
 - `PE端/src/workflows/expand.rs`：PE 无损扩容配置与标记定位、扩容调用、成功/失败共用清理和重启协调。
 - `PE端/src/core/mod.rs`：PE 核心模块声明。
-- `PE端/src/core/account_fix.rs`：修复离线系统登录账户相关注册表状态。
+- `PE端/src/core/account_fix.rs`：为完整备份、GHO 和 XP/2003 修复离线系统登录账户相关注册表/SAM 状态；安装镜像处于 reseal-to-OOBE 或状态未知时必须跳过 Winlogon 自动登录兜底，避免与 unattend 账户创建竞争。
 - `PE端/src/core/bcdedit.rs`：PE 中 ESP 定位挂载、BCD/BCDBoot 修复、活动分区和 PCA 引导选择。
 - `PE端/src/core/cabinet.rs`：PE 中通过 SetupAPI 解压和发现 CAB 文件。
 - `PE端/src/core/config.rs`：读取正常端写入的安装、备份、扩容配置和操作标记，提供旧配置默认值；配置扫描覆盖 A-Z 并排除当前 PE 系统盘，暂存文件统一通过安全文件名校验后在数据目录内解析，XP 目录型源仅允许会话根与 I386/AMD64 两级安全分量且拒绝链接或非目录目标。
-- `PE端/src/core/disk.rs`：PE 分区枚举、样式判断、格式化 fallback、删除、扩容、清理和 DiskPart 安全执行。
+- `PE端/src/core/disk.rs`：PE 分区枚举、样式判断、格式化 fallback、删除、扩容、清理和 DiskPart 安全执行；分区身份与物理相邻关系必须由卷句柄 IOCTL 的磁盘号、起始偏移和长度确认，不能依赖本地化 `detail volume` 文本或只比较分区号；格式化脚本只使用 ASCII 临时卷标，最终 Unicode 卷标通过 `SetVolumeLabelW` 写入并回读校验。
 - `PE端/src/core/dism.rs`：PE 高层镜像信息、释放、捕获和统一 WIM 引擎进度。
-- `PE端/src/core/dism_exe.rs`：DISM.exe 参数、子进程输出、进度和错误解析；离线驱动边界拒绝 `/ForceUnsigned`，不能让不可信启动驱动绕过目录签名检查。
+- `PE端/src/core/dism_exe.rs`：DISM.exe 参数、子进程输出、进度和错误解析，并通过只读 `/Get-Intl` 查询、严格解析已释放镜像的国际化默认值供无人值守生成；离线驱动边界拒绝 `/ForceUnsigned`，不能让不可信启动驱动绕过目录签名检查。
 - `PE端/src/core/driver.rs`：共享驱动实现的兼容再导出。
 - `PE端/src/core/expand_move.rs`：仅 PE 使用的块级分区移动扩容、几何对齐、阶段日志和恢复信息。
 - `PE端/src/core/ghost.rs`：PE 中 Ghost 镜像备份、还原、进度、取消和错误处理。

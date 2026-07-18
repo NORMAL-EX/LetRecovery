@@ -611,12 +611,14 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
                     return Ok(());
                 }
             }
-            ConfigFileManager::cleanup_all(&data_partition, &target_partition);
             if let Err(error) =
                 DiskManager::cleanup_auto_created_partition_and_extend(&target_partition)
             {
-                log::warn!("[PE INSTALL/XP TEXTMODE] cleanup failed: {error}");
+                log::error!("[PE INSTALL/XP TEXTMODE] cleanup failed: {error}");
+                show_error_message(&tr!("清理安装临时分区并合并空间失败: {}", error));
+                return Ok(());
             }
+            ConfigFileManager::cleanup_all(&data_partition, &target_partition);
             if config.auto_reboot {
                 let _ = utils::command::new_command("shutdown")
                     .args(["/r", "/t", "10", "/c", "LetRecovery XP/2003 setup is ready"])
@@ -806,30 +808,27 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
                         return Ok(());
                     }
                 };
-                match std::fs::read(&src) {
-                    Ok(content) => {
-                        let panther_dir = format!("{}\\Windows\\Panther", target_partition);
-                        let _ = std::fs::create_dir_all(&panther_dir);
-                        let _ = std::fs::write(format!("{}\\unattend.xml", panther_dir), &content);
-                        let sysprep_dir =
-                            format!("{}\\Windows\\System32\\Sysprep", target_partition);
-                        if std::path::Path::new(&sysprep_dir).exists() {
-                            let _ =
-                                std::fs::write(format!("{}\\unattend.xml", sysprep_dir), &content);
-                        }
-                        log::info!("[PE INSTALL] 已应用自定义无人值守文件: {}", src.display());
-                    }
-                    Err(e) => log::error!("[PE INSTALL] 读取自定义无人值守文件失败: {}", e),
+                if let Err(e) =
+                    app::apply_custom_unattend(&target_partition, &src.to_string_lossy())
+                {
+                    log::error!("[PE INSTALL] 应用自定义无人值守文件失败: {}", e);
+                    show_error_message(&tr!("应用自定义无人值守文件失败: {}", e));
+                    return Ok(());
                 }
-            } else {
-                let _ = app::generate_unattend_xml(&target_partition, &config);
+                log::info!("[PE INSTALL] 已应用自定义无人值守文件: {}", src.display());
+            } else if let Err(error) = app::generate_unattend_xml(&target_partition, &config) {
+                log::error!("[PE INSTALL] 生成无人值守配置失败: {error}");
+                show_error_message(&tr!("生成无人值守配置失败: {}", error));
+                return Ok(());
             }
         }
 
         // Step 7.5: 离线登录兜底（放开空密码策略 + 已知用户名时配置自动登录）
-        if let Err(e) =
-            core::account_fix::ensure_offline_login(&target_partition, &config.custom_username)
-        {
+        if let Err(e) = core::account_fix::ensure_offline_login(
+            &target_partition,
+            &config.custom_username,
+            config.is_gho || config.is_xp,
+        ) {
             log::warn!("[PE INSTALL] 离线登录兜底设置失败（不影响安装）: {}", e);
         } else {
             log::info!("[PE INSTALL] 已应用离线登录兜底设置");
@@ -837,18 +836,15 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
 
         // Step 8: 清理
         log::info!("[PE INSTALL] Step 8: 清理临时文件");
-        ConfigFileManager::cleanup_all(&data_partition, &target_partition);
-
         // Step 9: 清理自动创建的数据分区并扩展目标分区
         log::info!("[PE INSTALL] Step 9: 清理自动创建的分区");
-        match DiskManager::cleanup_auto_created_partition_and_extend(&target_partition) {
-            Ok(_) => log::info!("[PE INSTALL] 自动创建分区清理完成"),
-            Err(e) => {
-                // 不中断安装流程，只记录警告
-                log::warn!("[PE INSTALL] 警告: 清理自动创建分区失败: {}", e);
-                log::warn!("清理自动创建分区失败: {}", e);
-            }
+        if let Err(e) = DiskManager::cleanup_auto_created_partition_and_extend(&target_partition) {
+            log::error!("[PE INSTALL] 清理自动创建分区失败: {}", e);
+            show_error_message(&tr!("清理安装临时分区并合并空间失败: {}", e));
+            return Ok(());
         }
+        log::info!("[PE INSTALL] 自动创建分区清理完成");
+        ConfigFileManager::cleanup_all(&data_partition, &target_partition);
 
         log::info!("[PE INSTALL] 安装完成!");
 

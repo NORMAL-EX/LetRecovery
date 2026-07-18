@@ -460,12 +460,17 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             }
         }
         let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Cleanup));
-        ConfigFileManager::cleanup_all(&data_partition, &target_partition);
         if let Err(error) =
             DiskManager::cleanup_auto_created_partition_and_extend(&target_partition)
         {
-            log::warn!("[PE安装/XP文本模式] 清理自动数据分区失败: {error}");
+            log::error!("[PE安装/XP文本模式] 清理自动数据分区失败: {error}");
+            let _ = tx.send(WorkerMessage::Failed(tr!(
+                "清理安装临时分区并合并空间失败: {}",
+                error
+            )));
+            return;
         }
+        ConfigFileManager::cleanup_all(&data_partition, &target_partition);
         let _ = tx.send(WorkerMessage::SetProgress(100));
         let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Complete));
         let _ = tx.send(WorkerMessage::Completed);
@@ -781,12 +786,21 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             };
             match apply_custom_unattend(&target_partition, &src.to_string_lossy()) {
                 Ok(_) => log::info!("[UNATTEND] 已应用自定义无人值守文件: {}", src.display()),
-                Err(e) => log::warn!("应用自定义无人值守文件失败: {}", e),
+                Err(e) => {
+                    log::error!("应用自定义无人值守文件失败: {}", e);
+                    let _ = tx.send(WorkerMessage::Failed(tr!(
+                        "应用自定义无人值守配置失败: {}",
+                        e
+                    )));
+                    return;
+                }
             }
         } else {
             let _ = tx.send(WorkerMessage::SetStatus(tr!("正在生成无人值守配置...")));
             if let Err(e) = generate_unattend_xml(&target_partition, &config) {
-                log::warn!("生成无人值守配置失败: {}", e);
+                log::error!("生成无人值守配置失败: {}", e);
+                let _ = tx.send(WorkerMessage::Failed(tr!("生成无人值守配置失败: {}", e)));
+                return;
             }
         }
     } else {
@@ -795,9 +809,11 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     // 离线登录兜底：放开空密码登录策略 +（已知用户名时）配置空密码自动登录。
     // 解决整盘备份/未 sysprep 镜像下 unattend 不生效、登录界面退化为"其他用户"的问题。
-    if let Err(e) =
-        crate::core::account_fix::ensure_offline_login(&target_partition, &config.custom_username)
-    {
+    if let Err(e) = crate::core::account_fix::ensure_offline_login(
+        &target_partition,
+        &config.custom_username,
+        config.is_gho || config.is_xp,
+    ) {
         log::warn!("离线登录兜底设置失败（不影响安装）: {}", e);
     } else {
         log::info!("[LOGIN] 已应用离线登录兜底设置");
@@ -808,20 +824,21 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Cleanup));
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在清理临时文件...")));
 
-    ConfigFileManager::cleanup_all(&data_partition, &target_partition);
-    let _ = tx.send(WorkerMessage::SetProgress(50));
-
     // 清理自动创建的数据分区并扩展目标分区
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在清理自动创建的分区...")));
-    match DiskManager::cleanup_auto_created_partition_and_extend(&target_partition) {
-        Ok(_) => {
-            log::info!("自动创建分区清理完成");
-        }
-        Err(e) => {
-            // 不中断安装流程，只记录警告
-            log::warn!("清理自动创建分区失败: {}", e);
-        }
+    if let Err(e) = DiskManager::cleanup_auto_created_partition_and_extend(&target_partition) {
+        log::error!("清理自动创建分区失败: {}", e);
+        let _ = tx.send(WorkerMessage::Failed(tr!(
+            "清理安装临时分区并合并空间失败: {}",
+            e
+        )));
+        return;
     }
+    log::info!("自动创建分区清理完成");
+    let _ = tx.send(WorkerMessage::SetProgress(50));
+
+    // 只有分区清理成功后才删除数据目录和诊断材料，避免先删 marker 后无法安全重试。
+    ConfigFileManager::cleanup_all(&data_partition, &target_partition);
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     // 完成
@@ -850,7 +867,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 /// - oobeSystem pass: OOBE设置、用户账户、首次登录命令
 ///
 /// 应用用户自定义的无人值守文件：复制到目标系统的 Panther 与 Sysprep 目录
-fn apply_custom_unattend(target_partition: &str, src: &str) -> anyhow::Result<()> {
+pub(crate) fn apply_custom_unattend(target_partition: &str, src: &str) -> anyhow::Result<()> {
     let content = std::fs::read(src)
         .map_err(|e| anyhow::anyhow!("读取自定义无人值守文件失败 {}: {}", src, e))?;
 
@@ -960,7 +977,23 @@ pub(crate) fn generate_unattend_xml(
         generate_win8_unattend_xml(&username, scripts_dir, &first_logon_commands, arch_str)
     } else {
         // Windows 10/11 无人值守配置（默认）
-        generate_win10_unattend_xml(&username, scripts_dir, &first_logon_commands, arch_str)
+        let international = crate::core::dism_exe::DismExe::new()?
+            .get_offline_international_settings(target_partition)?;
+        log::info!(
+            "[UNATTEND] 目标系统国际化设置: UI={}, system={}, user={}, input={}, timezone={}",
+            international.ui_language,
+            international.system_locale,
+            international.user_locale,
+            international.input_locale,
+            international.time_zone
+        );
+        generate_win10_unattend_xml(
+            &username,
+            scripts_dir,
+            &first_logon_commands,
+            arch_str,
+            &international,
+        )
     };
 
     let panther_dir = format!("{}\\Windows\\Panther", target_partition);
@@ -1170,8 +1203,7 @@ fn generate_win8_unattend_xml(
 
 /// 生成 Windows 10/11 无人值守配置
 ///
-/// 通过预置 LocalAccount + 以下 OOBE 选项跳过账户/隐私等屏幕：
-/// - HideLocalAccountScreen
+/// 通过预置 LocalAccount、目标镜像的完整国际化设置和以下 OOBE 选项跳过账户/隐私等屏幕：
 /// - HideOnlineAccountScreens
 /// - HideWirelessSetupInOOBE
 ///
@@ -1181,7 +1213,13 @@ fn generate_win10_unattend_xml(
     scripts_dir: &str,
     first_logon_commands: &str,
     arch: &str,
+    international: &crate::core::dism_exe::OfflineInternationalSettings,
 ) -> String {
+    let ui_language = escape_xml_text(&international.ui_language);
+    let system_locale = escape_xml_text(&international.system_locale);
+    let user_locale = escape_xml_text(&international.user_locale);
+    let input_locale = escape_xml_text(&international.input_locale);
+    let time_zone = escape_xml_text(&international.time_zone);
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -1196,9 +1234,6 @@ fn generate_win10_unattend_xml(
         </component>
     </settings>
     <settings pass="specialize">
-        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <ComputerName>*</ComputerName>
-        </component>
         <component name="Microsoft-Windows-Deployment" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <RunSynchronous>
                 <RunSynchronousCommand wcm:action="add">
@@ -1210,10 +1245,17 @@ fn generate_win10_unattend_xml(
         </component>
     </settings>
     <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-International-Core" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <InputLocale>{input_locale}</InputLocale>
+            <SystemLocale>{system_locale}</SystemLocale>
+            <UILanguage>{ui_language}</UILanguage>
+            <UserLocale>{user_locale}</UserLocale>
+        </component>
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <TimeZone>{time_zone}</TimeZone>
             <OOBE>
                 <HideEULAPage>true</HideEULAPage>
-                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
@@ -1249,13 +1291,44 @@ fn generate_win10_unattend_xml(
         arch = arch,
         scripts_dir = scripts_dir,
         username = username,
-        first_logon_commands = first_logon_commands
+        first_logon_commands = first_logon_commands,
+        input_locale = input_locale,
+        system_locale = system_locale,
+        ui_language = ui_language,
+        user_locale = user_locale,
+        time_zone = time_zone
     )
 }
 
 #[cfg(test)]
 mod workflow_session_tests {
     use super::*;
+
+    #[test]
+    fn windows_11_unattend_fully_specifies_international_oobe() {
+        let international = crate::core::dism_exe::OfflineInternationalSettings {
+            ui_language: "zh-CN".to_string(),
+            system_locale: "zh-CN".to_string(),
+            user_locale: "zh-CN".to_string(),
+            input_locale: "0804:00000804".to_string(),
+            time_zone: "China Standard Time".to_string(),
+        };
+        let xml = generate_win10_unattend_xml(
+            "测试用户",
+            "LetRecoveryScripts",
+            "",
+            "amd64",
+            &international,
+        );
+        assert!(xml.contains("<UILanguage>zh-CN</UILanguage>"));
+        assert!(xml.contains("<InputLocale>0804:00000804</InputLocale>"));
+        assert!(xml.contains("<TimeZone>China Standard Time</TimeZone>"));
+        assert!(xml.contains("<HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>"));
+        assert!(!xml.contains("<HideLocalAccountScreen>"));
+        assert!(!xml.contains("<ComputerName>*</ComputerName>"));
+        assert!(!xml.contains("<SkipMachineOOBE>"));
+        assert!(!xml.contains("<SkipUserOOBE>"));
+    }
 
     fn disconnected_session() -> (WorkflowSession, Sender<WorkerMessage>) {
         let (tx, rx) = channel();
