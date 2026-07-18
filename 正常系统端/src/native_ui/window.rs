@@ -99,7 +99,6 @@ use super::tools::password_reset::{
 use super::tools::quick_partition::{NativeQuickPartitionDialog, QuickPartitionDialogIntent};
 use super::tools::storage_driver::{NativeStorageDriverDialog, StorageDriverDialogIntent};
 use super::tools::time_sync::{NativeTimeSyncDialog, TimeSyncDialogIntent};
-use crate::core::app_config::ExperimentalWindowBackdrop;
 use crate::core::native_backup_controller::{plan_backup_launch, BackupLaunchIntent};
 use crate::core::native_backup_executor::{execute_backup, BackupExecution, BackupWorkerMessage};
 use crate::core::native_bitlocker_gate::{
@@ -2450,8 +2449,6 @@ impl NativeWindow {
                 wim_engine: self.app_config.wim_engine,
                 download_threads: self.app_config.download_threads,
                 advanced_options_enabled: self.app_config.enable_advanced_options,
-                experimental_mica_enabled: self.app_config.experimental_window_backdrop
-                    == ExperimentalWindowBackdrop::Mica,
             },
         )?;
         about.apply_theme(self.palette);
@@ -2620,12 +2617,11 @@ impl NativeWindow {
     }
 
     unsafe fn apply_experimental_window_backdrop(&mut self, hwnd: HWND) {
-        let requested = self.app_config.experimental_window_backdrop;
         // The normal executable can be used as a diagnostic fallback in reduced environments.
         // Never request a DWM material from WinPE even if a desktop config.json was copied in.
         let endpoint_supports_mica = !crate::core::disk::DiskManager::is_pe_environment();
         let enabled = backdrop::mica_session_enabled(
-            requested == ExperimentalWindowBackdrop::Mica,
+            backdrop::ENABLE_EXPERIMENTAL_MICA,
             endpoint_supports_mica,
         );
         match backdrop::apply_mica(hwnd, enabled, self.window_active) {
@@ -10430,16 +10426,6 @@ unsafe extern "system" fn window_proc(
                                 state
                                     .app_config
                                     .set_advanced_options(page.advanced_options_enabled());
-                            }
-                        }
-                        Some(InfoIntent::ToggleExperimentalMica) => {
-                            if let Some(page) = &state.about_page {
-                                let enabled = page.experimental_mica_enabled();
-                                state.app_config.set_experimental_mica(enabled);
-                                let redraw = redraw::suspend(hwnd);
-                                state.apply_native_dark_theme(hwnd);
-                                super::dialog::refresh_open_dialog_backdrops();
-                                redraw::resume(hwnd, redraw);
                             }
                         }
                         Some(InfoIntent::OpenLogDirectory) => state.open_log_directory(hwnd),

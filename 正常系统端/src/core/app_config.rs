@@ -6,19 +6,6 @@ use std::path::PathBuf;
 
 use crate::utils::path::get_exe_dir;
 
-/// Experimental system-drawn backdrop for the normal Windows endpoint.
-///
-/// Unknown values deserialize to `None`, keeping hand-edited future or misspelled config files
-/// fail-safe without discarding unrelated user preferences.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExperimentalWindowBackdrop {
-    Mica,
-    #[default]
-    #[serde(other)]
-    None,
-}
-
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -70,11 +57,6 @@ pub struct AppConfig {
     #[serde(default = "default_download_threads")]
     pub download_threads: u8,
 
-    /// 正常系统端实验性全窗口 DWM 背景。仅支持 none、mica；旧的其他值安全回退关闭。
-    /// Windows 11 22H2 以下或系统策略不支持时安全回退为普通不透明背景。
-    #[serde(default)]
-    pub experimental_window_backdrop: ExperimentalWindowBackdrop,
-
     /// 「系统安装」页选项偏好（记住上次勾选状态，下次启动自动恢复）。
     #[serde(default)]
     pub install_prefs: crate::core::ui_state::InstallPrefs,
@@ -125,7 +107,6 @@ impl Default for AppConfig {
             enable_advanced_options: false,
             allow_insecure_http_downloads: false,
             download_threads: default_download_threads(),
-            experimental_window_backdrop: ExperimentalWindowBackdrop::None,
             install_prefs: crate::core::ui_state::InstallPrefs::default(),
         }
     }
@@ -288,18 +269,6 @@ impl AppConfig {
         }
     }
 
-    /// 设置仅限正常系统端的实验性 Mica 开关并保存。
-    pub fn set_experimental_mica(&mut self, enabled: bool) {
-        self.experimental_window_backdrop = if enabled {
-            ExperimentalWindowBackdrop::Mica
-        } else {
-            ExperimentalWindowBackdrop::None
-        };
-        if let Err(e) = self.save() {
-            log::warn!("保存配置失败: {}", e);
-        }
-    }
-
     /// 设置单个下载任务的并行连接数。新值从下一个下载任务开始生效。
     pub fn set_download_threads(&mut self, threads: u8) {
         self.download_threads = normalize_download_threads(threads);
@@ -412,23 +381,12 @@ mod tests {
     }
 
     #[test]
-    fn experimental_backdrop_defaults_off_and_accepts_only_mica() {
-        let default_config: AppConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(
-            default_config.experimental_window_backdrop,
-            ExperimentalWindowBackdrop::None
-        );
-        for (value, expected) in [
-            ("none", ExperimentalWindowBackdrop::None),
-            ("mica", ExperimentalWindowBackdrop::Mica),
-            ("auto", ExperimentalWindowBackdrop::None),
-            ("acrylic", ExperimentalWindowBackdrop::None),
-            ("mica_alt", ExperimentalWindowBackdrop::None),
-            ("future_material", ExperimentalWindowBackdrop::None),
-        ] {
-            let json = format!(r#"{{"experimental_window_backdrop":"{value}"}}"#);
-            let config: AppConfig = serde_json::from_str(&json).unwrap();
-            assert_eq!(config.experimental_window_backdrop, expected);
-        }
+    fn retired_backdrop_config_is_ignored_without_breaking_old_files() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"experimental_window_backdrop":"mica","language":"en-US"}"#)
+                .unwrap();
+        assert_eq!(config.language, "en-US");
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("experimental_window_backdrop"));
     }
 }

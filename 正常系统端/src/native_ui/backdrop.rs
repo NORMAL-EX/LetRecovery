@@ -13,6 +13,12 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::UI::Controls::MARGINS;
 
+/// Developer-only gate for the unfinished full-window material experiment.
+///
+/// It is deliberately not connected to `config.json` or the About page.  Change this constant and
+/// rebuild locally only when working on the remaining rendering defects tracked in `TODO.md`.
+pub(crate) const ENABLE_EXPERIMENTAL_MICA: bool = false;
+
 /// Applies or removes full-client Mica and reports whether the material is active.
 ///
 /// Both DWM calls are part of one logical request.  A partial failure is reset to the ordinary

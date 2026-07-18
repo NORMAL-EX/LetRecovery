@@ -47,7 +47,6 @@ use super::theme::{
     refresh_material_palette_to_descendants, Brushes, NativeControlKind, Palette,
 };
 use super::{backdrop, redraw};
-use crate::core::app_config::{AppConfig, ExperimentalWindowBackdrop};
 
 const DIALOG_CLASS: PCWSTR = w!("LetRecovery.Native.InnoDialog");
 const CONTENT_CLASS: PCWSTR = w!("LetRecovery.Native.InnoDialogContent");
@@ -323,10 +322,9 @@ impl DialogState {
 
     unsafe fn refresh_palette_and_backdrop(&mut self) {
         let base = Palette::system();
-        let requested = AppConfig::load().experimental_window_backdrop;
         let endpoint_supports_mica = !crate::core::disk::DiskManager::is_pe_environment();
         let enabled = backdrop::mica_session_enabled(
-            requested == ExperimentalWindowBackdrop::Mica,
+            backdrop::ENABLE_EXPERIMENTAL_MICA,
             endpoint_supports_mica,
         );
         self.backdrop_active = match backdrop::apply_mica(self.hwnd, enabled, self.window_active) {

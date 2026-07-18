@@ -98,12 +98,12 @@ LetRecovery/
 | Technology | Purpose |
 |------------|---------|
 | **Rust** | Primary programming language |
-| **egui/eframe** | Cross-platform GUI framework |
+| **Native Win32 / windows-rs** | Desktop and PE interfaces plus Windows API boundaries |
 | **tokio** | Async runtime |
-| **windows-rs** | Windows API bindings |
 | **aria2** | High-speed download engine |
-| **DISM** | System image deployment |
+| **wimlib / WIMGAPI / DISM** | Image deployment, capture, and driver servicing |
 | **Ghost** | GHO image restoration |
+| **React / TypeScript / Vite** | Website and documentation site |
 
 ---
 
@@ -139,8 +139,11 @@ Run these checks before submitting changes:
 ```bash
 cargo fmt --all --check
 cargo check --workspace --all-targets --locked
-cargo clippy --workspace --all-targets --locked
-cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings -A clippy::uninlined_format_args
+cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
+cargo test -p lr-core --locked
+cargo test -p letrecovery-pe --locked --features non-elevated-tests
+cargo test -p LetRecovery --locked --features non-elevated-tests
 ```
 
 CI compiles all test targets, runs deterministic unit tests, and builds the website for pull requests and pushes to `main`. CI never performs real formatting, partitioning, BCD changes, DISM writes, or reboots; those workflows require a separate isolated VM and dedicated test disk. See [Third-Party Binary Provenance](docs/THIRD_PARTY_BINARIES.md) for the bundled `libwim-15.dll` version, license, and hashes.

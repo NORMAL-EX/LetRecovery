@@ -398,7 +398,13 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
         // non-client band for the deterministic field frame so USER32's rectangular client paint
         // can never overwrite the rounded corners during typing, focus or caret updates.
         let _ = SetWindowTheme(control, w!(""), w!(""));
-        apply_borderless_style(control);
+        if palette.uses_system_backdrop_surface() {
+            apply_borderless_style(control);
+        } else {
+            // Keep USER32's stock single-line formatting rectangle on the supported opaque path.
+            // The deterministic frame covers the square border after native text/selection paint.
+            apply_single_border_style(control);
+        }
         disable_edit_layered_redirection(control);
         let _ = RemoveWindowSubclass(
             control,
@@ -2107,9 +2113,18 @@ unsafe extern "system" fn single_line_edit_subclass(
     match message {
         WM_PAINT => {
             let palette = palette_from_reference(reference_data);
-            paint_single_line_edit_client_atomic(hwnd, palette);
+            let result = if palette.uses_system_backdrop_surface() {
+                paint_single_line_edit_client_atomic(hwnd, palette);
+                LRESULT(0)
+            } else {
+                // Ordinary opaque windows must keep USER32's native Edit client metrics.  The
+                // material-only WM_PRINTCLIENT buffer does not preserve the stock left inset and
+                // vertical baseline while the user is editing, which makes focused text jump up
+                // and touch the left frame even though the idle field is laid out correctly.
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            };
             paint_rounded_control_frame(hwnd, palette);
-            LRESULT(0)
+            result
         }
         WM_NCPAINT => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -2135,22 +2150,35 @@ unsafe extern "system" fn single_line_edit_subclass(
             // frame. Do not send WM_SETREDRAW(FALSE) here: Windows removes WS_VISIBLE while redraw
             // is disabled, which makes the immediate final paint miss this child altogether.
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            let _ = RedrawWindow(
-                hwnd,
-                None,
-                None,
-                RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
-            );
+            let palette = palette_from_reference(reference_data);
+            if palette.uses_system_backdrop_surface() {
+                let _ = RedrawWindow(
+                    hwnd,
+                    None,
+                    None,
+                    RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+                );
+            } else {
+                // DefWindowProc already published the new glyphs with the correct native inset.
+                // Repaint only the deterministic outer frame; forcing WM_PAINT here would replace
+                // those correct metrics with the material-only WM_PRINTCLIENT path.
+                paint_rounded_control_frame(hwnd, palette);
+            }
             result
         }
         WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            let _ = RedrawWindow(
-                hwnd,
-                None,
-                None,
-                RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
-            );
+            let palette = palette_from_reference(reference_data);
+            if palette.uses_system_backdrop_surface() {
+                let _ = RedrawWindow(
+                    hwnd,
+                    None,
+                    None,
+                    RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
+                );
+            } else {
+                paint_rounded_control_frame(hwnd, palette);
+            }
             result
         }
         WM_NCDESTROY => {
@@ -2588,8 +2616,80 @@ unsafe fn paint_rounded_control_frame(hwnd: HWND, palette: Palette) {
     } else {
         palette.edit
     };
+    if is_edit_class(&class_name) && is_single_line_edit(hwnd) {
+        paint_single_line_edit_nonclient_bands(dc, hwnd, palette.edit_brush_color_for(hwnd));
+    }
     draw_rounded_control_frame_to_dc(dc, hwnd, palette, interior);
     let _ = ReleaseDC(hwnd, dc);
+}
+
+/// Covers USER32's stock single-border band before the deterministic rounded frame is published.
+/// The client rectangle remains untouched, so USER32 keeps its native formatting rectangle and
+/// continues to own text, selection, caret, horizontal scrolling and IME.
+unsafe fn paint_single_line_edit_nonclient_bands(dc: HDC, hwnd: HWND, interior: COLORREF) {
+    let mut window = RECT::default();
+    if GetWindowRect(hwnd, &mut window).is_err() {
+        return;
+    }
+    let width = (window.right - window.left).max(0);
+    let height = (window.bottom - window.top).max(0);
+    if rounded_control_frame_geometry(width, height, GetDpiForWindow(hwnd).max(96)).is_none() {
+        return;
+    }
+    let mut client = RECT::default();
+    if GetClientRect(hwnd, &mut client).is_err() {
+        return;
+    }
+    let mut client_top_left = POINT {
+        x: client.left,
+        y: client.top,
+    };
+    let mut client_bottom_right = POINT {
+        x: client.right,
+        y: client.bottom,
+    };
+    if !ClientToScreen(hwnd, &mut client_top_left).as_bool()
+        || !ClientToScreen(hwnd, &mut client_bottom_right).as_bool()
+    {
+        return;
+    }
+    let client_left = (client_top_left.x - window.left).clamp(0, width);
+    let client_top = (client_top_left.y - window.top).clamp(0, height);
+    let client_right = (client_bottom_right.x - window.left).clamp(client_left, width);
+    let client_bottom = (client_bottom_right.y - window.top).clamp(client_top, height);
+    let brush = CreateSolidBrush(interior);
+    if brush.0.is_null() {
+        return;
+    }
+    for rect in [
+        RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: client_top,
+        },
+        RECT {
+            left: 0,
+            top: client_bottom,
+            right: width,
+            bottom: height,
+        },
+        RECT {
+            left: 0,
+            top: client_top,
+            right: client_left,
+            bottom: client_bottom,
+        },
+        RECT {
+            left: client_right,
+            top: client_top,
+            right: width,
+            bottom: client_bottom,
+        },
+    ] {
+        let _ = FillRect(dc, &rect, brush);
+    }
+    let _ = DeleteObject(brush);
 }
 
 unsafe fn is_drop_down_list(hwnd: HWND) -> bool {

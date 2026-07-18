@@ -98,12 +98,12 @@ LetRecovery/
 | 技术 | 用途 |
 |------|------|
 | **Rust** | 主要编程语言 |
-| **egui/eframe** | 跨平台 GUI 框架 |
+| **原生 Win32 / windows-rs** | 正常系统端与 PE 端界面、Windows API 边界 |
 | **tokio** | 异步运行时 |
-| **windows-rs** | Windows API 绑定 |
 | **aria2** | 高速下载引擎 |
-| **DISM** | 系统镜像部署 |
+| **wimlib / WIMGAPI / DISM** | 系统镜像部署、捕获与驱动维护 |
 | **Ghost** | GHO 镜像恢复 |
+| **React / TypeScript / Vite** | 官网和文档站 |
 
 ---
 
@@ -139,8 +139,11 @@ npm run build
 ```bash
 cargo fmt --all --check
 cargo check --workspace --all-targets --locked
-cargo clippy --workspace --all-targets --locked
-cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings -A clippy::uninlined_format_args
+cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
+cargo test -p lr-core --locked
+cargo test -p letrecovery-pe --locked --features non-elevated-tests
+cargo test -p LetRecovery --locked --features non-elevated-tests
 ```
 
 CI 会在 Pull Request 和 `main` push 上编译全部测试目标、运行确定性单元测试并构建官网。CI 不会执行真实格式化、分区、BCD、DISM 写盘或重启；这些流程必须在隔离虚拟机和专用测试盘上另行验证。内置 `libwim-15.dll` 的版本、许可证和哈希见 [第三方二进制清单](docs/THIRD_PARTY_BINARIES.md)。
