@@ -1091,6 +1091,20 @@ const fn native_scrollbar_may_repaint_frame(message: u32) -> bool {
     )
 }
 
+/// Messages for which comctl32 can move existing ListView client pixels instead of repainting
+/// every visible row. The deterministic rounded frame is overlaid on that same window surface, so
+/// the moved pixels must be discarded after the native scroll completes or copies of the frame can
+/// remain between rows and beside the scrollbars.
+const fn list_view_scrolls_client_pixels(message: u32) -> bool {
+    matches!(
+        message,
+        0x0114 // WM_HSCROLL
+            | 0x0115 // WM_VSCROLL
+            | 0x020a // WM_MOUSEWHEEL
+            | 0x020e // WM_MOUSEHWHEEL
+    )
+}
+
 const fn palette_reference(palette: Palette) -> usize {
     let dark = if palette.dark {
         PALETTE_REFERENCE_DARK
@@ -2023,14 +2037,19 @@ unsafe extern "system" fn list_view_subclass(
             result
         }
         message if native_scrollbar_may_repaint_frame(message) => {
-            // SB_THUMBTRACK can arrive many times per second. Comctl32 already scrolls its
-            // double-buffered client and invalidates only the newly exposed strip; invalidating
-            // the complete report here made every thumb movement repaint all rows and the header.
-            // Even drawing our frame directly from inside this high-frequency message races the
-            // ListView's redirected client and its separate Header child, exposing alternating
-            // header-less DWM frames. Leave the entire scroll transaction to comctl32; its normal
-            // WM_NCPAINT/WM_PAINT paths restore the deterministic frame after the scroll update.
-            DefSubclassProc(hwnd, message, wparam, lparam)
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if list_view_scrolls_client_pixels(message) {
+                // Native report scrolling may move already-painted client pixels and invalidate
+                // only the newly exposed strip. Our final rounded frame also touches that surface,
+                // so the optimisation otherwise copies the top/bottom edge into rows during a
+                // vertical drag and the side edge across the body during a horizontal drag.
+                // Queue one complete client repaint after default handling. InvalidateRect does
+                // not paint synchronously; USER32 merges repeated SB_THUMBTRACK invalidations and
+                // the existing LVS_EX_DOUBLEBUFFER path publishes the repaired body atomically.
+                // Do not paint the frame or Header directly from this high-frequency branch.
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            result
         }
         WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -4607,6 +4626,16 @@ mod tests {
         }
         for message in [WM_SETTEXT, WM_ENABLE, WM_SIZE, WM_PAINT] {
             assert!(!native_scrollbar_may_repaint_frame(message));
+        }
+    }
+
+    #[test]
+    fn list_view_scroll_messages_discard_moved_frame_pixels() {
+        for message in [0x0114, 0x0115, 0x020a, 0x020e] {
+            assert!(list_view_scrolls_client_pixels(message));
+        }
+        for message in [0x00a1, 0x00a2, 0x00a3, 0x0113, 0x02a0, WM_PAINT] {
+            assert!(!list_view_scrolls_client_pixels(message));
         }
     }
 
