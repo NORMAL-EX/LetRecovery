@@ -70,7 +70,7 @@ pub struct InstallConfig {
     pub bypass_nro: bool,
     /// 禁用Windows自动更新
     pub disable_windows_update: bool,
-    /// 禁用Windows安全中心
+    /// 深度移除 Microsoft Defender Antivirus 杀毒引擎（保留安全中心等组件）
     pub disable_windows_defender: bool,
     /// 禁用系统保留空间
     pub disable_reserved_storage: bool,

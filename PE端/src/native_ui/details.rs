@@ -61,7 +61,7 @@ impl AdvancedOptionsSummary {
                 enabled_text(config.disable_windows_update),
             ),
             row(
-                crate::tr!("禁用 Windows Defender"),
+                crate::tr!("深度移除 Defender 杀毒引擎"),
                 enabled_text(config.disable_windows_defender),
             ),
             row(

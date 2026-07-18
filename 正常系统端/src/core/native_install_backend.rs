@@ -1535,8 +1535,11 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                     let advanced = Self::legacy_advanced(intent);
                     let is_xp = intent.options.is_xp
                         || !Path::new(&format!("{}\\Windows\\Boot", self.target)).exists();
-                    // Preserve legacy best-effort semantics for post-deployment tweaks.
                     if let Err(error) = advanced.apply_to_system(&self.target, is_xp) {
+                        if intent.options.advanced_options.disable_windows_defender {
+                            return Err(Self::error("remove_defender_antivirus_engine", error));
+                        }
+                        // Preserve legacy best-effort semantics for other post-deployment tweaks.
                         log::error!("[NATIVE INSTALL] advanced options failed: {error}");
                     }
                     self.inject_versioned_user_drivers(is_xp);

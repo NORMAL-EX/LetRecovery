@@ -1499,6 +1499,8 @@
     "计算失败：{}": "Calculation failed: {}",
     "仅导出": "Export only",
     "禁用 Windows Defender": "Disable Windows Defender",
+    "深度移除 Defender 杀毒引擎": "Deeply remove the Defender Antivirus engine",
+    "深度移除 Defender 杀毒引擎失败，未继续安装: {}": "Failed to deeply remove the Defender Antivirus engine; installation was stopped: {}",
     "禁用 Windows Update": "Disable Windows Update",
     "禁用保留存储": "Disable reserved storage",
     "禁用设备自动加密": "Disable automatic device encryption",

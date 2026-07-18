@@ -756,6 +756,14 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在应用高级选项...")));
 
     if let Err(e) = apply_advanced_options(&target_partition, &config) {
+        if config.disable_windows_defender {
+            log::error!("深度移除 Defender 杀毒引擎失败，安装停止: {}", e);
+            let _ = tx.send(WorkerMessage::Failed(tr!(
+                "深度移除 Defender 杀毒引擎失败，未继续安装: {}",
+                e
+            )));
+            return;
+        }
         log::warn!("应用高级选项失败: {}", e);
     }
     // 注入数据分区上的用户驱动（bin/drivers/<版本> 由正常端复制而来）

@@ -431,9 +431,31 @@ log=0
             self.apply_disable_windows_update();
         }
 
-        // 5. 禁用Windows安全中心/Defender
+        // 5. 仅深度移除 Microsoft Defender Antivirus 引擎，保留安全中心等组件
         if self.disable_windows_defender {
-            self.apply_disable_windows_defender();
+            match lr_core::defender_removal::remove_offline_defender_engine(
+                target_partition,
+                "pc-soft",
+                "pc-sys",
+            ) {
+                Ok(report) => log::info!(
+                    "[ADVANCED] Defender 杀毒引擎移除完成: disabled_services={}, deleted_service_keys={}, removed_paths={}, deleted_task_cache={}, deleted_task_records={}, deleted_engine_software_key={}",
+                    report.disabled_services,
+                    report.deleted_service_keys,
+                    report.removed_paths,
+                    report.deleted_task_cache,
+                    report.deleted_task_records,
+                    report.deleted_engine_software_key
+                ),
+                Err(error) => {
+                    let _ = OfflineRegistry::unload_hive("pc-soft");
+                    let _ = OfflineRegistry::unload_hive("pc-sys");
+                    if default_loaded {
+                        let _ = OfflineRegistry::unload_hive("pc-default");
+                    }
+                    return Err(error);
+                }
+            }
         }
 
         // 6. 禁用系统保留空间
@@ -631,38 +653,6 @@ log=0
             "HKLM\\pc-soft\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
             "AUOptions",
             1,
-        );
-    }
-
-    /// 5. 禁用Windows安全中心/Defender
-    fn apply_disable_windows_defender(&self) {
-        log::info!("[ADVANCED] 禁用Windows Defender");
-        // 禁用实时保护
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\Windows Defender",
-            "DisableAntiSpyware",
-            1,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection",
-            "DisableRealtimeMonitoring",
-            1,
-        );
-        // 禁用服务
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\WinDefend",
-            "Start",
-            4, // Disabled
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\WdNisSvc",
-            "Start",
-            4,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\SecurityHealthService",
-            "Start",
-            4,
         );
     }
 
@@ -1840,7 +1830,10 @@ Write-Host "UWP应用清理完成"
             );
 
             ui.checkbox(&mut self.disable_windows_update, tr!("禁用Windows自动更新"));
-            ui.checkbox(&mut self.disable_windows_defender, tr!("禁用Windows安全中心"));
+            ui.checkbox(
+                &mut self.disable_windows_defender,
+                tr!("深度移除 Defender 杀毒引擎"),
+            );
             ui.checkbox(&mut self.disable_reserved_storage, tr!("禁用系统保留空间"));
             ui.checkbox(&mut self.disable_uac, tr!("禁用用户账户控制(UAC)"));
             ui.checkbox(&mut self.disable_device_encryption, tr!("禁用自动设备加密"));

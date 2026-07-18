@@ -787,7 +787,20 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
 
         // Step 6: 应用高级选项
         log::info!("[PE INSTALL] Step 6: 应用高级选项");
-        let _ = apply_advanced_options(&target_partition, &config);
+        if let Err(error) = apply_advanced_options(&target_partition, &config) {
+            if config.disable_windows_defender {
+                log::error!(
+                    "[PE INSTALL] 深度移除 Defender 杀毒引擎失败，安装停止: {}",
+                    error
+                );
+                show_error_message(&tr!(
+                    "深度移除 Defender 杀毒引擎失败，未继续安装: {}",
+                    error
+                ));
+                return Ok(());
+            }
+            log::warn!("[PE INSTALL] 应用高级选项失败: {}", error);
+        }
         // 注入数据分区上的用户驱动（bin/drivers/<版本> 由正常端复制而来）
         ui::advanced_options::inject_user_drivers_from_data(&target_partition, &data_dir);
 

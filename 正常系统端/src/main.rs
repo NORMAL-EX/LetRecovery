@@ -654,7 +654,12 @@ fn execute_pe_install(
         ..core::advanced_options_legacy::AdvancedOptions::default()
     };
 
-    let _ = advanced_options.apply_to_system(target_partition, is_xp);
+    if let Err(error) = advanced_options.apply_to_system(target_partition, is_xp) {
+        if config.disable_windows_defender {
+            return Err(error);
+        }
+        log::warn!("[PE INSTALL] 应用高级选项失败: {}", error);
+    }
 
     // 生成无人值守配置
     if config.unattended {

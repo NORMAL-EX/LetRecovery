@@ -12,6 +12,7 @@ pub mod boot;
 pub mod boot_pca;
 pub mod cached_artifact;
 pub mod command;
+pub mod defender_removal;
 pub mod diskpart;
 pub mod download_integrity;
 pub mod driver;

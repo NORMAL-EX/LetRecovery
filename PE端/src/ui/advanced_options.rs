@@ -150,39 +150,31 @@ pub fn apply_advanced_options(
         );
     }
 
-    // 5. 禁用Windows安全中心/Defender
+    // 5. 仅深度移除 Microsoft Defender Antivirus 引擎，保留安全中心等组件
     if config.disable_windows_defender {
-        log::info!("[ADVANCED] 禁用Windows Defender");
-        // 禁用反间谍软件（Defender主开关）
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\Windows Defender",
-            "DisableAntiSpyware",
-            1,
-        );
-        // 禁用实时保护
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection",
-            "DisableRealtimeMonitoring",
-            1,
-        );
-        // 禁用 Windows Defender 服务 (Start=4 表示禁用)
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\WinDefend",
-            "Start",
-            4,
-        );
-        // 禁用 Defender 网络检查服务
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\WdNisSvc",
-            "Start",
-            4,
-        );
-        // 禁用安全健康服务
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\SecurityHealthService",
-            "Start",
-            4,
-        );
+        match lr_core::defender_removal::remove_offline_defender_engine(
+            target_partition,
+            "pc-soft",
+            "pc-sys",
+        ) {
+            Ok(report) => log::info!(
+                "[ADVANCED] Defender 杀毒引擎移除完成: disabled_services={}, deleted_service_keys={}, removed_paths={}, deleted_task_cache={}, deleted_task_records={}, deleted_engine_software_key={}",
+                report.disabled_services,
+                report.deleted_service_keys,
+                report.removed_paths,
+                report.deleted_task_cache,
+                report.deleted_task_records,
+                report.deleted_engine_software_key
+            ),
+            Err(error) => {
+                let _ = OfflineRegistry::unload_hive("pc-soft");
+                let _ = OfflineRegistry::unload_hive("pc-sys");
+                if default_loaded {
+                    let _ = OfflineRegistry::unload_hive("pc-default");
+                }
+                return Err(error);
+            }
+        }
     }
 
     // 6. 禁用系统保留空间
