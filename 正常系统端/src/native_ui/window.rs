@@ -141,8 +141,9 @@ const SS_CENTER_STYLE: i32 = 0x0000_0001;
 unsafe fn system_backdrop_surface_brush() -> HBRUSH {
     HBRUSH(GetStockObject(BLACK_BRUSH).0)
 }
-// Keeps the longest English navigation caption readable at 100-200% DPI.
-const NAV_WIDTH: i32 = 180;
+// Keeps the longest English navigation caption readable at 100-200% DPI without leaving an
+// oversized empty rail beside the centred button captions.
+const NAV_WIDTH: i32 = 168;
 const HEADER_HEIGHT: i32 = 66;
 const COMMAND_HEIGHT: i32 = 56;
 const WM_HARDWARE_INFO_READY: u32 = 0x8001;
