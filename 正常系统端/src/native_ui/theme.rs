@@ -10,11 +10,11 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC,
     CreateDIBSection, CreatePen, CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint,
     FillRect, GdiFlush, GetTextMetricsW, GetWindowDC, InvalidateRect, RedrawWindow, ReleaseDC,
-    RoundRect, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode, SetTextColor,
-    SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER,
-    DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HALFTONE,
-    HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOERASE,
-    RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
+    RoundRect, ScreenToClient, SelectObject, SetBkMode, SetDIBitsToDevice, SetStretchBltMode,
+    SetTextColor, SetWindowRgn, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
+    DT_WORDBREAK, HALFTONE, HBRUSH, HDC, PAINTSTRUCT, PEN_STYLE, RDW_ERASE, RDW_FRAME,
+    RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     GetComboBoxInfo, SetWindowTheme, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT,
@@ -47,7 +47,8 @@ use super::controls::{
     alpha_blend_premultiplied_bgra, button_visual, draw_alpha_composited_text,
     draw_antialiased_control_frame, draw_opaque_surface_text, draw_progress,
     fill_alpha_opaque_rect, fill_round_rect_antialiased, rounded_control_frame_geometry,
-    ButtonRole, ControlState, InnoMetrics, ProgressRole,
+    single_line_edit_frame, single_line_edit_frame_owner, ButtonRole, ControlState, InnoMetrics,
+    ProgressRole,
 };
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
@@ -356,6 +357,10 @@ const fn native_theme_class(kind: NativeControlKind, dark: bool) -> NativeThemeC
 /// owner-drawn rounded overlay left residual system-accent “blue feet” at the four rectangular
 /// corners and fought the Fluent control chrome, so it is no longer installed on those HWNDs.
 pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeControlKind) {
+    if let Some(edit) = single_line_edit_frame_owner(control) {
+        apply_single_line_edit_frame_theme(control, edit, palette);
+        return;
+    }
     let class = match native_theme_class(kind, palette.dark) {
         NativeThemeClass::Explorer => w!("Explorer"),
         NativeThemeClass::DarkExplorer => w!("DarkMode_Explorer"),
@@ -394,17 +399,11 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
         let _ = InvalidateRect(control, None, false);
     }
     if is_edit && is_single_line_edit(control) {
-        // Keep the native Edit text/caret/selection/IME and accessibility.  Reserve a small
-        // non-client band for the deterministic field frame so USER32's rectangular client paint
-        // can never overwrite the rounded corners during typing, focus or caret updates.
+        // The direct child Edit keeps native text/caret/selection/IME and accessibility. Its
+        // borderless client is vertically centred over a separate sibling surface, so USER32
+        // never paints into the full-height rounded frame or controls its optical baseline.
         let _ = SetWindowTheme(control, w!(""), w!(""));
-        if palette.uses_system_backdrop_surface() {
-            apply_borderless_style(control);
-        } else {
-            // Keep USER32's stock single-line formatting rectangle on the supported opaque path.
-            // The deterministic frame covers the square border after native text/selection paint.
-            apply_single_border_style(control);
-        }
+        apply_borderless_style(control);
         disable_edit_layered_redirection(control);
         let _ = RemoveWindowSubclass(
             control,
@@ -417,6 +416,9 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
             SINGLE_LINE_EDIT_SUBCLASS_ID,
             palette_reference(palette),
         );
+        if let Some(frame) = single_line_edit_frame(control) {
+            apply_single_line_edit_frame_theme(frame, control, palette);
+        }
         let _ = SetWindowPos(
             control,
             None,
@@ -948,6 +950,7 @@ const CHECK_BOX_SUBCLASS_ID: usize = 0x4c52_4342;
 const RADIO_BUTTON_SUBCLASS_ID: usize = 0x4c52_5242;
 const ROUNDED_CONTROL_SUBCLASS_ID: usize = 0x4c52_5243;
 const SINGLE_LINE_EDIT_SUBCLASS_ID: usize = 0x4c52_4544;
+const SINGLE_LINE_EDIT_FRAME_SUBCLASS_ID: usize = 0x4c52_4546;
 const COMBO_SELECTION_ITEM_SUBCLASS_ID: usize = 0x4c52_4353;
 const LIST_BOX_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoListBox.HotItem");
 const ROUNDED_CONTROL_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoControl.Hot");
@@ -994,13 +997,17 @@ pub unsafe fn refresh_material_palette_to_descendants(root: HWND, palette: Palet
 unsafe extern "system" fn refresh_material_palette_descendant(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let reference = lparam.0 as usize;
     let palette = palette_from_reference(reference);
-    let palette_subclasses: [(SUBCLASSPROC, usize); 9] = [
+    let palette_subclasses: [(SUBCLASSPROC, usize); 10] = [
         (Some(check_box_subclass), CHECK_BOX_SUBCLASS_ID),
         (Some(radio_button_subclass), RADIO_BUTTON_SUBCLASS_ID),
         (Some(rounded_control_subclass), ROUNDED_CONTROL_SUBCLASS_ID),
         (
             Some(single_line_edit_subclass),
             SINGLE_LINE_EDIT_SUBCLASS_ID,
+        ),
+        (
+            Some(single_line_edit_frame_subclass),
+            SINGLE_LINE_EDIT_FRAME_SUBCLASS_ID,
         ),
         (
             Some(combo_selection_item_subclass),
@@ -2102,6 +2109,173 @@ unsafe fn paint_list_view_trailing_body(hwnd: HWND, palette: Palette) {
     }
 }
 
+unsafe fn apply_single_line_edit_frame_theme(frame: HWND, edit: HWND, palette: Palette) {
+    let _ = SetWindowTheme(frame, w!(""), w!(""));
+    apply_borderless_style(frame);
+    let _ = SetWindowSubclass(
+        frame,
+        Some(single_line_edit_frame_subclass),
+        SINGLE_LINE_EDIT_FRAME_SUBCLASS_ID,
+        palette_reference(palette),
+    );
+    paint_single_line_edit_frame(frame, edit, palette);
+}
+
+unsafe fn repaint_single_line_edit_frame(edit: HWND, immediate: bool) {
+    let Some(frame) = single_line_edit_frame(edit) else {
+        return;
+    };
+    let flags = RDW_INVALIDATE
+        | RDW_NOERASE
+        | if immediate {
+            RDW_UPDATENOW
+        } else {
+            Default::default()
+        };
+    let _ = RedrawWindow(frame, None, None, flags);
+}
+
+unsafe fn paint_single_line_edit_frame(frame: HWND, edit: HWND, palette: Palette) {
+    let mut paint = PAINTSTRUCT::default();
+    let _ = BeginPaint(frame, &mut paint);
+    let _ = EndPaint(frame, &paint);
+
+    let dc = GetWindowDC(frame);
+    if dc.is_invalid() {
+        return;
+    }
+    let mut window = RECT::default();
+    if GetWindowRect(frame, &mut window).is_ok() {
+        let rect = RECT {
+            left: 0,
+            top: 0,
+            right: (window.right - window.left).max(0),
+            bottom: (window.bottom - window.top).max(0),
+        };
+        if let Some(geometry) =
+            rounded_control_frame_geometry(rect.right, rect.bottom, GetDpiForWindow(edit).max(96))
+        {
+            let interior = palette.edit_brush_color_for(edit);
+            fill(dc, &rect, interior);
+            let hot = !GetPropW(edit, ROUNDED_CONTROL_HOT_PROPERTY).is_invalid()
+                || !GetPropW(frame, ROUNDED_CONTROL_HOT_PROPERTY).is_invalid();
+            let border = if !IsWindowEnabled(edit).as_bool() {
+                palette.control_border()
+            } else if GetFocus() == edit {
+                palette.accent_border
+            } else if hot {
+                palette.separator
+            } else {
+                palette.control_border()
+            };
+            draw_antialiased_control_frame(
+                dc,
+                rect,
+                geometry,
+                interior,
+                border,
+                rounded_control_exterior(palette),
+            );
+        }
+    }
+    let _ = ReleaseDC(frame, dc);
+}
+
+unsafe fn forward_edit_frame_pointer_message(
+    frame: HWND,
+    edit: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if !IsWindowEnabled(edit).as_bool() {
+        return LRESULT(0);
+    }
+    let packed = lparam.0 as u32;
+    let mut point = POINT {
+        x: (packed as u16 as i16) as i32,
+        y: ((packed >> 16) as u16 as i16) as i32,
+    };
+    if !ClientToScreen(frame, &mut point).as_bool() || !ScreenToClient(edit, &mut point).as_bool() {
+        return LRESULT(0);
+    }
+    let mut client = RECT::default();
+    if GetClientRect(edit, &mut client).is_err() {
+        return LRESULT(0);
+    }
+    point.x = point
+        .x
+        .clamp(client.left, (client.right - 1).max(client.left));
+    point.y = point
+        .y
+        .clamp(client.top, (client.bottom - 1).max(client.top));
+    let forwarded = (u32::from(point.x as u16)) | (u32::from(point.y as u16) << 16);
+    SendMessageW(edit, message, wparam, LPARAM(forwarded as isize))
+}
+
+unsafe extern "system" fn single_line_edit_frame_subclass(
+    frame: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    let owner = single_line_edit_frame_owner(frame);
+    match message {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            if let Some(edit) = owner {
+                paint_single_line_edit_frame(frame, edit, palette_from_reference(reference_data));
+            } else {
+                let mut paint = PAINTSTRUCT::default();
+                let _ = BeginPaint(frame, &mut paint);
+                let _ = EndPaint(frame, &paint);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            ensure_hot_tracking(frame, ROUNDED_CONTROL_HOT_PROPERTY, false);
+            if let Some(edit) = owner {
+                let result =
+                    forward_edit_frame_pointer_message(frame, edit, message, wparam, lparam);
+                repaint_single_line_edit_frame(edit, false);
+                result
+            } else {
+                DefSubclassProc(frame, message, wparam, lparam)
+            }
+        }
+        WM_LBUTTONDOWN | WM_LBUTTONUP => owner.map_or_else(
+            || DefSubclassProc(frame, message, wparam, lparam),
+            |edit| forward_edit_frame_pointer_message(frame, edit, message, wparam, lparam),
+        ),
+        WM_MOUSELEAVE_MESSAGE => {
+            clear_hot_tracking(frame, ROUNDED_CONTROL_HOT_PROPERTY);
+            if let Some(edit) = owner {
+                repaint_single_line_edit_frame(edit, false);
+            }
+            DefSubclassProc(frame, message, wparam, lparam)
+        }
+        WM_THEMECHANGED | WM_ENABLE => {
+            let result = DefSubclassProc(frame, message, wparam, lparam);
+            if let Some(edit) = owner {
+                repaint_single_line_edit_frame(edit, true);
+            }
+            result
+        }
+        WM_NCDESTROY => {
+            let _ = RemovePropW(frame, ROUNDED_CONTROL_HOT_PROPERTY);
+            let _ = RemoveWindowSubclass(
+                frame,
+                Some(single_line_edit_frame_subclass),
+                SINGLE_LINE_EDIT_FRAME_SUBCLASS_ID,
+            );
+            DefSubclassProc(frame, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(frame, message, wparam, lparam),
+    }
+}
+
 unsafe extern "system" fn single_line_edit_subclass(
     hwnd: HWND,
     message: u32,
@@ -2113,7 +2287,7 @@ unsafe extern "system" fn single_line_edit_subclass(
     match message {
         WM_PAINT => {
             let palette = palette_from_reference(reference_data);
-            let result = if palette.uses_system_backdrop_surface() {
+            if palette.uses_system_backdrop_surface() {
                 paint_single_line_edit_client_atomic(hwnd, palette);
                 LRESULT(0)
             } else {
@@ -2122,25 +2296,19 @@ unsafe extern "system" fn single_line_edit_subclass(
                 // vertical baseline while the user is editing, which makes focused text jump up
                 // and touch the left frame even though the idle field is laid out correctly.
                 DefSubclassProc(hwnd, message, wparam, lparam)
-            };
-            paint_rounded_control_frame(hwnd, palette);
-            result
+            }
         }
-        WM_NCPAINT => {
-            let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
-            result
-        }
+        WM_NCPAINT => DefSubclassProc(hwnd, message, wparam, lparam),
         WM_MOUSEMOVE => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             ensure_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY, false);
-            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            repaint_single_line_edit_frame(hwnd, false);
             result
         }
         WM_MOUSELEAVE_MESSAGE => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
             clear_hot_tracking(hwnd, ROUNDED_CONTROL_HOT_PROPERTY);
-            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            repaint_single_line_edit_frame(hwnd, false);
             result
         }
         message if edit_message_may_change_visible_text(message, wparam.0) => {
@@ -2159,10 +2327,8 @@ unsafe extern "system" fn single_line_edit_subclass(
                     RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
                 );
             } else {
-                // DefWindowProc already published the new glyphs with the correct native inset.
-                // Repaint only the deterministic outer frame; forcing WM_PAINT here would replace
-                // those correct metrics with the material-only WM_PRINTCLIENT path.
-                paint_rounded_control_frame(hwnd, palette);
+                // DefWindowProc already published the native glyphs, selection and caret inside
+                // the centred child. The sibling frame is independent and needs no text repaint.
             }
             result
         }
@@ -2177,7 +2343,10 @@ unsafe extern "system" fn single_line_edit_subclass(
                     RDW_FRAME | RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW,
                 );
             } else {
-                paint_rounded_control_frame(hwnd, palette);
+                repaint_single_line_edit_frame(hwnd, true);
+            }
+            if palette.uses_system_backdrop_surface() {
+                repaint_single_line_edit_frame(hwnd, true);
             }
             result
         }

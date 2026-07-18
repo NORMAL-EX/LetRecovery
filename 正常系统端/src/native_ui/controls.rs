@@ -8,16 +8,16 @@ use std::sync::Once;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
-    COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect, GdiFlush, GetCurrentObject,
-    InvalidateRect, RoundRect, SelectObject, SetBkColor, SetBkMode, SetStretchBltMode,
-    SetTextColor, StretchBlt, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CENTER,
-    DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HFONT, OBJ_FONT, OPAQUE, PEN_STYLE,
-    SRCCOPY, TRANSPARENT,
+    GetDC, GetTextMetricsW, InvalidateRect, ReleaseDC, RoundRect, ScreenToClient, SelectObject,
+    SetBkColor, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, StretchDIBits,
+    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+    DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HFONT,
+    OBJ_FONT, OPAQUE, PEN_STYLE, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     BeginBufferedPaint, BufferedPaintClear, BufferedPaintInit, CloseThemeData, DrawThemeTextEx,
@@ -29,10 +29,12 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetPropW, GetWindowTextLengthW, GetWindowTextW, LoadCursorW, RemovePropW,
-    SetCursor, SetPropW, BS_OWNERDRAW, HMENU, IDC_ARROW, SWP_NOMOVE, SWP_NOSIZE, WINDOWPOS,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_ENABLE, WM_ERASEBKGND, WM_MOUSEMOVE,
-    WM_NCDESTROY, WM_SETCURSOR, WM_SHOWWINDOW, WM_WINDOWPOSCHANGING, WS_BORDER, WS_CHILD,
+    CreateWindowExW, DestroyWindow, GetParent, GetPropW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, IsWindow, LoadCursorW, RemovePropW, SendMessageW, SetCursor, SetPropW,
+    SetWindowPos, ShowWindow, BS_OWNERDRAW, HMENU, IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOWPOS, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CANCELMODE, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_SETCURSOR,
+    WM_SETFONT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGING, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS,
     WS_VISIBLE,
 };
 
@@ -41,6 +43,9 @@ use super::theme::{MaterialSurfaceState, Palette};
 const BUTTON_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoButton.Hot");
 const OWNER_DRAW_BUTTON_SUBCLASS_ID: usize = 0x4c52;
 const SINGLE_LINE_EDIT_LAYOUT_SUBCLASS_ID: usize = 0x4c52_4544;
+const SINGLE_LINE_EDIT_FRAME_PROPERTY: PCWSTR = w!("LetRecovery.InnoEdit.Frame");
+const SINGLE_LINE_EDIT_OWNER_PROPERTY: PCWSTR = w!("LetRecovery.InnoEdit.Owner");
+const SINGLE_LINE_EDIT_INTERNAL_LAYOUT_PROPERTY: PCWSTR = w!("LetRecovery.InnoEdit.Layout");
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     COLORREF((red as u32) | ((green as u32) << 8) | ((blue as u32) << 16))
@@ -1772,16 +1777,225 @@ pub unsafe fn child(
     Ok(hwnd)
 }
 
-/// Keeps a stock single-line v6 Edit at the native property-page height while centring the real
-/// HWND inside a taller responsive layout row. Directly-created fields must call this too; the
-/// control continues to own all text, selection, IME and non-client painting.
+/// Creates a non-interactive sibling frame and keeps the real single-line Edit centred inside it.
+///
+/// The Edit remains a direct child of the page with its original control id, so USER32 continues to
+/// own text, notifications, focus, selection, caret, IME and accessibility. The sibling owns only
+/// the full-height field surface; it never proxies application messages and therefore cannot turn
+/// a page layout width into the zero-width nested Edit regression that a parent wrapper caused.
 pub(crate) unsafe fn center_single_line_edit_in_row(hwnd: HWND) {
+    if single_line_edit_frame(hwnd).is_none() {
+        create_single_line_edit_frame(hwnd);
+    }
     let _ = SetWindowSubclass(
         hwnd,
         Some(single_line_edit_layout_proc),
         SINGLE_LINE_EDIT_LAYOUT_SUBCLASS_ID,
         0,
     );
+}
+
+pub(crate) unsafe fn single_line_edit_frame(edit: HWND) -> Option<HWND> {
+    let handle = GetPropW(edit, SINGLE_LINE_EDIT_FRAME_PROPERTY);
+    if handle.is_invalid() {
+        return None;
+    }
+    let frame = HWND(handle.0);
+    let owner = GetPropW(frame, SINGLE_LINE_EDIT_OWNER_PROPERTY);
+    if !IsWindow(frame).as_bool() || owner.is_invalid() || owner.0 != edit.0 {
+        let _ = RemovePropW(edit, SINGLE_LINE_EDIT_FRAME_PROPERTY);
+        return None;
+    }
+    Some(frame)
+}
+
+pub(crate) unsafe fn single_line_edit_frame_owner(frame: HWND) -> Option<HWND> {
+    let handle = GetPropW(frame, SINGLE_LINE_EDIT_OWNER_PROPERTY);
+    if handle.is_invalid() {
+        return None;
+    }
+    let edit = HWND(handle.0);
+    let linked_frame = GetPropW(edit, SINGLE_LINE_EDIT_FRAME_PROPERTY);
+    (IsWindow(edit).as_bool() && !linked_frame.is_invalid() && linked_frame.0 == frame.0)
+        .then_some(edit)
+}
+
+unsafe fn create_single_line_edit_frame(edit: HWND) {
+    let Ok(parent) = GetParent(edit) else {
+        return;
+    };
+    let Ok(frame) = CreateWindowExW(
+        WINDOW_EX_STYLE(0x0000_0004), // WS_EX_NOPARENTNOTIFY
+        w!("STATIC"),
+        w!(""),
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        0,
+        0,
+        0,
+        0,
+        parent,
+        HMENU::default(),
+        HINSTANCE::default(),
+        None,
+    ) else {
+        return;
+    };
+    let _ = SetWindowTheme(frame, w!(""), w!(""));
+    if SetPropW(edit, SINGLE_LINE_EDIT_FRAME_PROPERTY, HANDLE(frame.0)).is_err()
+        || SetPropW(frame, SINGLE_LINE_EDIT_OWNER_PROPERTY, HANDLE(edit.0)).is_err()
+    {
+        let _ = RemovePropW(edit, SINGLE_LINE_EDIT_FRAME_PROPERTY);
+        let _ = RemovePropW(frame, SINGLE_LINE_EDIT_OWNER_PROPERTY);
+        let _ = DestroyWindow(frame);
+        return;
+    }
+    let _ = SetWindowPos(
+        frame,
+        edit,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SingleLineEditInnerBounds {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn single_line_edit_inner_bounds(
+    outer_width: i32,
+    outer_height: i32,
+    font_height: i32,
+    inset: i32,
+) -> SingleLineEditInnerBounds {
+    let outer_width = outer_width.max(0);
+    let outer_height = outer_height.max(0);
+    let inset = inset.max(0).min(outer_width / 2).min(outer_height / 2);
+    let available_width = (outer_width - inset * 2).max(0);
+    let available_height = (outer_height - inset * 2).max(0);
+    let height = font_height.max(1).min(available_height);
+    let spare = available_height.saturating_sub(height);
+    SingleLineEditInnerBounds {
+        x: inset,
+        // Bias an odd spare pixel downward. Microsoft YaHei UI has more visible descent than
+        // ascent whitespace; ordinary floor division recreates the reported top-heavy result.
+        y: inset + (spare + 1) / 2,
+        width: available_width,
+        height,
+    }
+}
+
+unsafe fn single_line_edit_font_height(edit: HWND, dpi: u32) -> i32 {
+    let fallback = ((15i64 * i64::from(dpi.max(1)) + 48) / 96) as i32;
+    let dc = GetDC(edit);
+    if dc.is_invalid() {
+        return fallback.max(1);
+    }
+    let font = SendMessageW(edit, WM_GETFONT, WPARAM(0), LPARAM(0));
+    let old_font = (font.0 != 0)
+        .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
+    let mut metrics = windows::Win32::Graphics::Gdi::TEXTMETRICW::default();
+    let measured = GetTextMetricsW(dc, &mut metrics).as_bool();
+    if let Some(old_font) = old_font {
+        let _ = SelectObject(dc, old_font);
+    }
+    let _ = ReleaseDC(edit, dc);
+    if measured {
+        metrics.tmHeight.max(1)
+    } else {
+        fallback.max(1)
+    }
+}
+
+unsafe fn set_single_line_edit_margins(edit: HWND, dpi: u32) {
+    const EM_SETMARGINS: u32 = 0x00d3;
+    const EC_LEFTMARGIN: usize = 0x0001;
+    const EC_RIGHTMARGIN: usize = 0x0002;
+    let margin = ((4i64 * i64::from(dpi.max(1)) + 48) / 96).clamp(1, i64::from(u16::MAX)) as u16;
+    let packed = u32::from(margin) | (u32::from(margin) << 16);
+    let _ = SendMessageW(
+        edit,
+        EM_SETMARGINS,
+        WPARAM(EC_LEFTMARGIN | EC_RIGHTMARGIN),
+        LPARAM(packed as isize),
+    );
+}
+
+unsafe fn frame_bounds_in_parent(frame: HWND) -> Option<RECT> {
+    let Ok(parent) = GetParent(frame) else {
+        return None;
+    };
+    let mut window = RECT::default();
+    GetWindowRect(frame, &mut window).ok()?;
+    let mut top_left = POINT {
+        x: window.left,
+        y: window.top,
+    };
+    let mut bottom_right = POINT {
+        x: window.right,
+        y: window.bottom,
+    };
+    if !ScreenToClient(parent, &mut top_left).as_bool()
+        || !ScreenToClient(parent, &mut bottom_right).as_bool()
+    {
+        return None;
+    }
+    Some(RECT {
+        left: top_left.x,
+        top: top_left.y,
+        right: bottom_right.x,
+        bottom: bottom_right.y,
+    })
+}
+
+unsafe fn layout_single_line_edit(edit: HWND, outer: RECT) {
+    let Some(frame) = single_line_edit_frame(edit) else {
+        return;
+    };
+    let width = (outer.right - outer.left).max(0);
+    let height = (outer.bottom - outer.top).max(0);
+    let dpi = GetDpiForWindow(edit).max(96);
+    let inset = ((i64::from(dpi) + 48) / 96) as i32;
+    let inner = single_line_edit_inner_bounds(
+        width,
+        height,
+        single_line_edit_font_height(edit, dpi),
+        inset.max(1),
+    );
+    set_single_line_edit_margins(edit, dpi);
+    let _ = SetWindowPos(
+        frame,
+        edit,
+        outer.left,
+        outer.top,
+        width,
+        height,
+        SWP_NOACTIVATE,
+    );
+    if SetPropW(
+        edit,
+        SINGLE_LINE_EDIT_INTERNAL_LAYOUT_PROPERTY,
+        HANDLE(std::ptr::dangling_mut()),
+    )
+    .is_ok()
+    {
+        let _ = SetWindowPos(
+            edit,
+            None,
+            outer.left + inner.x,
+            outer.top + inner.y,
+            inner.width,
+            inner.height,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+        let _ = RemovePropW(edit, SINGLE_LINE_EDIT_INTERNAL_LAYOUT_PROPERTY);
+    }
 }
 
 unsafe extern "system" fn single_line_edit_layout_proc(
@@ -1793,21 +2007,107 @@ unsafe extern "system" fn single_line_edit_layout_proc(
     _reference_data: usize,
 ) -> LRESULT {
     match message {
-        WM_WINDOWPOSCHANGING if lparam.0 != 0 => {
+        WM_WINDOWPOSCHANGING
+            if lparam.0 != 0
+                && GetPropW(hwnd, SINGLE_LINE_EDIT_INTERNAL_LAYOUT_PROPERTY).is_invalid() =>
+        {
             let position = &mut *(lparam.0 as *mut WINDOWPOS);
-            if !position.flags.contains(SWP_NOSIZE) {
-                let target_height =
-                    InnoMetrics::for_dpi(GetDpiForWindow(hwnd).max(96)).field_height;
-                (position.y, position.cy) = centered_single_line_edit_bounds(
-                    position.y,
-                    position.cy,
-                    target_height,
-                    !position.flags.contains(SWP_NOMOVE),
-                );
+            if let Some(frame) = single_line_edit_frame(hwnd) {
+                let existing = frame_bounds_in_parent(frame).unwrap_or_default();
+                let outer = RECT {
+                    left: if position.flags.contains(SWP_NOMOVE) {
+                        existing.left
+                    } else {
+                        position.x
+                    },
+                    top: if position.flags.contains(SWP_NOMOVE) {
+                        existing.top
+                    } else {
+                        position.y
+                    },
+                    right: 0,
+                    bottom: 0,
+                };
+                let width = if position.flags.contains(SWP_NOSIZE) {
+                    existing.right - existing.left
+                } else {
+                    position.cx
+                };
+                let height = if position.flags.contains(SWP_NOSIZE) {
+                    existing.bottom - existing.top
+                } else {
+                    position.cy
+                };
+                if width > 0 && height > 0 {
+                    let dpi = GetDpiForWindow(hwnd).max(96);
+                    let inset = ((i64::from(dpi) + 48) / 96) as i32;
+                    let inner = single_line_edit_inner_bounds(
+                        width,
+                        height,
+                        single_line_edit_font_height(hwnd, dpi),
+                        inset.max(1),
+                    );
+                    set_single_line_edit_margins(hwnd, dpi);
+                    let _ = SetWindowPos(
+                        frame,
+                        hwnd,
+                        outer.left,
+                        outer.top,
+                        width,
+                        height,
+                        SWP_NOACTIVATE,
+                    );
+                    if !position.flags.contains(SWP_NOMOVE) {
+                        position.x = outer.left + inner.x;
+                        position.y = outer.top + inner.y;
+                    }
+                    if !position.flags.contains(SWP_NOSIZE) {
+                        position.cx = inner.width;
+                        position.cy = inner.height;
+                    }
+                }
             }
             DefSubclassProc(hwnd, message, wparam, lparam)
         }
+        WM_SETFONT => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if let Some(frame) = single_line_edit_frame(hwnd) {
+                if let Some(outer) = frame_bounds_in_parent(frame) {
+                    layout_single_line_edit(hwnd, outer);
+                }
+            }
+            result
+        }
+        WM_SHOWWINDOW => {
+            if let Some(frame) = single_line_edit_frame(hwnd) {
+                let _ = ShowWindow(frame, if wparam.0 != 0 { SW_SHOW } else { SW_HIDE });
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_ENABLE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if let Some(frame) = single_line_edit_frame(hwnd) {
+                let _ = InvalidateRect(frame, None, false);
+            }
+            result
+        }
+        0x02e3 => {
+            // WM_DPICHANGED_AFTERPARENT: the outer layout remains authoritative, but font height
+            // and the one-pixel visual inset must be recalculated for the child's new DPI.
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if let Some(frame) = single_line_edit_frame(hwnd) {
+                if let Some(outer) = frame_bounds_in_parent(frame) {
+                    layout_single_line_edit(hwnd, outer);
+                }
+            }
+            result
+        }
         WM_NCDESTROY => {
+            if let Some(frame) = single_line_edit_frame(hwnd) {
+                let _ = RemovePropW(hwnd, SINGLE_LINE_EDIT_FRAME_PROPERTY);
+                let _ = RemovePropW(frame, SINGLE_LINE_EDIT_OWNER_PROPERTY);
+                let _ = DestroyWindow(frame);
+            }
             let _ = RemoveWindowSubclass(
                 hwnd,
                 Some(single_line_edit_layout_proc),
@@ -1816,26 +2116,6 @@ unsafe extern "system" fn single_line_edit_layout_proc(
             DefSubclassProc(hwnd, message, wparam, lparam)
         }
         _ => DefSubclassProc(hwnd, message, wparam, lparam),
-    }
-}
-
-const fn centered_single_line_edit_bounds(
-    y: i32,
-    height: i32,
-    target_height: i32,
-    may_move: bool,
-) -> (i32, i32) {
-    if height <= 0 || target_height <= 0 || height < target_height {
-        (y, height)
-    } else {
-        (
-            if may_move {
-                y + (height - target_height) / 2
-            } else {
-                y
-            },
-            target_height,
-        )
     }
 }
 
@@ -2098,27 +2378,42 @@ mod tests {
     }
 
     #[test]
-    fn single_line_edit_is_vertically_centered_by_sizing_the_native_control() {
+    fn single_line_edit_centres_the_font_cell_inside_the_full_height_frame() {
         assert_eq!(
-            centered_single_line_edit_bounds(100, 30, 21, true),
-            (104, 21)
+            single_line_edit_inner_bounds(200, 30, 21, 1),
+            SingleLineEditInnerBounds {
+                x: 1,
+                y: 5,
+                width: 198,
+                height: 21,
+            }
         );
         assert_eq!(
-            centered_single_line_edit_bounds(100, 21, 21, true),
-            (100, 21)
+            single_line_edit_inner_bounds(400, 60, 42, 2),
+            SingleLineEditInnerBounds {
+                x: 2,
+                y: 9,
+                width: 396,
+                height: 42,
+            }
         );
         assert_eq!(
-            centered_single_line_edit_bounds(100, 18, 21, true),
-            (100, 18)
+            single_line_edit_inner_bounds(100, 18, 21, 1),
+            SingleLineEditInnerBounds {
+                x: 1,
+                y: 1,
+                width: 98,
+                height: 16,
+            }
         );
-        assert_eq!(centered_single_line_edit_bounds(100, 0, 21, true), (100, 0));
         assert_eq!(
-            centered_single_line_edit_bounds(100, 30, 21, false),
-            (100, 21)
-        );
-        assert_eq!(
-            centered_single_line_edit_bounds(200, 60, 42, true),
-            (209, 42)
+            single_line_edit_inner_bounds(0, 0, 21, 1),
+            SingleLineEditInnerBounds {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            }
         );
     }
 
