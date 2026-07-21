@@ -36,16 +36,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE,
     CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE,
-    ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW,
-    IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG, SM_CXICON, SM_CXSCREEN,
-    SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCREATE,
-    WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_CONTROLPARENT, WS_EX_LAYERED, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    EN_KILLFOCUS, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL,
+    IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG, SM_CXICON,
+    SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE,
+    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL,
+    WM_NCACTIVATE, WM_NCCREATE, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE,
+    WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_LAYERED, WS_OVERLAPPEDWINDOW,
+    WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::backdrop;
@@ -364,6 +365,28 @@ fn pca_target_result_is_current(
     active_generation == message.generation && active_target == Some(&message.target)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PcaPendingStatus {
+    FirmwareCompatibility,
+    TargetEfiSignature,
+}
+
+const fn pca_pending_status(
+    selection_is_relevant: bool,
+    firmware_pending: bool,
+    target_pending: bool,
+) -> Option<PcaPendingStatus> {
+    if !selection_is_relevant {
+        None
+    } else if firmware_pending {
+        Some(PcaPendingStatus::FirmwareCompatibility)
+    } else if target_pending {
+        Some(PcaPendingStatus::TargetEfiSignature)
+    } else {
+        None
+    }
+}
+
 const fn page_switch_requires_full_layout(page: Page) -> bool {
     matches!(page, Page::Install)
 }
@@ -580,6 +603,10 @@ struct CommandBarLayout {
     left_edge: i32,
 }
 
+const fn effective_easy_mode_enabled(configured: bool, is_pe_environment: bool) -> bool {
+    configured && !is_pe_environment
+}
+
 const fn command_bar_visibility(
     page: Page,
     easy_mode_enabled: bool,
@@ -622,6 +649,19 @@ fn command_bar_layout(
 
 fn centered_command_button_x(content_left: i32, content_width: i32, button_width: i32) -> i32 {
     content_left + (content_width - button_width).max(0) / 2
+}
+
+fn preserved_pe_selection(
+    preferred_filename: Option<&str>,
+    available: &[OnlinePE],
+) -> Option<usize> {
+    preferred_filename
+        .and_then(|filename| {
+            available
+                .iter()
+                .position(|pe| pe.filename.eq_ignore_ascii_case(filename))
+        })
+        .or_else(|| (available.len() == 1).then_some(0))
 }
 
 /// Returns the top of the installation partition heading relative to the image row.
@@ -669,14 +709,15 @@ mod layout_tests {
         bitlocker_gate_completion, centered_command_button_x, command_bar_layout,
         command_bar_visibility, command_button_role, confirmed_tool_backend_request,
         device_change_requests_partition_refresh, download_failure_message,
-        initial_mutating_tool_state, install_partition_heading_y,
+        effective_easy_mode_enabled, initial_mutating_tool_state, install_partition_heading_y,
         list_view_selection_state_changed, minimum_window_size, page_switch_requires_full_layout,
-        pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
-        pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
-        tool_backend_result_succeeded, unattended_checked_for_source_preference,
-        BitLockerGateCompletion, InstallControlSnapshot, Page, PcaTargetContext, PcaTargetKey,
-        PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
-        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
+        pca_pending_status, pca_target_error_blocks, pca_target_probe_required,
+        pca_target_result_is_current, pca_target_uses_uefi, preferred_window_size,
+        preserved_pe_selection, primary_state_refresh_for_page, tool_backend_result_succeeded,
+        unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
+        Page, PcaPendingStatus, PcaTargetContext, PcaTargetKey, PcaTargetMessage,
+        PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
+        DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_executor::{DownloadFailureStage, DownloadWorkerError};
@@ -779,6 +820,49 @@ mod layout_tests {
         assert_eq!(
             command_bar_visibility(Page::Install, false, false, true),
             [false, false, false]
+        );
+    }
+
+    #[test]
+    fn pe_environment_disables_configured_easy_mode_without_rewriting_the_preference() {
+        assert!(effective_easy_mode_enabled(true, false));
+        assert!(!effective_easy_mode_enabled(true, true));
+        assert!(!effective_easy_mode_enabled(false, false));
+        assert!(!effective_easy_mode_enabled(false, true));
+    }
+
+    #[test]
+    fn startup_pca_probe_is_silent_until_the_install_selection_is_relevant() {
+        assert_eq!(pca_pending_status(false, true, false), None);
+        assert_eq!(
+            pca_pending_status(true, true, false),
+            Some(PcaPendingStatus::FirmwareCompatibility)
+        );
+        assert_eq!(
+            pca_pending_status(true, false, true),
+            Some(PcaPendingStatus::TargetEfiSignature)
+        );
+        assert_eq!(pca_pending_status(true, false, false), None);
+    }
+
+    #[test]
+    fn refreshed_pe_catalogue_preserves_a_matching_user_selection() {
+        let pe = |name: &str, filename: &str| crate::download::config::OnlinePE {
+            download_url: format!("https://example.invalid/{filename}"),
+            display_name: name.to_owned(),
+            filename: filename.to_owned(),
+            md5: None,
+            sha256: None,
+        };
+        let available = vec![pe("PE A renamed", "a.wim"), pe("PE B", "b.wim")];
+        assert_eq!(preserved_pe_selection(Some("B.WIM"), &available), Some(1));
+        assert_eq!(
+            preserved_pe_selection(Some("missing.wim"), &available),
+            None
+        );
+        assert_eq!(
+            preserved_pe_selection(None, &[pe("Only PE", "only.wim")]),
+            Some(0)
         );
     }
 
@@ -1369,6 +1453,7 @@ struct NativeWindow {
     window_active: bool,
     handles: Option<Handles>,
     app_config: crate::core::app_config::AppConfig,
+    is_pe_environment: bool,
     partitions: Vec<crate::core::disk::Partition>,
     partition_refresh_generation: u64,
     partition_refresh_in_flight: bool,
@@ -1383,6 +1468,7 @@ struct NativeWindow {
     xp_i386_source: Option<String>,
     mounted_iso: Option<std::path::PathBuf>,
     image_request_generation: u64,
+    image_edit_programmatic_change: bool,
     advanced_defaults_target: Option<String>,
     custom_unattend_path: String,
     custom_unattend_error: Option<String>,
@@ -1486,11 +1572,16 @@ impl NativeWindow {
     fn new(config: Arc<PreloadedConfig>) -> Self {
         let palette = theme::Palette::system();
         let app_config = config.app_config.clone();
+        let is_pe_environment = config
+            .system_info
+            .as_ref()
+            .map(|info| info.is_pe_environment)
+            .unwrap_or_else(crate::core::disk::DiskManager::is_pe_environment);
         let partitions = config.partitions.clone();
         let mut download_controller = NativeDownloadController::default();
         let mut pe_catalogue = PeCache::load().unwrap_or_default();
         let mut easy_controller = NativeEasyModeController::new(
-            app_config.easy_mode_enabled,
+            effective_easy_mode_enabled(app_config.easy_mode_enabled, is_pe_environment),
             app_config.easy_mode_settings_tip_dismissed,
         );
         if let Some(remote) = &config.remote_config {
@@ -1543,6 +1634,7 @@ impl NativeWindow {
             window_active: false,
             handles: None,
             app_config,
+            is_pe_environment,
             partitions,
             partition_refresh_generation: 0,
             partition_refresh_in_flight: false,
@@ -1557,6 +1649,7 @@ impl NativeWindow {
             xp_i386_source: None,
             mounted_iso: None,
             image_request_generation: 0,
+            image_edit_programmatic_change: false,
             advanced_defaults_target: None,
             custom_unattend_path: String::new(),
             custom_unattend_error: None,
@@ -1628,6 +1721,10 @@ impl NativeWindow {
 
     fn scale(&self, value: i32) -> i32 {
         value * self.dpi as i32 / 96
+    }
+
+    fn easy_mode_enabled(&self) -> bool {
+        effective_easy_mode_enabled(self.app_config.easy_mode_enabled, self.is_pe_environment)
     }
 
     fn has_active_long_task(&self) -> bool {
@@ -2015,7 +2112,7 @@ impl NativeWindow {
             CBS_DROPDOWNLIST | WS_TABSTOP.0 as i32,
             ID_INSTALL_PE,
         )?;
-        self.populate_install_pe_combo(pe);
+        self.populate_install_pe_combo(pe, None);
         let _ = ShowWindow(pe_label, SW_HIDE);
         let _ = ShowWindow(pe, SW_HIDE);
         let advanced = child(
@@ -2160,12 +2257,17 @@ impl NativeWindow {
         }
         self.update_pca_combo_labels();
         self.create_secondary_pages(hwnd)?;
+        // The firmware probe already started alongside process preloading. Attach its receiver
+        // before the initial page transaction so a preloaded install intent can never become
+        // briefly actionable while PCA compatibility is still unknown.
+        self.request_pca_firmware_detection(hwnd);
         // Child HWNDs are created visible by default, while easy mode intentionally hides the
         // ordinary Install page and its shared command bar. Reconcile the initial route before
         // the top-level window is ever shown; merely laying out an invisible command at the right
         // edge leaves a still-visible HWND clipped to a narrow rectangle on small displays.
         self.select_page_impl(hwnd, Page::Install, false);
-        self.request_pca_firmware_detection(hwnd);
+        // Keep the first visible status useful: startup PCA work remains silent until a selected
+        // image and target make it relevant, while the boot/TPM/Secure Boot summary is immediate.
         self.update_system_status();
         self.apply_native_dark_theme(hwnd);
         self.apply_fonts();
@@ -2182,9 +2284,17 @@ impl NativeWindow {
         #[cfg(not(feature = "non-elevated-tests"))]
         {
             self.pca_detection_pending = true;
+            let startup_receiver = self
+                .config
+                .pca_firmware_receiver
+                .lock()
+                .ok()
+                .and_then(|mut receiver| receiver.take());
             let window = hwnd.0 as usize;
             std::thread::spawn(move || {
-                let result = lr_core::boot_pca::inspect_firmware_pca();
+                let result = startup_receiver
+                    .and_then(|receiver| receiver.recv().ok())
+                    .unwrap_or_else(lr_core::boot_pca::inspect_firmware_pca);
                 let payload = Box::into_raw(Box::new(result));
                 unsafe {
                     if PostMessageW(
@@ -2294,15 +2404,25 @@ impl NativeWindow {
     }
 
     unsafe fn update_pca_detection_status(&self) {
-        if !self.pca_selection_is_relevant() {
+        let selection_is_relevant = self.pca_selection_is_relevant();
+        if !selection_is_relevant {
             return;
         }
         let Some(handles) = self.handles else { return };
-        if self.pca_detection_pending || self.pca_target_detection_pending {
-            set_text(
-                handles.status,
-                &crate::tr!("正在检测目标磁盘的 EFI 引导签名..."),
-            );
+        if let Some(pending) = pca_pending_status(
+            selection_is_relevant,
+            self.pca_detection_pending,
+            self.pca_target_detection_pending,
+        ) {
+            let text = match pending {
+                PcaPendingStatus::FirmwareCompatibility => {
+                    crate::tr!("正在检测 PCA 兼容性，请稍候。")
+                }
+                PcaPendingStatus::TargetEfiSignature => {
+                    crate::tr!("正在检测目标磁盘的 EFI 引导签名...")
+                }
+            };
+            set_text(handles.status, &text);
         } else if let Some(error) = self.pca_target_detection_error.as_ref() {
             let diskpart_may_create_esp = self.pca_target_context().is_some_and(|(_, context)| {
                 !pca_target_error_blocks(context, self.pca_firmware.is_some(), true)
@@ -2504,12 +2624,8 @@ impl NativeWindow {
                     &crate::tr!("开源许可"),
                 ],
                 easy_mode: &crate::tr!("启用小白模式"),
-                easy_mode_enabled: self.app_config.easy_mode_enabled,
-                easy_mode_available: !self
-                    .config
-                    .system_info
-                    .as_ref()
-                    .is_some_and(|info| info.is_pe_environment),
+                easy_mode_enabled: self.easy_mode_enabled(),
+                easy_mode_available: !self.is_pe_environment,
                 log_enabled: self.app_config.log_enabled,
                 wim_engine: self.app_config.wim_engine,
                 download_threads: self.app_config.download_threads,
@@ -2996,7 +3112,7 @@ impl NativeWindow {
             true,
         );
         let image_volume_layout_active = self.page == Page::Install
-            && !self.app_config.easy_mode_enabled
+            && !self.easy_mode_enabled()
             && !self.advanced_visible
             && !self.progress_visible;
         let volume_row_expansion = if image_volume_layout_active {
@@ -3339,7 +3455,7 @@ impl NativeWindow {
             preferred_button_width.min(((content_width - button_gap * 2) / 3).max(0));
         let command_visibility = command_bar_visibility(
             self.page,
-            self.app_config.easy_mode_enabled,
+            self.easy_mode_enabled(),
             self.advanced_visible,
             self.progress_visible,
         );
@@ -3466,7 +3582,7 @@ impl NativeWindow {
             preferred_button_width.min(((content_width - button_gap * 2) / 3).max(0));
         let command_visibility = command_bar_visibility(
             self.page,
-            self.app_config.easy_mode_enabled,
+            self.easy_mode_enabled(),
             self.advanced_visible,
             self.progress_visible,
         );
@@ -3507,7 +3623,7 @@ impl NativeWindow {
 
     fn install_page_content_visible(&self) -> bool {
         self.page == Page::Install
-            && !self.app_config.easy_mode_enabled
+            && !self.easy_mode_enabled()
             && !self.advanced_visible
             && !self.progress_visible
     }
@@ -3673,7 +3789,7 @@ impl NativeWindow {
             },
         );
         let _ = EnableWindow(h.primary, page != Page::Install);
-        let easy_visible = page == Page::Install && self.app_config.easy_mode_enabled;
+        let easy_visible = page == Page::Install && self.easy_mode_enabled();
         let install_visible = page == Page::Install && !easy_visible;
         for control in [
             h.image_label,
@@ -3836,7 +3952,7 @@ impl NativeWindow {
     unsafe fn update_unattend_controls_visibility(&self) {
         let Some(handles) = &self.handles else { return };
         let visible = self.page == Page::Install
-            && !self.app_config.easy_mode_enabled
+            && !self.easy_mode_enabled()
             && !self.advanced_visible
             && !self.progress_visible
             && SendMessageW(handles.unattend, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
@@ -4020,6 +4136,12 @@ impl NativeWindow {
         self.sync_install_preferences_from_controls();
         let validation = self.install_intent();
         let enabled = validation.is_ok();
+        let pca_pending = pca_pending_status(
+            self.pca_selection_is_relevant(),
+            self.pca_detection_pending,
+            self.pca_target_detection_pending,
+        )
+        .is_some();
         let Some(h) = &self.handles else { return };
         let was_enabled = IsWindowEnabled(h.primary).as_bool();
         if was_enabled != enabled {
@@ -4028,9 +4150,17 @@ impl NativeWindow {
             if was_enabled && !enabled {
                 if let Err(error) = validation {
                     log::warn!("安装按钮因校验状态变化被禁用: {error:?}");
-                    set_text(h.status, &error.to_string());
+                    if !pca_pending {
+                        set_text(h.status, &error.to_string());
+                    }
                 }
             }
+        }
+        // Selection changes can move an already-enabled install intent back behind either PCA
+        // probe. Keep the dedicated loading text authoritative instead of replacing it with the
+        // generic validation error emitted while disabling the command.
+        if pca_pending {
+            self.update_pca_detection_status();
         }
     }
 
@@ -4266,7 +4396,7 @@ impl NativeWindow {
         let show_xp = self.xp_i386_source.is_some()
             || selected.is_some_and(|image| image.major_version == Some(5));
         let show_pca = self.page == Page::Install
-            && !self.app_config.easy_mode_enabled
+            && !self.easy_mode_enabled()
             && !self.advanced_visible
             && !self.progress_visible
             && self.pca_selection_is_relevant();
@@ -4454,6 +4584,56 @@ impl NativeWindow {
         page.set_save_path(&path.to_string_lossy(), path.exists());
     }
 
+    unsafe fn handle_image_edit_changed(&mut self, hwnd: HWND) {
+        if self.image_edit_programmatic_change {
+            return;
+        }
+        let Some(handles) = self.handles else { return };
+        // A visible path must never remain associated with metadata from a previously inspected
+        // source. Invalidate the generation immediately; a late result is discarded by the
+        // existing generation/text check and can never re-enable installation for stale input.
+        self.image_request_generation = self.image_request_generation.wrapping_add(1);
+        if let Some(previous) = self.mounted_iso.take() {
+            if let Err(error) =
+                crate::core::iso::IsoMounter::unmount_iso_by_path(&previous.to_string_lossy())
+            {
+                log::warn!("手工修改镜像路径时卸载旧 ISO 失败: {error}");
+            }
+        }
+        self.image_volumes.clear();
+        self.effective_image_path = None;
+        self.xp_i386_source = None;
+        self.source_has_unattend = false;
+        self.clear_pca_target_detection();
+        self.update_advanced_install_context();
+        let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
+        self.set_install_volume_row_visible(hwnd, false);
+        self.apply_unattend_default();
+        self.update_unattend_conflict();
+        let _ = EnableWindow(handles.primary, false);
+        let path = get_text(handles.image_edit);
+        set_text(
+            handles.status,
+            &if path.trim().is_empty() {
+                crate::tr!("请选择系统镜像。")
+            } else {
+                crate::tr!("镜像路径已更改，离开输入框后将重新读取。")
+            },
+        );
+    }
+
+    unsafe fn commit_image_edit(&mut self, hwnd: HWND) {
+        if self.image_edit_programmatic_change {
+            return;
+        }
+        let Some(handles) = self.handles else { return };
+        let path = get_text(handles.image_edit);
+        let path = path.trim();
+        if !path.is_empty() {
+            self.load_image_path(hwnd, std::path::PathBuf::from(path));
+        }
+    }
+
     unsafe fn load_image_path(&mut self, hwnd: HWND, path: std::path::PathBuf) {
         let Some(h) = self.handles else { return };
         if let Some(previous) = self.mounted_iso.take() {
@@ -4463,7 +4643,9 @@ impl NativeWindow {
                 log::warn!("切换镜像前卸载 ISO 失败: {error}");
             }
         }
+        self.image_edit_programmatic_change = true;
         set_text(h.image_edit, &path.to_string_lossy());
+        self.image_edit_programmatic_change = false;
         self.image_volumes.clear();
         self.effective_image_path = None;
         self.xp_i386_source = None;
@@ -4941,10 +5123,11 @@ impl NativeWindow {
                 }
             }
         }
+        let easy_mode_enabled = self.easy_mode_enabled();
         if let Some(page) = &mut self.easy_page {
             page.update(&self.easy_controller.view());
             if self.page != Page::Install
-                || !self.app_config.easy_mode_enabled
+                || !easy_mode_enabled
                 || self.advanced_visible
                 || self.progress_visible
             {
@@ -7984,6 +8167,14 @@ impl NativeWindow {
         self.pe_catalogue.clone()
     }
 
+    unsafe fn selected_install_pe_filename(&self) -> Option<String> {
+        let handles = self.handles?;
+        let selected = SendMessageW(handles.pe, 0x0147, WPARAM(0), LPARAM(0)).0;
+        self.pe_catalogue
+            .get(usize::try_from(selected).ok()?)
+            .map(|pe| pe.filename.clone())
+    }
+
     unsafe fn install_pe_selector_should_be_visible(&self) -> bool {
         !crate::core::disk::DiskManager::is_pe_environment()
             && self.available_pe().len() > 1
@@ -7992,14 +8183,14 @@ impl NativeWindow {
                 .is_some_and(|target| target.is_current_system)
     }
 
-    unsafe fn populate_install_pe_combo(&self, combo: HWND) {
+    unsafe fn populate_install_pe_combo(&self, combo: HWND, preferred_filename: Option<&str>) {
         let _ = SendMessageW(combo, 0x014B, WPARAM(0), LPARAM(0));
         let available = self.available_pe();
         for pe in &available {
             let label = wide(&pe.display_name);
             let _ = SendMessageW(combo, 0x0143, WPARAM(0), LPARAM(label.as_ptr() as isize));
         }
-        let selected = if available.len() == 1 { 0 } else { usize::MAX };
+        let selected = preserved_pe_selection(preferred_filename, &available).unwrap_or(usize::MAX);
         let _ = SendMessageW(combo, 0x014E, WPARAM(selected), LPARAM(0));
     }
 
@@ -8560,6 +8751,7 @@ impl NativeWindow {
         self.download_controller
             .replace_trusted_remote_catalogue(&catalogue);
         if !catalogue.pe_list.is_empty() {
+            let selected_install_pe = self.selected_install_pe_filename();
             self.pe_catalogue = catalogue.pe_list.clone();
             if let Err(error) = PeCache::save(&catalogue.pe_list) {
                 log::warn!("刷新 PE 目录后保存本地缓存失败: {error}");
@@ -8574,9 +8766,9 @@ impl NativeWindow {
             }
             self.update_backup_primary_state();
             if let Some(handles) = self.handles {
-                self.populate_install_pe_combo(handles.pe);
+                self.populate_install_pe_combo(handles.pe, selected_install_pe.as_deref());
                 let show_pe = self.page == Page::Install
-                    && !self.app_config.easy_mode_enabled
+                    && !self.easy_mode_enabled()
                     && !self.advanced_visible
                     && !self.progress_visible
                     && self.install_pe_selector_should_be_visible();
@@ -8597,10 +8789,11 @@ impl NativeWindow {
             .and_then(crate::download::config::EasyModeConfig::parse);
         self.easy_controller
             .set_catalogue(easy_config.as_ref(), false);
+        let easy_mode_enabled = self.easy_mode_enabled();
         if let Some(page) = &mut self.easy_page {
             page.update(&self.easy_controller.view());
             if self.page != Page::Install
-                || !self.app_config.easy_mode_enabled
+                || !easy_mode_enabled
                 || self.advanced_visible
                 || self.progress_visible
             {
@@ -10375,7 +10568,13 @@ unsafe extern "system" fn window_proc(
                         }
                         state.update_install_primary_state();
                     }
-                    ID_IMAGE_EDIT => state.update_install_primary_state(),
+                    ID_IMAGE_EDIT if notification == EN_CHANGE as u16 => {
+                        state.handle_image_edit_changed(hwnd)
+                    }
+                    ID_IMAGE_EDIT if notification == EN_KILLFOCUS as u16 => {
+                        state.commit_image_edit(hwnd)
+                    }
+                    ID_IMAGE_EDIT => {}
                     ID_IMAGE_VOLUME if notification == CBN_SELCHANGE as u16 => {
                         state.refresh_source_unattend();
                         state.update_unattend_conflict();
@@ -10410,7 +10609,7 @@ unsafe extern "system" fn window_proc(
                         state.handle_progress_command(hwnd, intent);
                     }
                 }
-                if state.page == Page::Install && state.app_config.easy_mode_enabled {
+                if state.page == Page::Install && state.easy_mode_enabled() {
                     if let Some(command) = EasyModePage::command(command_id) {
                         let is_combo = matches!(
                             command,

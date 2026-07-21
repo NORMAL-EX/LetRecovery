@@ -8,6 +8,7 @@ mod native_ui;
 mod utils;
 
 use std::sync::Arc;
+use std::sync::{mpsc::Receiver, Mutex};
 
 /// 预加载的配置数据
 pub struct PreloadedConfig {
@@ -16,6 +17,10 @@ pub struct PreloadedConfig {
     pub system_info: Option<core::system_info::SystemInfo>,
     pub hardware_info: Option<core::hardware_info::HardwareInfo>,
     pub partitions: Vec<core::disk::Partition>,
+    /// PCA firmware probing starts alongside the other startup preloads. The native window takes
+    /// this receiver after its HWND exists and forwards the already-running result into the normal
+    /// message path without delaying first presentation.
+    pub pca_firmware_receiver: Mutex<Option<Receiver<lr_core::boot_pca::FirmwarePcaInfo>>>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -124,6 +129,7 @@ fn main() -> anyhow::Result<()> {
             system_info: None,
             hardware_info: None,
             partitions: Vec::new(),
+            pca_firmware_receiver: Mutex::new(None),
         }))?;
         return Ok(());
     }
@@ -183,7 +189,10 @@ fn main() -> anyhow::Result<()> {
 
     // 在显示窗口前先加载服务器配置和系统信息
     #[cfg(not(feature = "non-elevated-tests"))]
-    let preloaded_config = preload_all_config(app_config.clone());
+    let preloaded_config = {
+        let pca_firmware_receiver = start_pca_firmware_probe();
+        preload_all_config(app_config.clone(), pca_firmware_receiver)
+    };
 
     // 原生 UI 开发预览不联网、不枚举安装目标分区；系统与硬件摘要仍在窗口
     // 显示前只读加载，确保无 UAC 的测试产物与正式版硬件页行为一致。
@@ -198,6 +207,7 @@ fn main() -> anyhow::Result<()> {
             system_info: system_info.join().ok().flatten(),
             hardware_info: hardware_info.join().ok().flatten(),
             partitions: Vec::new(),
+            pca_firmware_receiver: Mutex::new(None),
         }
     };
     let preloaded_config = Arc::new(preloaded_config);
@@ -210,7 +220,19 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// 预加载所有配置和系统信息
-fn preload_all_config(app_config: core::app_config::AppConfig) -> PreloadedConfig {
+fn start_pca_firmware_probe() -> Receiver<lr_core::boot_pca::FirmwarePcaInfo> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let firmware = lr_core::boot_pca::inspect_firmware_pca();
+        let _ = sender.send(firmware);
+    });
+    receiver
+}
+
+fn preload_all_config(
+    app_config: core::app_config::AppConfig,
+    pca_firmware_receiver: Receiver<lr_core::boot_pca::FirmwarePcaInfo>,
+) -> PreloadedConfig {
     use std::time::Instant;
 
     // 窗口显示前并行读取分区、系统和硬件信息。硬件页首次出现时必须已经
@@ -255,6 +277,7 @@ fn preload_all_config(app_config: core::app_config::AppConfig) -> PreloadedConfi
         system_info,
         hardware_info,
         partitions,
+        pca_firmware_receiver: Mutex::new(Some(pca_firmware_receiver)),
     }
 }
 

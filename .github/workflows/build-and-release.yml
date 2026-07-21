@@ -496,23 +496,29 @@ jobs:
             throw "LetRecovery update API rejected the request"
           }
 
-      - name: Force safe defaults in config.json (advanced options OFF)
+      - name: Force safe defaults in config.json (easy mode and advanced options OFF)
         shell: bash
         run: |
           set -euo pipefail
-          # 正式 release 发给终端用户：强制「高级选项」总开关关闭。
-          # 高级选项面向高级用户，需用户自行在软件设置里开启；正式版默认不该开。
-          test -f pkg/config.json || { echo "pkg/config.json 不存在，跳过"; exit 0; }
+          # 正式 release 的新装配置必须固定进入完整安装页；小白模式和高级选项都由
+          # 用户在软件内主动开启，不能继承外部底包仓库中的维护机偏好。
+          test -f pkg/config.json || { echo "pkg/config.json 不存在"; exit 1; }
           python - <<'PY'
           import json, io
           p = "pkg/config.json"
           d = json.load(open(p, encoding="utf-8"))
-          before = d.get("enable_advanced_options")
+          before_easy = d.get("easy_mode_enabled")
+          before_advanced = d.get("enable_advanced_options")
+          d["easy_mode_enabled"] = False
           d["enable_advanced_options"] = False
           io.open(p, "w", encoding="utf-8", newline="\n").write(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
-          print("enable_advanced_options:", before, "-> False")
+          check = json.load(open(p, encoding="utf-8"))
+          if check.get("easy_mode_enabled") is not False or check.get("enable_advanced_options") is not False:
+              raise SystemExit("failed to normalize release defaults")
+          print("easy_mode_enabled:", before_easy, "-> False")
+          print("enable_advanced_options:", before_advanced, "-> False")
           PY
-          echo "已强制 enable_advanced_options=False"
+          echo "已强制 easy_mode_enabled=False, enable_advanced_options=False"
 
       - name: Prepare package README
         shell: bash

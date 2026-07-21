@@ -1935,6 +1935,7 @@
     "调整分区失败：{}": "Partition resize failed: {}",
     "离线 Windows 目标无效，请重新选择": "The offline Windows target is invalid. Select it again.",
     "请选择系统镜像。": "Select a system image.",
+    "镜像路径已更改，离开输入框后将重新读取。": "The image path changed. Leave the field to inspect the new source.",
     "系统镜像仍在读取，请稍候。": "The system image is still being read. Please wait.",
     "请选择要安装的镜像卷。": "Select the image volume to install.",
     "仅支持 x86 或 x64 系统镜像。": "Only x86 and x64 system images are supported.",
