@@ -1,0 +1,290 @@
+/*
+ * Anthropic Style — Base CSS
+ * 将此文件作为所有 Anthropic 风格项目的基础层
+ * 包含：CSS 变量、Reset、基础排版
+ *
+ * ⚠️  使用前请在 HTML <head> 中先引入本地字体：
+ *     <link rel="stylesheet" href="assets/fonts/fonts.css">
+ *     然后再引入本文件：
+ *     <link rel="stylesheet" href="references/base.css">
+ *
+ *     字体文件位于 assets/fonts/ 目录，无需联网即可加载。
+ */
+
+/* ═══════════════════════════════════════
+   1. 设计 Token
+═══════════════════════════════════════ */
+:root {
+  /* 颜色 */
+  --color-bg-base:        #ECE9E0;
+  --color-bg-raised:      #F5F3EC;
+  --color-bg-overlay:     #FDFCF8;
+  --color-bg-inverted:    #141413;
+  --color-text-primary:   #141413;
+  --color-text-secondary: #6B6860;
+  --color-text-muted:     #B0AEA5;
+  --color-text-inverted:  #FAF9F5;
+  --color-text-link:      #C96442;
+  --color-border-default: #D8D5CC;
+  --color-border-subtle:  #E8E6DC;
+  --color-border-strong:  #9B9890;
+  --color-accent-orange:  #D97757;
+  --color-accent-warm:    #C96442;
+  --color-accent-blue:    #6A9BCC;
+  --color-accent-green:   #788C5D;
+  --color-accent-sand:    #C4B99A;
+  --color-success:        #6B8F47;
+  --color-warning:        #C9943A;
+  --color-error:          #C0453A;
+  --color-info:           #5A89B8;
+
+  /* 字体（Latin）
+   * 官方品牌字体（来自 brand-guidelines）：Poppins（heading）+ Lora（body）
+   * 备选字体（风格相近，可替代）：DM Sans（heading）+ DM Serif（body）
+   * 所有字体均已内置在 assets/fonts/ 中
+   */
+  --font-display:  'Lora', 'DM Serif Display', 'Georgia', serif;
+  --font-heading:  'Poppins', 'DM Sans', 'Arial', sans-serif;
+  --font-body:     'Lora', 'DM Serif Text', 'Georgia', serif;
+  --font-mono:     'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+
+  /* 字重参考（Poppins 可用 300/400/500/600/700）*/
+  --weight-light:     300;
+  --weight-regular:   400;
+  --weight-medium:    500;
+  --weight-semibold:  600;  /* 新增：Poppins 有 600，DM Sans 无 */
+  --weight-bold:      700;
+
+  /* 字体（简体中文混排）
+   * 英文字体在前（已声明 unicode-range，自动跳过 CJK 字符）
+   * 中文字体在后，作为 CJK 字符的渲染字体
+   */
+  --font-display-cn:  'Lora', 'DM Serif Display',
+                      'LXGW WenKai', 'Songti SC', 'STSong', 'SimSun', serif;
+  --font-body-cn:     'Lora', 'DM Serif Text',
+                      'LXGW WenKai', 'Songti SC', 'STSong', 'SimSun', serif;
+  --font-heading-cn:  'Poppins', 'DM Sans', 'Noto Sans SC', 'Source Han Sans SC',
+                      'PingFang SC', 'Microsoft YaHei UI',
+                      'Microsoft YaHei', sans-serif;
+
+  /* 字号 */
+  --text-xs:    0.75rem;
+  --text-sm:    0.875rem;
+  --text-base:  1rem;
+  --text-md:    1.125rem;
+  --text-lg:    1.25rem;
+  --text-xl:    1.5rem;
+  --text-2xl:   2rem;
+  --text-3xl:   2.75rem;
+  --text-4xl:   3.5rem;
+  --text-5xl:   4.5rem;
+
+  /* 行高（Latin） */
+  --leading-tight:  1.15;
+  --leading-snug:   1.35;
+  --leading-normal: 1.55;
+  --leading-loose:  1.75;
+
+  /* 行高（中文：比 Latin 高约 15%）*/
+  --leading-cn-tight:  1.4;    /* 大标题 */
+  --leading-cn-snug:   1.6;    /* 小标题 */
+  --leading-cn-normal: 1.75;   /* 正文 */
+  --leading-cn-loose:  1.9;    /* 长文阅读 */
+
+  /* 字号（中文：正文下限提升至 15px）*/
+  --text-cn-sm:    0.9375rem;  /* 15px，替代原 14px */
+  --text-cn-base:  1rem;       /* 16px */
+  --text-cn-md:    1.125rem;   /* 18px */
+
+  /* 字重 */
+  --weight-light:   300;
+  --weight-regular: 400;
+  --weight-medium:  500;
+  --weight-bold:    700;
+
+  /* 间距 */
+  --space-1:   4px;
+  --space-2:   8px;
+  --space-3:   12px;
+  --space-4:   16px;
+  --space-5:   20px;
+  --space-6:   24px;
+  --space-8:   32px;
+  --space-10:  40px;
+  --space-12:  48px;
+  --space-16:  64px;
+  --space-20:  80px;
+  --space-24:  96px;
+  --space-32:  128px;
+  --space-40:  160px;
+
+  /* 宽度 */
+  --max-width-prose:  680px;
+  --max-width-text:   860px;
+  --max-width-layout: 1200px;
+  --max-width-full:   1440px;
+
+  /* 圆角 */
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   16px;
+  --radius-xl:   24px;
+  --radius-full: 9999px;
+
+  /* 动效 */
+  --ease-default: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-bounce:  cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-gentle:  cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast:   150ms;
+  --duration-normal: 250ms;
+  --duration-slow:   400ms;
+}
+
+/* 深色模式 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg-base:        #1A1916;
+    --color-bg-raised:      #222119;
+    --color-bg-overlay:     #2C2B26;
+    --color-bg-inverted:    #F5F3EC;
+    --color-text-primary:   #EAE7DC;
+    --color-text-secondary: #9D9A91;
+    --color-text-muted:     #5C5A54;
+    --color-text-inverted:  #141413;
+    --color-border-default: #3A3830;
+    --color-border-subtle:  #2E2D27;
+  }
+}
+
+/* ═══════════════════════════════════════
+   2. 现代 Reset
+═══════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-bg-base);
+  color: var(--color-text-primary);
+  font-family: var(--font-heading);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+img, video, svg { display: block; max-width: 100%; }
+p, h1, h2, h3, h4, h5, h6 { margin: 0; overflow-wrap: break-word; }
+ul, ol { list-style: none; margin: 0; padding: 0; }
+a { color: inherit; text-decoration: none; }
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  outline: none;
+  appearance: none;
+}
+
+/* ═══════════════════════════════════════
+   3. 布局工具类
+═══════════════════════════════════════ */
+.page-container {
+  width: 100%;
+  max-width: var(--max-width-layout);
+  margin: 0 auto;
+  padding-inline: clamp(var(--space-6), 5vw, var(--space-16));
+}
+
+.section-hero    { padding-block: clamp(80px,  12vw, 160px); }
+.section-content { padding-block: clamp(64px,   8vw, 128px); }
+.section-tight   { padding-block: clamp(40px,   6vw, 80px); }
+
+/* ═══════════════════════════════════════
+   4. 可访问性
+═══════════════════════════════════════ */
+:focus-visible {
+  outline: 2px solid var(--color-accent-orange);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ═══════════════════════════════════════
+   5. 滚动动画工具
+═══════════════════════════════════════ */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.reveal {
+  opacity: 0;
+  animation: fadeUp var(--duration-slow) var(--ease-default) forwards;
+}
+.reveal:nth-child(1) { animation-delay:   0ms; }
+.reveal:nth-child(2) { animation-delay:  80ms; }
+.reveal:nth-child(3) { animation-delay: 160ms; }
+.reveal:nth-child(4) { animation-delay: 240ms; }
+.reveal:nth-child(5) { animation-delay: 320ms; }
+
+.scroll-reveal {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.5s var(--ease-default), transform 0.5s var(--ease-default);
+}
+.scroll-reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* ═══════════════════════════════════════════════
+   项目自定义 Token（合并保留）
+   ═══════════════════════════════════════════════ */
+:root {
+  /* 阴影（暖色调统一） */
+  --shadow-card:     0 2px 12px rgba(20, 20, 19, 0.07);
+  --shadow-elevated: 0 8px 32px rgba(20, 20, 19, 0.08);
+  --shadow-btn:      0 4px 12px rgba(217, 119, 87, 0.3);
+
+  /* UI 快捷别名 */
+  --font-ui: var(--font-heading);
+
+  /* 兼容别名（旧代码引用） */
+  --color-bg-surface:    var(--color-bg-raised);
+  --color-bg-elevated:   var(--color-bg-overlay);
+  --color-bg-sidebar:    #F0EDE4;
+  --color-bg-input:      var(--color-bg-overlay);
+  --color-border:        var(--color-border-default);
+  --color-accent:        var(--color-accent-orange);
+  --color-accent-dim:    rgba(217, 119, 87, 0.12);
+  --color-accent-glow:   rgba(217, 119, 87, 0.18);
+  --color-success-dim:   rgba(107, 143, 71, 0.12);
+  --color-success-glow:  rgba(107, 143, 71, 0.12);
+  --color-warning-dim:   rgba(201, 148, 58, 0.12);
+  --color-error-dim:     rgba(192, 69, 58, 0.12);
+  --color-text-accent:   var(--color-accent-warm);
+  --color-text-success:  var(--color-success);
+  --color-text-error:    var(--color-error);
+  --color-text-warning:  var(--color-warning);
+  --color-text-disabled: var(--color-text-muted);
+  --color-numeric:       var(--color-accent-blue);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg-sidebar: #1E1D19;
+  }
+}
