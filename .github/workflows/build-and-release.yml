@@ -27,6 +27,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch || github.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
 
       - name: Pin reproducible build timestamp
         shell: bash
@@ -620,13 +622,48 @@ jobs:
       - name: Determine tag
         id: tag
         shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
         run: |
-          $tag = "${{ inputs.tag }}"
+          $ErrorActionPreference = "Stop"
+          $tag = $env:REQUESTED_TAG.Trim()
           if ([string]::IsNullOrWhiteSpace($tag)) {
             $tag = (Get-Date).ToUniversalTime().ToString('yyyy.M.d')
           }
+          & git check-ref-format "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Invalid Release tag: $tag"
+          }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Tag: $tag"
+
+      - name: Stage fixed website version for validation
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\.github\scripts\update-website-version.ps1 -ReleaseTag $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to stage the website Release version"
+          }
+
+      - name: Setup Node for website validation
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: 官网/package-lock.json
+
+      - name: Validate website with the release version
+        shell: bash
+        working-directory: 官网
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run lint
+          npm run type-check
+          npm run build
 
       - name: Create Release
         shell: bash
@@ -657,3 +694,58 @@ jobs:
             --notes-file release_notes.md \
             $PRE
           echo "Released $TAG with LetRecovery.7z and LetRecovery-Setup-x64.exe (prerelease: ${PRE:-no})"
+
+      - name: Commit released website version
+        shell: pwsh
+        env:
+          RELEASE_BRANCH: ${{ inputs.branch || github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $branch = $env:RELEASE_BRANCH.Trim()
+          if ($branch.StartsWith("refs/heads/", [StringComparison]::Ordinal)) {
+            $branch = $branch.Substring("refs/heads/".Length)
+          }
+          if ([string]::IsNullOrWhiteSpace($branch)) {
+            throw "Release branch is empty"
+          }
+          & git check-ref-format "refs/heads/$branch"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Invalid Release branch: $branch"
+          }
+
+          $versionFile = "官网/version.json"
+          $changes = @(git status --porcelain --untracked-files=no -- $versionFile)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to inspect website version changes"
+          }
+          if ($changes.Count -eq 0) {
+            Write-Host "Website version already matches this Release; no commit is required."
+            exit 0
+          }
+
+          & git diff --check -- $versionFile
+          if ($LASTEXITCODE -ne 0) {
+            throw "Website version diff validation failed"
+          }
+
+          & git config user.name "github-actions[bot]"
+          & git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          & git add -- $versionFile
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to stage website version"
+          }
+
+          $stagedFiles = @(git -c core.quotepath=false diff --cached --name-only)
+          if ($LASTEXITCODE -ne 0 -or $stagedFiles.Count -ne 1 -or $stagedFiles[0] -ne $versionFile) {
+            throw "Release version commit must contain only $versionFile"
+          }
+
+          $version = [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $versionFile | ConvertFrom-Json).version
+          & git commit -m "chore(website): update version to $version [skip ci]"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to commit website version"
+          }
+          & git push origin "HEAD:refs/heads/$branch"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to push website version commit to $branch"
+          }

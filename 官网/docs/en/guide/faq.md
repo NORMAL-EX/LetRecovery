@@ -66,7 +66,7 @@ See [Image Engine](/guide/wim-engine).
 
 ## Will releasing a new version change the website's version number?
 
-Yes. Day-to-day development happens on separate branches or repositories and doesn't affect the live site; but once those changes pass review and are merged into the LetRecovery repo's `main` branch, EdgeOne Pages rebuilds and redeploys the website. Since the website's version number is generated from the build date (e.g. `v2026.06.07`), it updates along with that rebuild.
+Yes, but an ordinary website rebuild does not change it. The website displays the fixed released version stored in `官网/version.json`. Only after the LetRecovery Release workflow successfully publishes a new version does it write the corresponding Release tag to that file and commit the change automatically. On `main`, that version commit causes EdgeOne Pages to rebuild and deploy the website.
 
 ## Why don't I see `libwim-15.dll` inside the PE image?
 

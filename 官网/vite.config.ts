@@ -1,24 +1,33 @@
 import path from 'node:path'
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { cosspressMarkdown } from './plugins/markdown'
 
-// 构建期生成版本号：UTC 编译日期，沿用客户端 exe 的 v年.月.日 方案，避免在源码里写死。
-const buildVersion = (() => {
-  const d = new Date()
-  const y = d.getUTCFullYear()
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0')
-  const day = String(d.getUTCDate()).padStart(2, '0')
-  return `v${y}.${m}.${day}`
-})()
+interface WebsiteVersionDocument {
+  version?: unknown
+}
+
+// 官网只展示仓库中已经发布并提交的固定版本号。Release 流水线负责更新该文件；
+// 普通官网重建不得再根据构建机器时间改变用户看到的版本。
+const versionDocument = JSON.parse(
+  readFileSync(new URL('./version.json', import.meta.url), 'utf8'),
+) as WebsiteVersionDocument
+if (
+  typeof versionDocument.version !== 'string' ||
+  !/^v\d{4}\.\d{1,2}\.\d{1,2}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(versionDocument.version)
+) {
+  throw new Error('官网/version.json 必须包含有效的日期版本号')
+}
+const websiteVersion = versionDocument.version
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [cosspressMarkdown(), react(), tailwindcss()],
   define: {
-    // 打包时把 __APP_VERSION__ 替换为构建日期版本号（类型见 src/vite-env.d.ts）
-    __APP_VERSION__: JSON.stringify(buildVersion),
+    // 打包时把固定发布版本注入前端（类型见 src/vite-env.d.ts）。
+    __APP_VERSION__: JSON.stringify(websiteVersion),
   },
   resolve: {
     alias: {
