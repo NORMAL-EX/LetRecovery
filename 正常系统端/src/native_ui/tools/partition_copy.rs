@@ -43,6 +43,71 @@ const ID_PROGRESS: u16 = 65_106;
 const ID_LOG: u16 = 65_107;
 const LOG_CONTROL_KIND: NativeControlKind = NativeControlKind::ScrollableField;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PartitionCopyFlexibleHeights {
+    list: i32,
+    log: i32,
+}
+
+fn fit_partition_copy_flexible_heights(
+    available_height: i32,
+    fixed_height: i32,
+    preferred_list: i32,
+    preferred_log: i32,
+    minimum_list: i32,
+    minimum_log: i32,
+) -> PartitionCopyFlexibleHeights {
+    let budget = available_height.saturating_sub(fixed_height).max(0);
+    let preferred_list = preferred_list.max(0);
+    let preferred_log = preferred_log.max(0);
+    let minimum_list = minimum_list.clamp(0, preferred_list);
+    let minimum_log = minimum_log.clamp(0, preferred_log);
+    let preferred_total = preferred_list
+        .saturating_mul(2)
+        .saturating_add(preferred_log);
+    if budget >= preferred_total {
+        return PartitionCopyFlexibleHeights {
+            list: preferred_list,
+            log: preferred_log,
+        };
+    }
+
+    let minimum_total = minimum_list.saturating_mul(2).saturating_add(minimum_log);
+    if budget <= minimum_total {
+        if minimum_total == 0 {
+            return PartitionCopyFlexibleHeights { list: 0, log: 0 };
+        }
+        let list =
+            ((i64::from(budget) * i64::from(minimum_list)) / i64::from(minimum_total)) as i32;
+        return PartitionCopyFlexibleHeights {
+            list,
+            log: budget.saturating_sub(list.saturating_mul(2)),
+        };
+    }
+
+    let mut list = minimum_list;
+    let mut log = minimum_log;
+    let mut remaining = budget - minimum_total;
+    let list_capacity = preferred_list - minimum_list;
+    let log_capacity = preferred_log - minimum_log;
+    let total_capacity = list_capacity.saturating_mul(2).saturating_add(log_capacity);
+    if total_capacity > 0 {
+        let pair_extra = ((i64::from(remaining) * i64::from(list_capacity.saturating_mul(2)))
+            / i64::from(total_capacity)) as i32;
+        let per_list = (pair_extra / 2).min(list_capacity);
+        list += per_list;
+        remaining -= per_list * 2;
+        let log_extra = remaining.min(log_capacity);
+        log += log_extra;
+        remaining -= log_extra;
+    }
+    let additional_list = (remaining / 2).min(preferred_list - list);
+    list += additional_list;
+    remaining -= additional_list * 2;
+    log += remaining.min(preferred_log - log);
+    PartitionCopyFlexibleHeights { list, log }
+}
+
 const LVNI_SELECTED: isize = 0x0002;
 const PBM_SETRANGE32: u32 = 0x0406;
 const PBM_SETPOS: u32 = 0x0402;
@@ -358,7 +423,7 @@ pub struct NativePartitionCopyDialog {
 
 impl NativePartitionCopyDialog {
     pub unsafe fn create(owner: HWND) -> windows::core::Result<Self> {
-        let shell = DialogShell::create(
+        let mut shell = DialogShell::create(
             owner,
             DialogSpec {
                 window_title: crate::tr!("分区对拷"),
@@ -373,6 +438,8 @@ impl NativePartitionCopyDialog {
                 },
             },
         )?;
+        shell.set_primary_closes(false);
+        shell.set_secondary_closes(false);
         let dpi = GetDpiForWindow(shell.hwnd()).max(96);
         let face = wide("Microsoft YaHei UI");
         let font = CreateFontW(
@@ -489,7 +556,10 @@ impl NativePartitionCopyDialog {
             }
             DialogResult::Secondary => None,
             DialogResult::Primary => match self.state.request() {
-                Some(request) => Some(PartitionCopyDialogIntent::RequestConfirmation(request)),
+                Some(request) => {
+                    self.shell.hide_modeless();
+                    Some(PartitionCopyDialogIntent::RequestConfirmation(request))
+                }
                 None => {
                     self.state.message =
                         if self.state.source == self.state.target && self.state.source.is_some() {
@@ -518,10 +588,58 @@ impl NativePartitionCopyDialog {
             .min(width / 3);
         let value_x = label_width + metrics.control_gap;
         let value_width = (width - value_x).max(0);
-        let list_height = preferred_list_height(self.state.inventory.len(), dpi, 3, 6);
+        let preferred_list = preferred_list_height(self.state.inventory.len(), dpi, 3, 6);
 
         let row_height = metrics.field_height;
         let list_y = row_height + metrics.control_gap;
+        let progress_height = if self.state.message.is_empty() {
+            0
+        } else {
+            measure_text(
+                self.shell.hwnd(),
+                self.font,
+                &self.state.message,
+                Some(width),
+            )
+            .height
+            .max(metrics.label_height)
+        };
+        let progress_bar_height = scale(18, dpi);
+        let fixed_height = list_y * 2
+            + metrics.section_gap
+            + metrics.control_gap
+            + metrics.label_height
+            + metrics.tight_gap
+            + progress_height
+            + if progress_height > 0 {
+                metrics.tight_gap
+            } else {
+                0
+            }
+            + progress_bar_height
+            + metrics.control_gap
+            + metrics.label_height
+            + metrics.tight_gap;
+        let preferred_log =
+            metrics.list_row_height * self.state.log.lines.len().clamp(3, 6) as i32 + scale(2, dpi);
+        let natural_height = fixed_height + preferred_list * 2 + preferred_log;
+        self.shell
+            .fit_content_height(logical_height(natural_height, dpi));
+
+        // The top-level shell can be clamped to the monitor work area. Read the resulting content
+        // height and keep every tool control above the shell-owned command bar.
+        let _ = GetClientRect(self.shell.content(), &mut rect);
+        let available_height = (rect.bottom - rect.top).max(0);
+        let flexible = fit_partition_copy_flexible_heights(
+            available_height,
+            fixed_height,
+            preferred_list,
+            preferred_log,
+            metrics.list_row_height + scale(2, dpi),
+            metrics.list_row_height + scale(2, dpi),
+        );
+        let list_height = flexible.list;
+        let log_height = flexible.log;
         move_control(
             self.controls.source_label,
             0,
@@ -569,35 +687,24 @@ impl NativePartitionCopyDialog {
             resume_height,
         );
         let mut y = status_y + resume_height + metrics.tight_gap;
-        let progress_height = if self.state.message.is_empty() {
-            0
-        } else {
-            measure_text(
-                self.shell.hwnd(),
-                self.font,
-                &self.state.message,
-                Some(width),
-            )
-            .height
-            .max(metrics.label_height)
-        };
         move_control(self.controls.progress_status, 0, y, width, progress_height);
         y += progress_height;
         if progress_height > 0 {
             y += metrics.tight_gap;
         }
-        let progress_bar_height = scale(18, dpi);
         move_control(self.controls.progress, 0, y, width, progress_bar_height);
         y += progress_bar_height + metrics.control_gap;
         move_control(self.controls.log_label, 0, y, width, metrics.label_height);
         y += metrics.label_height + metrics.tight_gap;
-        let log_height =
-            metrics.list_row_height * self.state.log.lines.len().clamp(3, 6) as i32 + scale(2, dpi);
         move_control(self.controls.log, 0, y, width, log_height);
         y += log_height;
-        self.shell.fit_content_height(logical_height(y, dpi));
+        debug_assert!(y <= available_height || available_height < fixed_height);
         for list in [self.controls.source_list, self.controls.target_list] {
-            for (index, column_width) in partition_columns(width, dpi).into_iter().enumerate() {
+            let mut client = RECT::default();
+            let _ = GetClientRect(list, &mut client);
+            let list_width = (client.right - client.left).max(0);
+            for (index, column_width) in partition_columns(list_width, dpi).into_iter().enumerate()
+            {
                 let _ = SendMessageW(
                     list,
                     LVM_SETCOLUMNWIDTH,
@@ -964,6 +1071,26 @@ mod tests {
     #[test]
     fn copy_log_keeps_scrollable_field_theme_role() {
         assert_eq!(LOG_CONTROL_KIND, NativeControlKind::ScrollableField);
+    }
+
+    #[test]
+    fn clamped_dialog_distributes_flexible_height_without_crossing_the_command_bar() {
+        assert_eq!(
+            fit_partition_copy_flexible_heights(700, 220, 140, 120, 70, 50),
+            PartitionCopyFlexibleHeights {
+                list: 140,
+                log: 120,
+            }
+        );
+        let compact = fit_partition_copy_flexible_heights(500, 220, 140, 120, 70, 50);
+        assert!(compact.list >= 70 && compact.list <= 140);
+        assert!(compact.log >= 50 && compact.log <= 120);
+        assert!(compact.list * 2 + compact.log <= 280);
+
+        let severely_clamped = fit_partition_copy_flexible_heights(250, 220, 140, 120, 70, 50);
+        assert!(severely_clamped.list >= 0);
+        assert!(severely_clamped.log >= 0);
+        assert_eq!(severely_clamped.list * 2 + severely_clamped.log, 30);
     }
 
     fn rows() -> Vec<PartitionCopyInventoryRow> {

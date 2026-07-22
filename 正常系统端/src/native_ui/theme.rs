@@ -27,22 +27,23 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::WS_VSCROLL;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetPropW, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, KillTimer, PostMessageW,
-    RemovePropW, SendMessageW, SetPropW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowCaret,
-    GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY,
-    WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WM_TIMER, WS_BORDER,
-    WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_EX_LAYERED,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, PostMessageW, RemovePropW,
+    SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret, GWL_EXSTYLE, GWL_STYLE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_CANCELMODE,
+    WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_PAINT,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER, WS_CLIPCHILDREN,
+    WS_EX_CLIENTEDGE, WS_EX_LAYERED,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 use super::controls::{
     alpha_blend_premultiplied_bgra, button_visual, draw_antialiased_control_frame,
-    draw_native_text, draw_opaque_surface_text, draw_progress, fill_round_rect_antialiased,
-    rounded_control_frame_geometry, single_line_edit_frame, single_line_edit_frame_owner,
-    ButtonRole, ControlState, InnoMetrics, ProgressRole,
+    draw_native_text, draw_opaque_surface_text, draw_progress, ensure_list_view_frame,
+    fill_round_rect_antialiased, list_view_frame, rounded_control_frame_geometry,
+    single_line_edit_frame, single_line_edit_frame_owner, ButtonRole, ControlState, InnoMetrics,
+    ProgressRole,
 };
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
@@ -555,10 +556,11 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
-    // USER32/comctl32 can repaint a square non-client border after hover, focus or header paint.
-    // Keep the report implementation native, but reserve its outer frame for the deterministic
-    // antialiased overlay installed below.
+    // Keep the real report borderless. Its deterministic frame is a non-interactive sibling,
+    // because comctl32 copies pixels inside the ListView while scrolling and would otherwise copy
+    // the fixed right edge repeatedly across the report body.
     apply_borderless_style(list);
+    let frame = ensure_list_view_frame(list);
     apply_control_theme(list, palette, NativeControlKind::ListView);
     clear_legacy_control_region(list);
     // Comctl32 v6 explicitly provides double-buffered report painting for this purpose.  Some
@@ -585,6 +587,15 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
         LIST_VIEW_SUBCLASS_ID,
         palette_reference(palette),
     );
+    if let Some(frame) = frame {
+        let _ = SetWindowSubclass(
+            frame,
+            Some(list_view_frame_subclass),
+            LIST_VIEW_FRAME_SUBCLASS_ID,
+            palette_reference(palette),
+        );
+        let _ = InvalidateRect(frame, None, false);
+    }
     // Selection colour is delivered as NM_CUSTOMDRAW to the ListView parent rather than the
     // ListView itself. Install one keyed parent subclass per list, so dialogs containing two
     // reports remain independent and a real selected row uses the Inno highlighted-button fill.
@@ -633,32 +644,6 @@ unsafe fn set_list_view_colors(list: HWND, palette: Palette) {
     }
 }
 
-unsafe fn schedule_list_view_scroll_redraw(hwnd: HWND) {
-    if !GetPropW(hwnd, LIST_VIEW_SCROLL_REDRAW_PENDING_PROPERTY).is_invalid() {
-        return;
-    }
-    if SetPropW(
-        hwnd,
-        LIST_VIEW_SCROLL_REDRAW_PENDING_PROPERTY,
-        HANDLE(std::ptr::dangling_mut::<core::ffi::c_void>()),
-    )
-    .is_err()
-    {
-        let _ = InvalidateRect(hwnd, None, false);
-        return;
-    }
-    if SetTimer(
-        hwnd,
-        LIST_VIEW_SCROLL_REDRAW_TIMER_ID,
-        LIST_VIEW_SCROLL_REDRAW_INTERVAL_MS,
-        None,
-    ) == 0
-    {
-        let _ = RemovePropW(hwnd, LIST_VIEW_SCROLL_REDRAW_PENDING_PROPERTY);
-        let _ = InvalidateRect(hwnd, None, false);
-    }
-}
-
 /// Applies a deterministic Inno-style paint path to the one native progress control still used by
 /// a tool dialog.  UxTheme's progress class ignores the app dark mode and otherwise leaves a light
 /// trough in the partition-copy window.
@@ -688,9 +673,8 @@ pub unsafe fn apply_trackbar_theme(control: HWND, palette: Palette) {
 
 const HEADER_SUBCLASS_ID: usize = 0x4c52_4844;
 const LIST_VIEW_SUBCLASS_ID: usize = 0x4c52_4c56;
+const LIST_VIEW_FRAME_SUBCLASS_ID: usize = 0x4c52_4c46;
 const LIST_VIEW_PARENT_SUBCLASS_ID: usize = 0x4c52_4c50;
-const LIST_VIEW_SCROLL_REDRAW_TIMER_ID: usize = 0x4c52_5352;
-const LIST_VIEW_SCROLL_REDRAW_INTERVAL_MS: u32 = 16;
 const PROGRESS_SUBCLASS_ID: usize = 0x4c52_5052;
 const TRACKBAR_SUBCLASS_ID: usize = 0x4c52_5442;
 const CHECK_BOX_SUBCLASS_ID: usize = 0x4c52_4342;
@@ -708,8 +692,6 @@ const COMBO_SELECTION_ITEM_PREPARED_PROPERTY: PCWSTR =
 const RADIO_BUTTON_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoRadio.Hot");
 const PALETTE_REFERENCE_DARK: usize = 0x1;
 const CHECK_BOX_HOT_PROPERTY: PCWSTR = w!("LetRecovery.InnoCheck.Hot");
-const LIST_VIEW_SCROLL_REDRAW_PENDING_PROPERTY: PCWSTR =
-    w!("LetRecovery.InnoListView.ScrollRedrawPending");
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02a3;
 const WM_NCMOUSEMOVE_MESSAGE: u32 = 0x00a0;
 const WM_NCMOUSELEAVE_MESSAGE: u32 = 0x02a2;
@@ -730,20 +712,6 @@ const fn native_scrollbar_may_repaint_frame(message: u32) -> bool {
             | 0x020a // WM_MOUSEWHEEL
             | 0x020e // WM_MOUSEHWHEEL
             | 0x02a0 // WM_NCMOUSEHOVER
-    )
-}
-
-/// Messages for which comctl32 can move existing ListView client pixels instead of repainting
-/// every visible row. The deterministic rounded frame is overlaid on that same window surface, so
-/// the moved pixels must be discarded after the native scroll completes or copies of the frame can
-/// remain between rows and beside the scrollbars.
-const fn list_view_scrolls_client_pixels(message: u32) -> bool {
-    matches!(
-        message,
-        0x0114 // WM_HSCROLL
-            | 0x0115 // WM_VSCROLL
-            | 0x020a // WM_MOUSEWHEEL
-            | 0x020e // WM_MOUSEHWHEEL
     )
 }
 
@@ -1530,13 +1498,43 @@ unsafe fn paint_header(hwnd: HWND, palette: Palette) {
     if let Some(old_font) = old_font {
         let _ = SelectObject(dc, old_font);
     }
-    // The header is a child of the report and covers the report's top edge. Restore only the
-    // authoritative frame after the header transaction, without invalidating either HWND; queuing
-    // another report paint here would form a header/report feedback loop.
-    let list = GetParent(hwnd).ok();
     let _ = EndPaint(hwnd, &paint);
-    if let Some(list) = list {
-        paint_rounded_control_frame(list, palette);
+}
+
+unsafe extern "system" fn list_view_frame_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    match message {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            let mut paint = PAINTSTRUCT::default();
+            let dc = BeginPaint(hwnd, &mut paint);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            fill(dc, &client, palette_from_reference(reference_data).edit);
+            let _ = EndPaint(hwnd, &paint);
+            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
+            LRESULT(0)
+        }
+        WM_ENABLE | WM_SIZE | WM_THEMECHANGED => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let _ = InvalidateRect(hwnd, None, false);
+            result
+        }
+        WM_NCDESTROY => {
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(list_view_frame_subclass),
+                LIST_VIEW_FRAME_SUBCLASS_ID,
+            );
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
     }
 }
 
@@ -1576,7 +1574,6 @@ unsafe extern "system" fn list_view_subclass(
                 fill(dc, &client, palette_from_reference(reference_data).edit);
                 let _ = EndPaint(hwnd, &paint);
                 repaint_list_view_header_now(hwnd);
-                paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
                 return LRESULT(0);
             }
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -1593,33 +1590,6 @@ unsafe extern "system" fn list_view_subclass(
             // Checkbox glyphs only — the list frame stays under the Windows 11 ItemsView /
             // Explorer theme so corners match other Fluent controls without blue residual feet.
             paint_list_view_checkboxes(hwnd, palette_from_reference(reference_data));
-            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
-            result
-        }
-        WM_NCPAINT => {
-            let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            paint_rounded_control_frame(hwnd, palette_from_reference(reference_data));
-            result
-        }
-        WM_TIMER if wparam.0 == LIST_VIEW_SCROLL_REDRAW_TIMER_ID => {
-            let _ = KillTimer(hwnd, LIST_VIEW_SCROLL_REDRAW_TIMER_ID);
-            let _ = RemovePropW(hwnd, LIST_VIEW_SCROLL_REDRAW_PENDING_PROPERTY);
-            let _ = InvalidateRect(hwnd, None, false);
-            LRESULT(0)
-        }
-        message if native_scrollbar_may_repaint_frame(message) => {
-            let result = DefSubclassProc(hwnd, message, wparam, lparam);
-            if list_view_scrolls_client_pixels(message) {
-                // Native report scrolling may move already-painted client pixels and invalidate
-                // only the newly exposed strip. Our final rounded frame also touches that surface,
-                // so the optimisation otherwise copies the top/bottom edge into rows during a
-                // vertical drag and the side edge across the body during a horizontal drag.
-                // Raw SB_THUMBTRACK traffic can exceed the display refresh rate. Queue at most one
-                // ordinary invalidation per 16 ms frame; USER32 remains responsible for merging
-                // and painting through the existing LVS_EX_DOUBLEBUFFER path. Do not synchronously
-                // repaint the body, frame or Header from this high-frequency branch.
-                schedule_list_view_scroll_redraw(hwnd);
-            }
             result
         }
         WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
@@ -1632,12 +1602,13 @@ unsafe extern "system" fn list_view_subclass(
             if matches!(message, WM_SIZE | WM_THEMECHANGED) {
                 clear_legacy_control_region(hwnd);
             }
+            if let Some(frame) = list_view_frame(hwnd) {
+                let _ = InvalidateRect(frame, None, false);
+            }
             let _ = InvalidateRect(hwnd, None, false);
             result
         }
         WM_NCDESTROY => {
-            let _ = KillTimer(hwnd, LIST_VIEW_SCROLL_REDRAW_TIMER_ID);
-            let _ = RemovePropW(hwnd, LIST_VIEW_SCROLL_REDRAW_PENDING_PROPERTY);
             let _ = RemoveWindowSubclass(hwnd, Some(list_view_subclass), LIST_VIEW_SUBCLASS_ID);
             DefSubclassProc(hwnd, message, wparam, lparam)
         }
@@ -3895,16 +3866,6 @@ mod tests {
         }
         for message in [WM_SETTEXT, WM_ENABLE, WM_SIZE, WM_PAINT] {
             assert!(!native_scrollbar_may_repaint_frame(message));
-        }
-    }
-
-    #[test]
-    fn list_view_scroll_messages_discard_moved_frame_pixels() {
-        for message in [0x0114, 0x0115, 0x020a, 0x020e] {
-            assert!(list_view_scrolls_client_pixels(message));
-        }
-        for message in [0x00a1, 0x00a2, 0x00a3, 0x0113, 0x02a0, WM_PAINT] {
-            assert!(!list_view_scrolls_client_pixels(message));
         }
     }
 

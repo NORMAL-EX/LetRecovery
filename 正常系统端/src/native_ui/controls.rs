@@ -23,13 +23,13 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GetParent, GetPropW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, IsWindow, LoadCursorW, RemovePropW, SendMessageW, SetCursor, SetPropW,
-    SetWindowPos, ShowWindow, BS_OWNERDRAW, HMENU, IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOWPOS, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CANCELMODE, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_SETCURSOR,
-    WM_SETFONT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGING, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_VISIBLE,
+    CreateWindowExW, DestroyWindow, GetParent, GetPropW, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, IsWindow, LoadCursorW, RemovePropW, SendMessageW,
+    SetCursor, SetPropW, SetWindowPos, ShowWindow, BS_OWNERDRAW, GWL_STYLE, HMENU, IDC_ARROW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOWPOS,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_SETCURSOR, WM_SETFONT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGING,
+    WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use super::theme::Palette;
@@ -40,6 +40,10 @@ const SINGLE_LINE_EDIT_LAYOUT_SUBCLASS_ID: usize = 0x4c52_4544;
 const SINGLE_LINE_EDIT_FRAME_PROPERTY: PCWSTR = w!("LetRecovery.InnoEdit.Frame");
 const SINGLE_LINE_EDIT_OWNER_PROPERTY: PCWSTR = w!("LetRecovery.InnoEdit.Owner");
 const SINGLE_LINE_EDIT_INTERNAL_LAYOUT_PROPERTY: PCWSTR = w!("LetRecovery.InnoEdit.Layout");
+const LIST_VIEW_LAYOUT_SUBCLASS_ID: usize = 0x4c52_4c46;
+const LIST_VIEW_FRAME_PROPERTY: PCWSTR = w!("LetRecovery.InnoListView.Frame");
+const LIST_VIEW_OWNER_PROPERTY: PCWSTR = w!("LetRecovery.InnoListView.Owner");
+const LIST_VIEW_INTERNAL_LAYOUT_PROPERTY: PCWSTR = w!("LetRecovery.InnoListView.Layout");
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     COLORREF((red as u32) | ((green as u32) << 8) | ((blue as u32) << 16))
@@ -1293,6 +1297,85 @@ pub(crate) unsafe fn single_line_edit_frame_owner(frame: HWND) -> Option<HWND> {
         .then_some(edit)
 }
 
+/// Creates a fixed sibling frame for a native report ListView.
+///
+/// Comctl32 scrolls a report by copying pixels inside the ListView client surface. A frame painted
+/// into that surface is therefore copied into the rows while a scrollbar thumb is moving. The
+/// sibling owns only the non-scrolling field surface; the real ListView keeps its original parent,
+/// control id, notifications, selection, keyboard handling and accessibility implementation.
+pub(crate) unsafe fn ensure_list_view_frame(list: HWND) -> Option<HWND> {
+    if let Some(frame) = list_view_frame(list) {
+        return Some(frame);
+    }
+    let parent = GetParent(list).ok()?;
+    let frame = CreateWindowExW(
+        WINDOW_EX_STYLE(0x0000_0004), // WS_EX_NOPARENTNOTIFY
+        w!("STATIC"),
+        w!(""),
+        // The page router has already hidden non-current ListViews before theming runs. Creating
+        // every sibling visible here exposes an otherwise hidden page as a large blank STATIC.
+        // Publish visibility only after the owner link and geometry are complete.
+        WS_CHILD | WS_CLIPSIBLINGS,
+        0,
+        0,
+        0,
+        0,
+        parent,
+        HMENU::default(),
+        HINSTANCE::default(),
+        None,
+    )
+    .ok()?;
+    let _ = SetWindowTheme(frame, w!(""), w!(""));
+    if SetPropW(list, LIST_VIEW_FRAME_PROPERTY, HANDLE(frame.0)).is_err()
+        || SetPropW(frame, LIST_VIEW_OWNER_PROPERTY, HANDLE(list.0)).is_err()
+    {
+        let _ = RemovePropW(list, LIST_VIEW_FRAME_PROPERTY);
+        let _ = RemovePropW(frame, LIST_VIEW_OWNER_PROPERTY);
+        let _ = DestroyWindow(frame);
+        return None;
+    }
+    let _ = SetWindowSubclass(
+        list,
+        Some(list_view_layout_proc),
+        LIST_VIEW_LAYOUT_SUBCLASS_ID,
+        0,
+    );
+    let _ = SetWindowPos(
+        frame,
+        list,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    );
+    if let Some(outer) = control_bounds_in_parent(list) {
+        layout_list_view_in_frame(list, outer);
+    }
+    let visible = window_style_is_visible(GetWindowLongPtrW(list, GWL_STYLE));
+    let _ = ShowWindow(frame, if visible { SW_SHOW } else { SW_HIDE });
+    Some(frame)
+}
+
+const fn window_style_is_visible(style: isize) -> bool {
+    style as u32 & WS_VISIBLE.0 != 0
+}
+
+pub(crate) unsafe fn list_view_frame(list: HWND) -> Option<HWND> {
+    let handle = GetPropW(list, LIST_VIEW_FRAME_PROPERTY);
+    if handle.is_invalid() {
+        return None;
+    }
+    let frame = HWND(handle.0);
+    let owner = GetPropW(frame, LIST_VIEW_OWNER_PROPERTY);
+    if !IsWindow(frame).as_bool() || owner.is_invalid() || owner.0 != list.0 {
+        let _ = RemovePropW(list, LIST_VIEW_FRAME_PROPERTY);
+        return None;
+    }
+    Some(frame)
+}
+
 unsafe fn create_single_line_edit_frame(edit: HWND) {
     let Ok(parent) = GetParent(edit) else {
         return;
@@ -1425,6 +1508,169 @@ unsafe fn frame_bounds_in_parent(frame: HWND) -> Option<RECT> {
         right: bottom_right.x,
         bottom: bottom_right.y,
     })
+}
+
+unsafe fn control_bounds_in_parent(control: HWND) -> Option<RECT> {
+    let parent = GetParent(control).ok()?;
+    let mut window = RECT::default();
+    GetWindowRect(control, &mut window).ok()?;
+    let mut top_left = POINT {
+        x: window.left,
+        y: window.top,
+    };
+    let mut bottom_right = POINT {
+        x: window.right,
+        y: window.bottom,
+    };
+    if !ScreenToClient(parent, &mut top_left).as_bool()
+        || !ScreenToClient(parent, &mut bottom_right).as_bool()
+    {
+        return None;
+    }
+    Some(RECT {
+        left: top_left.x,
+        top: top_left.y,
+        right: bottom_right.x,
+        bottom: bottom_right.y,
+    })
+}
+
+fn list_view_inner_bounds(width: i32, height: i32, dpi: u32) -> SingleLineEditInnerBounds {
+    let width = width.max(0);
+    let height = height.max(0);
+    let inset = ((i64::from(dpi.max(1)) + 48) / 96) as i32;
+    let inset = inset.max(1).min(width / 2).min(height / 2);
+    SingleLineEditInnerBounds {
+        x: inset,
+        y: inset,
+        width: (width - inset * 2).max(0),
+        height: (height - inset * 2).max(0),
+    }
+}
+
+unsafe fn layout_list_view_in_frame(list: HWND, outer: RECT) {
+    let Some(frame) = list_view_frame(list) else {
+        return;
+    };
+    let width = (outer.right - outer.left).max(0);
+    let height = (outer.bottom - outer.top).max(0);
+    let inner = list_view_inner_bounds(width, height, GetDpiForWindow(list).max(96));
+    let _ = SetWindowPos(
+        frame,
+        list,
+        outer.left,
+        outer.top,
+        width,
+        height,
+        SWP_NOACTIVATE,
+    );
+    if SetPropW(
+        list,
+        LIST_VIEW_INTERNAL_LAYOUT_PROPERTY,
+        HANDLE(std::ptr::dangling_mut()),
+    )
+    .is_ok()
+    {
+        let _ = SetWindowPos(
+            list,
+            None,
+            outer.left + inner.x,
+            outer.top + inner.y,
+            inner.width,
+            inner.height,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+        let _ = RemovePropW(list, LIST_VIEW_INTERNAL_LAYOUT_PROPERTY);
+    }
+}
+
+unsafe extern "system" fn list_view_layout_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    _reference_data: usize,
+) -> LRESULT {
+    match message {
+        WM_WINDOWPOSCHANGING
+            if lparam.0 != 0 && GetPropW(hwnd, LIST_VIEW_INTERNAL_LAYOUT_PROPERTY).is_invalid() =>
+        {
+            let position = &mut *(lparam.0 as *mut WINDOWPOS);
+            if let Some(frame) = list_view_frame(hwnd) {
+                let existing = frame_bounds_in_parent(frame).unwrap_or_default();
+                let x = if position.flags.contains(SWP_NOMOVE) {
+                    existing.left
+                } else {
+                    position.x
+                };
+                let y = if position.flags.contains(SWP_NOMOVE) {
+                    existing.top
+                } else {
+                    position.y
+                };
+                let width = if position.flags.contains(SWP_NOSIZE) {
+                    existing.right - existing.left
+                } else {
+                    position.cx
+                };
+                let height = if position.flags.contains(SWP_NOSIZE) {
+                    existing.bottom - existing.top
+                } else {
+                    position.cy
+                };
+                let inner = list_view_inner_bounds(width, height, GetDpiForWindow(hwnd).max(96));
+                let _ = SetWindowPos(frame, hwnd, x, y, width, height, SWP_NOACTIVATE);
+                if !position.flags.contains(SWP_NOMOVE) {
+                    position.x = x + inner.x;
+                    position.y = y + inner.y;
+                }
+                if !position.flags.contains(SWP_NOSIZE) {
+                    position.cx = inner.width;
+                    position.cy = inner.height;
+                }
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_SHOWWINDOW => {
+            if let Some(frame) = list_view_frame(hwnd) {
+                let _ = ShowWindow(frame, if wparam.0 != 0 { SW_SHOW } else { SW_HIDE });
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_ENABLE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if let Some(frame) = list_view_frame(hwnd) {
+                let _ = InvalidateRect(frame, None, false);
+            }
+            result
+        }
+        0x02e3 => {
+            // WM_DPICHANGED_AFTERPARENT: preserve the caller-owned outer rectangle while updating
+            // the DPI-scaled non-scrolling inset.
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if let Some(frame) = list_view_frame(hwnd) {
+                if let Some(outer) = frame_bounds_in_parent(frame) {
+                    layout_list_view_in_frame(hwnd, outer);
+                }
+            }
+            result
+        }
+        WM_NCDESTROY => {
+            if let Some(frame) = list_view_frame(hwnd) {
+                let _ = RemovePropW(hwnd, LIST_VIEW_FRAME_PROPERTY);
+                let _ = RemovePropW(frame, LIST_VIEW_OWNER_PROPERTY);
+                let _ = DestroyWindow(frame);
+            }
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(list_view_layout_proc),
+                LIST_VIEW_LAYOUT_SUBCLASS_ID,
+            );
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
+    }
 }
 
 unsafe fn layout_single_line_edit(edit: HWND, outer: RECT) {
@@ -1866,6 +2112,44 @@ mod tests {
                 height: 0,
             }
         );
+    }
+
+    #[test]
+    fn list_view_frame_inset_scales_and_keeps_the_native_report_nonempty() {
+        assert_eq!(
+            list_view_inner_bounds(200, 100, 96),
+            SingleLineEditInnerBounds {
+                x: 1,
+                y: 1,
+                width: 198,
+                height: 98,
+            }
+        );
+        assert_eq!(
+            list_view_inner_bounds(400, 200, 192),
+            SingleLineEditInnerBounds {
+                x: 2,
+                y: 2,
+                width: 396,
+                height: 196,
+            }
+        );
+        assert_eq!(
+            list_view_inner_bounds(1, 1, 192),
+            SingleLineEditInnerBounds {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn list_view_sibling_frame_inherits_the_owner_style_visibility() {
+        assert!(window_style_is_visible(WS_VISIBLE.0 as isize));
+        assert!(window_style_is_visible((WS_CHILD | WS_VISIBLE).0 as isize));
+        assert!(!window_style_is_visible(WS_CHILD.0 as isize));
     }
 
     #[test]

@@ -223,6 +223,18 @@ pub enum DialogResult {
     Cancel,
 }
 
+const fn dialog_result_closes(
+    result: DialogResult,
+    primary_closes: bool,
+    secondary_closes: bool,
+) -> bool {
+    match result {
+        DialogResult::Primary => primary_closes,
+        DialogResult::Secondary => secondary_closes,
+        DialogResult::Cancel => true,
+    }
+}
+
 struct Handles {
     title: HWND,
     description: HWND,
@@ -243,6 +255,8 @@ struct DialogState {
     labels: [String; 5],
     handles: Option<Handles>,
     result: Option<DialogResult>,
+    primary_closes: bool,
+    secondary_closes: bool,
     first_presentation_pending: bool,
 }
 
@@ -266,6 +280,8 @@ impl DialogState {
             ],
             handles: None,
             result: None,
+            primary_closes: true,
+            secondary_closes: true,
             first_presentation_pending: true,
         }
     }
@@ -459,7 +475,10 @@ impl DialogState {
 
     unsafe fn choose(&mut self, result: DialogResult) {
         self.result = Some(result);
-        let _ = ShowWindow(self.hwnd, SW_HIDE);
+        let closes = dialog_result_closes(result, self.primary_closes, self.secondary_closes);
+        if closes {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
     }
 
     unsafe fn draw_item(&self, item: &DRAWITEMSTRUCT) {
@@ -623,6 +642,22 @@ impl DialogShell {
         if let Some(handles) = &self.state.handles {
             let _ = EnableWindow(handles.primary, enabled);
         }
+    }
+
+    /// Keeps a modeless primary command visible until the caller has validated the request and
+    /// explicitly hides it. Modal dialogs and all existing callers retain close-on-click by
+    /// default.
+    pub fn set_primary_closes(&mut self, closes: bool) {
+        self.state.primary_closes = closes;
+    }
+
+    /// Marks a modeless secondary command such as Refresh/Reanalyse as an in-place action.
+    pub fn set_secondary_closes(&mut self, closes: bool) {
+        self.state.secondary_closes = closes;
+    }
+
+    pub unsafe fn hide_modeless(&self) {
+        let _ = ShowWindow(self.state.hwnd, SW_HIDE);
     }
 
     pub unsafe fn show_modeless(&mut self) {
@@ -1099,6 +1134,15 @@ mod tests {
         assert_eq!(layout.command_bar.height, 46);
         assert!(layout.content.y + layout.content.height < layout.command_bar.y);
         assert_eq!(layout.buttons[1].unwrap().height, 23);
+    }
+
+    #[test]
+    fn modeless_in_place_commands_do_not_hide_but_cancel_always_closes() {
+        assert!(!dialog_result_closes(DialogResult::Primary, false, false));
+        assert!(!dialog_result_closes(DialogResult::Secondary, false, false));
+        assert!(dialog_result_closes(DialogResult::Cancel, false, false));
+        assert!(dialog_result_closes(DialogResult::Primary, true, false));
+        assert!(dialog_result_closes(DialogResult::Secondary, false, true));
     }
 
     #[test]

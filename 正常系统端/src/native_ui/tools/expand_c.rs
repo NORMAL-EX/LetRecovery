@@ -235,7 +235,7 @@ pub struct NativeExpandCDialog {
 
 impl NativeExpandCDialog {
     pub unsafe fn create(owner: HWND) -> windows::core::Result<Self> {
-        let shell = DialogShell::create(
+        let mut shell = DialogShell::create(
             owner,
             DialogSpec {
                 window_title: crate::tr!("无损扩大C盘"),
@@ -250,6 +250,8 @@ impl NativeExpandCDialog {
                 },
             },
         )?;
+        shell.set_primary_closes(false);
+        shell.set_secondary_closes(false);
         let dpi = GetDpiForWindow(shell.hwnd()).max(96);
         let face = wide("Microsoft YaHei UI");
         let font = CreateFontW(
@@ -375,7 +377,10 @@ impl NativeExpandCDialog {
             DialogResult::Primary => {
                 self.state.target_size_text = read_text(self.controls.target_edit);
                 match self.state.request() {
-                    Ok(request) => Some(ExpandCDialogIntent::RequestConfirmation(request)),
+                    Ok(request) => {
+                        self.shell.hide_modeless();
+                        Some(ExpandCDialogIntent::RequestConfirmation(request))
+                    }
                     Err(error) => {
                         self.state.message = error.to_string();
                         self.render_state();
