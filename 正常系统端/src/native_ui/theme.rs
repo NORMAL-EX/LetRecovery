@@ -27,21 +27,22 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::WS_VSCROLL;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetPropW, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, PostMessageW, RemovePropW,
-    SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret, GWL_EXSTYLE, GWL_STYLE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_CANCELMODE,
-    WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCHITTEST, WM_NCPAINT, WM_NOTIFY,
-    WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_LAYERED,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, IsWindowVisible, PostMessageW,
+    RemovePropW, SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret, GWL_EXSTYLE,
+    GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    WM_CANCELMODE, WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCHITTEST,
+    WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE,
+    WM_THEMECHANGED, WS_BORDER, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_LAYERED,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 use super::controls::{
     alpha_blend_premultiplied_bgra, button_visual, draw_antialiased_control_frame,
-    draw_native_text, draw_opaque_surface_text, draw_progress, ensure_list_view_frame,
-    fill_round_rect_antialiased, list_view_frame, list_view_frame_owner, publish_list_view_frame,
+    draw_antialiased_control_frame_with_vertical_interiors, draw_native_text,
+    draw_opaque_surface_text, draw_progress, ensure_list_view_frame, fill_round_rect_antialiased,
+    list_view_frame, list_view_frame_owner, publish_list_view_frame,
     rounded_control_frame_geometry, single_line_edit_frame, single_line_edit_frame_owner,
     ButtonRole, ControlState, InnoMetrics, ProgressRole,
 };
@@ -1522,8 +1523,7 @@ unsafe extern "system" fn list_view_frame_subclass(
             fill(dc, &client, palette_from_reference(reference_data).edit);
             let _ = EndPaint(hwnd, &paint);
             let palette = palette_from_reference(reference_data);
-            paint_rounded_control_frame(hwnd, palette);
-            paint_list_view_header_join(hwnd, palette);
+            paint_list_view_frame(hwnd, palette);
             LRESULT(0)
         }
         WM_ENABLE | WM_SIZE | WM_THEMECHANGED => {
@@ -1543,11 +1543,14 @@ unsafe extern "system" fn list_view_frame_subclass(
     }
 }
 
-unsafe fn paint_list_view_header_join(frame: HWND, palette: Palette) {
+unsafe fn paint_list_view_frame(frame: HWND, palette: Palette) {
     let Some(list) = list_view_frame_owner(frame) else {
+        paint_rounded_control_frame(frame, palette);
         return;
     };
-    if SendMessageW(list, 0x101f, WPARAM(0), LPARAM(0)).0 == 0 {
+    let header = HWND(SendMessageW(list, 0x101f, WPARAM(0), LPARAM(0)).0 as *mut _);
+    if header.is_invalid() || !IsWindowVisible(header).as_bool() {
+        paint_rounded_control_frame(frame, palette);
         return;
     }
     let mut window = RECT::default();
@@ -1561,24 +1564,38 @@ unsafe fn paint_list_view_header_join(frame: HWND, palette: Palette) {
     else {
         return;
     };
-    let top = geometry.side_band.min(height);
-    let bottom = (top + 1).min(height);
-    if bottom <= top || width <= geometry.radius.saturating_mul(2) {
-        return;
-    }
     let dc = GetWindowDC(frame);
     if dc.is_invalid() {
         return;
     }
+    let rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+    // The overlay owns only the hollow frame region.  Prime its complete upper arc with the
+    // adjacent header surface before drawing the outline so fully-interior corner samples cannot
+    // retain the ListView row colour.  The lower frame continues to meet the row surface.
+    fill(dc, &rect, palette.edit);
     fill(
         dc,
         &RECT {
-            left: geometry.side_band.min(width),
-            top,
-            right: width - geometry.side_band.min(width),
-            bottom,
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: geometry.arc_band.min(height),
         },
         palette.button,
+    );
+    draw_antialiased_control_frame_with_vertical_interiors(
+        dc,
+        rect,
+        geometry,
+        palette.button,
+        palette.edit,
+        palette.control_border(),
+        rounded_control_exterior(palette),
     );
     let _ = ReleaseDC(frame, dc);
 }

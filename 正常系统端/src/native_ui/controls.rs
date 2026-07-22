@@ -934,7 +934,32 @@ pub(crate) unsafe fn draw_antialiased_control_frame(
         dc,
         rect,
         geometry,
-        interior,
+        (interior, interior),
+        border,
+        CornerExterior::Color(exterior),
+    );
+}
+
+/// Paints a rounded frame whose upper and lower inner corners meet different native surfaces.
+///
+/// A report-mode ListView places its header directly below the upper frame while its rows meet the
+/// lower frame.  Feeding one interior colour to all four corners leaves the row background visible
+/// beside the header.  The straight outline remains shared; only the deterministic corner samples
+/// use the surface that is actually adjacent to that edge.
+pub(crate) unsafe fn draw_antialiased_control_frame_with_vertical_interiors(
+    dc: HDC,
+    rect: RECT,
+    geometry: RoundedControlFrameGeometry,
+    top_interior: COLORREF,
+    bottom_interior: COLORREF,
+    border: COLORREF,
+    exterior: COLORREF,
+) {
+    draw_antialiased_control_frame_impl(
+        dc,
+        rect,
+        geometry,
+        (top_interior, bottom_interior),
         border,
         CornerExterior::Color(exterior),
     );
@@ -956,7 +981,7 @@ pub(crate) unsafe fn draw_antialiased_control_frame_preserving_exterior(
         dc,
         rect,
         geometry,
-        interior,
+        (interior, interior),
         border,
         CornerExterior::PreserveNative,
     );
@@ -972,7 +997,7 @@ unsafe fn draw_antialiased_control_frame_impl(
     dc: HDC,
     rect: RECT,
     geometry: RoundedControlFrameGeometry,
-    interior: COLORREF,
+    vertical_interiors: (COLORREF, COLORREF),
     border: COLORREF,
     exterior: CornerExterior,
 ) {
@@ -1030,6 +1055,7 @@ unsafe fn draw_antialiased_control_frame_impl(
         (rect.left, rect.bottom - radius, false, true),
         (rect.right - radius, rect.bottom - radius, true, true),
     ] {
+        let interior = vertical_frame_corner_interior(vertical_interiors, (flip_x, flip_y));
         paint_antialiased_frame_corner(
             dc,
             (origin_x, origin_y),
@@ -1039,6 +1065,17 @@ unsafe fn draw_antialiased_control_frame_impl(
             border,
             exterior,
         );
+    }
+}
+
+fn vertical_frame_corner_interior(
+    vertical_interiors: (COLORREF, COLORREF),
+    corner_flip: (bool, bool),
+) -> COLORREF {
+    if corner_flip.1 {
+        vertical_interiors.1
+    } else {
+        vertical_interiors.0
     }
 }
 
@@ -2167,6 +2204,30 @@ mod tests {
         assert_eq!(
             deterministic_corner_color(interior, border, popup, 4, 11, 16),
             deterministic_corner_color(interior, border, popup, 4, 11, 16)
+        );
+    }
+
+    #[test]
+    fn split_frame_uses_header_surface_for_both_upper_corners() {
+        let header = rgb(48, 48, 48);
+        let body = rgb(28, 28, 28);
+        let interiors = (header, body);
+
+        assert_eq!(
+            vertical_frame_corner_interior(interiors, (false, false)),
+            header
+        );
+        assert_eq!(
+            vertical_frame_corner_interior(interiors, (true, false)),
+            header
+        );
+        assert_eq!(
+            vertical_frame_corner_interior(interiors, (false, true)),
+            body
+        );
+        assert_eq!(
+            vertical_frame_corner_interior(interiors, (true, true)),
+            body
         );
     }
 
