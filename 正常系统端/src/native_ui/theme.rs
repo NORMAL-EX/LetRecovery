@@ -31,9 +31,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowCaret, GWL_EXSTYLE, GWL_STYLE,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_CANCELMODE,
     WM_CAPTURECHANGED, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_PAINT,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER, WS_CLIPCHILDREN,
-    WS_EX_CLIENTEDGE, WS_EX_LAYERED,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCHITTEST, WM_NCPAINT, WM_NOTIFY,
+    WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE, WM_THEMECHANGED, WS_BORDER,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_LAYERED,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
@@ -41,9 +41,9 @@ use winreg::RegKey;
 use super::controls::{
     alpha_blend_premultiplied_bgra, button_visual, draw_antialiased_control_frame,
     draw_native_text, draw_opaque_surface_text, draw_progress, ensure_list_view_frame,
-    fill_round_rect_antialiased, list_view_frame, rounded_control_frame_geometry,
-    single_line_edit_frame, single_line_edit_frame_owner, ButtonRole, ControlState, InnoMetrics,
-    ProgressRole,
+    fill_round_rect_antialiased, list_view_frame, publish_list_view_frame,
+    rounded_control_frame_geometry, single_line_edit_frame, single_line_edit_frame_owner,
+    ButtonRole, ControlState, InnoMetrics, ProgressRole,
 };
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
@@ -544,8 +544,9 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
     // timers then expose precisely that intermediate frame (body colour covering the header).
     // Apply the style centrally to every report before installing either painter.
     let style = GetWindowLongPtrW(list, GWL_STYLE);
-    if style & WS_CLIPCHILDREN.0 as isize == 0 {
-        let _ = SetWindowLongPtrW(list, GWL_STYLE, style | WS_CLIPCHILDREN.0 as isize);
+    let clipping = (WS_CLIPCHILDREN | WS_CLIPSIBLINGS).0 as isize;
+    if style & clipping != clipping {
+        let _ = SetWindowLongPtrW(list, GWL_STYLE, style | clipping);
         let _ = SetWindowPos(
             list,
             None,
@@ -595,6 +596,7 @@ pub unsafe fn apply_list_view_theme(list: HWND, palette: Palette) -> Option<HWND
             palette_reference(palette),
         );
         let _ = InvalidateRect(frame, None, false);
+        publish_list_view_frame(list);
     }
     // Selection colour is delivered as NM_CUSTOMDRAW to the ListView parent rather than the
     // ListView itself. Install one keyed parent subclass per list, so dialogs containing two
@@ -1510,6 +1512,7 @@ unsafe extern "system" fn list_view_frame_subclass(
     reference_data: usize,
 ) -> LRESULT {
     match message {
+        WM_NCHITTEST => LRESULT(-1), // HTTRANSPARENT: preserve native ListView hit testing.
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
@@ -1587,8 +1590,8 @@ unsafe extern "system" fn list_view_subclass(
             // child synchronously after the body transaction; `paint_header` never invalidates
             // the report, so this ordering cannot form a feedback loop.
             repaint_list_view_header_now(hwnd);
-            // Checkbox glyphs only — the list frame stays under the Windows 11 ItemsView /
-            // Explorer theme so corners match other Fluent controls without blue residual feet.
+            // Checkbox glyphs only; the separate hollow sibling owns the fixed rounded frame, so
+            // scrolling this report never copies the frame into its rows.
             paint_list_view_checkboxes(hwnd, palette_from_reference(reference_data));
             result
         }

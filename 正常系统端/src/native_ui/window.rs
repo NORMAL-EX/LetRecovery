@@ -105,7 +105,7 @@ use crate::core::native_bitlocker_gate::{
     BitLockerCredential as GateCredential, BitLockerVolumeSnapshot,
 };
 use crate::core::native_download_controller::{
-    ControllerIntent, DownloadAction, NativeDownloadController, ResourceCategory,
+    CatalogueState, ControllerIntent, DownloadAction, NativeDownloadController, ResourceCategory,
     SoftwareArchitecture,
 };
 use crate::core::native_download_executor::{
@@ -136,6 +136,15 @@ use crate::PreloadedConfig;
 
 const CLASS_NAME: PCWSTR = w!("LetRecovery.Native.MainWindow");
 const SS_CENTER_STYLE: i32 = 0x0000_0001;
+
+fn catalogue_status_message(state: &CatalogueState) -> String {
+    match state {
+        CatalogueState::NotLoaded => String::new(),
+        CatalogueState::Loading => crate::tr!("正在刷新在线资源目录..."),
+        CatalogueState::Ready => crate::tr!("在线资源目录已刷新。"),
+        CatalogueState::Failed(message) => message.clone(),
+    }
+}
 
 // Keeps the longest English navigation caption readable at 100-200% DPI without leaving an
 // oversized empty rail beside the centred button captions.
@@ -701,24 +710,42 @@ impl InstallVolumeLayoutTransition {
 #[cfg(test)]
 mod layout_tests {
     use super::{
-        bitlocker_gate_completion, centered_command_button_x, command_bar_layout,
-        command_bar_visibility, command_button_role, confirmed_tool_backend_request,
-        device_change_requests_partition_refresh, download_failure_message,
-        effective_easy_mode_enabled, initial_mutating_tool_state, install_partition_heading_y,
-        list_view_selection_state_changed, minimum_window_size, page_switch_requires_full_layout,
-        pca_pending_status, pca_target_error_blocks, pca_target_probe_required,
-        pca_target_result_is_current, pca_target_uses_uefi, preferred_window_size,
-        preserved_pe_selection, primary_state_refresh_for_page, tool_backend_result_succeeded,
-        unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
-        Page, PcaPendingStatus, PcaTargetContext, PcaTargetKey, PcaTargetMessage,
-        PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
-        DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
+        bitlocker_gate_completion, catalogue_status_message, centered_command_button_x,
+        command_bar_layout, command_bar_visibility, command_button_role,
+        confirmed_tool_backend_request, device_change_requests_partition_refresh,
+        download_failure_message, effective_easy_mode_enabled, initial_mutating_tool_state,
+        install_partition_heading_y, list_view_selection_state_changed, minimum_window_size,
+        page_switch_requires_full_layout, pca_pending_status, pca_target_error_blocks,
+        pca_target_probe_required, pca_target_result_is_current, pca_target_uses_uefi,
+        preferred_window_size, preserved_pe_selection, primary_state_refresh_for_page,
+        tool_backend_result_succeeded, unattended_checked_for_source_preference,
+        BitLockerGateCompletion, InstallControlSnapshot, Page, PcaPendingStatus, PcaTargetContext,
+        PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
+        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
     };
     use crate::core::disk::PartitionStyle;
+    use crate::core::native_download_controller::CatalogueState;
     use crate::core::native_download_executor::{DownloadFailureStage, DownloadWorkerError};
     use crate::core::native_tool_backend::NativeToolBackendRequest;
     use crate::core::ui_state::{BootModeSelection, DriverAction, InstallPrefs};
     use crate::native_ui::tool_dialogs_mutating::{MutatingToolIntent, MutatingToolKind};
+
+    #[test]
+    fn catalogue_status_text_always_tracks_the_terminal_controller_state() {
+        assert!(catalogue_status_message(&CatalogueState::NotLoaded).is_empty());
+        assert_eq!(
+            catalogue_status_message(&CatalogueState::Loading),
+            crate::tr!("正在刷新在线资源目录...")
+        );
+        assert_eq!(
+            catalogue_status_message(&CatalogueState::Ready),
+            crate::tr!("在线资源目录已刷新。")
+        );
+        assert_eq!(
+            catalogue_status_message(&CatalogueState::Failed("network failed".into())),
+            "network failed"
+        );
+    }
 
     #[test]
     fn window_scales_to_monitor_dpi_when_space_allows() {
@@ -4871,14 +4898,20 @@ impl NativeWindow {
                     .download_controller
                     .apply_intent(ControllerIntent::RefreshCatalogue);
                 if let Some(page) = &self.download_page {
-                    set_text(page.status, &crate::tr!("正在刷新在线资源目录..."));
+                    set_text(
+                        page.status,
+                        &catalogue_status_message(self.download_controller.state()),
+                    );
                 }
                 #[cfg(feature = "non-elevated-tests")]
                 {
-                    self.download_controller
-                        .fail_refresh("development preview does not perform network requests");
+                    let message = crate::tr!("开发预览构建不会发起网络请求。");
+                    self.download_controller.fail_refresh(message);
                     if let Some(page) = &self.download_page {
-                        set_text(page.status, &crate::tr!("开发预览构建不会发起网络请求。"));
+                        set_text(
+                            page.status,
+                            &catalogue_status_message(self.download_controller.state()),
+                        );
                     }
                 }
                 #[cfg(not(feature = "non-elevated-tests"))]
@@ -8651,7 +8684,10 @@ impl NativeWindow {
                 let error = crate::tr!("远程资源目录加载线程异常结束，请重试。");
                 self.download_controller.fail_refresh(error.clone());
                 if let Some(page) = &self.download_page {
-                    set_text(page.status, &error);
+                    set_text(
+                        page.status,
+                        &catalogue_status_message(self.download_controller.state()),
+                    );
                 }
                 return;
             }
@@ -8666,7 +8702,10 @@ impl NativeWindow {
                 .unwrap_or_else(|| crate::tr!("远程资源目录加载失败"));
             self.download_controller.fail_refresh(error.clone());
             if let Some(page) = &self.download_page {
-                set_text(page.status, &error);
+                set_text(
+                    page.status,
+                    &catalogue_status_message(self.download_controller.state()),
+                );
             }
             return;
         }
@@ -8727,6 +8766,10 @@ impl NativeWindow {
         }
         if let Some(page) = &mut self.download_page {
             page.replace_rows(&self.download_controller.rows());
+            set_text(
+                page.status,
+                &catalogue_status_message(self.download_controller.state()),
+            );
         }
 
         let easy_config = remote

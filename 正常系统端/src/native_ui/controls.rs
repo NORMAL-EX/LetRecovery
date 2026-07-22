@@ -7,13 +7,14 @@ use windows::Win32::Foundation::{
     COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    AlphaBlend, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect, GdiFlush, GetCurrentObject,
-    GetDC, GetTextMetricsW, InvalidateRect, ReleaseDC, RoundRect, ScreenToClient, SelectObject,
-    SetBkColor, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, StretchDIBits,
-    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
-    DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HFONT,
-    OBJ_FONT, OPAQUE, PEN_STYLE, SRCCOPY, TRANSPARENT,
+    AlphaBlend, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
+    CreatePen, CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject,
+    DrawTextW, FillRect, GdiFlush, GetCurrentObject, GetDC, GetTextMetricsW, InvalidateRect,
+    ReleaseDC, RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetStretchBltMode,
+    SetTextColor, SetWindowRgn, StretchBlt, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CENTER,
+    DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HFONT, OBJ_FONT, OPAQUE, PEN_STYLE,
+    RGN_DIFF, RGN_ERROR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     SetWindowTheme, DRAWITEMSTRUCT, ODA_FOCUS, ODS_DISABLED, ODS_FOCUS, ODS_HOTLIGHT, ODS_SELECTED,
@@ -25,11 +26,11 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GetParent, GetPropW, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, IsWindow, LoadCursorW, RemovePropW, SendMessageW,
-    SetCursor, SetPropW, SetWindowPos, ShowWindow, BS_OWNERDRAW, GWL_STYLE, HMENU, IDC_ARROW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOWPOS,
+    SetCursor, SetPropW, SetWindowPos, ShowWindow, BS_OWNERDRAW, GWL_STYLE, HMENU, HWND_TOP,
+    IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOWPOS,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT,
-    WM_MOUSEMOVE, WM_NCDESTROY, WM_SETCURSOR, WM_SETFONT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGING,
-    WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_SETCURSOR, WM_SETFONT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED,
+    WM_WINDOWPOSCHANGING, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use super::theme::Palette;
@@ -1301,8 +1302,9 @@ pub(crate) unsafe fn single_line_edit_frame_owner(frame: HWND) -> Option<HWND> {
 ///
 /// Comctl32 scrolls a report by copying pixels inside the ListView client surface. A frame painted
 /// into that surface is therefore copied into the rows while a scrollbar thumb is moving. The
-/// sibling owns only the non-scrolling field surface; the real ListView keeps its original parent,
-/// control id, notifications, selection, keyboard handling and accessibility implementation.
+/// sibling owns only a hollow, non-scrolling overlay above the report; the real ListView keeps its
+/// original parent, control id, notifications, selection, keyboard handling and accessibility
+/// implementation.
 pub(crate) unsafe fn ensure_list_view_frame(list: HWND) -> Option<HWND> {
     if let Some(frame) = list_view_frame(list) {
         return Some(frame);
@@ -1341,21 +1343,80 @@ pub(crate) unsafe fn ensure_list_view_frame(list: HWND) -> Option<HWND> {
         LIST_VIEW_LAYOUT_SUBCLASS_ID,
         0,
     );
+    raise_list_view_frame(frame);
+    if let Some(outer) = control_bounds_in_parent(list) {
+        layout_list_view_in_frame(list, outer);
+    }
+    Some(frame)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListViewFrameRegionGeometry {
+    inset: i32,
+    inner_diameter: i32,
+}
+
+fn list_view_frame_region_geometry(
+    width: i32,
+    height: i32,
+    dpi: u32,
+) -> Option<ListViewFrameRegionGeometry> {
+    let frame = rounded_control_frame_geometry(width, height, dpi)?;
+    let inset = (frame.side_band + 1)
+        .max(1)
+        .min((width / 2).max(1))
+        .min((height / 2).max(1));
+    Some(ListViewFrameRegionGeometry {
+        inset,
+        inner_diameter: (frame.radius - inset).max(1).saturating_mul(2),
+    })
+}
+
+unsafe fn raise_list_view_frame(frame: HWND) {
     let _ = SetWindowPos(
         frame,
-        list,
+        HWND_TOP,
         0,
         0,
         0,
         0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
     );
-    if let Some(outer) = control_bounds_in_parent(list) {
-        layout_list_view_in_frame(list, outer);
+}
+
+unsafe fn update_list_view_frame_region(frame: HWND, width: i32, height: i32, dpi: u32) {
+    let Some(geometry) = list_view_frame_region_geometry(width, height, dpi) else {
+        let _ = SetWindowRgn(frame, None, true);
+        return;
+    };
+    let outer = CreateRectRgn(0, 0, width, height);
+    let inner = CreateRoundRectRgn(
+        geometry.inset,
+        geometry.inset,
+        width - geometry.inset,
+        height - geometry.inset,
+        geometry.inner_diameter,
+        geometry.inner_diameter,
+    );
+    let overlay = CreateRectRgn(0, 0, 0, 0);
+    if outer.is_invalid() || inner.is_invalid() || overlay.is_invalid() {
+        if !outer.is_invalid() {
+            let _ = DeleteObject(outer);
+        }
+        if !inner.is_invalid() {
+            let _ = DeleteObject(inner);
+        }
+        if !overlay.is_invalid() {
+            let _ = DeleteObject(overlay);
+        }
+        return;
     }
-    let visible = window_style_is_visible(GetWindowLongPtrW(list, GWL_STYLE));
-    let _ = ShowWindow(frame, if visible { SW_SHOW } else { SW_HIDE });
-    Some(frame)
+    let combined = CombineRgn(overlay, outer, inner, RGN_DIFF);
+    let _ = DeleteObject(outer);
+    let _ = DeleteObject(inner);
+    if combined == RGN_ERROR || SetWindowRgn(frame, overlay, true) == 0 {
+        let _ = DeleteObject(overlay);
+    }
 }
 
 const fn window_style_is_visible(style: isize) -> bool {
@@ -1374,6 +1435,17 @@ pub(crate) unsafe fn list_view_frame(list: HWND) -> Option<HWND> {
         return None;
     }
     Some(frame)
+}
+
+pub(crate) unsafe fn publish_list_view_frame(list: HWND) {
+    let Some(frame) = list_view_frame(list) else {
+        return;
+    };
+    let visible = window_style_is_visible(GetWindowLongPtrW(list, GWL_STYLE));
+    let _ = ShowWindow(frame, if visible { SW_SHOW } else { SW_HIDE });
+    if visible {
+        raise_list_view_frame(frame);
+    }
 }
 
 unsafe fn create_single_line_edit_frame(edit: HWND) {
@@ -1557,13 +1629,14 @@ unsafe fn layout_list_view_in_frame(list: HWND, outer: RECT) {
     let inner = list_view_inner_bounds(width, height, GetDpiForWindow(list).max(96));
     let _ = SetWindowPos(
         frame,
-        list,
+        HWND_TOP,
         outer.left,
         outer.top,
         width,
         height,
         SWP_NOACTIVATE,
     );
+    update_list_view_frame_region(frame, width, height, GetDpiForWindow(list).max(96));
     if SetPropW(
         list,
         LIST_VIEW_INTERNAL_LAYOUT_PROPERTY,
@@ -1620,7 +1693,8 @@ unsafe extern "system" fn list_view_layout_proc(
                     position.cy
                 };
                 let inner = list_view_inner_bounds(width, height, GetDpiForWindow(hwnd).max(96));
-                let _ = SetWindowPos(frame, hwnd, x, y, width, height, SWP_NOACTIVATE);
+                let _ = SetWindowPos(frame, HWND_TOP, x, y, width, height, SWP_NOACTIVATE);
+                update_list_view_frame_region(frame, width, height, GetDpiForWindow(hwnd).max(96));
                 if !position.flags.contains(SWP_NOMOVE) {
                     position.x = x + inner.x;
                     position.y = y + inner.y;
@@ -1635,8 +1709,20 @@ unsafe extern "system" fn list_view_layout_proc(
         WM_SHOWWINDOW => {
             if let Some(frame) = list_view_frame(hwnd) {
                 let _ = ShowWindow(frame, if wparam.0 != 0 { SW_SHOW } else { SW_HIDE });
+                if wparam.0 != 0 {
+                    raise_list_view_frame(frame);
+                }
             }
             DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_WINDOWPOSCHANGED => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if GetPropW(hwnd, LIST_VIEW_INTERNAL_LAYOUT_PROPERTY).is_invalid() {
+                if let Some(frame) = list_view_frame(hwnd) {
+                    raise_list_view_frame(frame);
+                }
+            }
+            result
         }
         WM_ENABLE => {
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -2027,6 +2113,25 @@ mod tests {
             })
         );
         assert_eq!(rounded_control_frame_geometry(0, 32, 96), None);
+    }
+
+    #[test]
+    fn list_view_overlay_region_keeps_a_real_hole_at_every_supported_dpi() {
+        assert_eq!(
+            list_view_frame_region_geometry(800, 240, 96),
+            Some(ListViewFrameRegionGeometry {
+                inset: 2,
+                inner_diameter: 6,
+            })
+        );
+        assert_eq!(
+            list_view_frame_region_geometry(1600, 480, 192),
+            Some(ListViewFrameRegionGeometry {
+                inset: 3,
+                inner_diameter: 14,
+            })
+        );
+        assert_eq!(list_view_frame_region_geometry(0, 240, 96), None);
     }
 
     #[test]
