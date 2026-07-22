@@ -2,6 +2,7 @@
 //! 管理 config.json 配置文件，用于存储用户偏好设置
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::utils::path::get_exe_dir;
@@ -180,7 +181,17 @@ impl AppConfig {
     pub fn save(&self) -> anyhow::Result<()> {
         let config_path = Self::get_config_path();
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&config_path, content)?;
+        let directory = config_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config.json path has no parent directory"))?;
+        let (temporary, mut file) = lr_core::scoped_temp_file::ScopedTempFile::create_writer_in(
+            directory, "config", "json",
+        )?;
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        temporary.persist_replace(&config_path)?;
         log::info!("配置文件已保存");
         Ok(())
     }

@@ -145,6 +145,25 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
+        self.capture_image_atomic(
+            image_file,
+            capture_dir,
+            name,
+            description,
+            WIM_COMPRESS_LZX,
+            progress_tx,
+        )
+    }
+
+    fn capture_image_raw(
+        &self,
+        image_file: &str,
+        capture_dir: &str,
+        name: &str,
+        description: &str,
+        compression: u32,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<()> {
         log::info!(
             "[Dism] 使用 wimlib 捕获镜像: {} -> {}",
             capture_dir,
@@ -173,7 +192,7 @@ impl Dism {
             image_file,
             name,
             description,
-            WIM_COMPRESS_LZX,
+            compression,
             Some(wim_tx),
         );
 
@@ -200,6 +219,26 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
+        self.capture_image_raw(
+            image_file,
+            capture_dir,
+            name,
+            description,
+            WIM_COMPRESS_LZX,
+            progress_tx,
+        )?;
+        Self::verify_captured_image(Path::new(image_file), name, description)
+    }
+
+    #[allow(dead_code)]
+    fn append_image_legacy(
+        &self,
+        image_file: &str,
+        capture_dir: &str,
+        name: &str,
+        description: &str,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<()> {
         log::info!(
             "[Dism] 使用 wimlib 追加镜像: {} -> {}",
             capture_dir,
@@ -213,6 +252,24 @@ impl Dism {
     /// 捕获系统镜像为 ESD（LZMS solid 高压缩）。目标文件已存在则追加镜像。
     /// 与 PE 端 `Dism::capture_image_esd` 等价，供桌面 Direct 备份按格式分发使用。
     pub fn capture_image_esd(
+        &self,
+        image_file: &str,
+        capture_dir: &str,
+        name: &str,
+        description: &str,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<()> {
+        self.capture_image_atomic(
+            image_file,
+            capture_dir,
+            name,
+            description,
+            WIM_COMPRESS_LZMS,
+            progress_tx,
+        )
+    }
+
+    fn capture_image_esd_raw(
         &self,
         image_file: &str,
         capture_dir: &str,
@@ -270,12 +327,89 @@ impl Dism {
         description: &str,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
+        self.capture_image_raw(
+            image_file,
+            capture_dir,
+            name,
+            description,
+            WIM_COMPRESS_LZMS,
+            progress_tx,
+        )?;
+        Self::verify_captured_image(Path::new(image_file), name, description)
+    }
+
+    #[allow(dead_code)]
+    fn append_image_esd_legacy(
+        &self,
+        image_file: &str,
+        capture_dir: &str,
+        name: &str,
+        description: &str,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<()> {
         log::info!("[Dism] 追加 ESD 镜像: {} -> {}", capture_dir, image_file);
         self.capture_image_esd(image_file, capture_dir, name, description, progress_tx)
     }
 
     /// 捕获为 SWM 分卷：先抓为临时 WIM(LZX)，再用 libwim 分割为 .swm。
     /// 与 PE 端 `Dism::capture_image_swm` 等价。
+    fn capture_image_atomic(
+        &self,
+        image_file: &str,
+        capture_dir: &str,
+        name: &str,
+        description: &str,
+        compression: u32,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<()> {
+        let target = Path::new(image_file);
+        let parent = target
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let file_name = target
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("backup destination has no file name"))?;
+        let staging =
+            lr_core::scoped_temp_file::ScopedTempDir::create_in(parent, "letrecovery-backup")?;
+        let staged = staging.path().join(file_name);
+        self.capture_image_raw(
+            &staged.to_string_lossy(),
+            capture_dir,
+            name,
+            description,
+            compression,
+            progress_tx,
+        )?;
+        Self::verify_captured_image(&staged, name, description)?;
+        lr_core::scoped_temp_file::atomic_replace_path(&staged, target)?;
+        Ok(())
+    }
+
+    fn verify_captured_image(path: &Path, name: &str, description: &str) -> Result<()> {
+        let library = lr_core::wimlib::Wimlib::new()
+            .map_err(|error| anyhow::anyhow!("captured image verifier unavailable: {error}"))?;
+        let handle = library
+            .open_wim(&path.to_string_lossy())
+            .map_err(|error| anyhow::anyhow!("cannot reopen captured image: {error}"))?;
+        handle
+            .verify()
+            .map_err(|error| anyhow::anyhow!("captured image verification failed: {error}"))?;
+        let index = handle.get_image_count();
+        if index <= 0 {
+            anyhow::bail!("captured image contains no image");
+        }
+        if handle.get_image_name(index).as_deref() != Some(name) {
+            anyhow::bail!("captured image name does not match the requested name");
+        }
+        if !description.is_empty()
+            && handle.get_image_description(index).as_deref() != Some(description)
+        {
+            anyhow::bail!("captured image description does not match the requested description");
+        }
+        Ok(())
+    }
+
     pub fn capture_image_swm(
         &self,
         image_file: &str,
@@ -293,7 +427,14 @@ impl Dism {
         );
 
         // 临时 WIM 与最终 .swm 同目录
-        let temp_wim = format!("{}.tmp.wim", image_file.trim_end_matches(".swm"));
+        let target = Path::new(image_file);
+        let parent = target
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let staging =
+            lr_core::scoped_temp_file::ScopedTempDir::create_in(parent, "letrecovery-swm")?;
+        let temp_wim = staging.path().join("capture.wim");
 
         if let Some(ref tx) = progress_tx {
             let _ = tx.send(DismProgress {
@@ -321,7 +462,7 @@ impl Dism {
 
         let result = engine.capture_image(
             capture_dir,
-            &temp_wim,
+            &temp_wim.to_string_lossy(),
             name,
             description,
             WIM_COMPRESS_LZX,
@@ -333,6 +474,7 @@ impl Dism {
             let _ = std::fs::remove_file(&temp_wim);
             anyhow::bail!("{}", tr!("捕获镜像失败: {}", e));
         }
+        Self::verify_captured_image(&temp_wim, name, description)?;
 
         if let Some(ref tx) = progress_tx {
             let _ = tx.send(DismProgress {
@@ -344,7 +486,11 @@ impl Dism {
         // 分卷由 libwim 执行（与生成引擎无关）。
         let wim_manager = WimlibManager::new()
             .map_err(|e| anyhow::anyhow!("{}", tr!("wimlib 初始化失败: {}", e)))?;
-        let split_result = wim_manager.split_wim(&temp_wim, image_file, split_size_mb as u64);
+        let split_result = wim_manager.split_wim(
+            &temp_wim.to_string_lossy(),
+            image_file,
+            split_size_mb as u64,
+        );
 
         // 清理临时 WIM
         let _ = std::fs::remove_file(&temp_wim);

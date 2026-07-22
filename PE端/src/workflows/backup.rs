@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::app::WorkerMessage;
 use crate::core::bcdedit::BootManager;
-use crate::core::config::{BackupFormat, ConfigFileManager};
+use crate::core::config::{BackupFormat, ConfigFileManager, OperationType};
 use crate::core::dism::{Dism, DismProgress};
 use crate::core::ghost::Ghost;
 use crate::tr;
@@ -15,7 +15,7 @@ use crate::utils::reboot_pe;
 pub(crate) fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
     log::info!("========== 开始PE备份流程 ==========");
 
-    let data_partition = match ConfigFileManager::find_data_partition() {
+    let data_partition = match ConfigFileManager::find_data_partition_for(OperationType::Backup) {
         Some(partition) => partition,
         None => {
             let _ = tx.send(WorkerMessage::Failed(tr!("未找到备份配置文件")));
@@ -138,15 +138,26 @@ pub(crate) fn execute_backup_workflow(tx: Sender<WorkerMessage>) {
 
     let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::VerifyBackup));
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在验证备份文件...")));
-    if !Path::new(&config.save_path).exists() {
-        let _ = tx.send(WorkerMessage::Failed(tr!("备份文件验证失败")));
+    let verify_result = match config.format {
+        BackupFormat::Gho => Ghost::new().verify_image_integrity(&config.save_path),
+        BackupFormat::Wim | BackupFormat::Esd | BackupFormat::Swm => Dism::verify_captured_image(
+            Path::new(&config.save_path),
+            &config.name,
+            &config.description,
+        ),
+    };
+    if let Err(error) = verify_result {
+        let _ = tx.send(WorkerMessage::Failed(tr!("备份文件验证失败: {}", error)));
         return;
     }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::RepairBoot));
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在恢复引导...")));
-    let _ = BootManager::new().delete_current_boot_entry();
+    if let Err(error) = BootManager::new().delete_current_boot_entry() {
+        let _ = tx.send(WorkerMessage::Failed(tr!("删除 PE 引导项失败: {}", error)));
+        return;
+    }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     let _ = tx.send(WorkerMessage::SetBackupStep(BackupStep::Cleanup));

@@ -123,6 +123,40 @@ impl Ghost {
         Ok(())
     }
 
+    /// Ask Ghost itself to read and verify the complete image and span chain.
+    pub fn verify_image_integrity(&self, gho_file: &str) -> Result<()> {
+        if !self.is_available() {
+            return Err(GhostError::ExecutableNotFound(self.ghost_path.clone()).into());
+        }
+        self.validate_image(gho_file)?;
+
+        let check_argument = format!("-chkimg,{gho_file}");
+        let output = new_command(&self.ghost_path)
+            .args([check_argument.as_str(), "-batch", "-blind"])
+            .output()
+            .context(tr!("无法启动 Ghost 镜像完整性检查"))?;
+        let stdout = gbk_to_utf8(&output.stdout);
+        let stderr = gbk_to_utf8(&output.stderr);
+        log::info!("[GHOST VERIFY] stdout: {}", stdout.trim());
+        if !stderr.trim().is_empty() {
+            log::warn!("[GHOST VERIFY] stderr: {}", stderr.trim());
+        }
+        if !output.status.success() {
+            let detail = if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            };
+            return Err(GhostError::InvalidImage(tr!(
+                "Ghost 完整性检查失败（退出码 {}）: {}",
+                format!("{:?}", output.status.code()),
+                detail
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
     /// 恢复 GHO 镜像到指定分区
     pub fn restore_image(
         &self,
@@ -371,9 +405,14 @@ impl Ghost {
 
         let stderr_handle = stderr.map(|stderr| {
             std::thread::spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    let line_utf8 = gbk_to_utf8(line.as_bytes());
+                let mut reader = BufReader::new(stderr);
+                let mut bytes = Vec::new();
+                while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
+                    while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+                        bytes.pop();
+                    }
+                    let line_utf8 = gbk_to_utf8(&bytes);
+                    bytes.clear();
                     log::debug!("GHOST STDERR: {}", line_utf8);
                     if let Ok(mut content) = stderr_content_clone.lock() {
                         content.push_str(&line_utf8);
@@ -494,9 +533,14 @@ impl Ghost {
 
         let stderr_handle = stderr.map(|stderr| {
             std::thread::spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    let line_utf8 = gbk_to_utf8(line.as_bytes());
+                let mut reader = BufReader::new(stderr);
+                let mut bytes = Vec::new();
+                while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
+                    while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+                        bytes.pop();
+                    }
+                    let line_utf8 = gbk_to_utf8(&bytes);
+                    bytes.clear();
                     log::debug!("GHOST STDERR: {}", line_utf8);
                     if let Ok(mut content) = stderr_content_clone.lock() {
                         content.push_str(&line_utf8);
@@ -599,19 +643,21 @@ impl Ghost {
 
     /// 读取 Ghost 输出
     fn read_ghost_output<R: Read>(reader: R, cancel_flag: Arc<AtomicBool>) -> Vec<String> {
-        let reader = BufReader::new(reader);
+        let mut reader = BufReader::new(reader);
         let mut lines = Vec::new();
+        let mut bytes = Vec::new();
 
-        for line in reader.lines() {
+        while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
             if cancel_flag.load(Ordering::SeqCst) {
                 break;
             }
-
-            if let Ok(line) = line {
-                let line_utf8 = gbk_to_utf8(line.as_bytes());
-                log::debug!("GHOST STDOUT: {}", line_utf8);
-                lines.push(line_utf8);
+            while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+                bytes.pop();
             }
+            let line_utf8 = gbk_to_utf8(&bytes);
+            bytes.clear();
+            log::debug!("GHOST STDOUT: {}", line_utf8);
+            lines.push(line_utf8);
         }
 
         lines

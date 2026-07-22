@@ -4,7 +4,7 @@
 //! 与 wimlib 的内部完整性校验互补（后者只覆盖 WIM 系列）。
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use md5::Md5;
@@ -35,6 +35,34 @@ pub fn sha256_reader<R: Read>(
         on_progress(total);
     }
     Ok(to_hex(&hasher.finalize()))
+}
+
+/// Copy all bytes from `reader` to `writer` while calculating the SHA-256 of
+/// the exact byte stream written to the destination.
+///
+/// The digest lets staging code prove that a subsequently re-read destination
+/// still contains the bytes supplied by the source handle, without reopening
+/// the source through a path that may have changed meanwhile.
+pub fn copy_and_sha256<R: Read, W: Write>(
+    mut reader: R,
+    mut writer: W,
+    mut on_progress: impl FnMut(u64) -> std::io::Result<()>,
+) -> std::io::Result<(u64, String)> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut total = 0u64;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..count])?;
+        hasher.update(&buffer[..count]);
+        total = total.saturating_add(count as u64);
+        on_progress(total)?;
+    }
+    writer.flush()?;
+    Ok((total, to_hex(&hasher.finalize())))
 }
 
 /// 计算文件的 SHA-256（流式，回调累计已读字节数）。

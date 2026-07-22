@@ -173,7 +173,20 @@ assign letter={}
         log::debug!("bcdedit delete stdout: {}", stdout);
         log::debug!("bcdedit delete stderr: {}", stderr);
 
-        // 忽略失败，因为可能本来就没有这个引导项
+        if !output.status.success() {
+            anyhow::bail!(
+                "{}",
+                tr!(
+                    "删除当前 PE 引导项失败（退出码 {}）：{}",
+                    format!("{:?}", output.status.code()),
+                    if stderr.trim().is_empty() {
+                        stdout.trim()
+                    } else {
+                        stderr.trim()
+                    }
+                )
+            );
+        }
         Ok(())
     }
 
@@ -199,7 +212,7 @@ assign letter={}
         }
 
         // 先删除当前PE引导项
-        let _ = self.delete_current_boot_entry();
+        self.delete_current_boot_entry()?;
 
         let mounted_esp = if use_uefi {
             log::info!("UEFI 模式：查找目标磁盘 ESP 分区");
@@ -289,6 +302,20 @@ assign letter={}
                 let stderr = gbk_to_utf8(&output.stderr);
                 log::debug!("bootsect stdout: {}", stdout);
                 log::debug!("bootsect stderr: {}", stderr);
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "{}",
+                        tr!(
+                            "bootsect 写入引导扇区失败（退出码 {}）：{}",
+                            format!("{:?}", output.status.code()),
+                            if stderr.trim().is_empty() {
+                                stdout.trim()
+                            } else {
+                                stderr.trim()
+                            }
+                        )
+                    );
+                }
             }
 
             let output = new_command(&self.bcdboot_path)
@@ -322,7 +349,7 @@ assign letter={}
     /// 为已释放的 XP/2003 系统写入引导（ntldr/boot.ini + MBR，仅 Legacy）。
     pub fn write_xp_boot(&self, windows_partition: &str) -> Result<()> {
         log::info!("========== 写入 XP 引导 ==========");
-        let _ = self.delete_current_boot_entry();
+        self.delete_current_boot_entry()?;
         match lr_core::boot::write_xp_boot(&get_bin_dir(), windows_partition) {
             Ok(out) => {
                 log::info!("XP 引导写入完成:\n{}", out);
@@ -339,7 +366,7 @@ assign letter={}
     /// 社区方案的 UEFI 引导写入。映像若不含这些文件，返回 Err，调用方应回退 Legacy。
     pub fn write_xp_uefi_gpt_boot(&self, windows_partition: &str) -> Result<()> {
         log::info!("========== 写入 XP UEFI/GPT 引导 ==========");
-        let _ = self.delete_current_boot_entry();
+        self.delete_current_boot_entry()?;
 
         let esp = self
             .find_esp_on_same_disk(windows_partition)

@@ -86,6 +86,8 @@ struct PartEntry {
     offset: u64,
     length: u64,
     is_special: bool, // ESP / MSR / 恢复 等不可随意移动的分区
+    mbr_type: Option<u8>,
+    mbr_active: bool,
 }
 
 fn diskpart_path() -> String {
@@ -252,6 +254,8 @@ unsafe fn read_disk_layout(disk_number: u32) -> Option<(PartitionStyle, u64, Vec
         if length <= 0 {
             continue;
         }
+        let mbr_type = (style == PartitionStyle::MBR).then_some(d[32]);
+        let mbr_active = style == PartitionStyle::MBR && d[33] != 0;
         let is_special = if style == PartitionStyle::GPT {
             let mut g = [0u8; 16];
             g.copy_from_slice(&d[32..48]);
@@ -266,6 +270,8 @@ unsafe fn read_disk_layout(disk_number: u32) -> Option<(PartitionStyle, u64, Vec
             offset: starting as u64,
             length: length as u64,
             is_special,
+            mbr_type,
+            mbr_active,
         });
     }
     parts.sort_by_key(|p| p.offset);
@@ -639,7 +645,13 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
         n_len_now / MIB,     // MB
     );
     if style == PartitionStyle::MBR {
-        recreate.push_str("set id=07\r\n"); // NTFS/IFS
+        let partition_type = n
+            .mbr_type
+            .ok_or_else(|| anyhow!("missing original MBR partition type"))?;
+        recreate.push_str(&format!("set id={partition_type:02X}\r\n"));
+        if n.mbr_active {
+            recreate.push_str("active\r\n");
+        }
     }
     recreate.push_str(&format!("assign letter={}\r\n", n_letter));
     journal(

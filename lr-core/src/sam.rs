@@ -45,45 +45,55 @@ pub fn clear_account_password(target_partition: &str, username: &str) -> Result<
     let result = (|| -> Result<bool> {
         let users_key = "HKLM\\LR_SAM\\SAM\\Domains\\Account\\Users";
         let rids = list_user_rids(users_key)?;
-        let mut cleared = false;
+        let mut account_found = false;
 
         for rid in rids {
             let user_key = format!("{}\\{}", users_key, rid);
-            let v = match reg_read_binary(&user_key, "V") {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let name = match parse_v_username(&v) {
-                Some(n) => n,
-                None => continue,
-            };
+            let v = reg_read_binary(&user_key, "V").map_err(|error| {
+                anyhow::anyhow!("failed to read SAM V data for RID {rid}: {error}")
+            })?;
+            let name = parse_v_username(&v).ok_or_else(|| {
+                anyhow::anyhow!("invalid SAM V data for RID {rid}; password reset stopped")
+            })?;
             if !name.eq_ignore_ascii_case(username) {
                 continue;
             }
+            account_found = true;
 
             // 清空 NT/LM hash 长度（等效空密码）
             let mut patched = v.clone();
             if blank_v_password(&mut patched) {
                 reg_write_binary(&user_key, "V", &patched)?;
                 log::info!("[SAM] 已清除账户 [{}] (RID {}) 的密码", name, rid);
-                cleared = true;
             } else {
                 log::info!("[SAM] 账户 [{}] 已是空密码，无需清除", name);
             }
 
             // 顺带启用被禁用的账户（清除 F 结构中的 ACB_DISABLED 位）
-            if let Ok(f) = reg_read_binary(&user_key, "F") {
-                if let Some(new_f) = enable_account_f(&f) {
-                    if reg_write_binary(&user_key, "F", &new_f).is_ok() {
-                        log::info!("[SAM] 已启用账户 [{}]", name);
-                    }
-                }
+            let f = reg_read_binary(&user_key, "F").map_err(|error| {
+                anyhow::anyhow!("failed to read SAM F data for {name}: {error}")
+            })?;
+            if let Some(new_f) = enable_account_f(&f) {
+                reg_write_binary(&user_key, "F", &new_f).map_err(|error| {
+                    anyhow::anyhow!("failed to enable SAM account {name}: {error}")
+                })?;
+                log::info!("[SAM] 已启用账户 [{}]", name);
             }
+            break;
         }
-        Ok(cleared)
+        Ok(account_found)
     })();
 
-    let _ = OfflineRegistry::unload_hive("LR_SAM");
+    let unload_result = OfflineRegistry::unload_hive("LR_SAM")
+        .map_err(|error| anyhow::anyhow!("failed to unload SAM hive: {error}"));
+    let result = match (result, unload_result) {
+        (Err(operation), Err(unload)) => Err(anyhow::anyhow!(
+            "SAM operation failed: {operation}; additionally, {unload}"
+        )),
+        (Err(operation), Ok(())) => Err(operation),
+        (Ok(_), Err(unload)) => Err(unload),
+        (Ok(found), Ok(())) => Ok(found),
+    };
 
     if let Ok(false) = &result {
         log::info!("[SAM] 未找到匹配账户 [{}]，SAM 未改动", username);
@@ -133,20 +143,24 @@ pub fn list_accounts(target_partition: &str) -> Result<Vec<SamAccount>> {
         let mut accounts = Vec::new();
         for rid in rids {
             let user_key = format!("{}\\{}", users_key, rid);
-            let v = match reg_read_binary(&user_key, "V") {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let name = match parse_v_username(&v) {
-                Some(n) if !n.is_empty() => n,
-                _ => continue,
-            };
+            let v = reg_read_binary(&user_key, "V").map_err(|error| {
+                anyhow::anyhow!("failed to read SAM V data for RID {rid}: {error}")
+            })?;
+            let name = parse_v_username(&v).ok_or_else(|| {
+                anyhow::anyhow!("invalid SAM V data for RID {rid}; enumeration stopped")
+            })?;
+            if name.is_empty() {
+                anyhow::bail!("SAM account name is empty for RID {rid}");
+            }
             // 读取 F 结构判断账户是否被禁用（偏移 0x38 处 USHORT 标志位）。
-            let disabled = reg_read_binary(&user_key, "F")
-                .ok()
-                .and_then(|f| f.get(0x38..0x3a).map(|s| u16::from_le_bytes([s[0], s[1]])))
-                .map(|flags| flags & 0x0001 != 0)
-                .unwrap_or(false);
+            let f = reg_read_binary(&user_key, "F").map_err(|error| {
+                anyhow::anyhow!("failed to read SAM F data for {name}: {error}")
+            })?;
+            let flags = f
+                .get(0x38..0x3a)
+                .map(|slice| u16::from_le_bytes([slice[0], slice[1]]))
+                .ok_or_else(|| anyhow::anyhow!("invalid SAM F data for {name}"))?;
+            let disabled = flags & 0x0001 != 0;
             accounts.push(SamAccount {
                 username: name,
                 rid,
@@ -156,8 +170,16 @@ pub fn list_accounts(target_partition: &str) -> Result<Vec<SamAccount>> {
         Ok(accounts)
     })();
 
-    let _ = OfflineRegistry::unload_hive("LR_SAM_RO");
-    result
+    let unload_result = OfflineRegistry::unload_hive("LR_SAM_RO")
+        .map_err(|error| anyhow::anyhow!("failed to unload read-only SAM hive: {error}"));
+    match (result, unload_result) {
+        (Err(operation), Err(unload)) => Err(anyhow::anyhow!(
+            "SAM enumeration failed: {operation}; additionally, {unload}"
+        )),
+        (Err(operation), Ok(())) => Err(operation),
+        (Ok(_), Err(unload)) => Err(unload),
+        (Ok(accounts), Ok(())) => Ok(accounts),
+    }
 }
 
 /// 枚举 `Users` 键下的用户 RID 子键（8 位十六进制，如 000001F4）。

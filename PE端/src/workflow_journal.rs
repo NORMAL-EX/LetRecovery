@@ -35,7 +35,8 @@ pub(crate) struct RecoveryCheckpointSnapshot {
 
 impl PeWorkflowJournal {
     pub(crate) fn create(operation_type: OperationType) -> Result<Option<Self>, OperationError> {
-        let Some(data_partition) = ConfigFileManager::find_data_partition() else {
+        let Some(data_partition) = ConfigFileManager::find_data_partition_for(operation_type)
+        else {
             return Ok(None);
         };
         let root = partition_root(&data_partition)?;

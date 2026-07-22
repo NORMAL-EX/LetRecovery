@@ -166,12 +166,11 @@ pub fn inject_xp_drivers(
             src_dir.display()
         ));
         if !src_dir.exists() {
-            // AHCI 缺失也只警告：映像可能已自带；其它盘上若没该控制器则无影响。
-            log.push_str(&format!(
-                "[XP-DRV] 警告: 驱动目录不存在，跳过 {}（如目标机无此控制器可忽略）\n",
-                set.label
+            return Err(format!(
+                "requested XP driver directory is missing for {}: {}",
+                set.label,
+                src_dir.display()
             ));
-            continue;
         }
 
         // 1) 拷贝文件：所有 .sys -> system32\drivers（含 x64\ 子目录，扁平化）；所有 .inf -> WINDOWS\inf
@@ -182,11 +181,10 @@ pub fn inject_xp_drivers(
             return Err(format!("拷贝 {} 驱动文件失败: {}", set.label, e));
         }
         if copied_sys == 0 {
-            log.push_str(&format!(
-                "[XP-DRV] 警告: {} 目录里没有 .sys 文件，跳过注册\n",
+            return Err(format!(
+                "requested XP driver set {} contains no .sys file",
                 set.label
             ));
-            continue;
         }
 
         // 2) 登记服务到 ControlSet001（current），并尽力同步到 ControlSet002
@@ -195,6 +193,14 @@ pub fn inject_xp_drivers(
             for svc in set.services {
                 let key = format!("HKLM\\{}\\{}\\Services\\{}", sys_hive_key, cs, svc.name);
                 let r = register_service(&key, svc);
+                if must {
+                    r.as_ref().map_err(|error| {
+                        format!(
+                            "failed to register required XP service {} in {}: {}",
+                            svc.name, cs, error
+                        )
+                    })?;
+                }
                 match r {
                     Ok(_) => {
                         if must {
@@ -223,6 +229,11 @@ pub fn inject_xp_drivers(
                 let ok = OfflineRegistry::create_key(&key).is_ok()
                     && OfflineRegistry::set_string(&key, "Service", svc_name).is_ok()
                     && OfflineRegistry::set_string(&key, "ClassGUID", class).is_ok();
+                if must && !ok {
+                    return Err(format!(
+                        "failed to register required XP CriticalDeviceDatabase entry {pci} in {cs}"
+                    ));
+                }
                 if must {
                     if ok {
                         log.push_str(&format!(
@@ -277,8 +288,8 @@ fn copy_drivers_recursive(
             None => continue,
         };
         let lower = name.to_ascii_lowercase();
-        let dst = if lower.ends_with(".sys") {
-            *copied_sys += 1;
+        let is_system_driver = lower.ends_with(".sys");
+        let dst = if is_system_driver {
             format!("{}\\{}", drivers_dst, name)
         } else if lower.ends_with(".inf") {
             format!("{}\\{}", inf_dst, name)
@@ -289,8 +300,18 @@ fn copy_drivers_recursive(
             continue;
         };
         match std::fs::copy(&path, &dst) {
-            Ok(_) => log.push_str(&format!("[XP-DRV]   拷贝 {} -> {}\n", name, dst)),
-            Err(e) => log.push_str(&format!("[XP-DRV]   警告: 拷贝 {} 失败: {}\n", name, e)),
+            Ok(_) => {
+                if is_system_driver {
+                    *copied_sys += 1;
+                }
+                log.push_str(&format!("[XP-DRV]   拷贝 {} -> {}\n", name, dst));
+            }
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("copying XP driver {name} to {dst} failed: {e}"),
+                ))
+            }
         }
     }
     Ok(())

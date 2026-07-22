@@ -456,32 +456,53 @@ impl ConfigFileManager {
         None
     }
 
-    /// 查找包含配置文件的数据分区
-    pub fn find_data_partition() -> Option<String> {
-        for letter in Self::scan_letters() {
-            let config_path = format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::INSTALL_CONFIG);
-            if Path::new(&config_path).exists() {
-                log::info!("找到安装配置分区: {}:", letter);
-                return Some(format!("{}:", letter));
-            }
-            let backup_config_path =
-                format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::BACKUP_CONFIG);
-            if Path::new(&backup_config_path).exists() {
-                log::info!("找到备份配置分区: {}:", letter);
-                return Some(format!("{}:", letter));
-            }
-            let expand_config_path =
-                format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::EXPAND_CONFIG);
-            if Path::new(&expand_config_path).exists() {
-                log::info!("找到扩容配置分区: {}:", letter);
-                return Some(format!("{}:", letter));
+    /// 检测操作类型 (安装或备份)
+    fn find_unique_config_partition(config_name: &str) -> Option<String> {
+        let matches = Self::scan_letters()
+            .filter_map(|letter| {
+                let path = format!("{}:\\{}\\{}", letter, Self::DATA_DIR, config_name);
+                Path::new(&path).is_file().then(|| format!("{}:", letter))
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [partition] => Some(partition.clone()),
+            [] => None,
+            _ => {
+                log::error!(
+                    "multiple data partitions contain task configuration {}: {:?}",
+                    config_name,
+                    matches
+                );
+                None
             }
         }
-        None
     }
 
-    /// 检测操作类型 (安装或备份)
+    pub fn find_data_partition_for(operation: OperationType) -> Option<String> {
+        match operation {
+            OperationType::Install => Self::find_install_task().ok().map(|task| task.0),
+            OperationType::Backup => Self::find_unique_config_partition(Self::BACKUP_CONFIG),
+            OperationType::Expand => Self::find_unique_config_partition(Self::EXPAND_CONFIG),
+        }
+    }
+
+    fn has_install_artifacts() -> bool {
+        Self::scan_letters().into_iter().any(|letter| {
+            Path::new(&format!("{}:\\{}", letter, Self::INSTALL_MARKER)).exists()
+                || Path::new(&format!(
+                    "{}:\\{}\\{}",
+                    letter,
+                    Self::DATA_DIR,
+                    Self::INSTALL_CONFIG
+                ))
+                .exists()
+        })
+    }
+
     pub fn detect_operation_type() -> Option<OperationType> {
+        if Self::has_install_artifacts() {
+            return Some(OperationType::Install);
+        }
         // 先检查安装标记
         if Self::find_install_task().is_ok() {
             return Some(OperationType::Install);
@@ -489,7 +510,7 @@ impl ConfigFileManager {
 
         // 再检查备份标记
         if Self::find_backup_marker_partition().is_some() {
-            if let Some(data_part) = Self::find_data_partition() {
+            if let Some(data_part) = Self::find_data_partition_for(OperationType::Backup) {
                 let backup_config_path =
                     format!("{}\\{}\\{}", data_part, Self::DATA_DIR, Self::BACKUP_CONFIG);
                 if Path::new(&backup_config_path).exists() {
@@ -500,7 +521,7 @@ impl ConfigFileManager {
 
         // 再检查扩容标记
         if Self::find_expand_marker_partition().is_some() {
-            if let Some(data_part) = Self::find_data_partition() {
+            if let Some(data_part) = Self::find_data_partition_for(OperationType::Expand) {
                 let expand_config_path =
                     format!("{}\\{}\\{}", data_part, Self::DATA_DIR, Self::EXPAND_CONFIG);
                 if Path::new(&expand_config_path).exists() {

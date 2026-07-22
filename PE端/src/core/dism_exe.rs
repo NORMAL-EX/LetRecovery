@@ -480,16 +480,16 @@ impl DismExe {
         // 读取并解析 stdout
         let progress_tx_clone = progress_tx.clone();
         let stdout_handle = std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
+            let mut reader = BufReader::new(stdout);
             let mut output = String::new();
+            let mut bytes = Vec::new();
 
-            for line in reader.lines().map_while(Result::ok) {
-                // 转换编码（Windows 可能使用 GBK）
-                let decoded_line = if line.is_ascii() {
-                    line
-                } else {
-                    gbk_to_utf8(line.as_bytes())
-                };
+            while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
+                while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+                    bytes.pop();
+                }
+                let decoded_line = gbk_to_utf8(&bytes);
+                bytes.clear();
 
                 output.push_str(&decoded_line);
                 output.push('\n');
@@ -509,15 +509,16 @@ impl DismExe {
 
         // 读取 stderr
         let stderr_handle = std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
+            let mut reader = BufReader::new(stderr);
             let mut error_output = String::new();
+            let mut bytes = Vec::new();
 
-            for line in reader.lines().map_while(Result::ok) {
-                let decoded_line = if line.is_ascii() {
-                    line
-                } else {
-                    gbk_to_utf8(line.as_bytes())
-                };
+            while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
+                while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+                    bytes.pop();
+                }
+                let decoded_line = gbk_to_utf8(&bytes);
+                bytes.clear();
 
                 error_output.push_str(&decoded_line);
                 error_output.push('\n');

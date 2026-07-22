@@ -1,41 +1,22 @@
-//! Windows Cabinet (.cab) 文件解压模块
-//!
-//! 使用 Windows SetupAPI (setupapi.dll) 的 SetupIterateCabinet 函数实现 .cab 文件解压。
-//! 主要用于解压 Windows 更新包（如 KB2990941、KB3087873 等 NVMe 驱动补丁）。
+//! Windows Cabinet (`.cab`) extraction through SetupAPI.
 
-// These declarations mirror SetupAPI names and layouts from the Windows SDK.
-// Keeping the ABI spelling makes comparison with the SDK definitions safer.
 #![allow(non_snake_case, clippy::upper_case_acronyms)]
 
 use std::ffi::c_void;
-use std::path::{Path, PathBuf};
-use std::ptr::null_mut;
-use std::sync::Mutex;
+use std::os::windows::fs::MetadataExt;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use libloading::Library;
 
 use crate::tr;
 
-// ============================================================================
-// Windows API 类型定义
-// ============================================================================
-
-/// BOOL 类型
 #[repr(transparent)]
 #[derive(Clone, Copy, Default)]
 struct BOOL(pub i32);
 
-/// UINT 类型
 type UINT = u32;
 
-/// PSP_FILE_CALLBACK_W 回调函数类型
-///
-/// 参数:
-/// - Context: 用户定义的上下文
-/// - Notification: 通知类型
-/// - Param1: 通知参数1
-/// - Param2: 通知参数2
 type SpFileCallbackW = unsafe extern "system" fn(
     Context: *mut c_void,
     Notification: UINT,
@@ -43,7 +24,6 @@ type SpFileCallbackW = unsafe extern "system" fn(
     Param2: usize,
 ) -> UINT;
 
-/// SetupIterateCabinetW 函数类型
 type FnSetupIterateCabinetW = unsafe extern "system" fn(
     CabinetFile: *const u16,
     Reserved: u32,
@@ -51,17 +31,13 @@ type FnSetupIterateCabinetW = unsafe extern "system" fn(
     Context: *mut c_void,
 ) -> BOOL;
 
-// SetupAPI 通知常量
-const SPFILENOTIFY_FILEINCABINET: UINT = 0x00000011;
-const SPFILENOTIFY_FILEEXTRACTED: UINT = 0x00000013;
-const SPFILENOTIFY_NEEDNEWCABINET: UINT = 0x00000014;
-
-// 回调返回值
+const SPFILENOTIFY_FILEINCABINET: UINT = 0x0000_0011;
+const SPFILENOTIFY_FILEEXTRACTED: UINT = 0x0000_0013;
+const SPFILENOTIFY_NEEDNEWCABINET: UINT = 0x0000_0014;
 const FILEOP_DOIT: UINT = 1;
-const FILEOP_SKIP: UINT = 2;
 const FILEOP_ABORT: UINT = 0;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
-/// FILE_IN_CABINET_INFO_W 结构
 #[repr(C)]
 struct FileInCabinetInfoW {
     NameInCabinet: *const u16,
@@ -73,7 +49,6 @@ struct FileInCabinetInfoW {
     FullTargetName: [u16; 260],
 }
 
-/// FILEPATHS_W 结构
 #[repr(C)]
 struct FilePathsW {
     Target: *const u16,
@@ -82,34 +57,18 @@ struct FilePathsW {
     Flags: u32,
 }
 
-// ============================================================================
-// 辅助函数
-// ============================================================================
-
-/// 从 null 终止的宽字符指针读取字符串
-///
-/// # Safety
-/// 调用者必须确保 ptr 指向有效的 null 终止宽字符串
 unsafe fn wide_ptr_to_string(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
     }
 
-    // 查找 null 终止符
     let mut len = 0;
-    while *ptr.add(len) != 0 {
+    while *ptr.add(len) != 0 && len < 32_768 {
         len += 1;
-        // 防止无限循环，设置最大长度
-        if len >= 32768 {
-            break;
-        }
     }
-
-    let slice = std::slice::from_raw_parts(ptr, len);
-    String::from_utf16_lossy(slice)
+    String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
 }
 
-/// 将 Path 转换为宽字符
 fn path_to_wide(path: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     path.as_os_str()
@@ -118,104 +77,117 @@ fn path_to_wide(path: &Path) -> Vec<u16> {
         .collect()
 }
 
-// ============================================================================
-// 全局解压上下文（用于回调函数）
-// ============================================================================
-
-/// 解压上下文
 struct ExtractContext {
     dest_dir: PathBuf,
     extracted_files: Vec<PathBuf>,
+    requested_files: usize,
+    error: Option<String>,
 }
 
-static EXTRACT_CONTEXT: Mutex<Option<ExtractContext>> = Mutex::new(None);
+fn validated_target_path(dest_dir: &Path, name_in_cabinet: &str) -> Result<PathBuf> {
+    let relative = Path::new(name_in_cabinet);
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!("cabinet entry uses an unsafe path: {name_in_cabinet}");
+    }
+    Ok(dest_dir.join(relative))
+}
 
-// ============================================================================
-// SetupAPI 回调函数
-// ============================================================================
+fn ensure_path_has_no_reparse_points(root: &Path, directory: &Path) -> Result<()> {
+    let mut current = root.to_path_buf();
+    for component in directory
+        .strip_prefix(root)
+        .context("cabinet target escaped extraction directory")?
+        .components()
+    {
+        current.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&current)
+            .with_context(|| format!("failed to inspect cabinet target directory {current:?}"))?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!("cabinet target directory contains a reparse point: {current:?}");
+        }
+    }
+    Ok(())
+}
 
-/// SetupIterateCabinet 回调函数
 unsafe extern "system" fn cabinet_callback(
-    _context: *mut c_void,
+    context: *mut c_void,
     notification: UINT,
     param1: usize,
     _param2: usize,
 ) -> UINT {
+    let Some(context) = (context as *mut ExtractContext).as_mut() else {
+        return FILEOP_ABORT;
+    };
+
     match notification {
         SPFILENOTIFY_FILEINCABINET => {
-            // 文件在 cabinet 中被发现
             let info = &mut *(param1 as *mut FileInCabinetInfoW);
-
-            // 获取文件名（使用安全的指针读取）
-            let name_in_cabinet = wide_ptr_to_string(info.NameInCabinet);
-
-            // 获取目标目录
-            let mut ctx = EXTRACT_CONTEXT.lock().unwrap();
-            if let Some(ref mut context) = *ctx {
-                // 构建完整目标路径
-                let target_path = context.dest_dir.join(&name_in_cabinet);
-
-                // 创建父目录
-                if let Some(parent) = target_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+            let name = wide_ptr_to_string(info.NameInCabinet);
+            let target = match validated_target_path(&context.dest_dir, &name) {
+                Ok(path) => path,
+                Err(error) => {
+                    context.error = Some(error.to_string());
+                    return FILEOP_ABORT;
                 }
-
-                // 设置目标文件名
-                let target_wide = path_to_wide(&target_path);
-                let copy_len = target_wide.len().min(259);
-                info.FullTargetName[..copy_len].copy_from_slice(&target_wide[..copy_len]);
-                info.FullTargetName[copy_len] = 0;
-
-                FILEOP_DOIT
-            } else {
-                FILEOP_SKIP
+            };
+            let Some(parent) = target.parent() else {
+                context.error = Some("cabinet target has no parent directory".to_string());
+                return FILEOP_ABORT;
+            };
+            if let Err(error) = std::fs::create_dir_all(parent).and_then(|_| {
+                ensure_path_has_no_reparse_points(&context.dest_dir, parent)
+                    .map_err(std::io::Error::other)
+            }) {
+                context.error = Some(format!("failed to prepare cabinet target: {error}"));
+                return FILEOP_ABORT;
             }
+
+            let target_wide = path_to_wide(&target);
+            if target_wide.len() > info.FullTargetName.len() {
+                context.error = Some(format!("cabinet target path is too long: {target:?}"));
+                return FILEOP_ABORT;
+            }
+            info.FullTargetName.fill(0);
+            info.FullTargetName[..target_wide.len()].copy_from_slice(&target_wide);
+            context.requested_files += 1;
+            FILEOP_DOIT
         }
         SPFILENOTIFY_FILEEXTRACTED => {
-            // 文件已解压
             let paths = &*(param1 as *const FilePathsW);
-
-            if paths.Win32Error == 0 {
-                // 使用安全的指针读取
-                let target = wide_ptr_to_string(paths.Target);
-
-                let mut ctx = EXTRACT_CONTEXT.lock().unwrap();
-                if let Some(ref mut context) = *ctx {
-                    context.extracted_files.push(PathBuf::from(&target));
-                }
+            if paths.Win32Error != 0 {
+                context.error = Some(format!(
+                    "cabinet file extraction failed with Win32 error {}",
+                    paths.Win32Error
+                ));
+                return FILEOP_ABORT;
             }
-
+            context
+                .extracted_files
+                .push(PathBuf::from(wide_ptr_to_string(paths.Target)));
             FILEOP_DOIT
         }
         SPFILENOTIFY_NEEDNEWCABINET => {
-            // 需要新的 cabinet 文件（多卷 cab）
-            // 暂不支持，跳过
+            context.error = Some("multi-part cabinet archives are not supported".to_string());
             FILEOP_ABORT
         }
         _ => FILEOP_DOIT,
     }
 }
 
-// ============================================================================
-// Cabinet 解压器
-// ============================================================================
-
-/// Cabinet 文件解压器
-///
-/// 使用 Windows SetupAPI 来解压 .cab 文件。
 pub struct CabinetExtractor {
     _lib: Library,
     iterate_cabinet: FnSetupIterateCabinetW,
 }
 
 impl CabinetExtractor {
-    /// 创建 Cabinet 解压器实例
     pub fn new() -> Result<Self> {
         let lib = unsafe { Library::new("setupapi.dll") }.context(tr!("无法加载 setupapi.dll"))?;
-
         unsafe {
             let iterate_cabinet: FnSetupIterateCabinetW = *lib.get(b"SetupIterateCabinetW")?;
-
             Ok(Self {
                 _lib: lib,
                 iterate_cabinet,
@@ -223,95 +195,70 @@ impl CabinetExtractor {
         }
     }
 
-    /// 解压 .cab 文件到指定目录
-    ///
-    /// # 参数
-    /// - `cab_path`: .cab 文件路径
-    /// - `dest_dir`: 目标目录
-    ///
-    /// # 返回
-    /// - 成功解压的文件列表
     pub fn extract(&self, cab_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
-        // 确保目标目录存在
         std::fs::create_dir_all(dest_dir)?;
-
-        // 设置解压上下文
-        {
-            let mut ctx = EXTRACT_CONTEXT.lock().unwrap();
-            *ctx = Some(ExtractContext {
-                dest_dir: dest_dir.to_path_buf(),
-                extracted_files: Vec::new(),
-            });
+        let metadata = std::fs::symlink_metadata(dest_dir)?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!("cabinet extraction directory is a reparse point");
         }
 
-        // 转换路径为宽字符
+        let mut context = ExtractContext {
+            dest_dir: dest_dir.to_path_buf(),
+            extracted_files: Vec::new(),
+            requested_files: 0,
+            error: None,
+        };
         let cab_wide = path_to_wide(cab_path);
-
-        // 调用 SetupIterateCabinetW
-        let result =
-            unsafe { (self.iterate_cabinet)(cab_wide.as_ptr(), 0, cabinet_callback, null_mut()) };
-
-        // 获取解压的文件列表
-        let extracted = {
-            let mut ctx = EXTRACT_CONTEXT.lock().unwrap();
-            ctx.take().map(|c| c.extracted_files).unwrap_or_default()
+        let result = unsafe {
+            (self.iterate_cabinet)(
+                cab_wide.as_ptr(),
+                0,
+                cabinet_callback,
+                (&mut context as *mut ExtractContext).cast(),
+            )
         };
 
-        if result.0 == 0 && extracted.is_empty() {
+        if let Some(error) = context.error.take() {
+            bail!("{error}");
+        }
+        if result.0 == 0 {
             bail!("{}", tr!("SetupIterateCabinetW 失败"));
+        }
+        if context.extracted_files.len() != context.requested_files {
+            bail!(
+                "cabinet extraction was incomplete: requested {}, extracted {}",
+                context.requested_files,
+                context.extracted_files.len()
+            );
         }
 
         log::info!(
-            "[CABINET] 成功解压 {} 个文件到 {:?}",
-            extracted.len(),
+            "[CABINET] extracted {} files to {:?}",
+            context.extracted_files.len(),
             dest_dir
         );
-
-        Ok(extracted)
+        Ok(context.extracted_files)
     }
 
-    /// 检查文件是否为 .cab 文件
     #[allow(
         dead_code,
         reason = "retained for PE extension and custom driver workflows"
     )]
     pub fn is_cab_file(path: &Path) -> bool {
         path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("cab"))
-            .unwrap_or(false)
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
     }
 }
 
-// ============================================================================
-// 便捷函数
-// ============================================================================
-
-/// 解压 .cab 文件到指定目录
-///
-/// # 参数
-/// - `cab_path`: .cab 文件路径
-/// - `dest_dir`: 目标目录
-///
-/// # 返回
-/// - 成功解压的文件列表
 #[allow(
     dead_code,
     reason = "retained for PE extension and custom driver workflows"
 )]
 pub fn extract_cab(cab_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
-    let extractor = CabinetExtractor::new()?;
-    extractor.extract(cab_path, dest_dir)
+    CabinetExtractor::new()?.extract(cab_path, dest_dir)
 }
 
-/// 解压目录中的所有 .cab 文件
-///
-/// # 参数
-/// - `source_dir`: 包含 .cab 文件的源目录
-/// - `dest_dir`: 目标目录（每个 cab 会解压到以 cab 文件名命名的子目录）
-///
-/// # 返回
-/// - 成功解压的 cab 文件数量
 #[allow(
     dead_code,
     reason = "retained for PE extension and custom driver workflows"
@@ -319,56 +266,32 @@ pub fn extract_cab(cab_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
 pub fn extract_all_cabs(source_dir: &Path, dest_dir: &Path) -> Result<usize> {
     let extractor = CabinetExtractor::new()?;
     let mut count = 0;
-
     for entry in std::fs::read_dir(source_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
+        let path = entry?.path();
         if CabinetExtractor::is_cab_file(&path) {
-            let cab_name = path
+            let name = path
                 .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
-
-            let cab_dest = dest_dir.join(cab_name);
-
-            match extractor.extract(&path, &cab_dest) {
-                Ok(files) => {
-                    log::info!(
-                        "[CABINET] 解压 {:?}: {} 个文件",
-                        path.file_name(),
-                        files.len()
-                    );
-                    count += 1;
-                }
-                Err(e) => {
-                    log::error!("[CABINET] 解压 {:?} 失败: {}", path.file_name(), e);
-                }
-            }
+                .and_then(|name| name.to_str())
+                .unwrap_or("cab");
+            extractor.extract(&path, &dest_dir.join(name))?;
+            count += 1;
         }
     }
-
     Ok(count)
 }
 
-/// 查找目录中的所有 .cab 文件
 #[allow(
     dead_code,
     reason = "retained for PE extension and custom driver workflows"
 )]
 pub fn find_cab_files(dir: &Path) -> Vec<PathBuf> {
-    let mut cab_files = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if CabinetExtractor::is_cab_file(&path) {
-                cab_files.push(path);
-            }
-        }
-    }
-
-    cab_files
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| CabinetExtractor::is_cab_file(path))
+        .collect()
 }
 
 #[cfg(test)]
@@ -376,13 +299,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_cab_file() {
+    fn recognizes_cabinet_extension_case_insensitively() {
         assert!(CabinetExtractor::is_cab_file(Path::new("test.cab")));
         assert!(CabinetExtractor::is_cab_file(Path::new("test.CAB")));
-        assert!(CabinetExtractor::is_cab_file(Path::new(
-            "Windows6.1-KB2990941-v3-x64.cab"
-        )));
         assert!(!CabinetExtractor::is_cab_file(Path::new("test.inf")));
-        assert!(!CabinetExtractor::is_cab_file(Path::new("test.sys")));
+    }
+
+    #[test]
+    fn cabinet_entry_path_rejects_traversal_and_absolute_names() {
+        let root = Path::new(r"C:\extract");
+        assert!(validated_target_path(root, r"drivers\disk.inf").is_ok());
+        assert!(validated_target_path(root, r"..\outside.dll").is_err());
+        assert!(validated_target_path(root, r"C:\outside.dll").is_err());
+        assert!(validated_target_path(root, r"\\server\share\outside.dll").is_err());
     }
 }

@@ -247,7 +247,7 @@ impl NativeDownloadController {
             .ok_or(DownloadPlanError::NoSelection)?;
 
         let allow_catalogue_http = allow_insecure_http || self.trusted_remote_legacy_http;
-        let (url, filename, completion_kind) = match self.category {
+        let (url, filename, completion_kind, sha256, md5) = match self.category {
             ResourceCategory::SystemImage => {
                 let system = self
                     .systems
@@ -255,11 +255,20 @@ impl NativeDownloadController {
                     .ok_or(DownloadPlanError::SelectionOutOfRange)?;
                 let validated = validate_download_url(&system.download_url, allow_catalogue_http)
                     .map_err(DownloadPlanError::InvalidUrl)?;
-                let filename = filename_from_url(validated.as_str(), "system.iso")?;
+                let filename = match system.filename.as_deref().filter(|value| !value.is_empty()) {
+                    Some(filename) => {
+                        validate_download_filename(filename)
+                            .map_err(DownloadPlanError::InvalidFilename)?;
+                        filename.to_string()
+                    }
+                    None => filename_from_url(validated.as_str(), "system.iso")?,
+                };
                 (
                     validated.into_string(),
                     filename,
                     CompletionKind::SystemImage,
+                    system.sha256.clone(),
+                    system.md5.clone(),
                 )
             }
             ResourceCategory::Software => {
@@ -267,7 +276,8 @@ impl NativeDownloadController {
                     .software
                     .get(index)
                     .ok_or(DownloadPlanError::SelectionOutOfRange)?;
-                let url = select_software_url(software, architecture);
+                let source = select_software_source(software, architecture);
+                let url = source.url;
                 let validated = validate_download_url(url, allow_catalogue_http)
                     .map_err(DownloadPlanError::InvalidUrl)?;
                 validate_download_filename(&software.filename)
@@ -276,6 +286,8 @@ impl NativeDownloadController {
                     validated.into_string(),
                     software.filename.clone(),
                     CompletionKind::Executable,
+                    source.sha256.map(str::to_owned),
+                    source.md5.map(str::to_owned),
                 )
             }
             ResourceCategory::GpuDriver => {
@@ -291,15 +303,17 @@ impl NativeDownloadController {
                     validated.into_string(),
                     driver.filename.clone(),
                     CompletionKind::Executable,
+                    driver.sha256.clone(),
+                    driver.md5.clone(),
                 )
             }
         };
 
-        // The current three public catalogue formats do not declare hashes.
-        // Keeping the requirement in every plan gives the executor one stable,
-        // fail-closed integrity entry point when metadata gains SHA-256/MD5.
-        let integrity =
-            select_expected_hash(None, None).map_err(DownloadPlanError::InvalidIntegrity)?;
+        // Hashes remain optional for compatibility with the current public catalogue.  When the
+        // fixed service starts publishing them, they must not be discarded on the way to the
+        // executor; a malformed declared hash is still a fail-closed configuration error.
+        let integrity = select_expected_hash(sha256.as_deref(), md5.as_deref())
+            .map_err(DownloadPlanError::InvalidIntegrity)?;
         let downloaded_path = save_directory.join(&filename);
         let completion = match (action, completion_kind) {
             (DownloadAction::Download, _) => DownloadCompletion::None,
@@ -357,18 +371,55 @@ enum CompletionKind {
     Executable,
 }
 
-fn select_software_url(software: &OnlineSoftware, architecture: SoftwareArchitecture) -> &str {
+struct SoftwareSource<'a> {
+    url: &'a str,
+    sha256: Option<&'a str>,
+    md5: Option<&'a str>,
+}
+
+fn select_software_source(
+    software: &OnlineSoftware,
+    architecture: SoftwareArchitecture,
+) -> SoftwareSource<'_> {
     match architecture {
-        SoftwareArchitecture::X64 => &software.download_url,
-        SoftwareArchitecture::X86 => software
-            .download_url_x86
-            .as_deref()
-            .unwrap_or(&software.download_url),
-        SoftwareArchitecture::Nt5 => software
-            .download_url_nt5
-            .as_deref()
-            .or(software.download_url_x86.as_deref())
-            .unwrap_or(&software.download_url),
+        SoftwareArchitecture::X64 => SoftwareSource {
+            url: &software.download_url,
+            sha256: software.sha256.as_deref(),
+            md5: software.md5.as_deref(),
+        },
+        SoftwareArchitecture::X86 => match software.download_url_x86.as_deref() {
+            Some(url) => SoftwareSource {
+                url,
+                sha256: software.sha256_x86.as_deref(),
+                md5: software.md5_x86.as_deref(),
+            },
+            None => SoftwareSource {
+                url: &software.download_url,
+                sha256: software.sha256.as_deref(),
+                md5: software.md5.as_deref(),
+            },
+        },
+        SoftwareArchitecture::Nt5 => {
+            if let Some(url) = software.download_url_nt5.as_deref() {
+                SoftwareSource {
+                    url,
+                    sha256: software.sha256_nt5.as_deref(),
+                    md5: software.md5_nt5.as_deref(),
+                }
+            } else if let Some(url) = software.download_url_x86.as_deref() {
+                SoftwareSource {
+                    url,
+                    sha256: software.sha256_x86.as_deref(),
+                    md5: software.md5_x86.as_deref(),
+                }
+            } else {
+                SoftwareSource {
+                    url: &software.download_url,
+                    sha256: software.sha256.as_deref(),
+                    md5: software.md5.as_deref(),
+                }
+            }
+        }
     }
 }
 
@@ -394,6 +445,9 @@ mod tests {
                 download_url: "https://example.com/Windows11.iso".into(),
                 display_name: "Windows 11".into(),
                 is_win11: true,
+                filename: None,
+                md5: None,
+                sha256: None,
             }],
             software_list: vec![OnlineSoftware {
                 name: "Tool".into(),
@@ -405,6 +459,12 @@ mod tests {
                 download_url_x86: Some("https://example.com/tool-x86.exe".into()),
                 download_url_nt5: Some("https://example.com/tool-nt5.exe".into()),
                 filename: "tool.exe".into(),
+                md5: None,
+                sha256: None,
+                md5_x86: None,
+                sha256_x86: None,
+                md5_nt5: None,
+                sha256_nt5: None,
             }],
             gpu_driver_list: vec![OnlineGpuDriver {
                 name: "GPU".into(),
@@ -414,6 +474,8 @@ mod tests {
                 icon_url: None,
                 download_url: "https://example.com/gpu.exe".into(),
                 filename: "gpu.exe".into(),
+                md5: None,
+                sha256: None,
             }],
             ..Default::default()
         }
@@ -441,6 +503,53 @@ mod tests {
             plan.completion,
             DownloadCompletion::OpenSystemImage(PathBuf::from(r"D:\Downloads\Windows11.iso"))
         );
+    }
+
+    #[test]
+    fn declared_system_sha256_reaches_the_download_executor() {
+        let mut config = config();
+        config.systems[0].filename = Some("server-name.esd".into());
+        config.systems[0].sha256 =
+            Some("BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD".into());
+        let mut controller = NativeDownloadController::default();
+        controller.replace_catalogue(&config);
+        controller.apply_intent(ControllerIntent::SelectResource(0));
+
+        let plan = controller
+            .plan_selected(
+                DownloadAction::Download,
+                r"D:\Downloads",
+                SoftwareArchitecture::X64,
+                false,
+                16,
+            )
+            .unwrap();
+
+        assert_eq!(plan.filename, "server-name.esd");
+        assert!(matches!(plan.integrity, IntegrityRequirement::Required(_)));
+    }
+
+    #[test]
+    fn alternate_architecture_never_reuses_the_x64_hash() {
+        let mut config = config();
+        config.software_list[0].sha256 =
+            Some("BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD".into());
+        let mut controller = NativeDownloadController::default();
+        controller.replace_catalogue(&config);
+        controller.apply_intent(ControllerIntent::SelectCategory(ResourceCategory::Software));
+        controller.apply_intent(ControllerIntent::SelectResource(0));
+
+        let plan = controller
+            .plan_selected(
+                DownloadAction::Download,
+                r"D:\Downloads",
+                SoftwareArchitecture::X86,
+                false,
+                16,
+            )
+            .unwrap();
+
+        assert_eq!(plan.integrity, IntegrityRequirement::NotProvided);
     }
 
     #[test]

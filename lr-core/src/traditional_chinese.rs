@@ -15,8 +15,15 @@ use windows::Win32::Globalization::{LCMapStringEx, LCMAP_TRADITIONAL_CHINESE};
 /// small Traditional-Chinese UI terminology glossary. ASCII placeholders and punctuation are left
 /// untouched by the Windows mapping API.
 pub fn to_traditional_chinese(text: &str) -> String {
-    let mapped = map_characters(text).unwrap_or_else(|| text.to_string());
-    apply_traditional_ui_terminology(mapped)
+    match map_characters(text) {
+        Some(mapped) => apply_traditional_ui_terminology(mapped),
+        None => {
+            log::error!(
+                "Windows NLS failed to convert a zh-TW UI string; refusing to display Simplified Chinese"
+            );
+            "繁體中文轉換失敗".to_owned()
+        }
+    }
 }
 
 #[cfg(windows)]

@@ -5,13 +5,14 @@
 //! implementations. Desktop-to-PE staging includes both regular image files
 //! and session-isolated XP/2003 text-mode source directories.
 
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
 use lr_core::cached_artifact::CachedArtifactStatus;
+use lr_core::cached_artifact::CachedArtifactVerification;
 use lr_core::command::{CommandExecutor, SystemCommandExecutor};
 use lr_core::pca_compat::PreparedPcaCompatPackage;
 
@@ -42,6 +43,7 @@ pub struct ProductionInstallBackend {
     pca_package: Option<PreparedPcaCompatPackage>,
     driver_backup: PathBuf,
     pe_path: Option<PathBuf>,
+    pe_snapshot: Option<lr_core::scoped_temp_file::ScopedTempDir>,
     pe_display_name: Option<String>,
     data_partition: Option<String>,
     staged_image_name: Option<String>,
@@ -58,6 +60,7 @@ impl ProductionInstallBackend {
             pca_package: None,
             driver_backup: std::env::temp_dir().join("LetRecovery_DriverBackup"),
             pe_path: None,
+            pe_snapshot: None,
             pe_display_name: None,
             data_partition: None,
             staged_image_name: None,
@@ -347,7 +350,49 @@ impl ProductionInstallBackend {
             pe.md5.as_deref(),
         )
         .map_err(|error| Self::error("pe_cache_rejected", error))?;
-        self.pe_path = Some(Self::require_cached_pe(status, &pe.filename)?);
+        let verified_path = Self::require_cached_pe(status.clone(), &pe.filename)?;
+        self.pe_snapshot = None;
+        self.pe_path = Some(match status {
+            CachedArtifactStatus::Ready {
+                verification: CachedArtifactVerification::Passed { .. },
+                ..
+            } => {
+                let snapshot = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+                    &std::env::temp_dir(),
+                    "letrecovery-pe-snapshot",
+                )
+                .map_err(|error| Self::error("create_pe_snapshot", error))?;
+                let snapshot_path = snapshot.path().join(&pe.filename);
+                std::fs::copy(&verified_path, &snapshot_path)
+                    .map_err(|error| Self::error("copy_pe_snapshot", error))?;
+                let snapshot_status = lr_core::cached_artifact::verify_cached_artifact(
+                    &pe.filename,
+                    &[snapshot.path().to_path_buf()],
+                    pe.sha256.as_deref(),
+                    pe.md5.as_deref(),
+                )
+                .map_err(|error| Self::error("verify_pe_snapshot", error))?;
+                if !matches!(
+                    snapshot_status,
+                    CachedArtifactStatus::Ready {
+                        verification: CachedArtifactVerification::Passed { .. },
+                        ..
+                    }
+                ) {
+                    return Err(InstallBackendError::new(
+                        "pe_snapshot_not_verified",
+                        "managed PE snapshot did not retain its declared checksum",
+                    ));
+                }
+                self.pe_snapshot = Some(snapshot);
+                snapshot_path
+            }
+            CachedArtifactStatus::Ready {
+                verification: CachedArtifactVerification::NotProvided,
+                ..
+            } => verified_path,
+            CachedArtifactStatus::Missing => unreachable!("missing PE was rejected above"),
+        });
         self.pe_display_name = Some(pe.display_name.clone());
         Ok(())
     }
@@ -517,64 +562,162 @@ impl ProductionInstallBackend {
             })?
             .to_string();
         let destination = Path::new(&self.data_dir()?).join(&file_name);
+        let source_path = Path::new(&intent.image_path);
+        let source_identity = std::fs::canonicalize(source_path)
+            .map_err(|error| Self::error("canonicalize_source_image", error))?;
+        if destination.exists() {
+            let destination_identity = std::fs::canonicalize(&destination)
+                .map_err(|error| Self::error("canonicalize_staged_image", error))?;
+            if source_identity == destination_identity {
+                self.verify_staged_image(&destination, cancellation)?;
+                self.staged_image_name = Some(file_name);
+                return Ok(());
+            }
+        }
         let source = std::fs::File::open(&intent.image_path)
             .map_err(|error| Self::error("open_source_image", error))?;
-        let total = source
+        let source_metadata = source
             .metadata()
-            .map_err(|error| Self::error("inspect_source_image", error))?
-            .len();
-        let destination_file = std::fs::File::create(&destination)
+            .map_err(|error| Self::error("inspect_source_image", error))?;
+        if !source_metadata.is_file() {
+            return Err(InstallBackendError::new(
+                "source_image_not_regular_file",
+                "source image is not a regular file",
+            ));
+        }
+        let total = source_metadata.len();
+        let extension = source_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| {
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+            .ok_or_else(|| {
+                InstallBackendError::new("invalid_image_extension", "unsafe image extension")
+            })?;
+        let destination_directory = destination.parent().ok_or_else(|| {
+            InstallBackendError::new(
+                "invalid_staged_image_path",
+                "staged image has no parent directory",
+            )
+        })?;
+        let (temporary, destination_file) =
+            lr_core::scoped_temp_file::ScopedTempFile::create_writer_in(
+                destination_directory,
+                "staged-image",
+                extension,
+            )
             .map_err(|error| Self::error("create_staged_image", error))?;
         let mut reader = BufReader::with_capacity(1024 * 1024, source);
         let mut writer = BufWriter::with_capacity(1024 * 1024, destination_file);
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        let mut copied = 0_u64;
-        loop {
-            if cancellation.is_cancelled() {
-                drop(writer);
-                let _ = std::fs::remove_file(&destination);
-                return Err(InstallBackendError::new(
-                    "cancelled",
-                    "image copy was cancelled",
-                ));
-            }
-            let count = reader
-                .read(&mut buffer)
-                .map_err(|error| Self::error("read_source_image", error))?;
-            if count == 0 {
-                break;
-            }
-            writer
-                .write_all(&buffer[..count])
-                .map_err(|error| Self::error("write_staged_image", error))?;
-            copied += count as u64;
-            let percentage = if total == 0 {
-                100
-            } else {
-                ((copied.saturating_mul(100) / total).min(100)) as u8
-            };
-            Self::report(
-                reporter,
-                InstallExecutionPhase::CopySourceImage,
-                percentage,
-                file_name.clone(),
-            );
+        let (copied, copied_sha256) =
+            lr_core::hash::copy_and_sha256(&mut reader, &mut writer, |copied| {
+                if cancellation.is_cancelled() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "image copy was cancelled",
+                    ));
+                }
+                let percentage = if total == 0 {
+                    100
+                } else {
+                    ((copied.saturating_mul(100) / total).min(100)) as u8
+                };
+                Self::report(
+                    reporter,
+                    InstallExecutionPhase::CopySourceImage,
+                    percentage,
+                    file_name.clone(),
+                );
+                Ok(())
+            })
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::Interrupted && cancellation.is_cancelled() {
+                    InstallBackendError::new("cancelled", "image copy was cancelled")
+                } else {
+                    Self::error("copy_staged_image", error)
+                }
+            })?;
+        if cancellation.is_cancelled() {
+            return Err(InstallBackendError::new(
+                "cancelled",
+                "image copy was cancelled",
+            ));
         }
         writer
             .flush()
             .map_err(|error| Self::error("flush_staged_image", error))?;
-        let staged_size = std::fs::metadata(&destination)
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|error| Self::error("sync_staged_image", error))?;
+        drop(writer);
+        let staged_size = std::fs::metadata(temporary.path())
             .map_err(|error| Self::error("inspect_staged_image", error))?
             .len();
-        if staged_size != total {
-            let _ = std::fs::remove_file(&destination);
+        if copied != total || staged_size != total {
             return Err(InstallBackendError::new(
                 "staged_image_size_mismatch",
-                format!("expected {total} bytes, copied {staged_size} bytes"),
+                format!(
+                    "expected {total} bytes, copied {copied} bytes, staged {staged_size} bytes"
+                ),
+            ));
+        }
+        let staged_sha256 = lr_core::hash::sha256_file(temporary.path(), |_| {})
+            .map_err(|error| Self::error("hash_staged_image", error))?;
+        if staged_sha256 != copied_sha256 {
+            return Err(InstallBackendError::new(
+                "staged_image_hash_mismatch",
+                "staged image differs from the source byte stream",
+            ));
+        }
+        self.verify_staged_image(temporary.path(), cancellation)?;
+        temporary
+            .persist_replace(&destination)
+            .map_err(|error| Self::error("commit_staged_image", error))?;
+        let committed_sha256 = lr_core::hash::sha256_file(&destination, |_| {})
+            .map_err(|error| Self::error("hash_committed_staged_image", error))?;
+        if committed_sha256 != copied_sha256 {
+            return Err(InstallBackendError::new(
+                "committed_staged_image_hash_mismatch",
+                "published staged image changed after verification",
             ));
         }
         self.staged_image_name = Some(file_name);
         Ok(())
+    }
+
+    fn verify_staged_image(
+        &self,
+        path: &Path,
+        cancellation: &dyn InstallCancellation,
+    ) -> Result<(), InstallBackendError> {
+        use super::image_verify::{ImageVerifier, VerifyStatus};
+
+        if cancellation.is_cancelled() {
+            return Err(InstallBackendError::new(
+                "cancelled",
+                "staged image verification was cancelled",
+            ));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = ImageVerifier::with_cancel_flag(Arc::clone(&cancel))
+            .verify(&path.to_string_lossy(), None);
+        if cancellation.is_cancelled() {
+            cancel.store(true, Ordering::SeqCst);
+            return Err(InstallBackendError::new(
+                "cancelled",
+                "staged image verification was cancelled",
+            ));
+        }
+        if result.status == VerifyStatus::Valid {
+            Ok(())
+        } else {
+            Err(InstallBackendError::new(
+                "staged_image_verification_failed",
+                format!("{}: {}", result.status, result.message),
+            ))
+        }
     }
 
     fn directory_size_checked(source: &Path) -> Result<u64, InstallBackendError> {

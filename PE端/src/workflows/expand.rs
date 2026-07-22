@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::app::WorkerMessage;
 use crate::core::bcdedit::BootManager;
-use crate::core::config::ConfigFileManager;
+use crate::core::config::{ConfigFileManager, OperationType};
 use crate::tr;
 use crate::utils::reboot_pe;
 
@@ -11,7 +11,7 @@ use crate::utils::reboot_pe;
 pub(crate) fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
     log::info!("========== 开始PE扩容流程 ==========");
 
-    let data_partition = match ConfigFileManager::find_data_partition() {
+    let data_partition = match ConfigFileManager::find_data_partition_for(OperationType::Expand) {
         Some(partition) => partition,
         None => {
             let _ = tx.send(WorkerMessage::Failed(tr!("未找到扩容配置文件")));
@@ -57,15 +57,21 @@ pub(crate) fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
         Err(error) => {
             log::error!("[EXPAND] 扩容失败: {}", error);
             let _ = tx.send(WorkerMessage::Failed(tr!("扩容失败: {}", error)));
-            cleanup_after_expand(&target_partition, &data_partition, false);
-            std::thread::sleep(Duration::from_secs(5));
-            reboot_pe();
+            log::warn!(
+                "[EXPAND] preserving task files and PE boot state for diagnosis and an explicit retry"
+            );
             return;
         }
     }
 
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在清理临时文件...")));
-    cleanup_after_expand(&target_partition, &data_partition, true);
+    if let Err(error) = cleanup_after_expand(&target_partition, &data_partition) {
+        let _ = tx.send(WorkerMessage::Failed(tr!(
+            "扩容已完成，但删除 PE 引导项失败: {}",
+            error
+        )));
+        return;
+    }
 
     let _ = tx.send(WorkerMessage::SetProgress(100));
     let _ = tx.send(WorkerMessage::Completed);
@@ -76,14 +82,10 @@ pub(crate) fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
     reboot_pe();
 }
 
-fn cleanup_after_expand(target_partition: &str, data_partition: &str, log_boot_error: bool) {
+fn cleanup_after_expand(target_partition: &str, data_partition: &str) -> anyhow::Result<()> {
+    BootManager::new().delete_current_boot_entry()?;
     ConfigFileManager::cleanup_partition_markers(target_partition);
     ConfigFileManager::cleanup_data_dir(data_partition);
-    let boot_manager = BootManager::new();
-    if let Err(error) = boot_manager.delete_current_boot_entry() {
-        if log_boot_error {
-            log::warn!("[EXPAND] 删除 PE 引导项失败（不影响结果）: {}", error);
-        }
-    }
     ConfigFileManager::cleanup_pe_dir(data_partition);
+    Ok(())
 }

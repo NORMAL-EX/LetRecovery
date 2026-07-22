@@ -577,7 +577,7 @@ log=0
         // ============ Windows XP 专用：离线注入存储/USB3 驱动 ============
         // 直接写已加载的 SYSTEM 配置单元(pc-sys)，不走 DISM。AHCI 始终注入；NVMe/USB3 按勾选。
         if is_xp {
-            self.apply_xp_inject_drivers(target_partition);
+            self.apply_xp_inject_drivers(target_partition)?;
         }
 
         // 卸载注册表
@@ -1299,9 +1299,9 @@ log=0
 
     /// Windows XP 专用：离线注入存储/USB3 驱动
     /// 直接写已加载的 SYSTEM 配置单元(pc-sys)，不走 DISM。AHCI 始终注入；NVMe/USB3 按勾选。
-    fn apply_xp_inject_drivers(&self, target_partition: &str) {
+    fn apply_xp_inject_drivers(&self, target_partition: &str) -> anyhow::Result<()> {
         let xp_dir = Self::get_program_dir().map(|b| b.join("bin").join("drivers").join("xp"));
-        match xp_dir {
+        match xp_dir.as_ref() {
             Some(dir) if dir.is_dir() => {
                 log::info!(
                     "[ADVANCED] XP: 离线注入驱动 (AHCI 始终, NVMe={}, USB3={}) 源: {}",
@@ -1309,19 +1309,25 @@ log=0
                     self.xp_inject_usb3_driver,
                     dir.display()
                 );
-                match lr_core::xp::inject_xp_drivers(
+                let output = lr_core::xp::inject_xp_drivers(
                     target_partition,
-                    &dir,
+                    dir,
                     "pc-sys",
                     self.xp_inject_nvme_driver,
                     self.xp_inject_usb3_driver,
-                ) {
-                    Ok(out) => log::info!("[ADVANCED] XP 驱动注入完成:\n{}", out),
-                    Err(e) => log::error!("[ADVANCED] XP 驱动注入失败: {} (继续执行)", e),
-                }
+                )
+                .map_err(anyhow::Error::msg)?;
+                log::info!("[ADVANCED] XP 驱动注入完成:\n{}", output);
             }
-            _ => log::warn!("[ADVANCED] 未找到 bin\\drivers\\xp 目录，跳过 XP 驱动注入"),
+            _ => anyhow::bail!(
+                "requested XP driver directory is missing: {}",
+                xp_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "bin\\drivers\\xp".to_string())
+            ),
         }
+        Ok(())
     }
 
     /// 生成删除预装UWP应用的PowerShell脚本

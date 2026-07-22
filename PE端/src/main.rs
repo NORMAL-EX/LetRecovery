@@ -158,22 +158,25 @@ fn load_matching_vmd_driver_into_running_pe() {
 fn detect_ui_language() -> String {
     use core::config::{ConfigFileManager, OperationType};
 
-    let data_partition = match ConfigFileManager::find_data_partition() {
+    let operation_type = match ConfigFileManager::detect_operation_type() {
+        Some(operation) => operation,
+        None => return String::new(),
+    };
+    let data_partition = match ConfigFileManager::find_data_partition_for(operation_type) {
         Some(p) => p,
         None => return String::new(),
     };
 
-    match ConfigFileManager::detect_operation_type() {
-        Some(OperationType::Install) => ConfigFileManager::read_install_config(&data_partition)
+    match operation_type {
+        OperationType::Install => ConfigFileManager::read_install_config(&data_partition)
             .map(|c| c.language)
             .unwrap_or_default(),
-        Some(OperationType::Backup) => ConfigFileManager::read_backup_config(&data_partition)
+        OperationType::Backup => ConfigFileManager::read_backup_config(&data_partition)
             .map(|c| c.language)
             .unwrap_or_default(),
-        Some(OperationType::Expand) => ConfigFileManager::read_expand_config(&data_partition)
+        OperationType::Expand => ConfigFileManager::read_expand_config(&data_partition)
             .map(|c| c.language)
             .unwrap_or_default(),
-        None => String::new(),
     }
 }
 
@@ -530,7 +533,18 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             }
         }
 
-        if !config.is_gho && !config.is_xp_i386 {
+        if config.is_gho {
+            let ghost = core::ghost::Ghost::new();
+            if !ghost.is_available() {
+                show_error_message(&tr!("Ghost工具不可用"));
+                return Ok(());
+            }
+            if let Err(error) = ghost.verify_image_integrity(&image_path) {
+                show_error_message(&tr!("GHO 镜像预检失败: {}", error));
+                return Ok(());
+            }
+            log::info!("[PE安装/CLI] GHO 镜像预检通过，尚未修改目标分区");
+        } else if !config.is_xp_i386 {
             log::info!("[PE INSTALL] Step 0: 校验镜像完整性");
             log::info!("[PE安装/CLI] 开始校验镜像: {}", image_path);
             let dism = Dism::new();
@@ -749,13 +763,7 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         let boot_result = if is_xp {
             if use_uefi {
                 log::info!("[PE INSTALL] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
-                match boot_manager.write_xp_uefi_gpt_boot(&target_partition) {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        log::error!("[PE INSTALL] XP UEFI 引导失败({})，回退 Legacy(ntldr)", e);
-                        boot_manager.write_xp_boot(&target_partition)
-                    }
-                }
+                boot_manager.write_xp_uefi_gpt_boot(&target_partition)
             } else {
                 log::info!("[PE INSTALL] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
                 boot_manager.write_xp_boot(&target_partition)
@@ -788,21 +796,17 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         // Step 6: 应用高级选项
         log::info!("[PE INSTALL] Step 6: 应用高级选项");
         if let Err(error) = apply_advanced_options(&target_partition, &config) {
-            if config.disable_windows_defender {
-                log::error!(
-                    "[PE INSTALL] 深度移除 Defender 杀毒引擎失败，安装停止: {}",
-                    error
-                );
-                show_error_message(&tr!(
-                    "深度移除 Defender 杀毒引擎失败，未继续安装: {}",
-                    error
-                ));
-                return Ok(());
-            }
-            log::warn!("[PE INSTALL] 应用高级选项失败: {}", error);
+            log::error!("[PE INSTALL] 应用高级选项失败，安装停止: {}", error);
+            show_error_message(&tr!("应用高级选项失败，未继续安装: {}", error));
+            return Ok(());
         }
         // 注入数据分区上的用户驱动（bin/drivers/<版本> 由正常端复制而来）
-        ui::advanced_options::inject_user_drivers_from_data(&target_partition, &data_dir);
+        if let Err(error) =
+            ui::advanced_options::inject_user_drivers_from_data(&target_partition, &data_dir)
+        {
+            show_error_message(&tr!("注入用户驱动失败: {}", error));
+            return Ok(());
+        }
 
         // Step 7: 生成无人值守配置
         if config.unattended {
@@ -880,7 +884,9 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         log::info!("[PE BACKUP] ========== PE自动备份模式 ==========");
 
         // 查找配置文件所在分区
-        let data_partition = match ConfigFileManager::find_data_partition() {
+        let data_partition = match ConfigFileManager::find_data_partition_for(
+            crate::core::config::OperationType::Backup,
+        ) {
             Some(p) => p,
             None => {
                 log::error!("[PE BACKUP] 错误: 未找到备份配置文件");
@@ -981,9 +987,31 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             return Ok(());
         }
 
+        let verify_result = match config.format {
+            BackupFormat::Gho => {
+                core::ghost::Ghost::new().verify_image_integrity(&config.save_path)
+            }
+            BackupFormat::Wim | BackupFormat::Esd | BackupFormat::Swm => {
+                Dism::verify_captured_image(
+                    std::path::Path::new(&config.save_path),
+                    &config.name,
+                    &config.description,
+                )
+            }
+        };
+        if let Err(error) = verify_result {
+            log::error!("[PE BACKUP] 备份产物验证失败: {}", error);
+            show_error_message(&tr!("备份文件验证失败: {}", error));
+            return Ok(());
+        }
+
         // 删除PE引导项
         let boot_manager = BootManager::new();
-        let _ = boot_manager.delete_current_boot_entry();
+        if let Err(error) = boot_manager.delete_current_boot_entry() {
+            log::error!("[PE BACKUP] 删除 PE 引导项失败: {}", error);
+            show_error_message(&tr!("删除 PE 引导项失败: {}", error));
+            return Ok(());
+        }
 
         // 清理
         ConfigFileManager::cleanup_partition_markers(&source_partition);

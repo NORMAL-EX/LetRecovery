@@ -108,15 +108,15 @@ impl InstallExecutionPhase {
             Self::ApplyAdvancedOptions => (96, 99),
             Self::FinishDirectInstall => (99, 100),
             Self::VerifyPeEnvironment => (3, 5),
-            Self::InstallPeBootEntry => (5, 8),
-            Self::SelectDataPartition => (8, 9),
-            Self::PersistPcaCompatibilityPackage => (9, 12),
-            Self::ExportDriversToPeData => (12, 20),
-            Self::VerifySourceImage => (20, 30),
-            Self::CopySourceImage => (30, 86),
-            Self::StageUefiSeven | Self::StageUserDrivers => (86, 93),
-            Self::WritePeInstallConfig => (93, 98),
-            Self::ReadyToRebootIntoPe => (98, 100),
+            Self::SelectDataPartition => (5, 6),
+            Self::PersistPcaCompatibilityPackage => (6, 9),
+            Self::ExportDriversToPeData => (9, 17),
+            Self::VerifySourceImage => (17, 27),
+            Self::CopySourceImage => (27, 84),
+            Self::StageUefiSeven | Self::StageUserDrivers => (84, 92),
+            Self::WritePeInstallConfig => (92, 96),
+            Self::InstallPeBootEntry => (96, 99),
+            Self::ReadyToRebootIntoPe => (99, 100),
         };
         let progress = if phase_progress > 100 {
             100
@@ -381,7 +381,6 @@ impl NativeInstallExecutor {
     fn append_via_pe_phases(intent: &StartInstallIntent, phases: &mut Vec<InstallExecutionPhase>) {
         phases.extend([
             InstallExecutionPhase::VerifyPeEnvironment,
-            InstallExecutionPhase::InstallPeBootEntry,
             InstallExecutionPhase::SelectDataPartition,
         ]);
         if intent.options.repair_boot {
@@ -400,6 +399,10 @@ impl NativeInstallExecutor {
         phases.extend([
             InstallExecutionPhase::StageUserDrivers,
             InstallExecutionPhase::WritePeInstallConfig,
+            // Installing the one-shot PE boot entry is the final machine
+            // mutation. Every source, package and configuration artifact is
+            // fully staged and verified before boot state is touched.
+            InstallExecutionPhase::InstallPeBootEntry,
             InstallExecutionPhase::ReadyToRebootIntoPe,
         ]);
     }
@@ -589,7 +592,7 @@ mod tests {
             .iter()
             .position(|phase| *phase == InstallExecutionPhase::WritePeInstallConfig)
             .unwrap();
-        assert!(boot < verify && verify < copy && copy < config);
+        assert!(verify < copy && copy < config && config < boot);
     }
 
     #[test]

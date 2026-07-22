@@ -8645,12 +8645,23 @@ impl NativeWindow {
     }
 
     unsafe fn poll_catalogue_messages(&mut self, hwnd: HWND) {
-        let result = self
+        let remote = match self
             .catalogue_messages
             .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok());
-        let Some(remote) = result else {
-            return;
+            .map(|receiver| receiver.try_recv())
+        {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.catalogue_messages = None;
+                let _ = KillTimer(hwnd, CATALOGUE_TIMER_ID);
+                let error = crate::tr!("远程资源目录加载线程异常结束，请重试。");
+                self.download_controller.fail_refresh(error.clone());
+                if let Some(page) = &self.download_page {
+                    set_text(page.status, &error);
+                }
+                return;
+            }
+            Some(Ok(remote)) => remote,
         };
 
         self.catalogue_messages = None;
@@ -8918,13 +8929,22 @@ impl NativeWindow {
                     state.cancellable = false;
                 }
                 DownloadWorkerMessage::Completed {
-                    path, follow_up, ..
+                    path,
+                    integrity,
+                    follow_up,
                 } => {
                     state.overall = ProgressValue::new(100, 100);
                     state.step = state.overall;
                     state.status = ProgressStatus::Succeeded;
                     state.cancellable = false;
-                    state.current_step = crate::tr!("下载和完整性验证已完成");
+                    state.current_step = match integrity {
+                        crate::core::native_download_executor::IntegrityOutcome::Passed(_) => {
+                            crate::tr!("下载和完整性验证已完成")
+                        }
+                        crate::core::native_download_executor::IntegrityOutcome::NotProvided => {
+                            crate::tr!("未提供文件校验值，已跳过完整性校验")
+                        }
+                    };
                     state.detail = path.display().to_string();
                     state.status_text = match &follow_up {
                             crate::core::native_download_controller::DownloadCompletion::None => {

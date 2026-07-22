@@ -95,6 +95,22 @@ fn last_err(prefix: &str) -> String {
     format!("{}（{}）", prefix, e)
 }
 
+fn merge_close_result(
+    operation: Result<(), String>,
+    close_succeeded: bool,
+    handle_name: &str,
+) -> Result<(), String> {
+    if close_succeeded {
+        operation
+    } else {
+        let close_error = last_err(&format!("WIMCloseHandle failed for {handle_name}"));
+        match operation {
+            Ok(()) => Err(close_error),
+            Err(operation_error) => Err(format!("{operation_error}; additionally, {close_error}")),
+        }
+    }
+}
+
 macro_rules! load_sym {
     ($lib:expr, $name:literal, $ty:ty) => {{
         let s: libloading::Symbol<$ty> = unsafe {
@@ -278,8 +294,14 @@ impl WimgapiManager {
                 )
             } != INVALID_CALLBACK_VALUE;
 
-            let h_img = unsafe { (self.load_image)(h_wim, index) };
-            let res = if h_img.is_null() {
+            let h_img = if cb_ok {
+                unsafe { (self.load_image)(h_wim, index) }
+            } else {
+                std::ptr::null_mut()
+            };
+            let res = if !cb_ok {
+                Err(last_err("WIMRegisterMessageCallback failed"))
+            } else if h_img.is_null() {
                 Err(last_err("WIMLoadImage 失败"))
             } else {
                 let wtarget = to_wide(target_dir);
@@ -294,8 +316,8 @@ impl WimgapiManager {
                 } else {
                     Err(last_err("WIMApplyImage 失败"))
                 };
-                unsafe { (self.close_handle)(h_img) };
-                r
+                let close_succeeded = unsafe { (self.close_handle)(h_img) } != 0;
+                merge_close_result(r, close_succeeded, "loaded image")
             };
 
             if cb_ok {
@@ -305,8 +327,8 @@ impl WimgapiManager {
             res
         };
 
-        unsafe { (self.close_handle)(h_wim) };
-        result
+        let close_succeeded = unsafe { (self.close_handle)(h_wim) } != 0;
+        merge_close_result(result, close_succeeded, "WIM file")
     }
 
     /// 捕获/备份目录到 WIM/ESD（compression：与 wimlib 取值一致；文件已存在则追加）。
@@ -360,18 +382,23 @@ impl WimgapiManager {
             } != INVALID_CALLBACK_VALUE;
 
             let wsource = to_wide(source_dir);
-            let h_img = unsafe { (self.capture_image_fn)(h_wim, wsource.as_ptr(), 0) };
-            let res = if h_img.is_null() {
+            let h_img = if cb_ok {
+                unsafe { (self.capture_image_fn)(h_wim, wsource.as_ptr(), 0) }
+            } else {
+                std::ptr::null_mut()
+            };
+            let res = if !cb_ok {
+                Err(last_err("WIMRegisterMessageCallback failed"))
+            } else if h_img.is_null() {
                 Err(last_err("WIMCaptureImage 失败"))
             } else {
-                // 设置镜像名称/描述（best-effort，失败不影响备份本身）
-                if !name.is_empty() || !description.is_empty() {
-                    if let Err(e) = self.set_image_info(h_img, name, description) {
-                        log::warn!("wimgapi 设置镜像信息失败（忽略）：{}", e);
-                    }
-                }
-                unsafe { (self.close_handle)(h_img) };
-                Ok(())
+                let metadata_result = if !name.is_empty() || !description.is_empty() {
+                    self.set_image_info(h_img, name, description)
+                } else {
+                    Ok(())
+                };
+                let close_succeeded = unsafe { (self.close_handle)(h_img) } != 0;
+                merge_close_result(metadata_result, close_succeeded, "captured image")
             };
 
             if cb_ok {
@@ -381,8 +408,8 @@ impl WimgapiManager {
             res
         };
 
-        unsafe { (self.close_handle)(h_wim) };
-        result
+        let close_succeeded = unsafe { (self.close_handle)(h_wim) } != 0;
+        merge_close_result(result, close_succeeded, "WIM file")
     }
 
     /// 通过 WIMSetImageInformation 写入镜像 NAME/DESCRIPTION（UTF-16 + BOM 的 XML）。

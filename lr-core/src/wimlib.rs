@@ -157,6 +157,12 @@ type FnWrite = unsafe extern "C" fn(
 type FnOverwrite =
     unsafe extern "C" fn(wim: WIMStruct, write_flags: c_int, num_threads: c_uint) -> c_int;
 type FnSetOutputCompression = unsafe extern "C" fn(wim: WIMStruct, ctype: c_int) -> c_int;
+type FnSetImageProperty = unsafe extern "C" fn(
+    wim: WIMStruct,
+    image: c_int,
+    property_name: *const u16,
+    property_value: *const u16,
+) -> c_int;
 type FnSplit = unsafe extern "C" fn(
     wim: WIMStruct,
     swm_name: *const u16,
@@ -706,6 +712,7 @@ pub struct WimlibManager {
     create_new_wim: FnCreateNewWim,
     free_wim: FnFree,
     get_error_string: FnGetErrorString,
+    get_wim_info: FnGetWimInfo,
     register_progress: FnRegisterProgress,
     extract_image: FnExtractImage,
     extract_paths: FnExtractPaths,
@@ -713,6 +720,7 @@ pub struct WimlibManager {
     write: FnWrite,
     overwrite: FnOverwrite,
     set_output_compression: FnSetOutputCompression,
+    set_image_property: FnSetImageProperty,
     split: FnSplit,
     reference_resource_files: FnReferenceResourceFiles,
     iterate_dir_tree: FnIterateDirTree,
@@ -733,6 +741,7 @@ impl WimlibManager {
         let create_new_wim = load_sym!(lib, b"wimlib_create_new_wim\0", FnCreateNewWim);
         let free_wim = load_sym!(lib, b"wimlib_free\0", FnFree);
         let get_error_string = load_sym!(lib, b"wimlib_get_error_string\0", FnGetErrorString);
+        let get_wim_info = load_sym!(lib, b"wimlib_get_wim_info\0", FnGetWimInfo);
         let register_progress = load_sym!(
             lib,
             b"wimlib_register_progress_function\0",
@@ -748,6 +757,7 @@ impl WimlibManager {
             b"wimlib_set_output_compression_type\0",
             FnSetOutputCompression
         );
+        let set_image_property = load_sym!(lib, b"wimlib_set_image_property\0", FnSetImageProperty);
         let split = load_sym!(lib, b"wimlib_split\0", FnSplit);
         let reference_resource_files = load_sym!(
             lib,
@@ -769,6 +779,7 @@ impl WimlibManager {
             create_new_wim,
             free_wim,
             get_error_string,
+            get_wim_info,
             register_progress,
             extract_image,
             extract_paths,
@@ -776,6 +787,7 @@ impl WimlibManager {
             write,
             overwrite,
             set_output_compression,
+            set_image_property,
             split,
             reference_resource_files,
             iterate_dir_tree,
@@ -959,7 +971,30 @@ impl WimlibManager {
             if rc != WIMLIB_ERR_SUCCESS {
                 return Err(self.error_message(rc));
             }
-            let _ = description; // 描述可后续通过 set_image_property 设置，这里从简
+            if !description.is_empty() {
+                let mut info = WimInfo::default();
+                let rc = unsafe { (self.get_wim_info)(wim, &mut info) };
+                if rc != WIMLIB_ERR_SUCCESS || info.image_count == 0 {
+                    return Err(if rc == WIMLIB_ERR_SUCCESS {
+                        "captured WIM contains no image to describe".to_owned()
+                    } else {
+                        self.error_message(rc)
+                    });
+                }
+                let property_name = to_wide("DESCRIPTION");
+                let property_value = to_wide(description);
+                let rc = unsafe {
+                    (self.set_image_property)(
+                        wim,
+                        info.image_count as c_int,
+                        property_name.as_ptr(),
+                        property_value.as_ptr(),
+                    )
+                };
+                if rc != WIMLIB_ERR_SUCCESS {
+                    return Err(self.error_message(rc));
+                }
+            }
 
             let solid = compression == 3;
             if append {

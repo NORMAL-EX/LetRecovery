@@ -278,9 +278,27 @@ impl PeManager {
         }
 
         let text = lr_core::bl_passthrough::serialize_keys(&entries);
-        let tmp = std::env::temp_dir().join(lr_core::bl_passthrough::KEYS_FILE_NAME);
+        let tmp = match lr_core::scoped_temp_file::ScopedTempFile::create_in(
+            &std::env::temp_dir(),
+            "letrecovery-bitlocker-keys",
+            "json",
+            text.as_bytes(),
+        ) {
+            Ok(tmp) => tmp,
+            Err(error) => {
+                log::info!("[PE] failed to create temporary BitLocker key file: {error}");
+                return;
+            }
+        };
         if let Err(e) = std::fs::write(&tmp, text) {
             log::info!("[PE][实验] 写临时密钥文件失败: {}（跳过注入）", e);
+            return;
+        }
+
+        if let Err(error) =
+            lr_core::scoped_temp_file::restrict_to_system_and_administrators(tmp.path())
+        {
+            log::info!("[PE] failed to restrict temporary BitLocker key file ACL: {error}");
             return;
         }
 

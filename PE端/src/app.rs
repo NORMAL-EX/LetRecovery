@@ -378,7 +378,18 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         }
     }
 
-    if !config.is_gho && !config.is_xp_i386 {
+    if config.is_gho {
+        let ghost = Ghost::new();
+        if !ghost.is_available() {
+            let _ = tx.send(WorkerMessage::Failed(tr!("Ghost工具不可用")));
+            return;
+        }
+        if let Err(error) = ghost.verify_image_integrity(&image_path) {
+            let _ = tx.send(WorkerMessage::Failed(tr!("GHO 镜像预检失败: {}", error)));
+            return;
+        }
+        log::info!("[PE安装] GHO 镜像预检通过，尚未修改目标分区");
+    } else if !config.is_xp_i386 {
         let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::VerifyImage));
         let _ = tx.send(WorkerMessage::SetStatus(tr!(
             "正在校验系统镜像完整性（可能需要几分钟）..."
@@ -767,18 +778,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let boot_result = if is_xp {
         if use_uefi {
             log::info!("[PE安装] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
-            // UEFI 化映像：用映像自带 bootxp64.efi/BCC 写 UEFI 引导；
-            // 失败（如映像非 UEFI 化、缺引导文件）则回退 Legacy(ntldr)。
-            match boot_manager.write_xp_uefi_gpt_boot(&target_partition) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    log::warn!("[PE安装] XP UEFI 引导失败({})，回退 Legacy(ntldr)", e);
-                    let _ = tx.send(WorkerMessage::SetStatus(tr!(
-                        "XP UEFI 引导不可用，回退 Legacy 引导..."
-                    )));
-                    boot_manager.write_xp_boot(&target_partition)
-                }
-            }
+            boot_manager.write_xp_uefi_gpt_boot(&target_partition)
         } else {
             log::info!("[PE安装] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
             boot_manager.write_xp_boot(&target_partition)
@@ -799,18 +799,20 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在应用高级选项...")));
 
     if let Err(e) = apply_advanced_options(&target_partition, &config) {
-        if config.disable_windows_defender {
-            log::error!("深度移除 Defender 杀毒引擎失败，安装停止: {}", e);
-            let _ = tx.send(WorkerMessage::Failed(tr!(
-                "深度移除 Defender 杀毒引擎失败，未继续安装: {}",
-                e
-            )));
-            return;
-        }
-        log::warn!("应用高级选项失败: {}", e);
+        log::error!("应用高级选项失败，安装停止: {}", e);
+        let _ = tx.send(WorkerMessage::Failed(tr!(
+            "应用高级选项失败，未继续安装: {}",
+            e
+        )));
+        return;
     }
     // 注入数据分区上的用户驱动（bin/drivers/<版本> 由正常端复制而来）
-    crate::ui::advanced_options::inject_user_drivers_from_data(&target_partition, &data_dir);
+    if let Err(error) =
+        crate::ui::advanced_options::inject_user_drivers_from_data(&target_partition, &data_dir)
+    {
+        let _ = tx.send(WorkerMessage::Failed(tr!("注入用户驱动失败: {}", error)));
+        return;
+    }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     // Step 7: 生成无人值守配置

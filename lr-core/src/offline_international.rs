@@ -111,7 +111,7 @@ fn input_locale_from_keyboard_layout(value: &str) -> Result<String> {
 }
 
 struct LoadedOfflineHive {
-    name: String,
+    name: Option<String>,
 }
 
 impl LoadedOfflineHive {
@@ -121,22 +121,31 @@ impl LoadedOfflineHive {
         })?;
         OfflineRegistry::load_hive(&name, hive_file)
             .with_context(|| format!("加载离线注册表配置单元失败: {hive_file}"))?;
-        Ok(Self { name })
+        Ok(Self { name: Some(name) })
     }
 
     fn key(&self, relative_path: &str) -> String {
-        format!("HKLM\\{}\\{}", self.name, relative_path)
+        format!(
+            "HKLM\\{}\\{}",
+            self.name.as_deref().expect("loaded hive name is present"),
+            relative_path
+        )
+    }
+
+    fn unload(mut self) -> Result<()> {
+        let name = self.name.take().expect("loaded hive name is present");
+        OfflineRegistry::unload_hive(&name)
+            .with_context(|| format!("failed to unload offline registry hive {name}"))
     }
 }
 
 impl Drop for LoadedOfflineHive {
     fn drop(&mut self) {
-        if let Err(error) = OfflineRegistry::unload_hive(&self.name) {
-            log::error!(
-                "卸载国际化探测注册表配置单元失败 [{}]: {:#}",
-                self.name,
-                error
-            );
+        let Some(name) = self.name.take() else {
+            return;
+        };
+        if let Err(error) = OfflineRegistry::unload_hive(&name) {
+            log::error!("卸载国际化探测注册表配置单元失败 [{}]: {:#}", name, error);
         }
     }
 }
@@ -212,13 +221,16 @@ pub fn read_offline_international_settings(
         bail!("离线 SYSTEM 注册表返回了无效的默认时区: {time_zone}");
     }
 
-    Ok(OfflineInternationalSettings {
+    let settings = OfflineInternationalSettings {
         ui_language,
         system_locale,
         user_locale,
         input_locale,
         time_zone,
-    })
+    };
+    default_hive.unload()?;
+    system_hive.unload()?;
+    Ok(settings)
 }
 
 #[cfg(test)]

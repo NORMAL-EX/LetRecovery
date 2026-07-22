@@ -7,6 +7,14 @@ pub struct OnlineSystem {
     pub download_url: String,
     pub display_name: String,
     pub is_win11: bool,
+    /// 服务端建议的保存文件名；旧目录可以省略。
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// 可选完整性信息。SHA-256 存在时优先，MD5 仅用于旧目录兼容。
+    #[serde(default)]
+    pub md5: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// 在线 PE 信息
@@ -128,6 +136,18 @@ pub struct OnlineSoftware {
     pub download_url_nt5: Option<String>,
     /// 文件名
     pub filename: String,
+    #[serde(default)]
+    pub md5: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub md5_x86: Option<String>,
+    #[serde(default)]
+    pub sha256_x86: Option<String>,
+    #[serde(default)]
+    pub md5_nt5: Option<String>,
+    #[serde(default)]
+    pub sha256_nt5: Option<String>,
 }
 
 /// 软件列表JSON格式
@@ -154,6 +174,10 @@ pub struct OnlineGpuDriver {
     pub download_url: String,
     /// 文件名
     pub filename: String,
+    #[serde(default)]
+    pub md5: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// GPU驱动列表JSON格式
@@ -346,12 +370,18 @@ impl ConfigManager {
                         download_url: parts[0].trim().to_string(),
                         display_name: parts[1].trim().to_string(),
                         is_win11: parts[2].trim().eq_ignore_ascii_case("Win11"),
+                        filename: None,
+                        md5: None,
+                        sha256: None,
                     })
                 } else if parts.len() >= 2 {
                     Some(OnlineSystem {
                         download_url: parts[0].trim().to_string(),
                         display_name: parts[1].trim().to_string(),
                         is_win11: parts[1].to_lowercase().contains("11"),
+                        filename: None,
+                        md5: None,
+                        sha256: None,
                     })
                 } else {
                     None
