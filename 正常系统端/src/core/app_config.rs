@@ -2,6 +2,7 @@
 //! 管理 config.json 配置文件，用于存储用户偏好设置
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::utils::path::get_exe_dir;
@@ -12,23 +13,23 @@ pub struct AppConfig {
     /// 小白模式是否启用
     #[serde(default)]
     pub easy_mode_enabled: bool,
-    
+
     /// 是否已关闭小白模式提示（在非小白模式下显示的提示）
     #[serde(default)]
     pub easy_mode_tip_dismissed: bool,
-    
+
     /// 是否已关闭小白模式下的设置提示
     #[serde(default)]
     pub easy_mode_settings_tip_dismissed: bool,
-    
+
     /// 是否启用日志记录（默认启用）
     #[serde(default = "default_log_enabled")]
     pub log_enabled: bool,
-    
+
     /// 日志保留天数（默认7天）
     #[serde(default = "default_log_retention_days")]
     pub log_retention_days: u32,
-    
+
     /// 界面语言代码（默认 "zh-CN"）
     #[serde(default = "default_language")]
     pub language: String,
@@ -47,9 +48,19 @@ pub struct AppConfig {
     #[serde(default)]
     pub enable_advanced_options: bool,
 
+    /// Compatibility switch for trusted deployments that still publish HTTP
+    /// download URLs. HTTPS remains the secure default.
+    #[serde(default)]
+    pub allow_insecure_http_downloads: bool,
+
+    /// 单个下载任务使用的并行分片数，只接受 8、16、32 三档。aria2 的单服务器
+    /// 连接上限仍限制为 16；旧配置没有此字段时保持迁移前的 16 连接行为。
+    #[serde(default = "default_download_threads")]
+    pub download_threads: u8,
+
     /// 「系统安装」页选项偏好（记住上次勾选状态，下次启动自动恢复）。
     #[serde(default)]
-    pub install_prefs: crate::app::InstallPrefs,
+    pub install_prefs: crate::core::ui_state::InstallPrefs,
 }
 
 /// 日志默认启用
@@ -67,21 +78,43 @@ fn default_language() -> String {
     String::from("zh-CN")
 }
 
+/// 把旧配置或损坏配置归一到 UI 暴露的 8、16、32 三档。
+///
+/// 12 和 24 是相邻档位的中点；中点选择更高一档，避免旧的较大配置被意外降得
+/// 过低。aria2 的 `max-connection-per-server` 会在执行边界单独限制为 16。
+pub const fn normalize_download_threads(threads: u8) -> u8 {
+    match threads {
+        0..=11 => 8,
+        12..=23 => 16,
+        _ => 32,
+    }
+}
+
+const fn default_download_threads() -> u8 {
+    16
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             easy_mode_enabled: false,
             easy_mode_tip_dismissed: false,
             easy_mode_settings_tip_dismissed: false,
-            log_enabled: true,  // 日志默认启用
-            log_retention_days: 7,  // 默认保留7天
-            language: String::from("zh-CN"),  // 默认简体中文
+            log_enabled: true,               // 日志默认启用
+            log_retention_days: 7,           // 默认保留7天
+            language: String::from("zh-CN"), // 默认简体中文
             pe_cache: crate::download::config::PeCache::default(),
-            wim_engine: 0,  // 默认 libwim
+            wim_engine: 0, // 默认 libwim
             enable_advanced_options: false,
-            install_prefs: crate::app::InstallPrefs::default(),
+            allow_insecure_http_downloads: false,
+            download_threads: default_download_threads(),
+            install_prefs: crate::core::ui_state::InstallPrefs::default(),
         }
     }
+}
+
+const fn advanced_options_allowed(requested: bool, easy_mode_enabled: bool) -> bool {
+    requested && !easy_mode_enabled
 }
 
 impl AppConfig {
@@ -89,80 +122,101 @@ impl AppConfig {
     fn get_config_path() -> PathBuf {
         get_exe_dir().join("config.json")
     }
-    
+
     /// 从文件加载配置
     /// 如果文件不存在或解析失败，返回默认配置
-    /// 
+    ///
     /// 注意：此方法可能在日志系统初始化之前被调用，
     /// 因此使用 load_silent() 进行静默加载
     pub fn load() -> Self {
         Self::load_silent()
     }
-    
+
     /// 静默加载配置（不输出日志）
     /// 用于在日志系统初始化之前加载配置
     fn load_silent() -> Self {
         let config_path = Self::get_config_path();
-        
+
         if !config_path.exists() {
             return Self::default();
         }
-        
+
         match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                serde_json::from_str::<AppConfig>(&content).unwrap_or_default()
-            }
-            Err(_) => Self::default()
+            Ok(content) => serde_json::from_str::<AppConfig>(&content)
+                .map(Self::normalized)
+                .unwrap_or_default(),
+            Err(_) => Self::default(),
         }
     }
-    
+
     /// 重新加载配置并记录日志
     /// 用于在日志系统初始化之后需要重新加载时使用
     pub fn reload_with_logging() -> Self {
         let config_path = Self::get_config_path();
-        
+
         if !config_path.exists() {
             log::info!("配置文件不存在，使用默认配置");
             return Self::default();
         }
-        
+
         match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                match serde_json::from_str::<AppConfig>(&content) {
-                    Ok(config) => {
-                        log::info!("加载配置文件成功");
-                        config
-                    }
-                    Err(e) => {
-                        log::warn!("解析配置文件失败: {}，使用默认配置", e);
-                        Self::default()
-                    }
+            Ok(content) => match serde_json::from_str::<AppConfig>(&content) {
+                Ok(config) => {
+                    log::info!("加载配置文件成功");
+                    config.normalized()
                 }
-            }
+                Err(e) => {
+                    log::warn!("解析配置文件失败: {}，使用默认配置", e);
+                    Self::default()
+                }
+            },
             Err(e) => {
                 log::warn!("读取配置文件失败: {}，使用默认配置", e);
                 Self::default()
             }
         }
     }
-    
+
     /// 保存配置到文件
     pub fn save(&self) -> anyhow::Result<()> {
         let config_path = Self::get_config_path();
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&config_path, content)?;
+        let directory = config_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config.json path has no parent directory"))?;
+        let (temporary, mut file) = lr_core::scoped_temp_file::ScopedTempFile::create_writer_in(
+            directory, "config", "json",
+        )?;
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        temporary.persist_replace(&config_path)?;
         log::info!("配置文件已保存");
         Ok(())
     }
-    
+
+    fn normalized(mut self) -> Self {
+        self.download_threads = normalize_download_threads(self.download_threads);
+        // Easy mode deliberately exposes a reduced, fixed installation policy.  Old config files
+        // can contain both switches after upgrading from builds where the two settings were
+        // independent; normalize that impossible UI state before any page is created.
+        self.enable_advanced_options =
+            advanced_options_allowed(self.enable_advanced_options, self.easy_mode_enabled);
+        self
+    }
+
     /// 设置小白模式状态并保存
     pub fn set_easy_mode(&mut self, enabled: bool) {
         self.easy_mode_enabled = enabled;
+        if enabled {
+            self.enable_advanced_options = false;
+        }
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }
     }
-    
+
     /// 关闭小白模式提示
     pub fn dismiss_easy_mode_tip(&mut self) {
         self.easy_mode_tip_dismissed = true;
@@ -170,7 +224,7 @@ impl AppConfig {
             log::warn!("保存配置失败: {}", e);
         }
     }
-    
+
     /// 关闭小白模式下的设置提示
     pub fn dismiss_easy_mode_settings_tip(&mut self) {
         self.easy_mode_settings_tip_dismissed = true;
@@ -178,7 +232,7 @@ impl AppConfig {
             log::warn!("保存配置失败: {}", e);
         }
     }
-    
+
     /// 设置日志记录状态并保存
     pub fn set_log_enabled(&mut self, enabled: bool) {
         self.log_enabled = enabled;
@@ -188,20 +242,20 @@ impl AppConfig {
             log::warn!("保存配置失败: {}", e);
         }
     }
-    
+
     /// 设置日志保留天数并保存
     pub fn set_log_retention_days(&mut self, days: u32) {
-        self.log_retention_days = days.max(1).min(365); // 限制范围：1-365天
+        self.log_retention_days = days.clamp(1, 365); // 限制范围：1-365天
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }
     }
-    
+
     /// 获取日志记录状态
     pub fn is_log_enabled(&self) -> bool {
         self.log_enabled
     }
-    
+
     /// 设置 WIM 镜像引擎并保存（同时更新进程级引擎选择，立即生效）
     pub fn set_wim_engine(&mut self, engine: u8) {
         self.wim_engine = engine;
@@ -218,20 +272,33 @@ impl AppConfig {
 
     /// 设置「高级选项」总开关并保存
     pub fn set_advanced_options(&mut self, enabled: bool) {
-        self.enable_advanced_options = enabled;
+        // The disabled About-page checkbox is the first line of defence, but keep the persisted
+        // invariant here as well so keyboard notifications or a stale caller cannot enable both.
+        self.enable_advanced_options = advanced_options_allowed(enabled, self.easy_mode_enabled);
+        if let Err(e) = self.save() {
+            log::warn!("保存配置失败: {}", e);
+        }
+    }
+
+    /// 设置单个下载任务的并行连接数。新值从下一个下载任务开始生效。
+    pub fn set_download_threads(&mut self, threads: u8) {
+        self.download_threads = normalize_download_threads(threads);
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }
     }
 
     /// 设置界面语言并保存
-    /// 
+    ///
     /// # Arguments
-    /// * `language_code` - 语言代码（如 "zh-CN", "en-US"）
+    /// * `language_code` - 语言代码（如 "zh-CN", "zh-TW", "en-US"）
     pub fn set_language(&mut self, language_code: &str) {
         self.language = language_code.to_string();
         // 切换运行时语言
         crate::utils::i18n::switch_language(language_code);
+        if let Err(error) = crate::utils::dprk_easter_egg::sync_for_language(language_code) {
+            log::warn!("同步朝鲜文彩蛋失败: {error:#}");
+        }
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }
@@ -243,24 +310,24 @@ impl AppConfig {
 pub fn get_current_username() -> Option<String> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
-    
+
     // 尝试从环境变量获取
     if let Ok(username) = std::env::var("USERNAME") {
         if !username.is_empty() && username.to_lowercase() != "system" {
             return Some(username);
         }
     }
-    
+
     // 使用Windows API获取
     unsafe {
         #[link(name = "advapi32")]
         extern "system" {
             fn GetUserNameW(lpBuffer: *mut u16, pcbBuffer: *mut u32) -> i32;
         }
-        
+
         let mut buffer = [0u16; 256];
         let mut size = buffer.len() as u32;
-        
+
         if GetUserNameW(buffer.as_mut_ptr(), &mut size) != 0 {
             let username = OsString::from_wide(&buffer[..size as usize - 1]);
             if let Some(name) = username.to_str() {
@@ -270,11 +337,60 @@ pub fn get_current_username() -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 
 #[cfg(not(windows))]
 pub fn get_current_username() -> Option<String> {
     std::env::var("USER").ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_json_without_download_threads_keeps_legacy_connection_count() {
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.download_threads, 16);
+    }
+
+    #[test]
+    fn download_threads_are_normalized_to_supported_tiers() {
+        assert_eq!(normalize_download_threads(0), 8);
+        assert_eq!(normalize_download_threads(8), 8);
+        assert_eq!(normalize_download_threads(11), 8);
+        assert_eq!(normalize_download_threads(12), 16);
+        assert_eq!(normalize_download_threads(16), 16);
+        assert_eq!(normalize_download_threads(23), 16);
+        assert_eq!(normalize_download_threads(24), 32);
+        assert_eq!(normalize_download_threads(32), 32);
+        assert_eq!(normalize_download_threads(u8::MAX), 32);
+    }
+
+    #[test]
+    fn loaded_legacy_thread_values_are_normalized_before_use() {
+        let mut config: AppConfig = serde_json::from_str(r#"{"download_threads":20}"#).unwrap();
+        assert_eq!(config.download_threads, 20);
+        config = config.normalized();
+        assert_eq!(config.download_threads, 16);
+    }
+
+    #[test]
+    fn easy_mode_normalizes_legacy_advanced_option_conflict() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"easy_mode_enabled":true,"enable_advanced_options":true}"#)
+                .unwrap();
+        let normalized = config.normalized();
+        assert!(normalized.easy_mode_enabled);
+        assert!(!normalized.enable_advanced_options);
+    }
+
+    #[test]
+    fn advanced_options_cannot_be_enabled_while_easy_mode_is_active() {
+        assert!(!advanced_options_allowed(true, true));
+        assert!(advanced_options_allowed(true, false));
+        assert!(!advanced_options_allowed(false, false));
+    }
 }

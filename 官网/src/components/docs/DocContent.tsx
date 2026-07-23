@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { createRoot } from 'react-dom/client'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { type DocPageData, docTitle } from '@/lib/docs'
 import { cn } from '@/lib/utils'
@@ -122,8 +123,8 @@ export default function DocContent({ page }: { page: DocPageData }) {
     if (!islands.length) return
     let roots: Array<{ unmount: () => void }> = []
     let cancelled = false
-    void Promise.all([import('react-dom/client'), import('./VideoPlayer')]).then(
-      ([{ createRoot }, { default: VideoPlayer }]) => {
+    void import('./VideoPlayer').then(
+      ({ default: VideoPlayer }) => {
         if (cancelled) return
         islands.forEach((el) => {
           el.innerHTML = ''

@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { Github, Globe, ExternalLink } from 'lucide-react'
-import { useT } from '@/lib/i18n'
+import { useT } from '@/lib/i18n-hooks'
 
 interface Contributor {
   name: string
@@ -55,7 +55,23 @@ const About: React.FC = () => {
                 <dd className="text-foreground">{__APP_VERSION__}</dd>
 
                 <dt className="text-muted-foreground">{t.about.license}</dt>
-                <dd className="text-foreground">PolyForm Noncommercial 1.0.0</dd>
+                <dd className="flex flex-wrap items-center gap-x-1 text-foreground">
+                  <a
+                    href="https://github.com/NORMAL-EX/LetRecovery/blob/main/LICENSE"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline underline-offset-4 hover:text-primary"
+                  >
+                    PolyForm Noncommercial 1.0.0
+                  </a>
+                  <span aria-hidden="true">+</span>
+                  <a
+                    href="#/docs/guide/terms"
+                    className="underline underline-offset-4 hover:text-primary"
+                  >
+                    {t.about.additionalTerms}
+                  </a>
+                </dd>
 
                 <dt className="text-muted-foreground">{t.about.copyright}</dt>
                 <dd className="leading-relaxed text-foreground">

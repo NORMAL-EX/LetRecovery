@@ -23,13 +23,12 @@ use crate::tr;
 use windows::core::PCWSTR;
 #[cfg(windows)]
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    SetupDiCallClassInstaller, SetupDiDestroyDeviceInfoList,
-    SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
-    SetupDiGetDeviceRegistryPropertyW, SetupDiRemoveDevice, SetupDiSetClassInstallParamsW,
-    DIGCF_ALLCLASSES, DIGCF_PRESENT, DIF_PROPERTYCHANGE, DICS_DISABLE,
-    DICS_FLAG_GLOBAL, HDEVINFO, SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA, SP_PROPCHANGE_PARAMS,
-    SPDRP_CLASS, SPDRP_DEVICEDESC, SPDRP_DRIVER, SPDRP_FRIENDLYNAME,
-    SPDRP_HARDWAREID, SPDRP_MFG, SETUP_DI_REGISTRY_PROPERTY,
+    SetupDiCallClassInstaller, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
+    SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW,
+    SetupDiRemoveDevice, SetupDiSetClassInstallParamsW, DICS_DISABLE, DICS_FLAG_GLOBAL,
+    DIF_PROPERTYCHANGE, DIGCF_ALLCLASSES, DIGCF_PRESENT, HDEVINFO, SETUP_DI_REGISTRY_PROPERTY,
+    SPDRP_CLASS, SPDRP_DEVICEDESC, SPDRP_DRIVER, SPDRP_FRIENDLYNAME, SPDRP_HARDWAREID, SPDRP_MFG,
+    SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA, SP_PROPCHANGE_PARAMS,
 };
 #[cfg(windows)]
 use windows::Win32::Foundation::{GetLastError, ERROR_NO_MORE_ITEMS, HWND};
@@ -218,7 +217,7 @@ pub fn enumerate_gpu_devices() -> Result<Vec<GpuDeviceInfo>> {
             // 使用 is_err() 替代 !.as_bool()
             if SetupDiEnumDeviceInfo(dev_info, index, &mut dev_info_data).is_err() {
                 let err = GetLastError();
-                if err.0 == ERROR_NO_MORE_ITEMS.0 as u32 {
+                if err.0 == ERROR_NO_MORE_ITEMS.0 {
                     break;
                 }
                 index += 1;
@@ -226,24 +225,34 @@ pub fn enumerate_gpu_devices() -> Result<Vec<GpuDeviceInfo>> {
             }
 
             // 获取设备类
-            let device_class = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_CLASS)
-                .unwrap_or_default();
+            let device_class =
+                get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_CLASS)
+                    .unwrap_or_default();
 
             // 只处理显示适配器
             if device_class.to_lowercase() == "display" {
-                let name = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_DEVICEDESC)
-                    .unwrap_or_default();
-                let friendly_name = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_FRIENDLYNAME)
-                    .unwrap_or_default();
-                let hardware_id = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_HARDWAREID)
-                    .unwrap_or_default();
-                let manufacturer = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_MFG)
-                    .unwrap_or_default();
-                let driver_key = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_DRIVER)
-                    .unwrap_or_default();
+                let name =
+                    get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_DEVICEDESC)
+                        .unwrap_or_default();
+                let friendly_name = get_device_registry_property_string(
+                    dev_info,
+                    &dev_info_data,
+                    SPDRP_FRIENDLYNAME,
+                )
+                .unwrap_or_default();
+                let hardware_id =
+                    get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_HARDWAREID)
+                        .unwrap_or_default();
+                let manufacturer =
+                    get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_MFG)
+                        .unwrap_or_default();
+                let driver_key =
+                    get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_DRIVER)
+                        .unwrap_or_default();
 
                 // 获取设备实例 ID
-                let instance_id = get_device_instance_id(dev_info, &dev_info_data).unwrap_or_default();
+                let instance_id =
+                    get_device_instance_id(dev_info, &dev_info_data).unwrap_or_default();
 
                 let display_name = if !friendly_name.is_empty() {
                     friendly_name.clone()
@@ -376,7 +385,9 @@ pub fn get_system_hardware_summary() -> Result<SystemHardwareSummary> {
 #[cfg(windows)]
 /// 获取 CPU 名称
 fn get_cpu_name() -> Option<String> {
-    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, KEY_READ, REG_VALUE_TYPE};
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, KEY_READ, REG_VALUE_TYPE,
+    };
 
     unsafe {
         let subkey = to_wide(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
@@ -461,23 +472,27 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
             // 使用 is_err() 替代 !.as_bool()
             if SetupDiEnumDeviceInfo(dev_info, index, &mut dev_info_data).is_err() {
                 let err = GetLastError();
-                if err.0 == ERROR_NO_MORE_ITEMS.0 as u32 {
+                if err.0 == ERROR_NO_MORE_ITEMS.0 {
                     break;
                 }
                 index += 1;
                 continue;
             }
 
-            let device_class = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_CLASS)
-                .unwrap_or_default();
+            let device_class =
+                get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_CLASS)
+                    .unwrap_or_default();
 
             if device_class.to_lowercase() == "display" {
-                let hardware_id = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_HARDWAREID)
-                    .unwrap_or_default();
-                let manufacturer = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_MFG)
-                    .unwrap_or_default();
-                let name = get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_DEVICEDESC)
-                    .unwrap_or_default();
+                let hardware_id =
+                    get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_HARDWAREID)
+                        .unwrap_or_default();
+                let manufacturer =
+                    get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_MFG)
+                        .unwrap_or_default();
+                let name =
+                    get_device_registry_property_string(dev_info, &dev_info_data, SPDRP_DEVICEDESC)
+                        .unwrap_or_default();
 
                 if is_nvidia_device(&hardware_id, &manufacturer, &name) {
                     nvidia_devices.push(dev_info_data);
@@ -497,8 +512,9 @@ pub fn uninstall_nvidia_drivers_online() -> Result<UninstallResult> {
 
         // 卸载每个英伟达设备
         for mut device_data in nvidia_devices {
-            let name = get_device_registry_property_string(dev_info, &device_data, SPDRP_DEVICEDESC)
-                .unwrap_or_else(|| "未知设备".to_string());
+            let name =
+                get_device_registry_property_string(dev_info, &device_data, SPDRP_DEVICEDESC)
+                    .unwrap_or_else(|| "未知设备".to_string());
 
             log::info!("[NvidiaUninstall] 正在卸载: {}", name);
 
@@ -653,7 +669,7 @@ pub fn uninstall_nvidia_drivers_offline(target_partition: &str) -> Result<Uninst
                 }
 
                 if let Some(ext) = path.extension() {
-                    if ext.to_ascii_lowercase() == "inf" {
+                    if ext.eq_ignore_ascii_case("inf") {
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                             let name_lower = name.to_lowercase();
                             // 检查是否为英伟达 INF 文件
@@ -730,6 +746,9 @@ fn remove_directory_recursive(path: &Path) -> Result<()> {
         }
 
         let mut perms = std::fs::metadata(path)?.permissions();
+        // This module is Windows-only; clearing FILE_ATTRIBUTE_READONLY does
+        // not alter Unix mode bits.
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         std::fs::set_permissions(path, perms)?;
         Ok(())
@@ -829,6 +848,9 @@ mod tests {
             beautify_gpu_name("NVIDIA GeForce RTX 4090"),
             "英伟达 GeForce RTX 4090"
         );
-        assert_eq!(beautify_gpu_name("Intel UHD Graphics"), "英特尔 UHD Graphics");
+        assert_eq!(
+            beautify_gpu_name("Intel UHD Graphics"),
+            "英特尔 UHD Graphics"
+        );
     }
 }

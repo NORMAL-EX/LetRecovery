@@ -1,10 +1,15 @@
 use crate::tr;
 use crate::utils::cmd::create_command;
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use lr_core::cached_artifact::{
+    inspect_cached_artifact, verify_cached_artifact, CachedArtifactError, CachedArtifactPresence,
+    CachedArtifactStatus,
+};
 
 use crate::utils::encoding::gbk_to_utf8;
-use crate::utils::path::{get_bin_dir, get_exe_dir};
+use crate::utils::path::{get_bin_dir, get_exe_dir, get_pe_download_cache_dir};
 
 /// WinPE 启动管理器
 pub struct PeManager {
@@ -21,25 +26,76 @@ impl PeManager {
         }
     }
 
-    /// 检查PE文件是否存在
-    /// 返回 (存在, 完整路径)
-    pub fn check_pe_exists(filename: &str) -> (bool, String) {
-        // 检查多个可能的位置（新布局优先：bin\pe）
-        let locations = [
-            get_bin_dir().join("pe").join(filename),
-            get_exe_dir().join(filename),
-            get_exe_dir().join("PE").join(filename),
-            get_exe_dir().join("pe").join(filename),
-            dirs::download_dir().unwrap_or_default().join(filename),
-        ];
+    fn user_managed_directories() -> Vec<PathBuf> {
+        let exe_dir = get_exe_dir();
+        vec![
+            get_bin_dir().join("pe"),
+            exe_dir.clone(),
+            exe_dir.join("PE"),
+            exe_dir.join("pe"),
+        ]
+    }
 
-        for path in &locations {
-            if path.exists() {
-                return (true, path.to_string_lossy().to_string());
+    fn managed_cache_directories() -> Vec<PathBuf> {
+        let mut directories = vec![get_pe_download_cache_dir()];
+        if let Some(download_dir) = dirs::download_dir() {
+            directories.push(download_dir);
+        }
+        directories
+    }
+
+    /// Locate a user-managed local PE or a managed downloaded PE.
+    ///
+    /// Files shipped in `bin/pe` intentionally remain customizable and are
+    /// constrained to regular files without enforcing server metadata. Files
+    /// from the managed download cache retain strict checksum verification.
+    pub fn find_cached_pe(
+        filename: &str,
+        sha256: Option<&str>,
+        md5: Option<&str>,
+    ) -> std::result::Result<CachedArtifactPresence, CachedArtifactError> {
+        inspect_pe_candidates(
+            filename,
+            &Self::user_managed_directories(),
+            &Self::managed_cache_directories(),
+            sha256,
+            md5,
+        )
+    }
+
+    /// 查找并校验缓存的 PE 文件。
+    ///
+    /// 文件名来自服务器配置，因此在拼接路径前必须先通过单文件名校验。
+    /// 用户管理目录中的 PE 允许自定义；联网下载缓存则 SHA-256 优先于兼容字段 MD5，
+    /// 声明过的校验值无法验证时会失败关闭。
+    pub fn check_cached_pe(
+        filename: &str,
+        sha256: Option<&str>,
+        md5: Option<&str>,
+    ) -> std::result::Result<CachedArtifactStatus, CachedArtifactError> {
+        verify_pe_candidates(
+            filename,
+            &Self::user_managed_directories(),
+            &Self::managed_cache_directories(),
+            sha256,
+            md5,
+        )
+    }
+
+    /// 仅检查 PE 文件是否存在的兼容接口。
+    ///
+    /// 高权限操作在真正使用 PE 前必须调用 `check_cached_pe` 并提供服务端校验值。
+    pub fn check_pe_exists(filename: &str) -> (bool, String) {
+        match Self::find_cached_pe(filename, None, None) {
+            Ok(CachedArtifactPresence::Present { path, .. }) => {
+                (true, path.to_string_lossy().into_owned())
+            }
+            Ok(CachedArtifactPresence::Missing) => (false, String::new()),
+            Err(error) => {
+                log::warn!("[PE] Rejected cached PE lookup for {filename:?}: {error}");
+                (false, String::new())
             }
         }
-
-        (false, String::new())
     }
 
     /// 检查是否为UEFI启动
@@ -173,11 +229,6 @@ impl PeManager {
         // 1.5 BitLocker 密钥透传：把各加密卷的恢复密钥打包进刚拷好的 boot.wim
         Self::maybe_inject_bitlocker_keys(&target_wim);
 
-        // 1.6 Secure Boot：PE 自带的 winload.efi 仅 2011 链签名，在已吊销 2011(CVE-2023-24932 DBX)
-        //     或仅信任 2023 证书的机器上会被 Secure Boot 拦下。若当前系统的 winload 是双签名(2011+2023)
-        //     且与 PE 同内核家族，则用它覆盖 PE 内的 winload，使 PE 在新老/已吊销机器上都能过 Secure Boot。
-        Self::maybe_upgrade_pe_bootloader(&target_wim);
-
         // 2. 创建或使用boot.sdi
         let target_sdi = self.create_default_sdi(target_dir)?;
 
@@ -227,9 +278,27 @@ impl PeManager {
         }
 
         let text = lr_core::bl_passthrough::serialize_keys(&entries);
-        let tmp = std::env::temp_dir().join(lr_core::bl_passthrough::KEYS_FILE_NAME);
+        let tmp = match lr_core::scoped_temp_file::ScopedTempFile::create_in(
+            &std::env::temp_dir(),
+            "letrecovery-bitlocker-keys",
+            "json",
+            text.as_bytes(),
+        ) {
+            Ok(tmp) => tmp,
+            Err(error) => {
+                log::info!("[PE] failed to create temporary BitLocker key file: {error}");
+                return;
+            }
+        };
         if let Err(e) = std::fs::write(&tmp, text) {
             log::info!("[PE][实验] 写临时密钥文件失败: {}（跳过注入）", e);
+            return;
+        }
+
+        if let Err(error) =
+            lr_core::scoped_temp_file::restrict_to_system_and_administrators(tmp.path())
+        {
+            log::info!("[PE] failed to restrict temporary BitLocker key file ACL: {error}");
             return;
         }
 
@@ -254,113 +323,6 @@ impl PeManager {
                 "[PE][实验] 注入 boot.wim 失败: {}（PE 端将无法自动解锁）",
                 e
             ),
-        }
-    }
-
-    /// 当前打包 PE 的内核家族（winload 版本前缀）。换 PE 基线时同步更新此常量。
-    /// 仅当“当前系统”的 winload 属于同一家族时才允许用它覆盖 PE 的 winload，避免 winload/内核版本不兼容。
-    const PE_WINLOAD_FAMILY: &'static str = "10.0.19041.";
-
-    /// 若满足条件，用【当前系统】的 winload.efi 覆盖 PE boot.wim 内的 winload.efi，
-    /// 让 PE 在“仅信任 2023 / 已吊销 2011(CVE-2023-24932 DBX)”的 Secure Boot 机器上也能启动。
-    ///
-    /// 条件（任一不满足即原样保留 PE 自带的 winload，绝不降级、不冒险）：
-    /// 1. 当前已开启 Secure Boot（否则用不着，避免无谓改动启动链）；
-    /// 2. 当前系统 winload.efi 含 2023 证书（双签名 2011+2023，新老机器都能过）；
-    /// 3. 当前系统 winload.efi 与 PE 同属 `PE_WINLOAD_FAMILY` 内核家族（版本兼容）。
-    ///
-    /// best-effort：失败只记日志，不影响 PE 启动准备。PE 经目标机自带 bootmgfw 引导，
-    /// 它唯一受 Secure Boot 校验的组件就是 boot.wim 内的 winload.efi，故只需替换它。
-    fn maybe_upgrade_pe_bootloader(target_wim: &str) {
-        // 1. 仅在 Secure Boot 开启时处理
-        if !Self::is_secure_boot_enabled() {
-            log::info!("[PE][SB] 未开启 Secure Boot，无需升级 PE winload");
-            return;
-        }
-
-        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-        let host_winload = format!("{}\\System32\\winload.efi", sysroot);
-        let bytes = match std::fs::read(&host_winload) {
-            Ok(b) => b,
-            Err(e) => {
-                log::info!(
-                    "[PE][SB] 读取当前系统 winload.efi 失败: {}，保留 PE 原 winload",
-                    e
-                );
-                return;
-            }
-        };
-
-        // 2. 当前系统 winload 是否含 2023 证书（双签名 / 2023 签名）
-        let has_2023 = Self::bytes_contains(&bytes, b"Windows UEFI CA 2023")
-            || Self::bytes_contains(&bytes, b"Microsoft Windows Production PCA 2023");
-        if !has_2023 {
-            log::info!("[PE][SB] 当前系统 winload 未含 2023 证书（非双签名），保留 PE 原 winload");
-            return;
-        }
-
-        // 3. 内核家族匹配（winload 版本资源为 UTF-16LE，需以 UTF-16 形式匹配 "10.0.19041."）
-        let fam_u16: Vec<u8> = Self::PE_WINLOAD_FAMILY
-            .encode_utf16()
-            .flat_map(|u| u.to_le_bytes())
-            .collect();
-        if !Self::bytes_contains(&bytes, &fam_u16) {
-            log::info!(
-                "[PE][SB] 当前系统 winload 与 PE 内核家族({})不匹配，避免版本不兼容，保留 PE 原 winload",
-                Self::PE_WINLOAD_FAMILY
-            );
-            return;
-        }
-
-        // 4. 覆盖 PE boot.wim 内的 winload（ramdisk 引导用 \Windows\System32\Boot\winload.efi；
-        //    一并覆盖 \Windows\System32\winload.efi 以防万一）。wimlib ADD 对已存在路径即为替换。
-        let mgr = match lr_core::wimlib::WimlibManager::new() {
-            Ok(m) => m,
-            Err(e) => {
-                log::info!("[PE][SB] wimlib 初始化失败: {}，保留 PE 原 winload", e);
-                return;
-            }
-        };
-        let mut ok = 0;
-        for dest in [
-            "\\Windows\\System32\\Boot\\winload.efi",
-            "\\Windows\\System32\\winload.efi",
-        ] {
-            match mgr.add_file_to_image(target_wim, 1, &host_winload, dest) {
-                Ok(()) => {
-                    ok += 1;
-                    log::info!("[PE][SB] 已用当前系统双签名 winload 覆盖 PE: {}", dest);
-                }
-                Err(e) => log::info!("[PE][SB] 覆盖 {} 失败: {}", dest, e),
-            }
-        }
-        if ok > 0 {
-            log::info!("[PE][SB] PE winload 已升级为双签名(2011+2023)，可在已吊销2011/仅2023机器上过 Secure Boot");
-        }
-    }
-
-    /// 内存子串查找（用于在 PE 二进制里探测证书 CN / 版本字符串）。
-    fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
-        if needle.is_empty() || haystack.len() < needle.len() {
-            return false;
-        }
-        haystack.windows(needle.len()).any(|w| w == needle)
-    }
-
-    /// 当前系统是否已开启 UEFI Secure Boot（读注册表 State\UEFISecureBootEnabled）。
-    fn is_secure_boot_enabled() -> bool {
-        let out = crate::utils::cmd::run_command_string(
-            "reg",
-            &[
-                "query",
-                r"HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\State",
-                "/v",
-                "UEFISecureBootEnabled",
-            ],
-        );
-        match out {
-            Ok(s) => s.to_lowercase().contains("0x1"),
-            Err(_) => false,
         }
     }
 
@@ -399,7 +361,7 @@ impl PeManager {
             header[7] = 0x00;
             header
         };
-        std::fs::write(&sdi_path, &sdi_header)?;
+        std::fs::write(&sdi_path, sdi_header)?;
 
         Ok(sdi_path)
     }
@@ -594,8 +556,118 @@ impl PeManager {
     }
 }
 
+fn inspect_pe_candidates(
+    filename: &str,
+    user_managed_directories: &[PathBuf],
+    managed_cache_directories: &[PathBuf],
+    sha256: Option<&str>,
+    md5: Option<&str>,
+) -> std::result::Result<CachedArtifactPresence, CachedArtifactError> {
+    match inspect_cached_artifact(filename, user_managed_directories, None, None)? {
+        present @ CachedArtifactPresence::Present { .. } => Ok(present),
+        CachedArtifactPresence::Missing => {
+            inspect_cached_artifact(filename, managed_cache_directories, sha256, md5)
+        }
+    }
+}
+
+fn verify_pe_candidates(
+    filename: &str,
+    user_managed_directories: &[PathBuf],
+    managed_cache_directories: &[PathBuf],
+    sha256: Option<&str>,
+    md5: Option<&str>,
+) -> std::result::Result<CachedArtifactStatus, CachedArtifactError> {
+    match verify_cached_artifact(filename, user_managed_directories, None, None)? {
+        ready @ CachedArtifactStatus::Ready { .. } => Ok(ready),
+        CachedArtifactStatus::Missing => {
+            verify_cached_artifact(filename, managed_cache_directories, sha256, md5)
+        }
+    }
+}
+
 impl Default for PeManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod cache_policy_tests {
+    use super::*;
+    use lr_core::cached_artifact::CachedArtifactVerification;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const WRONG_MD5: &str = "00000000000000000000000000000000";
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "letrecovery-pe-policy-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create isolated test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn user_managed_pe_can_be_customized_without_matching_server_hash() {
+        let local = TestDirectory::new("local");
+        let managed = TestDirectory::new("managed-empty");
+        let path = local.0.join("LetRecovery_PE.wim");
+        fs::write(&path, b"custom PE contents").unwrap();
+
+        let status = verify_pe_candidates(
+            "LetRecovery_PE.wim",
+            std::slice::from_ref(&local.0),
+            std::slice::from_ref(&managed.0),
+            None,
+            Some(WRONG_MD5),
+        )
+        .unwrap();
+
+        assert_eq!(
+            status,
+            CachedArtifactStatus::Ready {
+                path,
+                verification: CachedArtifactVerification::NotProvided,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_download_cache_still_fails_closed_on_hash_mismatch() {
+        let local = TestDirectory::new("local-empty");
+        let managed = TestDirectory::new("managed");
+        let path = managed.0.join("LetRecovery_PE.wim");
+        fs::write(&path, b"corrupted download").unwrap();
+
+        let error = verify_pe_candidates(
+            "LetRecovery_PE.wim",
+            std::slice::from_ref(&local.0),
+            std::slice::from_ref(&managed.0),
+            None,
+            Some(WRONG_MD5),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CachedArtifactError::HashMismatch { path: failed, .. } if failed == path
+        ));
     }
 }

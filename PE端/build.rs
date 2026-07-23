@@ -1,4 +1,10 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    // Keep the date-based version synchronized with the PE sources that produced the binary.
+    // Without these inputs Cargo may reuse an older BUILD_VERSION while compiling changed code.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+
     // 注：libwim-15.dll 已内置于共享库 lr-core，运行时自动释放到 exe 目录，
     // 这里不再需要从 vendor 复制。
 
@@ -10,6 +16,11 @@ fn main() {
 
     #[cfg(windows)]
     {
+        let non_elevated_tests = std::env::var_os("CARGO_FEATURE_NON_ELEVATED_TESTS").is_some();
+        if non_elevated_tests && std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!("non-elevated-tests must never be enabled for release builds");
+        }
+
         let mut res = winres::WindowsResource::new();
 
         // 设置程序图标
@@ -28,13 +39,13 @@ fn main() {
         // 资源管理器“文件版本”读取的是 FIXEDFILEINFO，而 winres 默认用
         // CARGO_PKG_VERSION（Cargo.toml 的包版本）填充，导致文件版本一直停在旧日期。
         // 这里按编译日期覆盖，确保“文件版本/产品版本”都跟随编译日期。
-        let ver_u64: u64 =
-            ((y as u64 & 0xffff) << 48) | ((m as u64) << 32) | ((d as u64) << 16);
+        let ver_u64: u64 = ((y as u64 & 0xffff) << 48) | ((m as u64) << 32) | ((d as u64) << 16);
         res.set_version_info(winres::VersionInfo::FILEVERSION, ver_u64);
         res.set_version_info(winres::VersionInfo::PRODUCTVERSION, ver_u64);
 
-        // 包含 Common Controls 6.0 和管理员权限
-        res.set_manifest(r#"
+        // 正式程序请求管理员权限；纯测试特性使用 asInvoker，避免测试 EXE
+        // 在无交互 CI/本地终端中因 UAC 清单而无法启动。
+        let manifest = r#"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -66,11 +77,16 @@ fn main() {
         </dependentAssembly>
     </dependency>
 </assembly>
-"#);
+"#;
+        let manifest = if non_elevated_tests {
+            manifest.replace("requireAdministrator", "asInvoker")
+        } else {
+            manifest.to_string()
+        };
+        res.set_manifest(&manifest);
 
-        if let Err(e) = res.compile() {
-            eprintln!("Warning: Failed to compile Windows resources: {}", e);
-        }
+        res.compile()
+            .expect("failed to compile required Windows resources and elevation manifest");
     }
 
     #[cfg(not(windows))]
@@ -79,19 +95,34 @@ fn main() {
 
 /// 取当前 UTC 日期 (年, 月, 日)，无第三方依赖。
 fn build_date() -> (i64, u32, u32) {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let secs = build_timestamp();
     let days = secs.div_euclid(86400);
     civil_from_days(days)
+}
+
+fn build_timestamp() -> i64 {
+    if let Some(value) = std::env::var_os("SOURCE_DATE_EPOCH") {
+        let value = value
+            .to_str()
+            .expect("SOURCE_DATE_EPOCH must contain ASCII decimal digits");
+        let timestamp = value
+            .parse::<i64>()
+            .expect("SOURCE_DATE_EPOCH must be a valid Unix timestamp");
+        assert!(timestamp >= 0, "SOURCE_DATE_EPOCH must not be negative");
+        return timestamp;
+    }
+
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// 天数(自 1970-01-01) -> (年, 月, 日)，Howard Hinnant 算法。
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as i64;
+    let doe = z - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

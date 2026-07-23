@@ -15,7 +15,7 @@ use crate::tr;
 use crate::utils::command::new_command;
 
 /// Cabinet 文件解压器
-/// 
+///
 /// 使用 Windows expand.exe 命令行工具解压 .cab 文件。
 /// 支持单文件解压和批量解压。
 pub struct CabinetExtractor {
@@ -24,7 +24,7 @@ pub struct CabinetExtractor {
 
 impl CabinetExtractor {
     /// 创建 Cabinet 解压器实例
-    /// 
+    ///
     /// 会自动查找系统中的 expand.exe
     pub fn new() -> Result<Self> {
         let expand_path = Self::find_expand_executable()?;
@@ -36,9 +36,7 @@ impl CabinetExtractor {
     fn find_expand_executable() -> Result<PathBuf> {
         // 优先尝试 System32 目录
         if let Ok(windir) = std::env::var("WINDIR") {
-            let system32_expand = PathBuf::from(&windir)
-                .join("System32")
-                .join("expand.exe");
+            let system32_expand = PathBuf::from(&windir).join("System32").join("expand.exe");
             if system32_expand.exists() {
                 return Ok(system32_expand);
             }
@@ -78,8 +76,7 @@ impl CabinetExtractor {
         }
 
         // 确保目标目录存在
-        std::fs::create_dir_all(dest_dir)
-            .context(tr!("创建目标目录失败"))?;
+        std::fs::create_dir_all(dest_dir).context(tr!("创建目标目录失败"))?;
 
         log::info!(
             "[CABINET] 解压: {} -> {}",
@@ -135,7 +132,7 @@ impl CabinetExtractor {
         // "Expanding: file2.sys"
         for line in output.lines() {
             let line = line.trim();
-            
+
             // 跳过空行和非文件行
             if line.is_empty() {
                 continue;
@@ -164,12 +161,12 @@ impl CabinetExtractor {
     /// 扫描目标目录获取所有文件
     fn scan_extracted_files(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        self.scan_dir_recursive(dir, &mut files)?;
+        Self::scan_dir_recursive(dir, &mut files)?;
         Ok(files)
     }
 
     /// 递归扫描目录
-    fn scan_dir_recursive(&self, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    fn scan_dir_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         if !dir.is_dir() {
             return Ok(());
         }
@@ -181,7 +178,7 @@ impl CabinetExtractor {
             if path.is_file() {
                 files.push(path);
             } else if path.is_dir() {
-                self.scan_dir_recursive(&path, files)?;
+                Self::scan_dir_recursive(&path, files)?;
             }
         }
 

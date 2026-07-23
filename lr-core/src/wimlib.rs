@@ -19,8 +19,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use libloading::Library;
 
@@ -156,6 +157,12 @@ type FnWrite = unsafe extern "C" fn(
 type FnOverwrite =
     unsafe extern "C" fn(wim: WIMStruct, write_flags: c_int, num_threads: c_uint) -> c_int;
 type FnSetOutputCompression = unsafe extern "C" fn(wim: WIMStruct, ctype: c_int) -> c_int;
+type FnSetImageProperty = unsafe extern "C" fn(
+    wim: WIMStruct,
+    image: c_int,
+    property_name: *const u16,
+    property_value: *const u16,
+) -> c_int;
 type FnSplit = unsafe extern "C" fn(
     wim: WIMStruct,
     swm_name: *const u16,
@@ -212,7 +219,6 @@ struct WimlibUpdateCommandAdd {
 }
 const WIMLIB_UPDATE_OP_ADD: c_int = 0;
 
-
 /// struct wimlib_wim_info（前若干字段，足够取 image_count / 完整性表标志）
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -255,7 +261,10 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 fn path_to_wide(p: &Path) -> Vec<u16> {
-    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 unsafe fn utf16_ptr_to_string(ptr: *const u16) -> Option<String> {
@@ -272,7 +281,9 @@ unsafe fn utf16_ptr_to_string(ptr: *const u16) -> Option<String> {
     if len == 0 {
         return None;
     }
-    Some(String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len)))
+    Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+        ptr, len,
+    )))
 }
 
 unsafe fn read_u64(base: *const c_void, off: usize) -> u64 {
@@ -350,13 +361,20 @@ struct ProgressCtx {
     tx: Option<Sender<WimProgress>>,
     last: u8,
     status_prefix: &'static str,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
-unsafe extern "C" fn progress_callback(
-    msg: c_int,
-    info: *const c_void,
-    ctx: *mut c_void,
-) -> c_int {
+unsafe extern "C" fn progress_callback(msg: c_int, info: *const c_void, ctx: *mut c_void) -> c_int {
+    if !ctx.is_null() {
+        let state = &*(ctx as *const ProgressCtx);
+        if state
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            return WIMLIB_PROGRESS_STATUS_ABORT;
+        }
+    }
     let result = catch_unwind(AssertUnwindSafe(|| {
         if ctx.is_null() || info.is_null() {
             return;
@@ -393,6 +411,10 @@ unsafe extern "C" fn progress_callback(
     }
 }
 
+struct VerifyProgressCtx {
+    cancel: Option<Arc<AtomicBool>>,
+}
+
 /// iterate_dir_tree 用的空回调（只关心路径是否存在，由返回码判断）
 unsafe extern "C" fn noop_iterate_cb(_dentry: *const c_void, _ctx: *mut c_void) -> c_int {
     0
@@ -402,8 +424,18 @@ unsafe extern "C" fn noop_iterate_cb(_dentry: *const c_void, _ctx: *mut c_void) 
 unsafe extern "C" fn verify_progress_callback(
     msg: c_int,
     info: *const c_void,
-    _ctx: *mut c_void,
+    ctx: *mut c_void,
 ) -> c_int {
+    if !ctx.is_null() {
+        let state = &*(ctx as *const VerifyProgressCtx);
+        if state
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            return WIMLIB_PROGRESS_STATUS_ABORT;
+        }
+    }
     let result = catch_unwind(AssertUnwindSafe(|| {
         if info.is_null() {
             return;
@@ -497,16 +529,26 @@ impl Wimlib {
         let lib = find_and_load_dll()?;
         let global_init = load_sym!(lib, b"wimlib_global_init\0", FnGlobalInit);
         let global_cleanup = load_sym!(lib, b"wimlib_global_cleanup\0", FnGlobalCleanup);
-        let open_wim = load_sym!(lib, b"wimlib_open_wim_with_progress\0", FnOpenWimWithProgress);
+        let open_wim = load_sym!(
+            lib,
+            b"wimlib_open_wim_with_progress\0",
+            FnOpenWimWithProgress
+        );
         let free_wim = load_sym!(lib, b"wimlib_free\0", FnFree);
         let verify_wim = load_sym!(lib, b"wimlib_verify_wim\0", FnVerifyWim);
         let get_error_string = load_sym!(lib, b"wimlib_get_error_string\0", FnGetErrorString);
         let get_wim_info = load_sym!(lib, b"wimlib_get_wim_info\0", FnGetWimInfo);
         let get_image_name = load_sym!(lib, b"wimlib_get_image_name\0", FnGetImageName);
-        let get_image_description =
-            load_sym!(lib, b"wimlib_get_image_description\0", FnGetImageDescription);
-        let reference_resource_files =
-            load_sym!(lib, b"wimlib_reference_resource_files\0", FnReferenceResourceFiles);
+        let get_image_description = load_sym!(
+            lib,
+            b"wimlib_get_image_description\0",
+            FnGetImageDescription
+        );
+        let reference_resource_files = load_sym!(
+            lib,
+            b"wimlib_reference_resource_files\0",
+            FnReferenceResourceFiles
+        );
 
         if !ensure_global_init(global_init) {
             return Err("wimlib 全局初始化失败".to_string());
@@ -532,15 +574,26 @@ impl Wimlib {
             utf16_ptr_to_string(p)
         };
         match msg {
-            Some(m) if !m.is_empty() => format!("{}（{}，错误码 {}）", m, err_description(code), code),
+            Some(m) if !m.is_empty() => {
+                format!("{}（{}，错误码 {}）", m, err_description(code), code)
+            }
             _ => format!("{}（错误码 {}）", err_description(code), code),
         }
     }
 
     pub fn open_wim(&self, path: &str) -> Result<WimHandle<'_>, String> {
+        self.open_wim_cancellable(path, None)
+    }
+
+    pub fn open_wim_cancellable(
+        &self,
+        path: &str,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<WimHandle<'_>, String> {
         VERIFY_GLOBAL_PROGRESS.store(0, Ordering::SeqCst);
         let wpath = to_wide(path);
         let mut wim: WIMStruct = null_mut();
+        let mut progress_ctx = Box::new(VerifyProgressCtx { cancel });
         // 注册校验进度回调（用于后续 verify 的进度上报）
         let rc = unsafe {
             (self.open_wim)(
@@ -548,7 +601,7 @@ impl Wimlib {
                 0,
                 &mut wim,
                 Some(verify_progress_callback),
-                null_mut(),
+                &mut *progress_ctx as *mut VerifyProgressCtx as *mut c_void,
             )
         };
         if rc != WIMLIB_ERR_SUCCESS {
@@ -557,7 +610,11 @@ impl Wimlib {
         if wim.is_null() {
             return Err("打开 WIM 失败：返回空句柄".to_string());
         }
-        Ok(WimHandle { wim, lib: self })
+        Ok(WimHandle {
+            wim,
+            lib: self,
+            _progress_ctx: progress_ctx,
+        })
     }
 
     /// 当前完整性校验进度（0-100）
@@ -573,6 +630,7 @@ impl Wimlib {
 pub struct WimHandle<'a> {
     wim: WIMStruct,
     lib: &'a Wimlib,
+    _progress_ctx: Box<VerifyProgressCtx>,
 }
 
 impl<'a> WimHandle<'a> {
@@ -654,6 +712,7 @@ pub struct WimlibManager {
     create_new_wim: FnCreateNewWim,
     free_wim: FnFree,
     get_error_string: FnGetErrorString,
+    get_wim_info: FnGetWimInfo,
     register_progress: FnRegisterProgress,
     extract_image: FnExtractImage,
     extract_paths: FnExtractPaths,
@@ -661,6 +720,7 @@ pub struct WimlibManager {
     write: FnWrite,
     overwrite: FnOverwrite,
     set_output_compression: FnSetOutputCompression,
+    set_image_property: FnSetImageProperty,
     split: FnSplit,
     reference_resource_files: FnReferenceResourceFiles,
     iterate_dir_tree: FnIterateDirTree,
@@ -673,22 +733,37 @@ impl WimlibManager {
         let lib = find_and_load_dll()?;
         let global_init = load_sym!(lib, b"wimlib_global_init\0", FnGlobalInit);
         let global_cleanup = load_sym!(lib, b"wimlib_global_cleanup\0", FnGlobalCleanup);
-        let open_wim = load_sym!(lib, b"wimlib_open_wim_with_progress\0", FnOpenWimWithProgress);
+        let open_wim = load_sym!(
+            lib,
+            b"wimlib_open_wim_with_progress\0",
+            FnOpenWimWithProgress
+        );
         let create_new_wim = load_sym!(lib, b"wimlib_create_new_wim\0", FnCreateNewWim);
         let free_wim = load_sym!(lib, b"wimlib_free\0", FnFree);
         let get_error_string = load_sym!(lib, b"wimlib_get_error_string\0", FnGetErrorString);
-        let register_progress =
-            load_sym!(lib, b"wimlib_register_progress_function\0", FnRegisterProgress);
+        let get_wim_info = load_sym!(lib, b"wimlib_get_wim_info\0", FnGetWimInfo);
+        let register_progress = load_sym!(
+            lib,
+            b"wimlib_register_progress_function\0",
+            FnRegisterProgress
+        );
         let extract_image = load_sym!(lib, b"wimlib_extract_image\0", FnExtractImage);
         let extract_paths = load_sym!(lib, b"wimlib_extract_paths\0", FnExtractPaths);
         let add_image = load_sym!(lib, b"wimlib_add_image\0", FnAddImage);
         let write = load_sym!(lib, b"wimlib_write\0", FnWrite);
         let overwrite = load_sym!(lib, b"wimlib_overwrite\0", FnOverwrite);
-        let set_output_compression =
-            load_sym!(lib, b"wimlib_set_output_compression_type\0", FnSetOutputCompression);
+        let set_output_compression = load_sym!(
+            lib,
+            b"wimlib_set_output_compression_type\0",
+            FnSetOutputCompression
+        );
+        let set_image_property = load_sym!(lib, b"wimlib_set_image_property\0", FnSetImageProperty);
         let split = load_sym!(lib, b"wimlib_split\0", FnSplit);
-        let reference_resource_files =
-            load_sym!(lib, b"wimlib_reference_resource_files\0", FnReferenceResourceFiles);
+        let reference_resource_files = load_sym!(
+            lib,
+            b"wimlib_reference_resource_files\0",
+            FnReferenceResourceFiles
+        );
         let iterate_dir_tree = load_sym!(lib, b"wimlib_iterate_dir_tree\0", FnIterateDirTree);
         let get_xml_data = load_sym!(lib, b"wimlib_get_xml_data\0", FnGetXmlData);
         let update_image = load_sym!(lib, b"wimlib_update_image\0", FnUpdateImage);
@@ -704,6 +779,7 @@ impl WimlibManager {
             create_new_wim,
             free_wim,
             get_error_string,
+            get_wim_info,
             register_progress,
             extract_image,
             extract_paths,
@@ -711,6 +787,7 @@ impl WimlibManager {
             write,
             overwrite,
             set_output_compression,
+            set_image_property,
             split,
             reference_resource_files,
             iterate_dir_tree,
@@ -722,7 +799,9 @@ impl WimlibManager {
     fn error_message(&self, code: c_int) -> String {
         let msg = unsafe { utf16_ptr_to_string((self.get_error_string)(code)) };
         match msg {
-            Some(m) if !m.is_empty() => format!("{}（{}，错误码 {}）", m, err_description(code), code),
+            Some(m) if !m.is_empty() => {
+                format!("{}（{}，错误码 {}）", m, err_description(code), code)
+            }
             _ => format!("{}（错误码 {}）", err_description(code), code),
         }
     }
@@ -749,6 +828,23 @@ impl WimlibManager {
         index: u32,
         progress_tx: Option<Sender<WimProgress>>,
     ) -> Result<(), String> {
+        self.apply_image_cancellable(image_file, target_dir, index, progress_tx, None)
+    }
+
+    pub fn apply_image_cancellable(
+        &self,
+        image_file: &str,
+        target_dir: &str,
+        index: u32,
+        progress_tx: Option<Sender<WimProgress>>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<(), String> {
+        if cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            return Err("操作已取消".to_owned());
+        }
         let wim = self.open(image_file)?;
         let _prio = HighPriorityGuard::new();
 
@@ -757,6 +853,7 @@ impl WimlibManager {
             tx: progress_tx,
             last: 255,
             status_prefix: "释放镜像中",
+            cancel,
         });
         unsafe {
             (self.register_progress)(
@@ -844,6 +941,7 @@ impl WimlibManager {
             tx: progress_tx,
             last: 255,
             status_prefix: "备份镜像中",
+            cancel: None,
         });
         unsafe {
             (self.register_progress)(
@@ -861,7 +959,11 @@ impl WimlibManager {
                 (self.add_image)(
                     wim,
                     wsource.as_ptr(),
-                    if name.is_empty() { null_mut() } else { wname.as_ptr() },
+                    if name.is_empty() {
+                        null_mut()
+                    } else {
+                        wname.as_ptr()
+                    },
                     null_mut(),
                     WIMLIB_ADD_FLAG_WINCONFIG,
                 )
@@ -869,7 +971,30 @@ impl WimlibManager {
             if rc != WIMLIB_ERR_SUCCESS {
                 return Err(self.error_message(rc));
             }
-            let _ = description; // 描述可后续通过 set_image_property 设置，这里从简
+            if !description.is_empty() {
+                let mut info = WimInfo::default();
+                let rc = unsafe { (self.get_wim_info)(wim, &mut info) };
+                if rc != WIMLIB_ERR_SUCCESS || info.image_count == 0 {
+                    return Err(if rc == WIMLIB_ERR_SUCCESS {
+                        "captured WIM contains no image to describe".to_owned()
+                    } else {
+                        self.error_message(rc)
+                    });
+                }
+                let property_name = to_wide("DESCRIPTION");
+                let property_value = to_wide(description);
+                let rc = unsafe {
+                    (self.set_image_property)(
+                        wim,
+                        info.image_count as c_int,
+                        property_name.as_ptr(),
+                        property_value.as_ptr(),
+                    )
+                };
+                if rc != WIMLIB_ERR_SUCCESS {
+                    return Err(self.error_message(rc));
+                }
+            }
 
             let solid = compression == 3;
             if append {
@@ -886,7 +1011,13 @@ impl WimlibManager {
                     0
                 };
                 let rc = unsafe {
-                    (self.write)(wim, wpath.as_ptr(), WIMLIB_ALL_IMAGES, flags, optimal_threads())
+                    (self.write)(
+                        wim,
+                        wpath.as_ptr(),
+                        WIMLIB_ALL_IMAGES,
+                        flags,
+                        optimal_threads(),
+                    )
                 };
                 if rc != WIMLIB_ERR_SUCCESS {
                     return Err(self.error_message(rc));
@@ -943,7 +1074,12 @@ impl WimlibManager {
     }
 
     /// 把已有 WIM 分割为 SWM 分卷
-    pub fn split_wim(&self, wim_path: &str, swm_path: &str, part_size_mb: u64) -> Result<(), String> {
+    pub fn split_wim(
+        &self,
+        wim_path: &str,
+        swm_path: &str,
+        part_size_mb: u64,
+    ) -> Result<(), String> {
         let wim = self.open(wim_path)?;
         let _prio = HighPriorityGuard::new();
         let wswm = to_wide(swm_path);
@@ -982,11 +1118,29 @@ impl WimlibManager {
 
     /// 判断镜像某卷是否包含指定路径（替代挂载查目录结构）。
     /// 用 iterate_dir_tree 的返回码判断：成功=存在，PATH_DOES_NOT_EXIST=不存在。
-    pub fn image_contains_path(&self, image_file: &str, index: u32, path_in_image: &str) -> Result<bool, String> {
+    pub fn image_contains_path(
+        &self,
+        image_file: &str,
+        index: u32,
+        path_in_image: &str,
+    ) -> Result<bool, String> {
         let wim = self.open(image_file)?;
+        if image_file.to_ascii_lowercase().ends_with(".swm") {
+            if let Err(error) = self.reference_swm(wim, image_file) {
+                unsafe { (self.free_wim)(wim) };
+                return Err(error);
+            }
+        }
         let wpath = to_wide(path_in_image);
         let rc = unsafe {
-            (self.iterate_dir_tree)(wim, index as c_int, wpath.as_ptr(), 0, noop_iterate_cb, null_mut())
+            (self.iterate_dir_tree)(
+                wim,
+                index as c_int,
+                wpath.as_ptr(),
+                0,
+                noop_iterate_cb,
+                null_mut(),
+            )
         };
         unsafe { (self.free_wim)(wim) };
         if rc == WIMLIB_ERR_SUCCESS {
@@ -1012,11 +1166,24 @@ impl WimlibManager {
         paths: &[&str],
     ) -> Result<bool, String> {
         let wim = self.open(image_file)?;
+        if image_file.to_ascii_lowercase().ends_with(".swm") {
+            if let Err(error) = self.reference_swm(wim, image_file) {
+                unsafe { (self.free_wim)(wim) };
+                return Err(error);
+            }
+        }
         let mut found = false;
         for p in paths {
             let wpath = to_wide(p);
             let rc = unsafe {
-                (self.iterate_dir_tree)(wim, index as c_int, wpath.as_ptr(), 0, noop_iterate_cb, null_mut())
+                (self.iterate_dir_tree)(
+                    wim,
+                    index as c_int,
+                    wpath.as_ptr(),
+                    0,
+                    noop_iterate_cb,
+                    null_mut(),
+                )
             };
             if rc == WIMLIB_ERR_SUCCESS {
                 found = true;
@@ -1041,6 +1208,12 @@ impl WimlibManager {
         paths: &[&str],
     ) -> Result<(), String> {
         let wim = self.open(image_file)?;
+        if image_file.to_ascii_lowercase().ends_with(".swm") {
+            if let Err(error) = self.reference_swm(wim, image_file) {
+                unsafe { (self.free_wim)(wim) };
+                return Err(error);
+            }
+        }
         let wtarget = to_wide(target_dir);
         let wpaths: Vec<Vec<u16>> = paths.iter().map(|p| to_wide(p)).collect();
         let ptrs: Vec<*const u16> = wpaths.iter().map(|v| v.as_ptr()).collect();
@@ -1081,4 +1254,44 @@ fn decode_utf16le(data: &[u8]) -> String {
         units.pop();
     }
     String::from_utf16_lossy(&units)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn apply_progress_callback_aborts_when_cancelled_even_without_progress_info() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut context = ProgressCtx {
+            tx: None,
+            last: 255,
+            status_prefix: "test",
+            cancel: Some(cancel),
+        };
+        let status = unsafe {
+            progress_callback(
+                progress_msg::EXTRACT_STREAMS,
+                std::ptr::null(),
+                &mut context as *mut ProgressCtx as *mut c_void,
+            )
+        };
+        assert_eq!(status, WIMLIB_PROGRESS_STATUS_ABORT);
+    }
+
+    #[test]
+    fn verify_progress_callback_aborts_when_cancelled_even_without_progress_info() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut context = VerifyProgressCtx {
+            cancel: Some(cancel),
+        };
+        let status = unsafe {
+            verify_progress_callback(
+                progress_msg::VERIFY_STREAMS,
+                std::ptr::null(),
+                &mut context as *mut VerifyProgressCtx as *mut c_void,
+            )
+        };
+        assert_eq!(status, WIMLIB_PROGRESS_STATUS_ABORT);
+    }
 }

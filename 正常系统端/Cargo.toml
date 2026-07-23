@@ -2,15 +2,21 @@
 name = "LetRecovery"
 version = "2026.2.6"
 edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 authors = ["NORMAL-EX"]
 description = "Windows系统一键重装工具"
 
-[dependencies]
-# GUI
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
-egui = "0.31"
-egui_extras = { version = "0.31", features = ["image"] }
+[features]
+# Explicit opt-in for distributable test builds. Production builds omit this feature, which
+# keeps `build_info::DEV` false and removes all test-build labels from the UI.
+dev-build = []
+# Test harnesses must not trigger a UAC prompt. build.rs rejects this feature
+# for release builds so production binaries always require elevation.
+non-elevated-tests = []
 
+[dependencies]
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
 
@@ -33,6 +39,7 @@ roxmltree = "0.20"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Nvme",
     "Win32_Storage_Vhd",
     "Win32_System_SystemInformation",
     "Win32_System_Registry",
@@ -43,7 +50,14 @@ windows = { version = "0.58", features = [
     "Win32_System_Ioctl",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_Multimedia",
     # WMI COM 支持 (替代 wmic 命令行)
     "Win32_System_Com",
     "Win32_System_Ole",
@@ -93,15 +107,10 @@ dirs = "5"
 walkdir = "2"
 rfd = "0.15"
 single-instance = "0.3"
-image = "0.25"
-
-# SVG渲染
-resvg = { version = "0.44", default-features = false }
-
-# 显式添加 ttf-parser 以解决 rlib 格式问题
-ttf-parser = "0.25"
+clipboard-win = "5.4"
 
 [build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 winres = "0.1"
 
 [[bin]]

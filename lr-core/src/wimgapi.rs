@@ -15,7 +15,9 @@ use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use libloading::Library;
 
@@ -37,17 +39,26 @@ const WIM_OPEN_ALWAYS: u32 = 4;
 // 压缩类型（与 wimlib 取值一致：NONE=0 / XPRESS=1 / LZX=2 / LZMS=3）
 // 由调用方以 u32 传入，直接作为 dwCompressionType。
 
-// 消息常量：WIM_MSG = WM_APP = 0x8000
-const WIM_MSG: u32 = 0x8000;
+// 消息常量严格对照 wimgapi.h：WIM_MSG = WM_APP + 0x1476。
+const WIM_MSG: u32 = 0x8000 + 0x1476;
 /// 进度消息：wParam = 完成百分比(0-100)，lParam = 预计剩余毫秒
 const WIM_MSG_PROGRESS: u32 = WIM_MSG + 2;
+/// 文件/目录处理消息；微软文档要求仅在此消息中返回 WIM_MSG_ABORT_IMAGE。
+const WIM_MSG_PROCESS: u32 = WIM_MSG + 3;
 /// 回调返回 ERROR_SUCCESS(0) 表示继续
 const WIM_MSG_SUCCESS: u32 = 0;
+/// 取消整个 apply/capture 操作。
+const WIM_MSG_ABORT_IMAGE: u32 = 0xFFFF_FFFF;
 /// WIMRegisterMessageCallback 失败返回值
 const INVALID_CALLBACK_VALUE: u32 = 0xFFFF_FFFF;
 
+// Keep the SDK spellings in this FFI adapter so signatures can be audited
+// directly against wimgapi.h.
+#[allow(clippy::upper_case_acronyms)]
 type HANDLE = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type DWORD = u32;
+#[allow(clippy::upper_case_acronyms)]
 type BOOL = i32;
 
 // 回调：DWORD WINAPI (DWORD msg, WPARAM, LPARAM, PVOID)
@@ -72,13 +83,32 @@ type FnWIMUnregisterMessageCallback =
     unsafe extern "system" fn(HANDLE, Option<WimMsgCallback>) -> DWORD;
 
 fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// 取最近一次 Win32 错误并拼成中文描述。
 fn last_err(prefix: &str) -> String {
     let e = std::io::Error::last_os_error();
     format!("{}（{}）", prefix, e)
+}
+
+fn merge_close_result(
+    operation: Result<(), String>,
+    close_succeeded: bool,
+    handle_name: &str,
+) -> Result<(), String> {
+    if close_succeeded {
+        operation
+    } else {
+        let close_error = last_err(&format!("WIMCloseHandle failed for {handle_name}"));
+        match operation {
+            Ok(()) => Err(close_error),
+            Err(operation_error) => Err(format!("{operation_error}; additionally, {close_error}")),
+        }
+    }
 }
 
 macro_rules! load_sym {
@@ -99,6 +129,7 @@ struct ProgressCtx {
     tx: Option<Sender<WimProgress>>,
     last: u8,
     status_prefix: &'static str,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 unsafe extern "system" fn message_callback(
@@ -107,9 +138,20 @@ unsafe extern "system" fn message_callback(
     _lparam: isize,
     ctx: *mut c_void,
 ) -> DWORD {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        if msg == WIM_MSG_PROGRESS && !ctx.is_null() {
-            let state = &mut *(ctx as *mut ProgressCtx);
+    if ctx.is_null() {
+        return WIM_MSG_SUCCESS;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let state = &mut *(ctx as *mut ProgressCtx);
+        if msg == WIM_MSG_PROCESS
+            && state
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            return WIM_MSG_ABORT_IMAGE;
+        }
+        if msg == WIM_MSG_PROGRESS {
             let percent = (wparam as u32).min(100) as u8;
             if percent != state.last {
                 state.last = percent;
@@ -121,8 +163,9 @@ unsafe extern "system" fn message_callback(
                 }
             }
         }
-    }));
-    WIM_MSG_SUCCESS
+        WIM_MSG_SUCCESS
+    }))
+    .unwrap_or(WIM_MSG_ABORT_IMAGE)
 }
 
 // ============================================================================
@@ -158,8 +201,11 @@ impl WimgapiManager {
         let get_image_count = load_sym!(lib, b"WIMGetImageCount\0", FnWIMGetImageCount);
         let set_image_information =
             load_sym!(lib, b"WIMSetImageInformation\0", FnWIMSetImageInformation);
-        let register_cb =
-            load_sym!(lib, b"WIMRegisterMessageCallback\0", FnWIMRegisterMessageCallback);
+        let register_cb = load_sym!(
+            lib,
+            b"WIMRegisterMessageCallback\0",
+            FnWIMRegisterMessageCallback
+        );
         let unregister_cb = load_sym!(
             lib,
             b"WIMUnregisterMessageCallback\0",
@@ -197,6 +243,24 @@ impl WimgapiManager {
         index: u32,
         progress_tx: Option<Sender<WimProgress>>,
     ) -> Result<(), String> {
+        self.apply_image_cancellable(image_file, target_dir, index, progress_tx, None)
+    }
+
+    /// 释放/应用镜像，并按微软 WIMGAPI 约定在 WIM_MSG_PROCESS 回调中协作取消。
+    pub fn apply_image_cancellable(
+        &self,
+        image_file: &str,
+        target_dir: &str,
+        index: u32,
+        progress_tx: Option<Sender<WimProgress>>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<(), String> {
+        if cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            return Err("WIM operation cancelled".to_owned());
+        }
         let wpath = to_wide(image_file);
         let mut disp: DWORD = 0;
         let h_wim = unsafe {
@@ -213,13 +277,14 @@ impl WimgapiManager {
             return Err(last_err("WIMCreateFile（读取）失败"));
         }
 
-        let result = (|| {
+        let result = {
             self.set_temp_to_env(h_wim);
 
             let mut ctx = Box::new(ProgressCtx {
                 tx: progress_tx,
                 last: 255,
                 status_prefix: "释放镜像中",
+                cancel: cancel.clone(),
             });
             let cb_ok = unsafe {
                 (self.register_cb)(
@@ -229,19 +294,30 @@ impl WimgapiManager {
                 )
             } != INVALID_CALLBACK_VALUE;
 
-            let h_img = unsafe { (self.load_image)(h_wim, index) };
-            let res = if h_img.is_null() {
+            let h_img = if cb_ok {
+                unsafe { (self.load_image)(h_wim, index) }
+            } else {
+                std::ptr::null_mut()
+            };
+            let res = if !cb_ok {
+                Err(last_err("WIMRegisterMessageCallback failed"))
+            } else if h_img.is_null() {
                 Err(last_err("WIMLoadImage 失败"))
             } else {
                 let wtarget = to_wide(target_dir);
                 let ok = unsafe { (self.apply_image_fn)(h_img, wtarget.as_ptr(), 0) } != 0;
-                let r = if ok {
+                let r = if cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+                {
+                    Err("WIM operation cancelled".to_owned())
+                } else if ok {
                     Ok(())
                 } else {
                     Err(last_err("WIMApplyImage 失败"))
                 };
-                unsafe { (self.close_handle)(h_img) };
-                r
+                let close_succeeded = unsafe { (self.close_handle)(h_img) } != 0;
+                merge_close_result(r, close_succeeded, "loaded image")
             };
 
             if cb_ok {
@@ -249,10 +325,10 @@ impl WimgapiManager {
             }
             drop(ctx);
             res
-        })();
+        };
 
-        unsafe { (self.close_handle)(h_wim) };
-        result
+        let close_succeeded = unsafe { (self.close_handle)(h_wim) } != 0;
+        merge_close_result(result, close_succeeded, "WIM file")
     }
 
     /// 捕获/备份目录到 WIM/ESD（compression：与 wimlib 取值一致；文件已存在则追加）。
@@ -288,13 +364,14 @@ impl WimgapiManager {
             return Err(last_err("WIMCreateFile（写入）失败"));
         }
 
-        let result = (|| {
+        let result = {
             self.set_temp_to_env(h_wim);
 
             let mut ctx = Box::new(ProgressCtx {
                 tx: progress_tx,
                 last: 255,
                 status_prefix: "备份镜像中",
+                cancel: None,
             });
             let cb_ok = unsafe {
                 (self.register_cb)(
@@ -305,18 +382,23 @@ impl WimgapiManager {
             } != INVALID_CALLBACK_VALUE;
 
             let wsource = to_wide(source_dir);
-            let h_img = unsafe { (self.capture_image_fn)(h_wim, wsource.as_ptr(), 0) };
-            let res = if h_img.is_null() {
+            let h_img = if cb_ok {
+                unsafe { (self.capture_image_fn)(h_wim, wsource.as_ptr(), 0) }
+            } else {
+                std::ptr::null_mut()
+            };
+            let res = if !cb_ok {
+                Err(last_err("WIMRegisterMessageCallback failed"))
+            } else if h_img.is_null() {
                 Err(last_err("WIMCaptureImage 失败"))
             } else {
-                // 设置镜像名称/描述（best-effort，失败不影响备份本身）
-                if !name.is_empty() || !description.is_empty() {
-                    if let Err(e) = self.set_image_info(h_img, name, description) {
-                        log::warn!("wimgapi 设置镜像信息失败（忽略）：{}", e);
-                    }
-                }
-                unsafe { (self.close_handle)(h_img) };
-                Ok(())
+                let metadata_result = if !name.is_empty() || !description.is_empty() {
+                    self.set_image_info(h_img, name, description)
+                } else {
+                    Ok(())
+                };
+                let close_succeeded = unsafe { (self.close_handle)(h_img) } != 0;
+                merge_close_result(metadata_result, close_succeeded, "captured image")
             };
 
             if cb_ok {
@@ -324,16 +406,18 @@ impl WimgapiManager {
             }
             drop(ctx);
             res
-        })();
+        };
 
-        unsafe { (self.close_handle)(h_wim) };
-        result
+        let close_succeeded = unsafe { (self.close_handle)(h_wim) } != 0;
+        merge_close_result(result, close_succeeded, "WIM file")
     }
 
     /// 通过 WIMSetImageInformation 写入镜像 NAME/DESCRIPTION（UTF-16 + BOM 的 XML）。
     fn set_image_info(&self, h_img: HANDLE, name: &str, description: &str) -> Result<(), String> {
         fn esc(s: &str) -> String {
-            s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
         }
         let xml = format!(
             "<IMAGE><NAME>{}</NAME><DESCRIPTION>{}</DESCRIPTION></IMAGE>",
@@ -351,5 +435,43 @@ impl WimgapiManager {
         } else {
             Err(last_err("WIMSetImageInformation 失败"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_ids_match_the_windows_sdk_contract() {
+        assert_eq!(WIM_MSG_PROGRESS, 0x9478);
+        assert_eq!(WIM_MSG_PROCESS, 0x9479);
+        assert_eq!(WIM_MSG_ABORT_IMAGE, u32::MAX);
+    }
+
+    #[test]
+    fn cancellation_aborts_only_from_the_process_callback() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut context = ProgressCtx {
+            tx: None,
+            last: 255,
+            status_prefix: "test",
+            cancel: Some(Arc::clone(&cancel)),
+        };
+        let context_ptr = (&mut context as *mut ProgressCtx).cast::<c_void>();
+
+        assert_eq!(
+            unsafe { message_callback(WIM_MSG_PROCESS, 0, 0, context_ptr) },
+            WIM_MSG_SUCCESS
+        );
+        cancel.store(true, Ordering::SeqCst);
+        assert_eq!(
+            unsafe { message_callback(WIM_MSG_PROGRESS, 1, 0, context_ptr) },
+            WIM_MSG_SUCCESS
+        );
+        assert_eq!(
+            unsafe { message_callback(WIM_MSG_PROCESS, 0, 0, context_ptr) },
+            WIM_MSG_ABORT_IMAGE
+        );
     }
 }

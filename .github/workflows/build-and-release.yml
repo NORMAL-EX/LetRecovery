@@ -27,9 +27,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch || github.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
 
-      - name: Setup Rust (stable)
+      - name: Pin reproducible build timestamp
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Setup Rust 1.88
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -38,26 +47,33 @@ jobs:
             正常系统端
             PE端
 
+      - name: Verify Rust workspace before release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo check --workspace --all-targets --locked
+          # Rust 1.88 reports this style-only lint differently from newer supported toolchains.
+          # Keep every behavioral warning blocking while avoiding a version-dependent rewrite.
+          cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings -A clippy::uninlined_format_args
+          cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
+          cargo test -p lr-core --locked
+          cargo test -p letrecovery-pe --locked --features non-elevated-tests
+          cargo test -p LetRecovery --locked --features non-elevated-tests
+
       - name: Build system-side exe (LetRecovery.exe)
         shell: bash
         working-directory: 正常系统端
         run: |
           set -euo pipefail
-          # 有 Cargo.lock 才用 --locked（main 各 crate 自带锁；workspace 分支可能无锁需现生成）
-          LOCKED=""
-          if [ -f Cargo.lock ] || [ -f ../Cargo.lock ]; then LOCKED="--locked"; fi
-          echo "cargo build --release ${LOCKED:-(no --locked)}"
-          cargo build --release $LOCKED
+          cargo build --release --locked
 
       - name: Build PE-side exe (LetRecoveryPE.exe)
         shell: bash
         working-directory: PE端
         run: |
           set -euo pipefail
-          LOCKED=""
-          if [ -f Cargo.lock ] || [ -f ../Cargo.lock ]; then LOCKED="--locked"; fi
-          echo "cargo build --release ${LOCKED:-(no --locked)}"
-          cargo build --release $LOCKED
+          cargo build --release --locked
 
       - name: Download base package (template)
         shell: bash
@@ -96,6 +112,45 @@ jobs:
           \) -print -delete || true
           echo "运行时垃圾清理完成。"
 
+      - name: Validate bundled PCA2023 offline assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $assetDir = "pkg\bin\pca2023"
+          $lockFile = "docs\PCA2023_RESOURCES.lock.json"
+          $required = @(
+            "pca2023-legacy-amd64.wim",
+            "pca2023-windows10-x86.wim",
+            "pca2023-modern-amd64.wim"
+          )
+          if (-not (Test-Path -LiteralPath $lockFile -PathType Leaf)) {
+            throw "缺少 PCA2023 资源锁定清单: $lockFile"
+          }
+          $manifest = Get-Content -LiteralPath $lockFile -Raw -Encoding UTF8 | ConvertFrom-Json
+          $lockedNames = @($manifest.packages | ForEach-Object { [string]$_.file })
+          if (@(Compare-Object $required $lockedNames).Count -ne 0) {
+            throw "PCA2023 资源锁定清单与固定资源集合不一致"
+          }
+          foreach ($package in $manifest.packages) {
+            $name = [string]$package.file
+            if ([IO.Path]::GetFileName($name) -ne $name) {
+              throw "PCA2023 资源锁定清单包含非法文件名: $name"
+            }
+            $path = Join-Path $assetDir $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "底包缺少 PCA2023 离线资源: $path"
+            }
+            $item = Get-Item -LiteralPath $path
+            if ($item.Length -ne [int64]$package.size) {
+              throw "PCA2023 资源大小不匹配: $name ($($item.Length) != $($package.size))"
+            }
+            $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne [string]$package.sha256) {
+              throw "PCA2023 资源 SHA-256 不匹配: $name"
+            }
+            Write-Host "Validated PCA2023 resource: $name"
+          }
+
       - name: Relocate system-side lang/diskpart into bin
         shell: bash
         run: |
@@ -110,6 +165,79 @@ jobs:
               echo "relocated pkg/$d -> pkg/bin/$d"
             fi
           done
+
+      - name: Validate and synchronize release language catalogs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $codes = @("en-US", "ja-JP", "ko-KR", "fr-FR", "de-DE")
+          $catalogs = @{}
+          foreach ($code in $codes) {
+            $path = Join-Path "assets\release\lang" "$code.json"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "缺少发布语言文件: $path"
+            }
+            $catalog = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+            if (-not $catalog.language -or -not $catalog.author -or -not $catalog.data) {
+              throw "语言文件结构无效: $path"
+            }
+            $catalogs[$code] = $catalog
+          }
+          $referenceKeys = @($catalogs["en-US"].data.Keys | Sort-Object)
+          foreach ($code in $codes) {
+            $keys = @($catalogs[$code].data.Keys | Sort-Object)
+            if ($keys.Count -ne $referenceKeys.Count -or
+                (Compare-Object -ReferenceObject $referenceKeys -DifferenceObject $keys)) {
+              throw "语言文件键集合与 en-US 不一致: $code"
+            }
+            foreach ($key in $referenceKeys) {
+              $translated = [string]$catalogs[$code].data[$key]
+              if ([string]::IsNullOrWhiteSpace($translated)) {
+                throw "语言文件包含空译文: $code / $key"
+              }
+              $referencePlaceholders = @(
+                [regex]::Matches([string]$catalogs["en-US"].data[$key], '\{[^{}]*\}') |
+                  ForEach-Object { $_.Value }
+              )
+              $translatedPlaceholders = @(
+                [regex]::Matches($translated, '\{[^{}]*\}') |
+                  ForEach-Object { $_.Value }
+              )
+              if (Compare-Object -ReferenceObject $referencePlaceholders `
+                  -DifferenceObject $translatedPlaceholders) {
+                throw "语言文件格式占位符与 en-US 不一致: $code / $key"
+              }
+            }
+          }
+          $destination = "pkg\bin\lang"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          foreach ($code in $codes) {
+            Copy-Item -LiteralPath (Join-Path "assets\release\lang" "$code.json") `
+              -Destination (Join-Path $destination "$code.json") -Force
+          }
+          Write-Host "Validated and synchronized $($codes.Count) release language catalogs."
+
+      - name: Synchronize normal-side easter egg audio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = "assets\release\bin\dprk_easter_egg.mp3"
+          $destination = "pkg\bin\dprk_easter_egg.mp3"
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "缺少正常系统端彩蛋音频: $source"
+          }
+          $sourceInfo = Get-Item -LiteralPath $source
+          if ($sourceInfo.Length -lt 65536) {
+            throw "正常系统端彩蛋音频大小异常: $($sourceInfo.Length) bytes"
+          }
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+          $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+          $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+          if ($sourceHash -ne $destinationHash) {
+            throw "正常系统端彩蛋音频复制后 SHA-256 不一致"
+          }
+          Write-Host "Synchronized normal-side easter egg audio: $destination ($sourceHash)"
 
       - name: Replace system-side exe
         shell: bash
@@ -141,6 +269,23 @@ jobs:
           Write-Host "Using PE-side exe: $peExe"
           Copy-Item -Force $peExe $dst
           Write-Host "Replaced: $dst"
+          # The PE client is native Win32-only. Remove the legacy Mesa shim from the base WIM so
+          # release artifacts do not retain an unused OpenGL runtime after replacing the old EXE.
+          $legacyOpenGl = Join-Path $mount "Program Files\LetRecoveryPE\opengl32.dll"
+          if (Test-Path -LiteralPath $legacyOpenGl) {
+            Remove-Item -LiteralPath $legacyOpenGl -Force
+            Write-Host "Removed legacy OpenGL runtime: $legacyOpenGl"
+          }
+          $pcaSource = "pkg\bin\pca2023"
+          $pcaDestination = Join-Path $mount "Program Files\LetRecoveryPE\bin\pca2023"
+          New-Item -ItemType Directory -Force -Path $pcaDestination | Out-Null
+          Copy-Item -Path (Join-Path $pcaSource "*") -Destination $pcaDestination -Recurse -Force
+          Write-Host "Injected PCA2023 offline assets: $pcaDestination"
+          $languageSource = "assets\release\lang"
+          $languageDestination = Join-Path $mount "Program Files\LetRecoveryPE\lang"
+          New-Item -ItemType Directory -Force -Path $languageDestination | Out-Null
+          Copy-Item -Path (Join-Path $languageSource "*.json") -Destination $languageDestination -Force
+          Write-Host "Injected release language catalogs: $languageDestination"
           dism /Unmount-Image /MountDir:"$mount" /Commit
           if ($LASTEXITCODE -ne 0) { throw "DISM unmount/commit failed" }
 
@@ -337,7 +482,10 @@ jobs:
             throw "WIM not found: $wimPath"
           }
 
-          $md5 = (Get-FileHash -LiteralPath $wimPath -Algorithm MD5).Hash.ToUpperInvariant()
+          $wim = Get-Item -LiteralPath $wimPath
+          $md5 = (Get-FileHash -LiteralPath $wim.FullName -Algorithm MD5).Hash.ToUpperInvariant()
+          $wimSha256 = (Get-FileHash -LiteralPath $wim.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+          $wimSizeBytes = $wim.Length.ToString([System.Globalization.CultureInfo]::InvariantCulture)
           $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
           $rand = [guid]::NewGuid().ToString("N")
           $version = "v0.0.0"
@@ -348,7 +496,7 @@ jobs:
             return -join ($bytes | ForEach-Object { $_.ToString("x2") })
           }
 
-          $payloadText = $env:LETRECOVERY_PE_URL + "`n" + $env:LETRECOVERY_PE_NAME + "`n" + $env:LETRECOVERY_PE_FILENAME + "`n" + $md5
+          $payloadText = $env:LETRECOVERY_PE_URL + "`n" + $env:LETRECOVERY_PE_NAME + "`n" + $env:LETRECOVERY_PE_FILENAME + "`n" + $md5 + "`n" + $wimSha256 + "`n" + $wimSizeBytes
           $sha256 = [System.Security.Cryptography.SHA256]::Create()
           try {
             $payloadHash = Convert-BytesToHexLower ($sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($payloadText)))
@@ -378,6 +526,8 @@ jobs:
             lr_pe_name = $env:LETRECOVERY_PE_NAME
             lr_pe_filename = $env:LETRECOVERY_PE_FILENAME
             lr_pe_md5 = $md5
+            lr_pe_sha256 = $wimSha256
+            lr_pe_size_bytes = $wimSizeBytes
           }
 
           $json = $body | ConvertTo-Json -Compress
@@ -404,7 +554,7 @@ jobs:
               body = f.read()
 
           request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-          context = ssl._create_unverified_context()
+          context = ssl.create_default_context()
           try:
               with urllib.request.urlopen(request, context=context, timeout=60) as response:
                   sys.stdout.buffer.write(response.read())
@@ -426,23 +576,29 @@ jobs:
             throw "LetRecovery update API rejected the request"
           }
 
-      - name: Force safe defaults in config.json (advanced options OFF)
+      - name: Force safe defaults in config.json (easy mode and advanced options OFF)
         shell: bash
         run: |
           set -euo pipefail
-          # 正式 release 发给终端用户：强制「高级选项」总开关关闭。
-          # 高级选项面向高级用户，需用户自行在软件设置里开启；正式版默认不该开。
-          test -f pkg/config.json || { echo "pkg/config.json 不存在，跳过"; exit 0; }
+          # 正式 release 的新装配置必须固定进入完整安装页；小白模式和高级选项都由
+          # 用户在软件内主动开启，不能继承外部底包仓库中的维护机偏好。
+          test -f pkg/config.json || { echo "pkg/config.json 不存在"; exit 1; }
           python - <<'PY'
           import json, io
           p = "pkg/config.json"
           d = json.load(open(p, encoding="utf-8"))
-          before = d.get("enable_advanced_options")
+          before_easy = d.get("easy_mode_enabled")
+          before_advanced = d.get("enable_advanced_options")
+          d["easy_mode_enabled"] = False
           d["enable_advanced_options"] = False
           io.open(p, "w", encoding="utf-8", newline="\n").write(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
-          print("enable_advanced_options:", before, "-> False")
+          check = json.load(open(p, encoding="utf-8"))
+          if check.get("easy_mode_enabled") is not False or check.get("enable_advanced_options") is not False:
+              raise SystemExit("failed to normalize release defaults")
+          print("easy_mode_enabled:", before_easy, "-> False")
+          print("enable_advanced_options:", before_advanced, "-> False")
           PY
-          echo "已强制 enable_advanced_options=False"
+          echo "已强制 easy_mode_enabled=False, enable_advanced_options=False"
 
       - name: Prepare package README
         shell: bash
@@ -465,16 +621,127 @@ jobs:
           ( cd pkg && 7z a -t7z -mx=9 -m0=lzma2 -ms=on ../LetRecovery.7z ./* >/dev/null )
           ls -la LetRecovery.7z
 
+      - name: Install Inno Setup 6.7.1
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.7.1 --yes --no-progress
+          $exitCode = $LASTEXITCODE
+          if (@(0, 1605, 1614, 1641, 3010) -notcontains $exitCode) {
+            throw "Chocolatey failed to install Inno Setup 6.7.1 (exit code $exitCode)"
+          }
+
+          $compiler = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1)
+          ) | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_) -and
+            (Test-Path -LiteralPath $_ -PathType Leaf)
+          } | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($compiler)) {
+            throw "Inno Setup 6.7.1 was installed but ISCC.exe was not found"
+          }
+
+          $compiler = (Resolve-Path -LiteralPath $compiler).Path
+          "INNO_COMPILER=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Inno Setup compiler: $compiler"
+
+      - name: Build offline installer EXE
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:GITHUB_WORKSPACE "installer\output"
+          if (Test-Path -LiteralPath $output) {
+            Remove-Item -LiteralPath $output -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $output | Out-Null
+
+          & .\installer\build-installer.ps1 `
+            -SourceDirectory (Resolve-Path .\pkg).Path `
+            -OutputDirectory $output `
+            -InnoCompiler $env:INNO_COMPILER
+
+          $installer = Join-Path $output "LetRecovery-Setup-x64.exe"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw "Installer build did not produce LetRecovery-Setup-x64.exe"
+          }
+
+      - name: Verify the two Release assets
+        shell: pwsh
+        run: |
+          $archive = (Resolve-Path .\LetRecovery.7z).Path
+          $installerDirectory = (Resolve-Path .\installer\output).Path
+          $installer = Join-Path $installerDirectory "LetRecovery-Setup-x64.exe"
+
+          & 7z t $archive
+          if ($LASTEXITCODE -ne 0) {
+            throw "LetRecovery.7z integrity test failed with exit code $LASTEXITCODE"
+          }
+
+          $installerFiles = @(Get-ChildItem -LiteralPath $installerDirectory -File)
+          if ($installerFiles.Count -ne 1 -or $installerFiles[0].Name -ne "LetRecovery-Setup-x64.exe") {
+            $names = $installerFiles.Name -join ", "
+            throw "Installer output must contain exactly LetRecovery-Setup-x64.exe; found: $names"
+          }
+
+          $assets = @(
+            Get-Item -LiteralPath $archive
+            Get-Item -LiteralPath $installer
+          )
+          foreach ($asset in $assets) {
+            if ($asset.Length -le 0) {
+              throw "Release asset is empty: $($asset.FullName)"
+            }
+            $hash = (Get-FileHash -LiteralPath $asset.FullName -Algorithm SHA256).Hash
+            Write-Host "$($asset.Name): $($asset.Length) bytes, SHA-256 $hash"
+            "- ``$($asset.Name)`` — $($asset.Length) bytes — SHA-256 ``$hash``" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+
       - name: Determine tag
         id: tag
         shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
         run: |
-          $tag = "${{ inputs.tag }}"
+          $ErrorActionPreference = "Stop"
+          $tag = $env:REQUESTED_TAG.Trim()
           if ([string]::IsNullOrWhiteSpace($tag)) {
             $tag = (Get-Date).ToUniversalTime().ToString('yyyy.M.d')
           }
+          & git check-ref-format "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Invalid Release tag: $tag"
+          }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Tag: $tag"
+
+      - name: Stage fixed website version for validation
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\.github\scripts\update-website-version.ps1 -ReleaseTag $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to stage the website Release version"
+          }
+
+      - name: Setup Node for website validation
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: 官网/package-lock.json
+
+      - name: Validate website with the release version
+        shell: bash
+        working-directory: 官网
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run lint
+          npm run type-check
+          npm run build
 
       - name: Create Release
         shell: bash
@@ -496,10 +763,67 @@ jobs:
             printf '%s\n' "Automated build from branch ${BR} (commit ${SHA})."
           } > release_notes.md
           gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag || true
-          gh release create "$TAG" LetRecovery.7z \
+          gh release create "$TAG" \
+            LetRecovery.7z \
+            installer/output/LetRecovery-Setup-x64.exe \
             --repo "${{ github.repository }}" \
             --target "$SHA" \
             --title "$TAG" \
             --notes-file release_notes.md \
             $PRE
-          echo "Released $TAG (prerelease: ${PRE:-no})"
+          echo "Released $TAG with LetRecovery.7z and LetRecovery-Setup-x64.exe (prerelease: ${PRE:-no})"
+
+      - name: Commit released website version
+        shell: pwsh
+        env:
+          RELEASE_BRANCH: ${{ inputs.branch || github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $branch = $env:RELEASE_BRANCH.Trim()
+          if ($branch.StartsWith("refs/heads/", [StringComparison]::Ordinal)) {
+            $branch = $branch.Substring("refs/heads/".Length)
+          }
+          if ([string]::IsNullOrWhiteSpace($branch)) {
+            throw "Release branch is empty"
+          }
+          & git check-ref-format "refs/heads/$branch"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Invalid Release branch: $branch"
+          }
+
+          $versionFile = "官网/version.json"
+          $changes = @(git status --porcelain --untracked-files=no -- $versionFile)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to inspect website version changes"
+          }
+          if ($changes.Count -eq 0) {
+            Write-Host "Website version already matches this Release; no commit is required."
+            exit 0
+          }
+
+          & git diff --check -- $versionFile
+          if ($LASTEXITCODE -ne 0) {
+            throw "Website version diff validation failed"
+          }
+
+          & git config user.name "github-actions[bot]"
+          & git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          & git add -- $versionFile
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to stage website version"
+          }
+
+          $stagedFiles = @(git -c core.quotepath=false diff --cached --name-only)
+          if ($LASTEXITCODE -ne 0 -or $stagedFiles.Count -ne 1 -or $stagedFiles[0] -ne $versionFile) {
+            throw "Release version commit must contain only $versionFile"
+          }
+
+          $version = [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $versionFile | ConvertFrom-Json).version
+          & git commit -m "chore(website): update version to $version [skip ci]"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to commit website version"
+          }
+          & git push origin "HEAD:refs/heads/$branch"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to push website version commit to $branch"
+          }

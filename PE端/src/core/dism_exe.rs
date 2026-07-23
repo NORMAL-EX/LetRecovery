@@ -10,9 +10,14 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 
 use anyhow::{bail, Context, Result};
+use lr_core::registry::OfflineRegistry;
+
+#[cfg(windows)]
+use windows::Win32::Globalization::LCIDToLocaleName;
 
 use crate::tr;
 use crate::utils::encoding::gbk_to_utf8;
@@ -21,11 +26,271 @@ use crate::utils::encoding::gbk_to_utf8;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+static OFFLINE_INTL_HIVE_SEQUENCE: AtomicU32 = AtomicU32::new(1);
+
 /// DISM 操作进度
 #[derive(Debug, Clone)]
 pub struct DismExeProgress {
     pub percentage: u8,
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineInternationalSettings {
+    pub ui_language: String,
+    pub system_locale: String,
+    pub user_locale: String,
+    pub input_locale: String,
+    pub time_zone: String,
+}
+
+fn field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let (name, value) = line.split_once(':')?;
+    name.trim()
+        .eq_ignore_ascii_case(field)
+        .then_some(value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn valid_locale_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 35
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+}
+
+fn valid_input_locale(value: &str) -> bool {
+    let Some((language, keyboard)) = value.split_once(':') else {
+        return valid_locale_name(value);
+    };
+    language.len() == 4
+        && keyboard.len() == 8
+        && language
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        && keyboard
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+fn valid_time_zone(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value
+            .chars()
+            .any(|character| matches!(character, '<' | '>'))
+}
+
+fn locale_id_from_registry(value: &str) -> Result<u32> {
+    let normalized = value
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| value.trim().strip_prefix("0X"))
+        .unwrap_or_else(|| value.trim());
+    if normalized.is_empty()
+        || normalized.len() > 8
+        || !normalized
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        bail!("无效的十六进制区域标识: {value}");
+    }
+    u32::from_str_radix(normalized, 16).with_context(|| format!("无法解析区域标识: {value}"))
+}
+
+#[cfg(windows)]
+fn locale_name_from_registry_id(value: &str) -> Result<String> {
+    let locale_id = locale_id_from_registry(value)?;
+    let mut buffer = [0u16; 85];
+    let length = unsafe { LCIDToLocaleName(locale_id, Some(&mut buffer), 0) };
+    if length == 0 {
+        bail!("Windows 无法把区域标识 {value} 转换为区域名称");
+    }
+    let locale_name = String::from_utf16(&buffer[..length.saturating_sub(1) as usize])
+        .context("Windows 返回了无效的 UTF-16 区域名称")?;
+    if !valid_locale_name(&locale_name) {
+        bail!("Windows 返回了无效的区域名称: {locale_name}");
+    }
+    Ok(locale_name)
+}
+
+#[cfg(not(windows))]
+fn locale_name_from_registry_id(value: &str) -> Result<String> {
+    let _ = locale_id_from_registry(value)?;
+    bail!("离线 Windows 区域标识转换只能在 Windows 上执行")
+}
+
+fn input_locale_from_keyboard_layout(value: &str) -> Result<String> {
+    let keyboard_layout = value.trim();
+    if keyboard_layout.len() != 8
+        || !keyboard_layout
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        bail!("无效的默认键盘布局: {value}");
+    }
+    let language_id = &keyboard_layout[4..];
+    let input_locale = format!("{language_id}:{keyboard_layout}");
+    if !valid_input_locale(&input_locale) {
+        bail!("无法从默认键盘布局构造输入区域: {value}");
+    }
+    Ok(input_locale)
+}
+
+struct LoadedOfflineHive {
+    name: String,
+}
+
+impl LoadedOfflineHive {
+    fn load(name: String, hive_file: &Path) -> Result<Self> {
+        let hive_file = hive_file.to_str().ok_or_else(|| {
+            anyhow::anyhow!("离线注册表路径不是有效的 Unicode: {}", hive_file.display())
+        })?;
+        OfflineRegistry::load_hive(&name, hive_file)
+            .with_context(|| format!("加载离线注册表配置单元失败: {hive_file}"))?;
+        Ok(Self { name })
+    }
+
+    fn key(&self, relative_path: &str) -> String {
+        format!("HKLM\\{}\\{}", self.name, relative_path)
+    }
+}
+
+impl Drop for LoadedOfflineHive {
+    fn drop(&mut self) {
+        if let Err(error) = OfflineRegistry::unload_hive(&self.name) {
+            log::error!(
+                "[UNATTEND] 卸载国际化探测注册表配置单元失败 [{}]: {:#}",
+                self.name,
+                error
+            );
+        }
+    }
+}
+
+fn read_offline_international_settings_from_registry(
+    image_path: &str,
+) -> Result<OfflineInternationalSettings> {
+    let image_root = image_path.trim_end_matches(['\\', '/']);
+    if image_root.len() != 2
+        || !image_root.as_bytes()[0].is_ascii_alphabetic()
+        || image_root.as_bytes()[1] != b':'
+    {
+        bail!("离线系统根目录必须是盘符: {image_path}");
+    }
+
+    let config_dir = PathBuf::from(format!(r"{}\Windows\System32\config", image_root));
+    let system_hive_path = config_dir.join("SYSTEM");
+    let default_hive_path = config_dir.join("DEFAULT");
+    if !system_hive_path.is_file() || !default_hive_path.is_file() {
+        bail!(
+            "目标系统缺少国际化探测所需的 SYSTEM 或 DEFAULT 注册表配置单元: {}",
+            config_dir.display()
+        );
+    }
+
+    let sequence = OFFLINE_INTL_HIVE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let prefix = format!("lr-intl-{}-{sequence}", std::process::id());
+    let system_hive = LoadedOfflineHive::load(format!("{prefix}-system"), &system_hive_path)?;
+    let default_hive = LoadedOfflineHive::load(format!("{prefix}-default"), &default_hive_path)?;
+
+    let select_key = system_hive.key("Select");
+    let control_set =
+        OfflineRegistry::query_dword(&select_key, "Current").or_else(|current_error| {
+            OfflineRegistry::query_dword(&select_key, "Default").with_context(|| {
+                format!("读取活动控制集 Current 失败 ({current_error:#})，且 Default 回退也失败")
+            })
+        })?;
+    if !(1..=999).contains(&control_set) {
+        bail!("离线 SYSTEM 注册表返回了无效的控制集编号: {control_set}");
+    }
+    let control_root = format!("ControlSet{control_set:03}\\Control");
+
+    let language_key = system_hive.key(&format!(r"{control_root}\Nls\Language"));
+    let install_language = OfflineRegistry::query_string(&language_key, "InstallLanguage")
+        .context("读取目标系统安装语言失败")?;
+    let system_language = OfflineRegistry::query_string(&language_key, "Default")
+        .context("读取目标系统区域设置失败")?;
+    let ui_language =
+        locale_name_from_registry_id(&install_language).context("转换目标系统安装语言失败")?;
+    let system_locale =
+        locale_name_from_registry_id(&system_language).context("转换目标系统区域设置失败")?;
+
+    let international_key = default_hive.key(r"Control Panel\International");
+    let user_locale = OfflineRegistry::query_string(&international_key, "LocaleName")
+        .context("读取目标系统默认用户区域设置失败")?;
+    if !valid_locale_name(&user_locale) {
+        bail!("离线 DEFAULT 注册表返回了无效的用户区域设置: {user_locale}");
+    }
+
+    let keyboard_key = default_hive.key(r"Keyboard Layout\Preload");
+    let keyboard_layout = OfflineRegistry::query_string(&keyboard_key, "1")
+        .context("读取目标系统默认键盘布局失败")?;
+    let input_locale = input_locale_from_keyboard_layout(&keyboard_layout)?;
+
+    let time_zone_key = system_hive.key(&format!(r"{control_root}\TimeZoneInformation"));
+    let time_zone = OfflineRegistry::query_string(&time_zone_key, "TimeZoneKeyName")
+        .context("读取目标系统默认时区失败")?;
+    if !valid_time_zone(&time_zone) {
+        bail!("离线 SYSTEM 注册表返回了无效的默认时区: {time_zone}");
+    }
+
+    Ok(OfflineInternationalSettings {
+        ui_language,
+        system_locale,
+        user_locale,
+        input_locale,
+        time_zone,
+    })
+}
+
+fn parse_offline_international_settings(output: &str) -> Result<OfflineInternationalSettings> {
+    let mut ui_language = None;
+    let mut system_locale = None;
+    let mut user_locale = None;
+    let mut input_locale = None;
+    let mut time_zone = None;
+
+    for line in output.lines() {
+        ui_language = ui_language
+            .or_else(|| field_value(line, "Default system UI language").map(str::to_string));
+        system_locale =
+            system_locale.or_else(|| field_value(line, "System locale").map(str::to_string));
+        user_locale = user_locale.or_else(|| field_value(line, "User locale").map(str::to_string));
+        time_zone =
+            time_zone.or_else(|| field_value(line, "Default time zone").map(str::to_string));
+        if input_locale.is_none() {
+            input_locale = field_value(line, "Active keyboard(s)")
+                .and_then(|value| value.split([',', ';', ' ']).find(|item| !item.is_empty()))
+                .map(str::to_string);
+        }
+    }
+
+    let ui_language = ui_language
+        .filter(|value| valid_locale_name(value))
+        .ok_or_else(|| anyhow::anyhow!("DISM /Get-Intl 未返回有效的默认系统 UI 语言"))?;
+    let system_locale = system_locale
+        .filter(|value| valid_locale_name(value))
+        .ok_or_else(|| anyhow::anyhow!("DISM /Get-Intl 未返回有效的系统区域设置"))?;
+    let user_locale = user_locale.unwrap_or_else(|| ui_language.clone());
+    if !valid_locale_name(&user_locale) {
+        anyhow::bail!("DISM /Get-Intl 返回了无效的用户区域设置: {user_locale}");
+    }
+    let input_locale = input_locale
+        .filter(|value| valid_input_locale(value))
+        .ok_or_else(|| anyhow::anyhow!("DISM /Get-Intl 未返回有效的活动键盘布局"))?;
+    let time_zone = time_zone
+        .filter(|value| valid_time_zone(value))
+        .ok_or_else(|| anyhow::anyhow!("DISM /Get-Intl 未返回有效的默认时区"))?;
+
+    Ok(OfflineInternationalSettings {
+        ui_language,
+        system_locale,
+        user_locale,
+        input_locale,
+        time_zone,
+    })
 }
 
 /// DISM.exe 执行器
@@ -75,7 +340,9 @@ impl DismExe {
 
         // 系统目录路径
         if let Ok(system_root) = std::env::var("SystemRoot") {
-            let system_path = PathBuf::from(&system_root).join("System32").join("dism.exe");
+            let system_path = PathBuf::from(&system_root)
+                .join("System32")
+                .join("dism.exe");
             if system_path.exists() {
                 return Ok(system_path);
             }
@@ -97,16 +364,16 @@ impl DismExe {
         let where_result = {
             let mut cmd = Command::new("where");
             cmd.arg("dism.exe");
-            
+
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
-            
+
             cmd.output()
         };
-        
+
         if let Ok(output) = where_result {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(first_line) = stdout.lines().next() {
@@ -119,10 +386,12 @@ impl DismExe {
 
         bail!(
             "{}",
-            tr!("无法找到 dism.exe。请确保在 PE 环境或 Windows 系统中运行。\n\
+            tr!(
+                "无法找到 dism.exe。请确保在 PE 环境或 Windows 系统中运行。\n\
              已搜索的路径:\n\
              - X:\\Windows\\System32\\dism.exe (PE 环境)\n\
-             - C:\\Windows\\System32\\dism.exe (Windows 系统)")
+             - C:\\Windows\\System32\\dism.exe (Windows 系统)"
+            )
         )
     }
 
@@ -159,7 +428,7 @@ impl DismExe {
                 log::debug!("[DISM.EXE] 使用临时目录: {}", dir);
                 return dir.to_string();
             }
-            
+
             // 尝试创建目录
             if std::fs::create_dir_all(path).is_ok() {
                 log::info!("[DISM.EXE] 创建临时目录: {}", dir);
@@ -171,7 +440,7 @@ impl DismExe {
         let system_temp = std::env::temp_dir();
         let temp_str = system_temp.to_string_lossy().to_string();
         log::warn!("[DISM.EXE] 使用系统临时目录: {}", temp_str);
-        
+
         // 确保系统临时目录存在
         let _ = std::fs::create_dir_all(&system_temp);
         temp_str
@@ -191,7 +460,11 @@ impl DismExe {
         args: &[&str],
         progress_tx: Option<Sender<DismExeProgress>>,
     ) -> Result<String> {
-        log::info!("[DISM.EXE] 执行: {} {}", self.dism_path.display(), args.join(" "));
+        log::info!(
+            "[DISM.EXE] 执行: {} {}",
+            self.dism_path.display(),
+            args.join(" ")
+        );
 
         let mut child = self
             .create_command()
@@ -207,30 +480,28 @@ impl DismExe {
         // 读取并解析 stdout
         let progress_tx_clone = progress_tx.clone();
         let stdout_handle = std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
+            let mut reader = BufReader::new(stdout);
             let mut output = String::new();
+            let mut bytes = Vec::new();
 
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    // 转换编码（Windows 可能使用 GBK）
-                    let decoded_line = if line.is_ascii() {
-                        line
-                    } else {
-                        gbk_to_utf8(line.as_bytes())
-                    };
-
-                    output.push_str(&decoded_line);
-                    output.push('\n');
-
-                    // 解析进度信息
-                    if let Some(ref tx) = progress_tx_clone {
-                        if let Some(progress) = Self::parse_progress_line(&decoded_line) {
-                            let _ = tx.send(progress);
-                        }
-                    }
-
-                    log::trace!("[DISM.EXE STDOUT] {}", decoded_line);
+            while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
+                while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+                    bytes.pop();
                 }
+                let decoded_line = gbk_to_utf8(&bytes);
+                bytes.clear();
+
+                output.push_str(&decoded_line);
+                output.push('\n');
+
+                // 解析进度信息
+                if let Some(ref tx) = progress_tx_clone {
+                    if let Some(progress) = Self::parse_progress_line(&decoded_line) {
+                        let _ = tx.send(progress);
+                    }
+                }
+
+                log::trace!("[DISM.EXE STDOUT] {}", decoded_line);
             }
 
             output
@@ -238,22 +509,21 @@ impl DismExe {
 
         // 读取 stderr
         let stderr_handle = std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
+            let mut reader = BufReader::new(stderr);
             let mut error_output = String::new();
+            let mut bytes = Vec::new();
 
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    let decoded_line = if line.is_ascii() {
-                        line
-                    } else {
-                        gbk_to_utf8(line.as_bytes())
-                    };
-
-                    error_output.push_str(&decoded_line);
-                    error_output.push('\n');
-
-                    log::trace!("[DISM.EXE STDERR] {}", decoded_line);
+            while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
+                while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+                    bytes.pop();
                 }
+                let decoded_line = gbk_to_utf8(&bytes);
+                bytes.clear();
+
+                error_output.push_str(&decoded_line);
+                error_output.push('\n');
+
+                log::trace!("[DISM.EXE STDERR] {}", decoded_line);
             }
 
             error_output
@@ -289,6 +559,45 @@ impl DismExe {
 
         log::info!("[DISM.EXE] 操作成功完成");
         Ok(stdout_text)
+    }
+
+    /// 只读查询已经释放到目标分区的 Windows 国际化默认值。
+    /// 这些值必须写入 oobeSystem，避免 Windows 11 因语言或键盘仍待确认而重新进入用户 OOBE。
+    pub fn get_offline_international_settings(
+        &self,
+        image_path: &str,
+    ) -> Result<OfflineInternationalSettings> {
+        let normalized_image = if image_path.ends_with('\\') {
+            image_path.to_string()
+        } else {
+            format!("{}\\", image_path)
+        };
+        let image_arg = format!("/Image:{normalized_image}");
+        let dism_result = self
+            .execute_with_progress(&["/English", &image_arg, "/Get-Intl"], None)
+            .and_then(|output| parse_offline_international_settings(&output));
+        match dism_result {
+            Ok(settings) => Ok(settings),
+            Err(dism_error) => {
+                log::warn!(
+                    "[UNATTEND] DISM /Get-Intl 不可用，改用目标系统离线注册表只读回退: {:#}",
+                    dism_error
+                );
+                match read_offline_international_settings_from_registry(image_path) {
+                    Ok(settings) => {
+                        log::info!(
+                            "[UNATTEND] 已从目标系统离线注册表读取并验证国际化设置"
+                        );
+                        Ok(settings)
+                    }
+                    Err(registry_error) => bail!(
+                        "无法读取目标系统国际化设置；DISM /Get-Intl 失败: {:#}; 离线注册表回退失败: {:#}",
+                        dism_error,
+                        registry_error
+                    ),
+                }
+            }
+        }
     }
 
     /// 解析 DISM 输出中的进度信息
@@ -384,6 +693,11 @@ impl DismExe {
         force_unsigned: bool,
         progress_tx: Option<Sender<DismExeProgress>>,
     ) -> Result<()> {
+        // Never bypass catalog validation for an offline target. A rejected boot-start driver
+        // otherwise becomes an unbootable installation instead of an actionable import error.
+        if force_unsigned {
+            bail!("refusing to add unsigned offline drivers");
+        }
         log::info!(
             "[DISM.EXE] 添加驱动到离线系统: {} -> {}",
             driver_path,
@@ -418,10 +732,6 @@ impl DismExe {
         }
 
         args.push(format!("/scratchdir:{}", scratch_dir));
-
-        if force_unsigned {
-            args.push("/ForceUnsigned".to_string());
-        }
 
         // 转换为 &str 切片
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -639,5 +949,68 @@ mod tests {
         let output = "Line 1\nError: Something went wrong\nDetails here\nMore info\nLast line";
         let error = DismExe::extract_error_from_output(output);
         assert!(error.contains("Error:"));
+    }
+
+    #[test]
+    fn parses_offline_international_settings_for_chinese_image() {
+        let output = r#"
+Default system UI language : zh-CN
+System locale : zh-CN
+Default time zone : China Standard Time
+Active keyboard(s) : 0804:00000804
+Keyboard layered driver : Not installed.
+"#;
+        let settings = parse_offline_international_settings(output).unwrap();
+        assert_eq!(settings.ui_language, "zh-CN");
+        assert_eq!(settings.system_locale, "zh-CN");
+        assert_eq!(settings.user_locale, "zh-CN");
+        assert_eq!(settings.input_locale, "0804:00000804");
+        assert_eq!(settings.time_zone, "China Standard Time");
+    }
+
+    #[test]
+    fn rejects_incomplete_offline_international_settings() {
+        let error = parse_offline_international_settings(
+            "Default system UI language : en-US\nSystem locale : en-US\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("活动键盘布局"));
+    }
+
+    #[test]
+    fn converts_registry_lcids_and_keyboard_layouts() {
+        assert_eq!(locale_id_from_registry("0804").unwrap(), 0x0804);
+        assert_eq!(locale_id_from_registry("0x0409").unwrap(), 0x0409);
+        assert_eq!(
+            input_locale_from_keyboard_layout("00000804").unwrap(),
+            "0804:00000804"
+        );
+        assert_eq!(
+            input_locale_from_keyboard_layout("d0010409").unwrap(),
+            "0409:d0010409"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn converts_standard_windows_lcids_to_locale_names() {
+        assert_eq!(locale_name_from_registry_id("0804").unwrap(), "zh-CN");
+        assert_eq!(locale_name_from_registry_id("0409").unwrap(), "en-US");
+    }
+
+    #[test]
+    fn rejects_invalid_registry_international_values() {
+        assert!(locale_id_from_registry("not-a-lcid").is_err());
+        assert!(input_locale_from_keyboard_layout("804").is_err());
+        assert!(input_locale_from_keyboard_layout("0000080Z").is_err());
+    }
+
+    #[test]
+    fn unsigned_driver_override_is_rejected_before_path_or_process_access() {
+        let dism = DismExe::new().expect("DISM command boundary should initialize");
+        let error = dism
+            .add_driver_offline(r"Z:\missing-image", r"Z:\missing-driver", true, true, None)
+            .expect_err("/ForceUnsigned must be rejected");
+        assert!(error.to_string().contains("unsigned offline drivers"));
     }
 }

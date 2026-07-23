@@ -2,14 +2,18 @@
 name = "letrecovery-pe"
 version = "2026.2.6"
 edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 authors = ["NORMAL-EX"]
 description = "LetRecovery PE安装助手"
 
-[dependencies]
-# GUI
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
-egui = "0.31"
+[features]
+# Test harnesses must not trigger a UAC prompt. build.rs rejects this feature
+# for release builds so production binaries always require elevation.
+non-elevated-tests = []
 
+[dependencies]
 # 序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,11 +25,20 @@ parking_lot = "0.12"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Globalization",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_System_Shutdown",
     "Win32_Security",
     "Win32_System_Threading",
@@ -53,7 +66,6 @@ thiserror = "1"
 
 # 其他工具
 walkdir = "2"
-image = "0.25"
 
 [build-dependencies]
 winres = "0.1"

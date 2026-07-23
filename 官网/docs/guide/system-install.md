@@ -47,6 +47,8 @@ LetRecovery 会自动决定怎么装：
 
 LetRecovery 会自动识别 UEFI / Legacy（GPT→UEFI、MBR→Legacy）并写入对应引导文件。需要时也可在**引导模式**下拉框里手动指定 `自动 / UEFI / Legacy`。该下拉框始终可见；启用无人值守时它与"自定义无人值守"按钮并列同一行，否则单独成行。
 
+对支持的 Windows 10/11 和 Server 2016+ UEFI 镜像，程序还会在写盘前检查 Secure Boot 的 PCA2011/PCA2023 信任代际，并在旧镜像缺少 BootEx 时使用随包离线资源补齐。通常保持**自动**即可，完整判断和旧系统限制见 [Secure Boot 与 PCA2011 / PCA2023](/guide/secure-boot-pca)。
+
 ## 自定义分区脚本（进阶）
 
 启用[高级选项](/guide/advanced-options)后，会多出一个"运行 Diskpart 脚本"选项：把 `.cmd` / `.bat` / `.txt` 脚本放进 `<程序目录>\diskpart\`，安装会在**格式化之前**执行它们（脚本失败则中止安装）。适合需要特殊分区布局的场景。

@@ -7,11 +7,11 @@ description: An introduction to LetRecovery — a free and open-source tool for 
 
 **LetRecovery** is a free, open-source tool for **reinstalling and backing up Windows**. It can deploy system images (WIM / ESD / SWM / GHO / ISO, including text-mode setup for Windows XP / 2003), back up your existing system, download images online, and ships with a full set of common maintenance tools — all in one clean, ad-free interface.
 
-It is built on **Rust + egui** and runs both under the normal Windows desktop and directly inside **WinPE**.
+It is built with **Rust**. The desktop client uses a native Windows-controls interface, and LetRecovery can also run directly inside **WinPE**.
 Its goal is to let even non-technical users reinstall Windows safely.
 
 ::: tip Always free
-LetRecovery is free forever. Please obtain it only from [official channels](#where-to-get-it). Anyone charging you for it is a third-party reseller with no connection to this project.
+The unmodified official LetRecovery software remains free to obtain from [official channels](#where-to-get-it). Official customization services and commercial authorization under the [use and distribution terms](/docs/guide/terms) may involve separately agreed fees; those services are not sales of the unmodified software.
 :::
 
 ## Highlights
@@ -61,5 +61,4 @@ Be cautious about any other "official site" or "download mirror."
 
 ## License
 
-LetRecovery is released under the [PolyForm Noncommercial License 1.0.0](https://github.com/NORMAL-EX/LetRecovery/blob/main/LICENSE):
-personal, research, and non-commercial use is permitted; **commercial use is prohibited**.
+LetRecovery uses the [PolyForm Noncommercial License 1.0.0](https://github.com/NORMAL-EX/LetRecovery/blob/main/LICENSE), together with the project's [additional use and distribution terms](/docs/guide/terms). The additional terms define attribution for modified distributions, limited permission for computer-installation services, customization licensing, and restrictions on selling the source code or software.

@@ -2,10 +2,12 @@
 
 mod app;
 mod core;
+#[cfg(target_os = "windows")]
+pub mod native_ui;
 mod ui;
 mod utils;
-
-use eframe::egui;
+mod workflow_journal;
+mod workflows;
 
 /// 日志文件路径：优先 exe 同目录；取不到则退回当前目录。
 fn log_file_path() -> std::path::PathBuf {
@@ -93,31 +95,92 @@ fn install_panic_hook() {
     }));
 }
 
+/// Loads a hardware-matched Intel VMD package into the running WinPE before any volume scan.
+/// Drvload is the Microsoft-supported runtime path; this does not persist a driver in the PE WIM.
+fn load_matching_vmd_driver_into_running_pe() {
+    let hardware_ids = match lr_core::driver::list_present_hardware_ids() {
+        Ok(hardware_ids) => hardware_ids,
+        Err(error) => {
+            log::warn!("[VMD/PE] present-device enumeration failed: {error}");
+            return;
+        }
+    };
+    let packages = lr_core::storage_driver_match::select_builtin_storage_driver_packages(
+        hardware_ids.iter().map(String::as_str),
+    );
+    if packages.is_empty() {
+        log::info!("[VMD/PE] no supported Intel VMD controller is present");
+        return;
+    }
+
+    let package_root = utils::path::get_exe_dir()
+        .join("drivers")
+        .join("storage_controller");
+    for package in packages {
+        let inf = package_root
+            .join(package.directory_name())
+            .join("iaStorVD.inf");
+        let is_regular_file = inf
+            .symlink_metadata()
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false);
+        if !is_regular_file {
+            log::error!("[VMD/PE] matched VMD INF is unavailable: {}", inf.display());
+            continue;
+        }
+
+        let request = lr_core::command::CommandRequest::new("drvload.exe").arg(&inf);
+        match lr_core::command::execute_request(&lr_core::command::SystemCommandExecutor, &request)
+        {
+            Ok(outcome) if outcome.succeeded() => {
+                log::info!("[VMD/PE] runtime VMD driver loaded: {}", inf.display());
+            }
+            Ok(outcome) => {
+                log::error!(
+                    "[VMD/PE] drvload rejected {} (exit {:?}): {}",
+                    inf.display(),
+                    outcome.exit_code(),
+                    String::from_utf8_lossy(outcome.stderr()).trim()
+                );
+            }
+            Err(error) => {
+                log::error!(
+                    "[VMD/PE] failed to start drvload for {}: {error}",
+                    inf.display()
+                );
+            }
+        }
+    }
+}
+
 /// 探测界面语言：从（正常系统端随重启写入的）配置文件读取 Language 字段。
 /// 找不到数据分区或配置时返回空串（即简体中文内置）。
 fn detect_ui_language() -> String {
     use core::config::{ConfigFileManager, OperationType};
 
-    let data_partition = match ConfigFileManager::find_data_partition() {
+    let operation_type = match ConfigFileManager::detect_operation_type() {
+        Some(operation) => operation,
+        None => return String::new(),
+    };
+    let data_partition = match ConfigFileManager::find_data_partition_for(operation_type) {
         Some(p) => p,
         None => return String::new(),
     };
 
-    match ConfigFileManager::detect_operation_type() {
-        Some(OperationType::Install) => ConfigFileManager::read_install_config(&data_partition)
+    match operation_type {
+        OperationType::Install => ConfigFileManager::read_install_config(&data_partition)
             .map(|c| c.language)
             .unwrap_or_default(),
-        Some(OperationType::Backup) => ConfigFileManager::read_backup_config(&data_partition)
+        OperationType::Backup => ConfigFileManager::read_backup_config(&data_partition)
             .map(|c| c.language)
             .unwrap_or_default(),
-        Some(OperationType::Expand) => ConfigFileManager::read_expand_config(&data_partition)
+        OperationType::Expand => ConfigFileManager::read_expand_config(&data_partition)
             .map(|c| c.language)
             .unwrap_or_default(),
-        None => String::new(),
     }
 }
 
-fn main() -> eframe::Result<()> {
+fn main() -> anyhow::Result<()> {
     // 初始化日志：写入到 exe 同目录的 LetRecoveryPE.log。
     // PE 下 GUI 程序没有控制台，stderr 会被直接丢弃，必须落盘才能事后排查“怎么死的”。
     init_file_logger();
@@ -132,8 +195,32 @@ fn main() -> eframe::Result<()> {
         log_file_path().display()
     );
 
-    // 检查命令行参数
+    // Deterministic, side-effect-free visual entry for the native PE progress shell, including the
+    // same elapsed-time loading ring and paint timer used by the production page. It must run before
+    // driver loading, BitLocker passthrough and task discovery so desktop QA cannot touch the host
+    // storage stack. Release builds do not contain this branch.
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(feature = "non-elevated-tests")]
+    if args.iter().any(|arg| arg == "--ui-progress-preview-failed") {
+        utils::i18n::init("");
+        native_ui::progress::run_failed_preview(core::config::OperationType::Install)
+            .map_err(anyhow::Error::new)?;
+        return Ok(());
+    }
+    #[cfg(feature = "non-elevated-tests")]
+    if args.iter().any(|arg| arg == "--ui-progress-preview") {
+        utils::i18n::init("");
+        native_ui::progress::run_preview(core::config::OperationType::Install)
+            .map_err(anyhow::Error::new)?;
+        return Ok(());
+    }
+
+    // VMD storage must be visible before BitLocker passthrough, marker discovery or any partition
+    // inventory. A matched package is loaded into this booted PE only; offline Windows receives
+    // the same package later through the signed DISM boundary.
+    load_matching_vmd_driver_into_running_pe();
+
+    // 检查命令行参数
     log::info!("命令行参数: {:?}", args);
 
     // 【关键】BitLocker 密钥透传解锁必须在**任何**操作类型检测之前执行。
@@ -195,51 +282,20 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    log::info!("初始化 GUI...");
-
-    // 加载图标
-    let icon = load_icon();
-
-    // 设置窗口选项 - 窗口不可关闭，不可调整大小
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 500.0])
-            .with_min_inner_size([600.0, 500.0])
-            .with_max_inner_size([600.0, 500.0])
-            .with_resizable(false)
-            .with_maximize_button(false)
-            .with_minimize_button(false)
-            .with_close_button(false)
-            .with_icon(icon),
-        ..Default::default()
+    let Some(operation_type) = core::config::ConfigFileManager::detect_operation_type() else {
+        log::warn!("PE 原生界面未检测到安装、备份或扩容任务");
+        show_error_message(&tr!(
+            "未检测到安装或备份配置文件。\n\n请确保已正确准备配置文件后重试。"
+        ));
+        return Ok(());
     };
 
-    // 运行应用
-    eframe::run_native(
-        "LetRecovery PE",
-        options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
-    )
-}
-
-/// 加载图标
-fn load_icon() -> egui::IconData {
-    // 使用内嵌的图标数据（编译时嵌入）
-    const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.png");
-
-    // 从内嵌的PNG数据加载图标
-    if let Ok(image) = image::load_from_memory(ICON_BYTES) {
-        let image = image.to_rgba8();
-        let (width, height) = image.dimensions();
-        return egui::IconData {
-            rgba: image.into_raw(),
-            width,
-            height,
-        };
+    log::info!("进入 PE 原生 Win32 进度界面");
+    if let Err(error) = native_ui::progress::run(operation_type) {
+        log::error!("PE 原生 Win32 进度界面运行失败: {error}");
+        show_error_message(&tr!("启动失败: {} - {}", "LetRecovery PE", error));
     }
-
-    // 如果解析失败，返回默认图标
-    egui::IconData::default()
+    Ok(())
 }
 
 /// BitLocker 密钥透传解锁。
@@ -375,7 +431,7 @@ fn try_unlock_manage_bde(drive: &str, recovery_key: &str) -> bool {
 }
 
 /// 命令行模式执行
-fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
+fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
     use core::bcdedit::BootManager;
     use core::config::ConfigFileManager;
     use core::disk::DiskManager;
@@ -429,9 +485,24 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
         log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
 
-        // 构建完整镜像路径
         let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-        let image_path = format!("{}\\{}", data_dir, config.image_path);
+        let resolved_source = if config.is_xp_i386 {
+            ConfigFileManager::resolve_staged_xp_source(
+                &data_dir,
+                &config.image_path,
+                &config.xp_source_arch,
+            )
+        } else {
+            ConfigFileManager::resolve_staged_file(&data_dir, &config.image_path)
+        };
+        let image_path = match resolved_source {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(error) => {
+                log::error!("[PE INSTALL] 错误: {error}");
+                show_error_message(&tr!("安装配置中的镜像文件名无效: {}", error));
+                return Ok(());
+            }
+        };
 
         if !std::path::Path::new(&image_path).exists() {
             log::error!("[PE INSTALL] 错误: 镜像文件不存在: {}", image_path);
@@ -442,7 +513,38 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         log::info!("[PE INSTALL] 完整镜像路径: {}", image_path);
 
         // Step 0: 校验镜像完整性（WIM/ESD；GHO 跳过）——放在格式化之前，坏镜像不糟蹋目标盘
-        if !config.is_gho {
+        let xp_custom_sif = if config.is_xp_i386 && !config.custom_unattend_file.is_empty() {
+            match ConfigFileManager::resolve_staged_file(&data_dir, &config.custom_unattend_file) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    show_error_message(&tr!("自定义 XP 应答文件名无效: {}", error));
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+        if config.is_xp_i386 {
+            if let Err(error) =
+                lr_core::xp_i386::validate_i386_source(std::path::Path::new(&image_path))
+            {
+                show_error_message(&tr!("XP/2003 安装源校验失败: {}", error));
+                return Ok(());
+            }
+        }
+
+        if config.is_gho {
+            let ghost = core::ghost::Ghost::new();
+            if !ghost.is_available() {
+                show_error_message(&tr!("Ghost工具不可用"));
+                return Ok(());
+            }
+            if let Err(error) = ghost.verify_image_integrity(&image_path) {
+                show_error_message(&tr!("GHO 镜像预检失败: {}", error));
+                return Ok(());
+            }
+            log::info!("[PE安装/CLI] GHO 镜像预检通过，尚未修改目标分区");
+        } else if !config.is_xp_i386 {
             log::info!("[PE INSTALL] Step 0: 校验镜像完整性");
             log::info!("[PE安装/CLI] 开始校验镜像: {}", image_path);
             let dism = Dism::new();
@@ -458,9 +560,51 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             log::info!("[PE安装/CLI] 镜像校验通过");
         }
 
+        // Keep CLI installs on the same fail-closed path as the PE GUI. This
+        // check is read-only and runs before formatting the selected volume.
+        let staged_pca_compat =
+            match core::pca_preflight::staged_config(&config, std::path::Path::new(&data_dir)) {
+                Ok(staged) => staged,
+                Err(error) => {
+                    show_error_message(&error);
+                    return Ok(());
+                }
+            };
+        let pca_compat_package = if config.is_xp_i386 {
+            None
+        } else {
+            match core::pca_preflight::verify_before_disk_write(
+                &image_path,
+                config.volume_index,
+                config.is_gho,
+                config.is_xp,
+                config.boot_mode != 2,
+                config.boot_pca_mode,
+                staged_pca_compat.as_ref(),
+            ) {
+                Ok(package) => package,
+                Err(error) => {
+                    show_error_message(&error);
+                    return Ok(());
+                }
+            }
+        };
+
+        if config.run_diskpart_scripts {
+            log::info!("[PE INSTALL] Step 0.5: 运行 Diskpart 脚本");
+            let scripts_dir = std::path::Path::new(&data_dir).join("diskpart");
+            if let Err(error) = lr_core::diskpart::run_scripts_in_dir(&scripts_dir) {
+                log::error!("[PE INSTALL] Diskpart 脚本执行失败: {error}");
+                show_error_message(&tr!("Diskpart 脚本执行失败: {}", error));
+                return Ok(());
+            }
+        }
+
         // Step 1: 格式化分区
         log::info!("[PE INSTALL] Step 1: 格式化分区");
-        if let Err(e) = DiskManager::format_partition(&target_partition) {
+        let volume_label =
+            (!config.volume_label.is_empty()).then_some(config.volume_label.as_str());
+        if let Err(e) = DiskManager::format_partition_with_label(&target_partition, volume_label) {
             log::error!("[PE INSTALL] 格式化失败: {}", e);
             show_error_message(&tr!("格式化分区失败: {}", e));
             return Ok(());
@@ -468,6 +612,39 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
         // Step 2: 释放镜像
         log::info!("[PE INSTALL] Step 2: 释放镜像");
+        if config.is_xp_i386 {
+            match lr_core::xp_i386::install_from_i386(
+                std::path::Path::new(&image_path),
+                &target_partition,
+                &utils::path::get_bin_dir(),
+                xp_custom_sif.as_deref(),
+            ) {
+                Ok(log_output) => log::info!("[PE INSTALL/XP TEXTMODE] {log_output}"),
+                Err(error) => {
+                    show_error_message(&tr!("准备 XP/2003 文本模式安装失败: {}", error));
+                    return Ok(());
+                }
+            }
+            if let Err(error) =
+                DiskManager::cleanup_auto_created_partition_and_extend(&target_partition)
+            {
+                log::error!("[PE INSTALL/XP TEXTMODE] cleanup failed: {error}");
+                show_error_message(&tr!("清理安装临时分区并合并空间失败: {}", error));
+                return Ok(());
+            }
+            ConfigFileManager::cleanup_all(&data_partition, &target_partition);
+            if config.auto_reboot {
+                let _ = utils::command::new_command("shutdown")
+                    .args(["/r", "/t", "10", "/c", "LetRecovery XP/2003 setup is ready"])
+                    .spawn();
+            } else {
+                show_success_message(&tr!(
+                    "XP/2003 文本模式安装已准备完成，请重启计算机继续安装。"
+                ));
+            }
+            return Ok(());
+        }
+
         let apply_dir = format!("{}\\", target_partition);
 
         let apply_result = if config.is_gho {
@@ -560,10 +737,25 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             log::info!("[PE INSTALL] 跳过CAB更新包安装");
         }
 
+        if let Some(package) = pca_compat_package.as_ref() {
+            log::info!(
+                "[PE INSTALL] 为 Windows build {} / architecture {} 注入 PCA2023 BootEx",
+                package.target().build,
+                package.target().architecture
+            );
+            if let Err(error) =
+                package.inject_into_offline_windows(std::path::Path::new(&apply_dir))
+            {
+                log::error!("[PE INSTALL] PCA2023 兼容包注入失败: {error}");
+                show_error_message(&tr!("升级 PCA2023 引导文件失败：{}", error));
+                return Ok(());
+            }
+        }
+
         // Step 5: 修复引导
         log::info!("[PE INSTALL] Step 5: 修复引导");
         let boot_manager = BootManager::new();
-        let use_uefi = DiskManager::detect_uefi_mode();
+        let use_uefi = DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition);
 
         // XP/2003：写 XP 引导（UEFI 化映像走 UEFI/GPT，否则 ntldr）；其余走 bcdboot。
         let win_boot_dir = format!("{}\\Windows\\Boot", target_partition);
@@ -571,19 +763,13 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         let boot_result = if is_xp {
             if use_uefi {
                 log::info!("[PE INSTALL] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
-                match boot_manager.write_xp_uefi_gpt_boot(&target_partition) {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        log::error!("[PE INSTALL] XP UEFI 引导失败({})，回退 Legacy(ntldr)", e);
-                        boot_manager.write_xp_boot(&target_partition)
-                    }
-                }
+                boot_manager.write_xp_uefi_gpt_boot(&target_partition)
             } else {
                 log::info!("[PE INSTALL] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
                 boot_manager.write_xp_boot(&target_partition)
             }
         } else {
-            boot_manager.repair_boot_advanced(&target_partition, use_uefi)
+            boot_manager.repair_boot_advanced(&target_partition, use_uefi, config.boot_pca_mode)
         };
         if let Err(e) = boot_result {
             log::error!("[PE INSTALL] 修复引导失败: {}", e);
@@ -609,9 +795,18 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
         // Step 6: 应用高级选项
         log::info!("[PE INSTALL] Step 6: 应用高级选项");
-        let _ = apply_advanced_options(&target_partition, &config);
+        if let Err(error) = apply_advanced_options(&target_partition, &config) {
+            log::error!("[PE INSTALL] 应用高级选项失败，安装停止: {}", error);
+            show_error_message(&tr!("应用高级选项失败，未继续安装: {}", error));
+            return Ok(());
+        }
         // 注入数据分区上的用户驱动（bin/drivers/<版本> 由正常端复制而来）
-        ui::advanced_options::inject_user_drivers_from_data(&target_partition, &data_dir);
+        if let Err(error) =
+            ui::advanced_options::inject_user_drivers_from_data(&target_partition, &data_dir)
+        {
+            show_error_message(&tr!("注入用户驱动失败: {}", error));
+            return Ok(());
+        }
 
         // Step 7: 生成无人值守配置
         if config.unattended {
@@ -619,31 +814,38 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             if !config.custom_unattend_file.is_empty() {
                 // 用户自定义无人值守文件：直接复制到目标系统
                 let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-                let src = format!("{}\\{}", data_dir, config.custom_unattend_file);
-                match std::fs::read(&src) {
-                    Ok(content) => {
-                        let panther_dir = format!("{}\\Windows\\Panther", target_partition);
-                        let _ = std::fs::create_dir_all(&panther_dir);
-                        let _ = std::fs::write(format!("{}\\unattend.xml", panther_dir), &content);
-                        let sysprep_dir =
-                            format!("{}\\Windows\\System32\\Sysprep", target_partition);
-                        if std::path::Path::new(&sysprep_dir).exists() {
-                            let _ =
-                                std::fs::write(format!("{}\\unattend.xml", sysprep_dir), &content);
-                        }
-                        log::info!("[PE INSTALL] 已应用自定义无人值守文件: {}", src);
+                let src = match ConfigFileManager::resolve_staged_file(
+                    &data_dir,
+                    &config.custom_unattend_file,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        log::error!("[PE INSTALL] 自定义无人值守文件名无效: {error}");
+                        show_error_message(&tr!("自定义无人值守文件名无效: {}", error));
+                        return Ok(());
                     }
-                    Err(e) => log::error!("[PE INSTALL] 读取自定义无人值守文件失败: {}", e),
+                };
+                if let Err(e) =
+                    app::apply_custom_unattend(&target_partition, &src.to_string_lossy())
+                {
+                    log::error!("[PE INSTALL] 应用自定义无人值守文件失败: {}", e);
+                    show_error_message(&tr!("应用自定义无人值守文件失败: {}", e));
+                    return Ok(());
                 }
-            } else {
-                let _ = generate_unattend_xml(&target_partition, &config.custom_username);
+                log::info!("[PE INSTALL] 已应用自定义无人值守文件: {}", src.display());
+            } else if let Err(error) = app::generate_unattend_xml(&target_partition, &config) {
+                log::error!("[PE INSTALL] 生成无人值守配置失败: {error}");
+                show_error_message(&tr!("生成无人值守配置失败: {}", error));
+                return Ok(());
             }
         }
 
         // Step 7.5: 离线登录兜底（放开空密码策略 + 已知用户名时配置自动登录）
-        if let Err(e) =
-            core::account_fix::ensure_offline_login(&target_partition, &config.custom_username)
-        {
+        if let Err(e) = core::account_fix::ensure_offline_login(
+            &target_partition,
+            &config.custom_username,
+            config.is_gho || config.is_xp,
+        ) {
             log::warn!("[PE INSTALL] 离线登录兜底设置失败（不影响安装）: {}", e);
         } else {
             log::info!("[PE INSTALL] 已应用离线登录兜底设置");
@@ -651,18 +853,15 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
 
         // Step 8: 清理
         log::info!("[PE INSTALL] Step 8: 清理临时文件");
-        ConfigFileManager::cleanup_all(&data_partition, &target_partition);
-
         // Step 9: 清理自动创建的数据分区并扩展目标分区
         log::info!("[PE INSTALL] Step 9: 清理自动创建的分区");
-        match DiskManager::cleanup_auto_created_partition_and_extend(&target_partition) {
-            Ok(_) => log::info!("[PE INSTALL] 自动创建分区清理完成"),
-            Err(e) => {
-                // 不中断安装流程，只记录警告
-                log::warn!("[PE INSTALL] 警告: 清理自动创建分区失败: {}", e);
-                log::warn!("清理自动创建分区失败: {}", e);
-            }
+        if let Err(e) = DiskManager::cleanup_auto_created_partition_and_extend(&target_partition) {
+            log::error!("[PE INSTALL] 清理自动创建分区失败: {}", e);
+            show_error_message(&tr!("清理安装临时分区并合并空间失败: {}", e));
+            return Ok(());
         }
+        log::info!("[PE INSTALL] 自动创建分区清理完成");
+        ConfigFileManager::cleanup_all(&data_partition, &target_partition);
 
         log::info!("[PE INSTALL] 安装完成!");
 
@@ -685,7 +884,9 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
         log::info!("[PE BACKUP] ========== PE自动备份模式 ==========");
 
         // 查找配置文件所在分区
-        let data_partition = match ConfigFileManager::find_data_partition() {
+        let data_partition = match ConfigFileManager::find_data_partition_for(
+            crate::core::config::OperationType::Backup,
+        ) {
             Some(p) => p,
             None => {
                 log::error!("[PE BACKUP] 错误: 未找到备份配置文件");
@@ -786,9 +987,31 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             return Ok(());
         }
 
+        let verify_result = match config.format {
+            BackupFormat::Gho => {
+                core::ghost::Ghost::new().verify_image_integrity(&config.save_path)
+            }
+            BackupFormat::Wim | BackupFormat::Esd | BackupFormat::Swm => {
+                Dism::verify_captured_image(
+                    std::path::Path::new(&config.save_path),
+                    &config.name,
+                    &config.description,
+                )
+            }
+        };
+        if let Err(error) = verify_result {
+            log::error!("[PE BACKUP] 备份产物验证失败: {}", error);
+            show_error_message(&tr!("备份文件验证失败: {}", error));
+            return Ok(());
+        }
+
         // 删除PE引导项
         let boot_manager = BootManager::new();
-        let _ = boot_manager.delete_current_boot_entry();
+        if let Err(error) = boot_manager.delete_current_boot_entry() {
+            log::error!("[PE BACKUP] 删除 PE 引导项失败: {}", error);
+            show_error_message(&tr!("删除 PE 引导项失败: {}", error));
+            return Ok(());
+        }
 
         // 清理
         ConfigFileManager::cleanup_partition_markers(&source_partition);
@@ -809,74 +1032,6 @@ fn run_cli_mode(is_install: bool) -> eframe::Result<()> {
             ])
             .spawn();
     }
-
-    Ok(())
-}
-
-/// 生成无人值守XML
-fn generate_unattend_xml(target_partition: &str, username: &str) -> anyhow::Result<()> {
-    let username = if username.is_empty() {
-        "User"
-    } else {
-        username
-    };
-
-    let xml_content = format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-    <settings pass="windowsPE">
-        <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-            <UserData>
-                <ProductKey>
-                    <WillShowUI>OnError</WillShowUI>
-                </ProductKey>
-                <AcceptEula>true</AcceptEula>
-            </UserData>
-        </component>
-    </settings>
-    <settings pass="oobeSystem">
-        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <OOBE>
-                <HideEULAPage>true</HideEULAPage>
-                <HideLocalAccountScreen>true</HideLocalAccountScreen>
-                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
-                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
-                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-                <ProtectYourPC>3</ProtectYourPC>
-            </OOBE>
-            <UserAccounts>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value></Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local User</Description>
-                        <DisplayName>{}</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>{}</Name>
-                    </LocalAccount>
-                </LocalAccounts>
-            </UserAccounts>
-            <AutoLogon>
-                <Password>
-                    <Value></Value>
-                    <PlainText>true</PlainText>
-                </Password>
-                <Enabled>true</Enabled>
-                <Username>{}</Username>
-            </AutoLogon>
-        </component>
-    </settings>
-</unattend>"#,
-        username, username, username
-    );
-
-    let panther_dir = format!("{}\\Windows\\Panther", target_partition);
-    std::fs::create_dir_all(&panther_dir)?;
-
-    let unattend_path = format!("{}\\unattend.xml", panther_dir);
-    std::fs::write(&unattend_path, &xml_content)?;
 
     Ok(())
 }

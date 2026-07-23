@@ -19,16 +19,18 @@ use windows::core::PCWSTR;
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LUID};
 #[cfg(windows)]
-use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
-#[cfg(windows)]
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES,
-    SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+};
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
 };
 #[cfg(windows)]
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegLoadKeyW, RegOpenKeyExW, RegQueryValueExW, RegUnLoadKeyW,
-    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_VALUE_TYPE,
+    RegCloseKey, RegLoadKeyW, RegOpenKeyExW, RegQueryValueExW, RegUnLoadKeyW, HKEY,
+    HKEY_LOCAL_MACHINE, KEY_READ, REG_VALUE_TYPE,
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -89,7 +91,11 @@ pub fn get_file_version(path: &Path) -> Option<(u16, u16, u16, u16)> {
     }
 
     unsafe {
-        let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         let mut handle: u32 = 0;
         let size = GetFileVersionInfoSizeW(PCWSTR::from_raw(wide_path.as_ptr()), Some(&mut handle));
         if size == 0 {
@@ -146,34 +152,34 @@ pub fn get_file_version(_path: &Path) -> Option<(u16, u16, u16, u16)> {
 }
 
 /// 检测PE文件的CPU架构
-/// 
+///
 /// 通过读取PE文件头来判断目标系统是32位还是64位
-/// 
+///
 /// # 参数
 /// - `path`: PE文件路径（通常是ntdll.dll或kernel32.dll）
-/// 
+///
 /// # 返回
 /// - `SystemArchitecture`: 系统架构枚举
 pub fn get_pe_architecture(path: &Path) -> SystemArchitecture {
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
-    
+
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return SystemArchitecture::Unknown,
     };
-    
+
     // 读取DOS头，检查MZ签名
     let mut dos_header = [0u8; 64];
     if file.read_exact(&mut dos_header).is_err() {
         return SystemArchitecture::Unknown;
     }
-    
+
     // 检查MZ签名
     if dos_header[0] != b'M' || dos_header[1] != b'Z' {
         return SystemArchitecture::Unknown;
     }
-    
+
     // 获取PE头偏移（位于DOS头的0x3C处）
     let pe_offset = u32::from_le_bytes([
         dos_header[0x3C],
@@ -181,72 +187,72 @@ pub fn get_pe_architecture(path: &Path) -> SystemArchitecture {
         dos_header[0x3E],
         dos_header[0x3F],
     ]) as u64;
-    
+
     // 定位到PE头
     if file.seek(SeekFrom::Start(pe_offset)).is_err() {
         return SystemArchitecture::Unknown;
     }
-    
+
     // 读取PE签名和COFF头
     let mut pe_header = [0u8; 6];
     if file.read_exact(&mut pe_header).is_err() {
         return SystemArchitecture::Unknown;
     }
-    
+
     // 检查PE签名 "PE\0\0"
     if pe_header[0] != b'P' || pe_header[1] != b'E' || pe_header[2] != 0 || pe_header[3] != 0 {
         return SystemArchitecture::Unknown;
     }
-    
+
     // 读取Machine字段（COFF头的前2字节）
     let machine = u16::from_le_bytes([pe_header[4], pe_header[5]]);
-    
+
     match machine {
-        0x014c => SystemArchitecture::X86,      // IMAGE_FILE_MACHINE_I386
-        0x8664 => SystemArchitecture::Amd64,    // IMAGE_FILE_MACHINE_AMD64
-        0xAA64 => SystemArchitecture::Arm64,    // IMAGE_FILE_MACHINE_ARM64
+        0x014c => SystemArchitecture::X86,   // IMAGE_FILE_MACHINE_I386
+        0x8664 => SystemArchitecture::Amd64, // IMAGE_FILE_MACHINE_AMD64
+        0xAA64 => SystemArchitecture::Arm64, // IMAGE_FILE_MACHINE_ARM64
         _ => SystemArchitecture::Unknown,
     }
 }
 
 /// 检测目标系统的架构
-/// 
+///
 /// 通过检测系统目录下的ntdll.dll或kernel32.dll来判断架构
-/// 
+///
 /// # 参数
 /// - `system_root`: 系统根目录（如 "C:\\"）
-/// 
+///
 /// # 返回
 /// - `SystemArchitecture`: 系统架构
 pub fn get_system_architecture(system_root: &str) -> SystemArchitecture {
     let system_root_path = Path::new(system_root);
-    
+
     // 优先检测 ntdll.dll
     let ntdll_path = system_root_path
         .join("Windows")
         .join("System32")
         .join("ntdll.dll");
-    
+
     if ntdll_path.exists() {
         let arch = get_pe_architecture(&ntdll_path);
         if arch != SystemArchitecture::Unknown {
             return arch;
         }
     }
-    
+
     // 备选：检测 kernel32.dll
     let kernel32_path = system_root_path
         .join("Windows")
         .join("System32")
         .join("kernel32.dll");
-    
+
     if kernel32_path.exists() {
         let arch = get_pe_architecture(&kernel32_path);
         if arch != SystemArchitecture::Unknown {
             return arch;
         }
     }
-    
+
     // 默认返回 amd64
     SystemArchitecture::Amd64
 }
@@ -263,7 +269,11 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
         let process = GetCurrentProcess();
 
         // OpenProcessToken 返回 Result
-        if let Err(e) = OpenProcessToken(process, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token_handle) {
+        if let Err(e) = OpenProcessToken(
+            process,
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token_handle,
+        ) {
             bail!("{}", tr!("OpenProcessToken 失败: {}", e));
         }
 
@@ -271,7 +281,8 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
         let mut luid = LUID::default();
 
         // LookupPrivilegeValueW 返回 Result
-        if let Err(e) = LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide_name.as_ptr()), &mut luid) {
+        if let Err(e) = LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide_name.as_ptr()), &mut luid)
+        {
             let _ = CloseHandle(token_handle);
             bail!("{}", tr!("LookupPrivilegeValueW 失败: {}", e));
         }
@@ -285,14 +296,7 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
         };
 
         // AdjustTokenPrivileges 返回 Result
-        if let Err(e) = AdjustTokenPrivileges(
-            token_handle,
-            false,
-            Some(&tp),
-            0,
-            None,
-            None,
-        ) {
+        if let Err(e) = AdjustTokenPrivileges(token_handle, false, Some(&tp), 0, None, None) {
             let _ = CloseHandle(token_handle);
             bail!("{}", tr!("AdjustTokenPrivileges 失败: {}", e));
         }
@@ -300,10 +304,13 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
         // 检查 GetLastError，AdjustTokenPrivileges 即使成功也可能设置错误码
         let last_error = GetLastError();
         let _ = CloseHandle(token_handle);
-        
+
         if last_error.0 != 0 && last_error.0 != 1300 {
             // 1300 = ERROR_NOT_ALL_ASSIGNED，表示部分权限未能分配，可以忽略
-            log::warn!("[SystemUtils] AdjustTokenPrivileges 警告: 错误码 {}", last_error.0);
+            log::warn!(
+                "[SystemUtils] AdjustTokenPrivileges 警告: 错误码 {}",
+                last_error.0
+            );
         }
     }
 
@@ -345,10 +352,10 @@ pub struct OfflineSystemInfo {
 }
 
 /// 从离线系统读取系统信息
-/// 
+///
 /// # 参数
 /// - `system_root`: 系统根目录 (如 "D:\\")
-/// 
+///
 /// # 返回
 /// - `OfflineSystemInfo`: 系统信息结构
 #[cfg(windows)]
@@ -365,7 +372,10 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
         .join("SOFTWARE");
 
     if !software_hive.exists() {
-        bail!("{}", tr!("SOFTWARE hive 不存在: {}", format!("{:?}", software_hive)));
+        bail!(
+            "{}",
+            tr!("SOFTWARE hive 不存在: {}", format!("{:?}", software_hive))
+        );
     }
 
     // 生成唯一的临时键名
@@ -377,7 +387,11 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
 
     // 加载 hive 到 HKEY_LOCAL_MACHINE
     let load_result = unsafe {
-        RegLoadKeyW(HKEY_LOCAL_MACHINE, PCWSTR(wide_key_name.as_ptr()), PCWSTR(wide_hive_path.as_ptr()))
+        RegLoadKeyW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(wide_key_name.as_ptr()),
+            PCWSTR(wide_hive_path.as_ptr()),
+        )
     };
 
     if load_result.0 != 0 {
@@ -402,10 +416,7 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
     };
 
     // 打开 CurrentVersion 键
-    let subkey_path = format!(
-        "{}\\Microsoft\\Windows NT\\CurrentVersion",
-        temp_key_name
-    );
+    let subkey_path = format!("{}\\Microsoft\\Windows NT\\CurrentVersion", temp_key_name);
     let wide_subkey = to_wide(&subkey_path);
 
     let mut hkey = HKEY::default();
@@ -444,10 +455,7 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
         if result.0 == 0 && (reg_type.0 == 1 || reg_type.0 == 2) {
             // REG_SZ (1) 或 REG_EXPAND_SZ (2)
             let wide_slice = unsafe {
-                std::slice::from_raw_parts(
-                    buffer.as_ptr() as *const u16,
-                    (size as usize) / 2,
-                )
+                std::slice::from_raw_parts(buffer.as_ptr() as *const u16, (size as usize) / 2)
             };
             Some(wide_to_string(wide_slice))
         } else {
@@ -464,7 +472,8 @@ pub fn get_offline_system_info(system_root: &str) -> Result<OfflineSystemInfo> {
         edition_id: read_reg_string(hkey, "EditionID").unwrap_or_default(),
         installation_type: read_reg_string(hkey, "InstallationType").unwrap_or_default(),
         registered_owner: read_reg_string(hkey, "RegisteredOwner").unwrap_or_default(),
-        registered_organization: read_reg_string(hkey, "RegisteredOrganization").unwrap_or_default(),
+        registered_organization: read_reg_string(hkey, "RegisteredOrganization")
+            .unwrap_or_default(),
         system_root: read_reg_string(hkey, "SystemRoot").unwrap_or_default(),
         path_name: read_reg_string(hkey, "PathName").unwrap_or_default(),
     };
@@ -486,17 +495,14 @@ pub fn get_offline_system_info(_system_root: &str) -> Result<OfflineSystemInfo> 
 /// 获取离线系统版本字符串（简化版）
 pub fn get_offline_system_edition(system_root: &str) -> Result<String> {
     let info = get_offline_system_info(system_root)?;
-    
+
     let version = if !info.display_version.is_empty() {
         format!(
             "{} {} (Build {})",
             info.product_name, info.display_version, info.current_build
         )
     } else {
-        format!(
-            "{} (Build {})",
-            info.product_name, info.current_build
-        )
+        format!("{} (Build {})", info.product_name, info.current_build)
     };
 
     Ok(version)
@@ -507,7 +513,7 @@ pub fn get_offline_system_edition(system_root: &str) -> Result<String> {
 // ============================================================================
 
 /// 清理组件存储（WinSxS）
-/// 
+///
 /// 使用 Task Scheduler 触发 StartComponentCleanup 任务
 /// 这是 Microsoft 推荐的清理方式
 #[cfg(windows)]
@@ -518,7 +524,11 @@ pub fn cleanup_component_store() -> Result<()> {
 
     // 方法1: 使用 schtasks.exe 触发已有任务
     let output = Command::new("schtasks.exe")
-        .args(["/Run", "/TN", "\\Microsoft\\Windows\\Servicing\\StartComponentCleanup"])
+        .args([
+            "/Run",
+            "/TN",
+            "\\Microsoft\\Windows\\Servicing\\StartComponentCleanup",
+        ])
         .output();
 
     match output {
@@ -554,7 +564,7 @@ pub fn cleanup_component_store() -> Result<()> {
 }
 
 /// 清理离线系统的组件存储
-/// 
+///
 /// 对于离线系统，清理以下临时目录：
 /// - Windows\WinSxS\Temp
 /// - Windows\Temp
@@ -567,7 +577,10 @@ pub fn cleanup_offline_component_store(system_root: &str) -> Result<()> {
         system_root_path.join("Windows").join("WinSxS").join("Temp"),
         system_root_path.join("Windows").join("Temp"),
         system_root_path.join("Windows").join("Prefetch"),
-        system_root_path.join("Windows").join("SoftwareDistribution").join("Download"),
+        system_root_path
+            .join("Windows")
+            .join("SoftwareDistribution")
+            .join("Download"),
     ];
 
     let mut cleaned_size: u64 = 0;
@@ -638,7 +651,7 @@ pub struct ComponentStoreAnalysis {
 }
 
 /// 分析组件存储
-/// 
+///
 /// 直接读取目录大小，而不是依赖 DISM
 pub fn analyze_component_store(system_root: &str) -> Result<ComponentStoreAnalysis> {
     let system_root_path = Path::new(system_root);
@@ -695,7 +708,7 @@ fn get_dir_size(path: &Path) -> Result<u64> {
 // ============================================================================
 
 /// 检查系统文件完整性
-/// 
+///
 /// 使用 SFC (System File Checker) 扫描
 #[cfg(windows)]
 pub fn check_system_files() -> Result<bool> {
@@ -703,12 +716,10 @@ pub fn check_system_files() -> Result<bool> {
 
     log::info!("[SystemUtils] 运行系统文件检查...");
 
-    let output = Command::new("sfc")
-        .args(["/scannow"])
-        .output()?;
+    let output = Command::new("sfc").args(["/scannow"]).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // 检查输出中是否包含 "did not find any integrity violations"
     let no_issues = stdout.contains("did not find any integrity violations")
         || stdout.contains("未发现完整性冲突")
@@ -723,7 +734,7 @@ pub fn check_system_files() -> Result<bool> {
 }
 
 /// 检查离线系统文件完整性
-/// 
+///
 /// 扫描离线系统的关键文件是否存在
 pub fn check_offline_system_files(system_root: &str) -> Result<bool> {
     let system_root_path = Path::new(system_root);

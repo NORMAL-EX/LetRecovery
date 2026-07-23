@@ -9,7 +9,9 @@ use anyhow::Result;
 
 use crate::tr;
 
-// 共享的驱动类型从 lr-core 再导出（调用方无需改动）。
+// 共享的驱动类型从 lr-core 再导出（调用方无需改动）。DriverInfo 当前仅作为
+// 兼容再导出保留，二进制内部暂未直接引用。
+#[allow(unused_imports)]
 pub use lr_core::driver::{DriverInfo, DriverManager};
 
 /// 离线驱动导入：优先使用 dism.exe，失败再回退到 lr-core 的传统方法。
@@ -32,7 +34,8 @@ pub fn import_drivers_offline_dism_first(
 
     log::info!(
         "[DriverManager] 使用 dism.exe 离线导入驱动: {:?} -> {:?}",
-        source_dir, offline_root
+        source_dir,
+        offline_root
     );
 
     // 规范化路径
@@ -40,8 +43,8 @@ pub fn import_drivers_offline_dism_first(
     let driver_path = source_dir.to_string_lossy();
 
     // 使用 dism.exe 命令行进行离线驱动注入
-    let dism_cmd = DismCmd::new()
-        .map_err(|e| anyhow::anyhow!("{}", tr!("DISM 命令行初始化失败: {}", e)))?;
+    let dism_cmd =
+        DismCmd::new().map_err(|e| anyhow::anyhow!("{}", tr!("DISM 命令行初始化失败: {}", e)))?;
 
     // 统计驱动文件数量。与基线行为一致：源目录非法（不存在/非目录）时在此处
     // 通过 ? 提前返回错误，不再继续尝试 dism（find_inf_files 对非目录会 bail!）。
@@ -50,17 +53,12 @@ pub fn import_drivers_offline_dism_first(
     // 使用智能导入（支持 INF 和 CAB）
     match dism_cmd.import_drivers_smart(&image_path, &driver_path, None) {
         Ok(_) => {
-            log::info!(
-                "[DriverManager] dism.exe 离线驱动导入成功"
-            );
+            log::info!("[DriverManager] dism.exe 离线驱动导入成功");
             // DISM 成功时假设所有驱动都导入成功
             Ok((inf_count.max(1), 0))
         }
         Err(e) => {
-            log::warn!(
-                "[DriverManager] dism.exe 导入失败: {}, 尝试备用方法",
-                e
-            );
+            log::warn!("[DriverManager] dism.exe 导入失败: {}, 尝试备用方法", e);
             // 回退到传统方法（lr-core 的 Windows API 实现）
             manager.import_drivers_offline(offline_root, source_dir)
         }
@@ -77,9 +75,5 @@ pub fn import_drivers_offline_dism_first(
 /// - (成功数, 失败数)
 pub fn import_drivers_offline(offline_root: &str, driver_path: &str) -> Result<(usize, usize)> {
     let manager = DriverManager::new()?;
-    import_drivers_offline_dism_first(
-        &manager,
-        Path::new(offline_root),
-        Path::new(driver_path),
-    )
+    import_drivers_offline_dism_first(&manager, Path::new(offline_root), Path::new(driver_path))
 }

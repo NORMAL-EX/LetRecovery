@@ -30,8 +30,8 @@ import {
   DialogClose,
 } from '@/components/ui/dialog'
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
-import { useLang, useT } from '@/lib/i18n'
-import Artplayer from 'artplayer'
+import { useLang, useT } from '@/lib/i18n-hooks'
+import type ArtplayerInstance from 'artplayer'
 
 const featureIcons = [Zap, Shield, Sparkles, Rocket, Gauge, BadgeCheck]
 
@@ -92,42 +92,54 @@ const Home: React.FC = () => {
   const t = useT()
   const { lang } = useLang()
   const artRef = useRef<HTMLDivElement>(null)
-  const playerRef = useRef<Artplayer | null>(null)
+  const playerRef = useRef<ArtplayerInstance | null>(null)
 
   useEffect(() => {
-    if (artRef.current && !playerRef.current) {
-      playerRef.current = new Artplayer({
-        container: artRef.current,
-        url: 'https://p1.cloud-pe.cn/LetRecovery.mp4',
-        poster: 'https://pic1.imgdb.cn/item/6a33aa9a91b65c4475abaa73.jpg',
-        volume: 0.5,
-        isLive: false,
-        muted: false,
-        autoplay: false,
-        pip: false,
-        autoSize: false,
-        autoMini: false,
-        screenshot: true,
-        setting: true,
-        loop: false,
-        flip: true,
-        playbackRate: true,
-        aspectRatio: true,
-        fullscreen: true,
-        fullscreenWeb: true,
-        subtitleOffset: true,
-        miniProgressBar: false,
-        mutex: true,
-        backdrop: true,
-        playsInline: true,
-        autoPlayback: true,
-        airplay: true,
-        theme: '#262626',
-        lang: lang === 'en' ? 'en' : 'zh-cn',
-      })
+    let cancelled = false
+    const container = artRef.current
+
+    if (container && !playerRef.current) {
+      void import('artplayer')
+        .then(({ default: Artplayer }) => {
+          if (cancelled || playerRef.current) return
+
+          playerRef.current = new Artplayer({
+            container,
+            url: 'https://p1.cloud-pe.cn/LetRecovery.mp4',
+            poster: 'https://pic1.imgdb.cn/item/6a33aa9a91b65c4475abaa73.jpg',
+            volume: 0.5,
+            isLive: false,
+            muted: false,
+            autoplay: false,
+            pip: false,
+            autoSize: false,
+            autoMini: false,
+            screenshot: true,
+            setting: true,
+            loop: false,
+            flip: true,
+            playbackRate: true,
+            aspectRatio: true,
+            fullscreen: true,
+            fullscreenWeb: true,
+            subtitleOffset: true,
+            miniProgressBar: false,
+            mutex: true,
+            backdrop: true,
+            playsInline: true,
+            autoPlayback: true,
+            airplay: true,
+            theme: '#262626',
+            lang: lang === 'en' ? 'en' : 'zh-cn',
+          })
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) console.error('Failed to load the demo player', error)
+        })
     }
 
     return () => {
+      cancelled = true
       if (playerRef.current) {
         playerRef.current.destroy()
         playerRef.current = null
@@ -164,9 +176,9 @@ const Home: React.FC = () => {
 
           {/* 产品截图 */}
           <div className="relative w-full">
-            <div className="overflow-hidden rounded-xl border bg-card bg-clip-padding shadow-xs dark:bg-clip-border">
+            <div className="overflow-hidden rounded-xl border bg-card bg-clip-padding shadow-xs dark:bg-clip-border" style={{borderRadius:'8px'}}>
               <ImageWithLoading
-                src="https://pic1.imgdb.cn/item/6a339a3591b65c4475ab67b2.png"
+                src="https://pic1.imgdb.cn/i/033qPBQZnTXGJuJeaS28Tb.png"
                 alt={t.home.screenshotAlt}
                 className="h-auto w-full"
                 wrapperClassName="w-full"

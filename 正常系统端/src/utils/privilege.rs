@@ -1,8 +1,6 @@
 use anyhow::Result;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::Security::{
-    GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// 检查当前进程是否具有管理员权限
@@ -49,12 +47,18 @@ pub fn restart_as_admin() -> Result<()> {
     // 无参数时为空字符串，行为与传 null 一致。
     let params: String = std::env::args()
         .skip(1)
-        .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a })
+        .map(|a| {
+            if a.contains(' ') {
+                format!("\"{}\"", a)
+            } else {
+                a
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ");
     let params_wide: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
 
-    unsafe {
+    let result = unsafe {
         ShellExecuteW(
             None,
             PCWSTR(operation.as_ptr()),
@@ -62,6 +66,15 @@ pub fn restart_as_admin() -> Result<()> {
             PCWSTR(params_wide.as_ptr()),
             PCWSTR::null(),
             SW_SHOWNORMAL,
+        )
+    };
+
+    // ShellExecuteW returns an HINSTANCE-compatible error code in the range 0..=32.
+    // Do not terminate the current process when elevation was cancelled or failed.
+    if result.0 as isize <= 32 {
+        anyhow::bail!(
+            "ShellExecuteW(runas) failed with code {}",
+            result.0 as isize
         );
     }
 

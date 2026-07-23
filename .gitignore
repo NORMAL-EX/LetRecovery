@@ -2,9 +2,6 @@
 /target
 **/target/
 
-# Cargo.lock 由 CI 重新生成，不纳入版本控制
-Cargo.lock
-
 # 临时 / 日志文件
 nlog.txt
 *.tmp
@@ -22,3 +19,22 @@ ghstwarn.txt
 Thumbs.db
 *.swp
 新建文本文档.bat
+
+# Local installer toolchain and build output
+/installer/output/
+/installer/tools/
+
+# QA screenshots
+qa_*.png
+qa-*.png
+native-ui-*.png
+
+# Build artifacts
+*.exe
+*.7z
+pkg/
+log/
+.cloudpe-work/
+
+# Local config
+config.json

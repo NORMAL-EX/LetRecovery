@@ -1,6 +1,6 @@
 import { Link, useLocation } from 'react-router-dom'
-import { type SidebarItem, isActiveLink } from '@/lib/docs'
-import { useT } from '@/lib/i18n'
+import { type SidebarItem, isActiveLink } from '@/lib/docs-navigation'
+import { useT } from '@/lib/i18n-hooks'
 import { cn } from '@/lib/utils'
 
 interface DocsSidebarProps {

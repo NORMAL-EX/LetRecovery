@@ -45,45 +45,55 @@ pub fn clear_account_password(target_partition: &str, username: &str) -> Result<
     let result = (|| -> Result<bool> {
         let users_key = "HKLM\\LR_SAM\\SAM\\Domains\\Account\\Users";
         let rids = list_user_rids(users_key)?;
-        let mut cleared = false;
+        let mut account_found = false;
 
         for rid in rids {
             let user_key = format!("{}\\{}", users_key, rid);
-            let v = match reg_read_binary(&user_key, "V") {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let name = match parse_v_username(&v) {
-                Some(n) => n,
-                None => continue,
-            };
+            let v = reg_read_binary(&user_key, "V").map_err(|error| {
+                anyhow::anyhow!("failed to read SAM V data for RID {rid}: {error}")
+            })?;
+            let name = parse_v_username(&v).ok_or_else(|| {
+                anyhow::anyhow!("invalid SAM V data for RID {rid}; password reset stopped")
+            })?;
             if !name.eq_ignore_ascii_case(username) {
                 continue;
             }
+            account_found = true;
 
             // 清空 NT/LM hash 长度（等效空密码）
             let mut patched = v.clone();
             if blank_v_password(&mut patched) {
                 reg_write_binary(&user_key, "V", &patched)?;
                 log::info!("[SAM] 已清除账户 [{}] (RID {}) 的密码", name, rid);
-                cleared = true;
             } else {
                 log::info!("[SAM] 账户 [{}] 已是空密码，无需清除", name);
             }
 
             // 顺带启用被禁用的账户（清除 F 结构中的 ACB_DISABLED 位）
-            if let Ok(f) = reg_read_binary(&user_key, "F") {
-                if let Some(new_f) = enable_account_f(&f) {
-                    if reg_write_binary(&user_key, "F", &new_f).is_ok() {
-                        log::info!("[SAM] 已启用账户 [{}]", name);
-                    }
-                }
+            let f = reg_read_binary(&user_key, "F").map_err(|error| {
+                anyhow::anyhow!("failed to read SAM F data for {name}: {error}")
+            })?;
+            if let Some(new_f) = enable_account_f(&f) {
+                reg_write_binary(&user_key, "F", &new_f).map_err(|error| {
+                    anyhow::anyhow!("failed to enable SAM account {name}: {error}")
+                })?;
+                log::info!("[SAM] 已启用账户 [{}]", name);
             }
+            break;
         }
-        Ok(cleared)
+        Ok(account_found)
     })();
 
-    let _ = OfflineRegistry::unload_hive("LR_SAM");
+    let unload_result = OfflineRegistry::unload_hive("LR_SAM")
+        .map_err(|error| anyhow::anyhow!("failed to unload SAM hive: {error}"));
+    let result = match (result, unload_result) {
+        (Err(operation), Err(unload)) => Err(anyhow::anyhow!(
+            "SAM operation failed: {operation}; additionally, {unload}"
+        )),
+        (Err(operation), Ok(())) => Err(operation),
+        (Ok(_), Err(unload)) => Err(unload),
+        (Ok(found), Ok(())) => Ok(found),
+    };
 
     if let Ok(false) = &result {
         log::info!("[SAM] 未找到匹配账户 [{}]，SAM 未改动", username);
@@ -133,27 +143,43 @@ pub fn list_accounts(target_partition: &str) -> Result<Vec<SamAccount>> {
         let mut accounts = Vec::new();
         for rid in rids {
             let user_key = format!("{}\\{}", users_key, rid);
-            let v = match reg_read_binary(&user_key, "V") {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let name = match parse_v_username(&v) {
-                Some(n) if !n.is_empty() => n,
-                _ => continue,
-            };
+            let v = reg_read_binary(&user_key, "V").map_err(|error| {
+                anyhow::anyhow!("failed to read SAM V data for RID {rid}: {error}")
+            })?;
+            let name = parse_v_username(&v).ok_or_else(|| {
+                anyhow::anyhow!("invalid SAM V data for RID {rid}; enumeration stopped")
+            })?;
+            if name.is_empty() {
+                anyhow::bail!("SAM account name is empty for RID {rid}");
+            }
             // 读取 F 结构判断账户是否被禁用（偏移 0x38 处 USHORT 标志位）。
-            let disabled = reg_read_binary(&user_key, "F")
-                .ok()
-                .and_then(|f| f.get(0x38..0x3a).map(|s| u16::from_le_bytes([s[0], s[1]])))
-                .map(|flags| flags & 0x0001 != 0)
-                .unwrap_or(false);
-            accounts.push(SamAccount { username: name, rid, disabled });
+            let f = reg_read_binary(&user_key, "F").map_err(|error| {
+                anyhow::anyhow!("failed to read SAM F data for {name}: {error}")
+            })?;
+            let flags = f
+                .get(0x38..0x3a)
+                .map(|slice| u16::from_le_bytes([slice[0], slice[1]]))
+                .ok_or_else(|| anyhow::anyhow!("invalid SAM F data for {name}"))?;
+            let disabled = flags & 0x0001 != 0;
+            accounts.push(SamAccount {
+                username: name,
+                rid,
+                disabled,
+            });
         }
         Ok(accounts)
     })();
 
-    let _ = OfflineRegistry::unload_hive("LR_SAM_RO");
-    result
+    let unload_result = OfflineRegistry::unload_hive("LR_SAM_RO")
+        .map_err(|error| anyhow::anyhow!("failed to unload read-only SAM hive: {error}"));
+    match (result, unload_result) {
+        (Err(operation), Err(unload)) => Err(anyhow::anyhow!(
+            "SAM enumeration failed: {operation}; additionally, {unload}"
+        )),
+        (Err(operation), Ok(())) => Err(operation),
+        (Ok(_), Err(unload)) => Err(unload),
+        (Ok(accounts), Ok(())) => Ok(accounts),
+    }
 }
 
 /// 枚举 `Users` 键下的用户 RID 子键（8 位十六进制，如 000001F4）。
@@ -196,7 +222,17 @@ fn reg_read_binary(key: &str, value: &str) -> Result<Vec<u8>> {
 fn reg_write_binary(key: &str, value: &str, data: &[u8]) -> Result<()> {
     let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
     let out = new_command("reg.exe")
-        .args(["add", key, "/v", value, "/t", "REG_BINARY", "/d", &hex, "/f"])
+        .args([
+            "add",
+            key,
+            "/v",
+            value,
+            "/t",
+            "REG_BINARY",
+            "/d",
+            &hex,
+            "/f",
+        ])
         .output()?;
     if !out.status.success() {
         anyhow::bail!("reg add 失败: {}", gbk_to_utf8(&out.stderr));
@@ -206,7 +242,7 @@ fn reg_write_binary(key: &str, value: &str, data: &[u8]) -> Result<()> {
 
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
     let hex: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         anyhow::bail!("十六进制长度异常");
     }
     let val = |c: u8| (c as char).to_digit(16).unwrap() as u8;
@@ -283,7 +319,10 @@ mod tests {
 
     /// 合成一个最小可解析的 SAM "V" 结构。
     fn build_v(username: &str, uoff: u32, lm_len: u32, nt_len: u32) -> Vec<u8> {
-        let uname: Vec<u8> = username.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let uname: Vec<u8> = username
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
         let data_start = 0xcc + uoff as usize;
         let mut v = vec![0u8; data_start + uname.len()];
         v[0x0c..0x10].copy_from_slice(&uoff.to_le_bytes());
@@ -302,8 +341,14 @@ mod tests {
 
     #[test]
     fn hex_to_bytes_works() {
-        assert_eq!(hex_to_bytes("dEadBeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(hex_to_bytes("de ad\tbe ef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            hex_to_bytes("dEadBeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+        assert_eq!(
+            hex_to_bytes("de ad\tbe ef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
         assert!(hex_to_bytes("abc").is_err());
         assert_eq!(hex_to_bytes("").unwrap(), Vec::<u8>::new());
     }
@@ -321,7 +366,10 @@ mod tests {
             parse_v_username(&build_v("Administrator", 0, 16, 16)).as_deref(),
             Some("Administrator")
         );
-        assert_eq!(parse_v_username(&build_v("用户A", 8, 16, 16)).as_deref(), Some("用户A"));
+        assert_eq!(
+            parse_v_username(&build_v("用户A", 8, 16, 16)).as_deref(),
+            Some("用户A")
+        );
     }
 
     #[test]
@@ -346,7 +394,7 @@ mod tests {
     fn blank_v_password_noop_cases() {
         let mut v = build_v("u", 0, 0, 0);
         assert!(!blank_v_password(&mut v));
-        assert!(!blank_v_password(&mut vec![0u8; 0x80]));
+        assert!(!blank_v_password(&mut [0u8; 0x80]));
     }
 
     #[test]

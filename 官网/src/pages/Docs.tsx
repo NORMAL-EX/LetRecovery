@@ -1,10 +1,21 @@
-import { Navigate, useLocation } from 'react-router-dom'
+import { BookOpen, FileQuestion } from 'lucide-react'
+import { Link, Navigate, useLocation } from 'react-router-dom'
 import { Card, CardFrame, CardPanel } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty'
 import DocsSidebar from '@/components/docs/DocsSidebar'
 import DocsOutline from '@/components/docs/DocsOutline'
 import DocContent from '@/components/docs/DocContent'
-import { getDocPage, getSidebar, firstDocLink } from '@/lib/docs'
-import { useLang, useT } from '@/lib/i18n'
+import { getDocPage } from '@/lib/docs'
+import { firstDocLink, getSidebar } from '@/lib/docs-navigation'
+import { useLang, useT } from '@/lib/i18n-hooks'
 
 const Docs: React.FC = () => {
   const { pathname } = useLocation()
@@ -20,9 +31,22 @@ const Docs: React.FC = () => {
 
   if (!page) {
     return (
-      <div className="mx-auto max-w-[1416px] px-6 py-24 text-center">
-        <h1 className="font-heading text-3xl font-semibold">{t.docs.notFound}</h1>
-        <p className="mt-3 text-muted-foreground">{t.docs.notFoundDesc}</p>
+      <div className="mx-auto flex min-h-[calc(100svh-var(--header-height))] w-full max-w-[1416px] px-6 py-12">
+        <Empty>
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <FileQuestion />
+            </EmptyMedia>
+            <EmptyTitle>{t.docs.notFound}</EmptyTitle>
+            <EmptyDescription>{t.docs.notFoundDesc}</EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Button render={<Link to={firstDocLink} />}>
+              <BookOpen className="size-4" />
+              {t.docs.backToDocs}
+            </Button>
+          </EmptyContent>
+        </Empty>
       </div>
     )
   }

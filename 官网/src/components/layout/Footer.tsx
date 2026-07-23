@@ -1,6 +1,6 @@
 import { useLocation } from 'react-router-dom'
 import { CornerMarks } from './Frame'
-import { useT } from '@/lib/i18n'
+import { useT } from '@/lib/i18n-hooks'
 
 const friendLinks = [
   { name: 'Cloud-PE 官网', url: 'https://cloud-pe.cn' },

@@ -7,6 +7,14 @@ pub struct OnlineSystem {
     pub download_url: String,
     pub display_name: String,
     pub is_win11: bool,
+    /// 服务端建议的保存文件名；旧目录可以省略。
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// 可选完整性信息。SHA-256 存在时优先，MD5 仅用于旧目录兼容。
+    #[serde(default)]
+    pub md5: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// 在线 PE 信息
@@ -18,6 +26,9 @@ pub struct OnlinePE {
     /// MD5校验值（可选）
     #[serde(default)]
     pub md5: Option<String>,
+    /// Optional SHA-256 checksum. Preferred over MD5 when present.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// 本地缓存的PE配置（不含下载链接）
@@ -28,6 +39,8 @@ pub struct CachedPE {
     /// MD5校验值（可选）
     #[serde(default)]
     pub md5: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 impl From<&OnlinePE> for CachedPE {
@@ -36,6 +49,7 @@ impl From<&OnlinePE> for CachedPE {
             display_name: pe.display_name.clone(),
             filename: pe.filename.clone(),
             md5: pe.md5.clone(),
+            sha256: pe.sha256.clone(),
         }
     }
 }
@@ -48,6 +62,7 @@ impl CachedPE {
             display_name: self.display_name.clone(),
             filename: self.filename.clone(),
             md5: self.md5.clone(),
+            sha256: self.sha256.clone(),
         }
     }
 }
@@ -84,15 +99,12 @@ impl PeCache {
             return None;
         }
 
-        let pe_list: Vec<OnlinePE> = cache.pe_list
-            .iter()
-            .map(|c| c.to_online_pe())
-            .collect();
+        let pe_list: Vec<OnlinePE> = cache.pe_list.iter().map(|c| c.to_online_pe()).collect();
 
         log::info!("从 config.json 加载PE配置，共 {} 项", pe_list.len());
         Some(pe_list)
     }
-    
+
     /// 检查是否有本地PE可用（已下载过）
     pub fn has_downloaded_pe(filename: &str) -> bool {
         let (exists, _) = crate::core::pe::PeManager::check_pe_exists(filename);
@@ -124,6 +136,18 @@ pub struct OnlineSoftware {
     pub download_url_nt5: Option<String>,
     /// 文件名
     pub filename: String,
+    #[serde(default)]
+    pub md5: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub md5_x86: Option<String>,
+    #[serde(default)]
+    pub sha256_x86: Option<String>,
+    #[serde(default)]
+    pub md5_nt5: Option<String>,
+    #[serde(default)]
+    pub sha256_nt5: Option<String>,
 }
 
 /// 软件列表JSON格式
@@ -150,6 +174,10 @@ pub struct OnlineGpuDriver {
     pub download_url: String,
     /// 文件名
     pub filename: String,
+    #[serde(default)]
+    pub md5: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// GPU驱动列表JSON格式
@@ -199,85 +227,96 @@ impl ConfigManager {
             Vec::new()
         };
 
-        Ok(Self { systems, pe_list, software_list: Vec::new(), gpu_driver_list: Vec::new(), easy_mode_config: None })
+        Ok(Self {
+            systems,
+            pe_list,
+            software_list: Vec::new(),
+            gpu_driver_list: Vec::new(),
+            easy_mode_config: None,
+        })
     }
-    
+
     /// 从远程配置内容加载
-    /// 
+    ///
     /// # Arguments
     /// * `dl_content` - 系统镜像列表内容
     /// * `pe_content` - PE 列表内容
     pub fn load_from_content(dl_content: Option<&str>, pe_content: Option<&str>) -> Self {
-        let systems = dl_content
-            .map(|c| Self::parse_system_list(c))
-            .unwrap_or_default();
-        
-        let pe_list = pe_content
-            .map(|c| Self::parse_pe_list(c))
-            .unwrap_or_default();
-        
-        Self { systems, pe_list, software_list: Vec::new(), gpu_driver_list: Vec::new(), easy_mode_config: None }
+        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
+
+        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
+
+        Self {
+            systems,
+            pe_list,
+            software_list: Vec::new(),
+            gpu_driver_list: Vec::new(),
+            easy_mode_config: None,
+        }
     }
-    
+
     /// 从远程配置内容加载（包含软件列表）
-    /// 
+    ///
     /// # Arguments
     /// * `dl_content` - 系统镜像列表内容
     /// * `pe_content` - PE 列表内容
     /// * `soft_content` - 软件列表内容（JSON格式）
     pub fn load_from_content_with_soft(
-        dl_content: Option<&str>, 
+        dl_content: Option<&str>,
         pe_content: Option<&str>,
         soft_content: Option<&str>,
     ) -> Self {
-        let systems = dl_content
-            .map(|c| Self::parse_system_list(c))
-            .unwrap_or_default();
-        
-        let pe_list = pe_content
-            .map(|c| Self::parse_pe_list(c))
-            .unwrap_or_default();
-        
+        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
+
+        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
+
         let software_list = soft_content
-            .map(|c| Self::parse_software_list(c))
+            .map(Self::parse_software_list)
             .unwrap_or_default();
-        
-        Self { systems, pe_list, software_list, gpu_driver_list: Vec::new(), easy_mode_config: None }
+
+        Self {
+            systems,
+            pe_list,
+            software_list,
+            gpu_driver_list: Vec::new(),
+            easy_mode_config: None,
+        }
     }
-    
+
     /// 从远程配置内容加载（完整版，包含所有配置）
-    /// 
+    ///
     /// # Arguments
     /// * `dl_content` - 系统镜像列表内容
     /// * `pe_content` - PE 列表内容
     /// * `soft_content` - 软件列表内容（JSON格式）
     /// * `easy_content` - 小白模式配置内容（JSON格式）
     pub fn load_from_content_full(
-        dl_content: Option<&str>, 
+        dl_content: Option<&str>,
         pe_content: Option<&str>,
         soft_content: Option<&str>,
         easy_content: Option<&str>,
     ) -> Self {
-        let systems = dl_content
-            .map(|c| Self::parse_system_list(c))
-            .unwrap_or_default();
-        
-        let pe_list = pe_content
-            .map(|c| Self::parse_pe_list(c))
-            .unwrap_or_default();
-        
+        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
+
+        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
+
         let software_list = soft_content
-            .map(|c| Self::parse_software_list(c))
+            .map(Self::parse_software_list)
             .unwrap_or_default();
-        
-        let easy_mode_config = easy_content
-            .and_then(|c| EasyModeConfig::parse(c));
-        
-        Self { systems, pe_list, software_list, gpu_driver_list: Vec::new(), easy_mode_config }
+
+        let easy_mode_config = easy_content.and_then(EasyModeConfig::parse);
+
+        Self {
+            systems,
+            pe_list,
+            software_list,
+            gpu_driver_list: Vec::new(),
+            easy_mode_config,
+        }
     }
-    
+
     /// 从远程配置内容加载（完整版+GPU驱动，包含所有配置）
-    /// 
+    ///
     /// # Arguments
     /// * `dl_content` - 系统镜像列表内容
     /// * `pe_content` - PE 列表内容
@@ -285,37 +324,42 @@ impl ConfigManager {
     /// * `easy_content` - 小白模式配置内容（JSON格式）
     /// * `gpu_content` - GPU驱动列表内容（JSON格式）
     pub fn load_from_content_full_with_gpu(
-        dl_content: Option<&str>, 
+        dl_content: Option<&str>,
         pe_content: Option<&str>,
         soft_content: Option<&str>,
         easy_content: Option<&str>,
         gpu_content: Option<&str>,
     ) -> Self {
-        let systems = dl_content
-            .map(|c| Self::parse_system_list(c))
-            .unwrap_or_default();
-        
-        let pe_list = pe_content
-            .map(|c| Self::parse_pe_list(c))
-            .unwrap_or_default();
-        
+        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
+
+        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
+
         let software_list = soft_content
-            .map(|c| Self::parse_software_list(c))
+            .map(Self::parse_software_list)
             .unwrap_or_default();
-        
-        let easy_mode_config = easy_content
-            .and_then(|c| EasyModeConfig::parse(c));
-        
+
+        let easy_mode_config = easy_content.and_then(EasyModeConfig::parse);
+
         let gpu_driver_list = gpu_content
-            .map(|c| Self::parse_gpu_driver_list(c))
+            .map(Self::parse_gpu_driver_list)
             .unwrap_or_default();
-        
-        Self { systems, pe_list, software_list, gpu_driver_list, easy_mode_config }
+
+        Self {
+            systems,
+            pe_list,
+            software_list,
+            gpu_driver_list,
+            easy_mode_config,
+        }
     }
 
     /// 解析系统列表
-    /// 格式: URL,显示名称,Win11/Win10
+    /// v3 使用 JSON 数组；v2 继续兼容 URL,显示名称,Win11/Win10 文本。
     pub fn parse_system_list(content: &str) -> Vec<OnlineSystem> {
+        if let Ok(systems) = serde_json::from_str::<Vec<OnlineSystem>>(content) {
+            return systems;
+        }
+
         content
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
@@ -326,12 +370,18 @@ impl ConfigManager {
                         download_url: parts[0].trim().to_string(),
                         display_name: parts[1].trim().to_string(),
                         is_win11: parts[2].trim().eq_ignore_ascii_case("Win11"),
+                        filename: None,
+                        md5: None,
+                        sha256: None,
                     })
                 } else if parts.len() >= 2 {
                     Some(OnlineSystem {
                         download_url: parts[0].trim().to_string(),
                         display_name: parts[1].trim().to_string(),
                         is_win11: parts[1].to_lowercase().contains("11"),
+                        filename: None,
+                        md5: None,
+                        sha256: None,
                     })
                 } else {
                     None
@@ -341,8 +391,12 @@ impl ConfigManager {
     }
 
     /// 解析 PE 列表
-    /// 格式: URL,显示名称,文件名[,MD5]
+    /// v3 使用 JSON 数组；v2 继续兼容 URL,显示名称,文件名[,MD5[,SHA256]] 文本。
     pub fn parse_pe_list(content: &str) -> Vec<OnlinePE> {
+        if let Ok(pe_list) = serde_json::from_str::<Vec<OnlinePE>>(content) {
+            return pe_list;
+        }
+
         content
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
@@ -356,11 +410,16 @@ impl ConfigManager {
                     } else {
                         Some(md5_str.to_uppercase())
                     };
+                    let sha256 = parts.get(4).and_then(|value| {
+                        let value = value.trim();
+                        (!value.is_empty()).then(|| value.to_uppercase())
+                    });
                     Some(OnlinePE {
                         download_url: parts[0].trim().to_string(),
                         display_name: parts[1].trim().to_string(),
                         filename: parts[2].trim().to_string(),
                         md5,
+                        sha256,
                     })
                 } else if parts.len() >= 3 {
                     Some(OnlinePE {
@@ -368,15 +427,17 @@ impl ConfigManager {
                         display_name: parts[1].trim().to_string(),
                         filename: parts[2].trim().to_string(),
                         md5: None,
+                        sha256: None,
                     })
                 } else if parts.len() >= 2 {
                     let url = parts[0].trim();
-                    let filename = url.split('/').last().unwrap_or("pe.wim").to_string();
+                    let filename = url.split('/').next_back().unwrap_or("pe.wim").to_string();
                     Some(OnlinePE {
                         download_url: url.to_string(),
                         display_name: parts[1].trim().to_string(),
                         filename,
                         md5: None,
+                        sha256: None,
                     })
                 } else {
                     None
@@ -384,7 +445,7 @@ impl ConfigManager {
             })
             .collect()
     }
-    
+
     /// 解析软件列表（JSON格式）
     pub fn parse_software_list(content: &str) -> Vec<OnlineSoftware> {
         match serde_json::from_str::<SoftwareList>(content) {
@@ -395,7 +456,7 @@ impl ConfigManager {
             }
         }
     }
-    
+
     /// 解析GPU驱动列表（JSON格式）
     pub fn parse_gpu_driver_list(content: &str) -> Vec<OnlineGpuDriver> {
         match serde_json::from_str::<GpuDriverList>(content) {
@@ -411,12 +472,12 @@ impl ConfigManager {
     pub fn is_empty(&self) -> bool {
         self.systems.is_empty() && self.pe_list.is_empty()
     }
-    
+
     /// 检查软件列表是否为空
     pub fn has_software(&self) -> bool {
         !self.software_list.is_empty()
     }
-    
+
     /// 检查GPU驱动列表是否为空
     pub fn has_gpu_drivers(&self) -> bool {
         !self.gpu_driver_list.is_empty()
@@ -464,14 +525,46 @@ impl EasyModeConfig {
             }
         }
     }
-    
+
     /// 获取所有系统（展平为Vec）
     pub fn get_systems(&self) -> Vec<(String, EasyModeSystem)> {
         self.system
             .iter()
-            .flat_map(|map| {
-                map.iter().map(|(name, sys)| (name.clone(), sys.clone()))
-            })
+            .flat_map(|map| map.iter().map(|(name, sys)| (name.clone(), sys.clone())))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigManager;
+
+    const MD5: &str = "900150983CD24FB0D6963F7D28E17F72";
+    const SHA256: &str = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+
+    #[test]
+    fn legacy_pe_metadata_keeps_md5_compatibility() {
+        let input = format!("https://example.com/pe.wim,PE,pe.wim,{MD5}");
+        let parsed = ConfigManager::parse_pe_list(&input);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].md5.as_deref(), Some(MD5));
+        assert_eq!(parsed[0].sha256, None);
+    }
+
+    #[test]
+    fn pe_metadata_accepts_optional_sha256_fifth_field() {
+        let input = format!("https://example.com/pe.wim,PE,pe.wim,{MD5},{SHA256}");
+        let parsed = ConfigManager::parse_pe_list(&input);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].md5.as_deref(), Some(MD5));
+        assert_eq!(parsed[0].sha256.as_deref(), Some(SHA256));
+    }
+
+    #[test]
+    fn empty_checksum_fields_remain_missing() {
+        let parsed = ConfigManager::parse_pe_list("https://example.com/pe.wim,PE,pe.wim,,");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].md5, None);
+        assert_eq!(parsed[0].sha256, None);
     }
 }

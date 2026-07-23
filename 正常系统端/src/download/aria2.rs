@@ -16,6 +16,25 @@ use crate::tr;
 use crate::utils::cmd::create_command;
 use crate::utils::path::get_bin_dir;
 
+fn generate_rpc_secret() -> Result<String> {
+    use windows::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_ALG_HANDLE, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+
+    let mut bytes = [0u8; 32];
+    let status = unsafe {
+        BCryptGenRandom(
+            BCRYPT_ALG_HANDLE::default(),
+            &mut bytes,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status.is_err() {
+        anyhow::bail!("BCryptGenRandom failed: 0x{:08X}", status.0 as u32);
+    }
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// 全局aria2管理器（延迟初始化）
 static GLOBAL_ARIA2: OnceLock<Arc<TokioMutex<Option<Aria2Manager>>>> = OnceLock::new();
 
@@ -42,15 +61,25 @@ pub enum DownloadStatus {
     Error(String),
 }
 
+fn aria2_connection_args(download_threads: u8) -> [String; 2] {
+    let split = crate::core::app_config::normalize_download_threads(download_threads);
+    let per_server = split.min(16);
+    [
+        format!("--split={split}"),
+        format!("--max-connection-per-server={per_server}"),
+    ]
+}
+
 /// aria2 下载管理器
 pub struct Aria2Manager {
     client: Option<Arc<aria2_ws::Client>>,
     aria2_process: Option<Child>,
+    download_threads: u8,
 }
 
 impl Aria2Manager {
     /// 预热aria2（在后台启动进程并建立连接）
-    /// 
+    ///
     /// 可以在应用启动时或用户选择PE时调用，提前准备好aria2
     pub async fn warmup() -> Result<()> {
         if ARIA2_WARMED_UP.load(Ordering::SeqCst) {
@@ -59,19 +88,19 @@ impl Aria2Manager {
         }
 
         log::info!("[aria2] 开始预热...");
-        
+
         // 获取或创建全局管理器
         let global = GLOBAL_ARIA2.get_or_init(|| Arc::new(TokioMutex::new(None)));
         let mut guard = global.lock().await;
-        
+
         if guard.is_some() {
             log::info!("[aria2] 全局管理器已存在");
             ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
             return Ok(());
         }
-        
+
         // 启动新的管理器
-        match Self::start_internal().await {
+        match Self::start_internal(16).await {
             Ok(manager) => {
                 *guard = Some(manager);
                 ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
@@ -88,22 +117,24 @@ impl Aria2Manager {
     /// 获取全局aria2管理器（如果已预热）或创建新的
     pub async fn get_or_start() -> Result<Arc<TokioMutex<Option<Aria2Manager>>>> {
         let global = GLOBAL_ARIA2.get_or_init(|| Arc::new(TokioMutex::new(None)));
-        
+
         {
             let mut guard = global.lock().await;
             if guard.is_none() {
                 log::info!("[aria2] 全局管理器不存在，正在创建...");
-                let manager = Self::start_internal().await?;
+                let manager = Self::start_internal(16).await?;
                 *guard = Some(manager);
                 ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
             }
         }
-        
+
         Ok(Arc::clone(global))
     }
 
     /// 内部启动方法
-    async fn start_internal() -> Result<Self> {
+    async fn start_internal(download_threads: u8) -> Result<Self> {
+        let download_threads =
+            crate::core::app_config::normalize_download_threads(download_threads);
         let bin_dir = get_bin_dir();
         let aria2c_path = bin_dir.join("aria2c.exe");
 
@@ -113,23 +144,26 @@ impl Aria2Manager {
 
         log::info!("[aria2] 正在启动 aria2c 进程...");
         let start_time = std::time::Instant::now();
+        let rpc_secret = generate_rpc_secret()?;
+        let rpc_secret_arg = format!("--rpc-secret={rpc_secret}");
 
         // 启动 aria2c 进程，启用 RPC
+        let connection_args = aria2_connection_args(download_threads);
         let process = create_command(&aria2c_path)
             .args([
                 "--daemon=true",
                 "--enable-rpc=true",
                 "--rpc-listen-port=6800",
-                "--rpc-allow-origin-all=true",
+                "--rpc-listen-all=false",
                 "--max-concurrent-downloads=5",
-                "--split=32",
-                "--max-connection-per-server=16",
                 "--min-split-size=1M",
                 "--file-allocation=none",
                 "--continue=true",
                 "--auto-file-renaming=false",
                 "--allow-overwrite=true",
             ])
+            .arg(&rpc_secret_arg)
+            .args(&connection_args)
             .spawn()?;
 
         log::info!("[aria2] aria2c 进程已启动，正在等待 RPC 服务就绪...");
@@ -143,11 +177,16 @@ impl Aria2Manager {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         for i in 0..20 {
-            match aria2_ws::Client::connect("ws://127.0.0.1:6800/jsonrpc", None).await {
+            match aria2_ws::Client::connect("ws://127.0.0.1:6800/jsonrpc", Some(&rpc_secret)).await
+            {
                 Ok(c) => {
                     client = Some(c);
                     let elapsed = start_time.elapsed();
-                    log::info!("[aria2] RPC 连接成功 (第 {} 次尝试)，总耗时: {:?}", i + 1, elapsed);
+                    log::info!(
+                        "[aria2] RPC 连接成功 (第 {} 次尝试)，总耗时: {:?}",
+                        i + 1,
+                        elapsed
+                    );
                     break;
                 }
                 Err(e) => {
@@ -163,19 +202,24 @@ impl Aria2Manager {
             }
         }
 
-        let client = client.ok_or_else(|| {
-            anyhow::anyhow!("{}", tr!("初始化aria2失败: {}", last_error))
-        })?;
+        let client =
+            client.ok_or_else(|| anyhow::anyhow!("{}", tr!("初始化aria2失败: {}", last_error)))?;
 
         Ok(Self {
             client: Some(Arc::new(client)),
             aria2_process: Some(process),
+            download_threads,
         })
     }
 
     /// 启动 aria2c 进程并连接（公开接口，向后兼容）
     pub async fn start() -> Result<Self> {
-        Self::start_internal().await
+        Self::start_with_download_threads(16).await
+    }
+
+    /// Starts an independent aria2 process using the configured per-file connection count.
+    pub async fn start_with_download_threads(download_threads: u8) -> Result<Self> {
+        Self::start_internal(download_threads).await
     }
 
     /// 添加下载任务
@@ -185,7 +229,8 @@ impl Aria2Manager {
         save_dir: &str,
         filename: Option<&str>,
     ) -> Result<String> {
-        self.add_download_with_headers(url, save_dir, filename, None).await
+        self.add_download_with_headers(url, save_dir, filename, None)
+            .await
     }
 
     /// 添加下载任务（支持自定义headers）
@@ -201,10 +246,12 @@ impl Aria2Manager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("aria2 client not connected"))?;
 
-        let mut options = aria2_ws::TaskOptions::default();
-        options.dir = Some(save_dir.to_string());
-        options.split = Some(32);
-        options.max_connection_per_server = Some(16);
+        let mut options = aria2_ws::TaskOptions {
+            dir: Some(save_dir.to_string()),
+            split: Some(self.download_threads as i32),
+            max_connection_per_server: Some(self.download_threads.min(16) as i32),
+            ..aria2_ws::TaskOptions::default()
+        };
 
         if let Some(name) = filename {
             options.out = Some(name.to_string());
@@ -240,12 +287,10 @@ impl Aria2Manager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("aria2 client not connected"))?;
 
-        let status = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.tell_status(gid),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("{}", tr!("查询下载状态超时")))??;
+        let status =
+            tokio::time::timeout(std::time::Duration::from_secs(10), client.tell_status(gid))
+                .await
+                .map_err(|_| anyhow::anyhow!("{}", tr!("查询下载状态超时")))??;
 
         let completed = status.completed_length;
         let total = status.total_length;
@@ -343,5 +388,26 @@ pub async fn cleanup_global_aria2() {
             let _ = manager.shutdown().await;
         }
         ARIA2_WARMED_UP.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aria2_arguments_use_the_selected_supported_thread_count() {
+        assert_eq!(
+            aria2_connection_args(8),
+            ["--split=8", "--max-connection-per-server=8"]
+        );
+        assert_eq!(
+            aria2_connection_args(99),
+            ["--split=32", "--max-connection-per-server=16"]
+        );
+        assert_eq!(
+            aria2_connection_args(16),
+            ["--split=16", "--max-connection-per-server=16"]
+        );
     }
 }

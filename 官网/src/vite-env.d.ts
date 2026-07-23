@@ -16,6 +16,6 @@ declare module '*.md' {
 export {}
 
 declare global {
-  // 由 vite.config.ts 的 define 在构建期注入（编译日期版本号，如 "v2026.06.15"）
+  // 由 vite.config.ts 从官网/version.json 读取并在构建期注入。
   const __APP_VERSION__: string
 }

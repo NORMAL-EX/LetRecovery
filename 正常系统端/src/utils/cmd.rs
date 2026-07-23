@@ -1,32 +1,22 @@
-use std::process::{Command, Output, Child, Stdio};
 use std::ffi::OsStr;
+use std::process::{Child, Command, Output, Stdio};
 
 use crate::utils::encoding::gbk_to_utf8;
 
-/// Windows CREATE_NO_WINDOW 标志
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 /// 创建一个配置好的 Command，在 Windows 上隐藏控制台窗口
 pub fn create_command<S: AsRef<OsStr>>(program: S) -> Command {
-    let mut cmd = Command::new(program);
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    cmd
+    lr_core::command::new_command(program)
 }
 
 /// 执行命令并在 debug 模式下输出调试信息
 pub fn run_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Result<Output> {
-    let program_str = program.as_ref().to_string_lossy();
-
     #[cfg(debug_assertions)]
     {
-        log::debug!("[CMD] {} {}", program_str, args.join(" "));
+        log::debug!(
+            "[CMD] {} {}",
+            program.as_ref().to_string_lossy(),
+            args.join(" ")
+        );
     }
 
     let output = create_command(program).args(args).output()?;
@@ -51,11 +41,13 @@ pub fn run_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Resul
 
 /// 执行命令并spawn（不等待结果）
 pub fn spawn_command<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Result<Child> {
-    let program_str = program.as_ref().to_string_lossy();
-
     #[cfg(debug_assertions)]
     {
-        log::debug!("[SPAWN] {} {}", program_str, args.join(" "));
+        log::debug!(
+            "[SPAWN] {} {}",
+            program.as_ref().to_string_lossy(),
+            args.join(" ")
+        );
     }
 
     create_command(program).args(args).spawn()
@@ -68,12 +60,17 @@ pub fn run_command_string<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io
 }
 
 /// 执行命令并返回 stdout 字符串（带自定义参数的版本）
-pub fn run_command_with_args<S: AsRef<OsStr>>(program: S, args: Vec<String>) -> std::io::Result<Output> {
-    let program_str = program.as_ref().to_string_lossy();
-
+pub fn run_command_with_args<S: AsRef<OsStr>>(
+    program: S,
+    args: Vec<String>,
+) -> std::io::Result<Output> {
     #[cfg(debug_assertions)]
     {
-        log::debug!("[CMD] {} {}", program_str, args.join(" "));
+        log::debug!(
+            "[CMD] {} {}",
+            program.as_ref().to_string_lossy(),
+            args.join(" ")
+        );
     }
 
     let output = create_command(program).args(&args).output()?;
@@ -98,11 +95,13 @@ pub fn run_command_with_args<S: AsRef<OsStr>>(program: S, args: Vec<String>) -> 
 
 /// 执行带 Stdio 管道的命令（用于 DISM 等需要实时输出的场景）
 pub fn spawn_command_piped<S: AsRef<OsStr>>(program: S, args: &[&str]) -> std::io::Result<Child> {
-    let program_str = program.as_ref().to_string_lossy();
-
     #[cfg(debug_assertions)]
     {
-        log::debug!("[SPAWN PIPED] {} {}", program_str, args.join(" "));
+        log::debug!(
+            "[SPAWN PIPED] {} {}",
+            program.as_ref().to_string_lossy(),
+            args.join(" ")
+        );
     }
 
     create_command(program)

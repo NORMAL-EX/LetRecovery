@@ -8,26 +8,28 @@
 //!   `apply_image` / `capture_image`。当选择 wimgapi 时优先用 wimgapi；若 wimgapi
 //!   **加载/初始化失败**或**操作失败**，自动回退到 libwim，保证功能始终可用。
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use crate::image_meta::WimProgress;
 use crate::wimgapi::WimgapiManager;
 use crate::wimlib::WimlibManager;
 
+pub const WIM_OPERATION_CANCELLED: &str = "WIM operation cancelled";
+
+fn cancellation_requested(cancel: Option<&Arc<AtomicBool>>) -> bool {
+    cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+}
+
 /// 镜像引擎
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WimEngine {
     /// 内置 libwim（libwim-15.dll）——默认，跨环境一致。
+    #[default]
     Libwim,
     /// 系统 wimgapi（wimgapi.dll）——可选，Windows 原生 API。
     Wimgapi,
-}
-
-impl Default for WimEngine {
-    fn default() -> Self {
-        WimEngine::Libwim
-    }
 }
 
 impl WimEngine {
@@ -78,8 +80,7 @@ pub struct WimEngineManager {
 impl WimEngineManager {
     /// 按指定引擎构造。libwim 始终初始化；若指定 wimgapi 但其初始化失败，则回退 libwim。
     pub fn new(engine: WimEngine) -> Result<Self, String> {
-        let libwim = WimlibManager::new()
-            .map_err(|e| format!("libwim 初始化失败: {}", e))?;
+        let libwim = WimlibManager::new().map_err(|e| format!("libwim 初始化失败: {}", e))?;
 
         let mut active = WimEngine::Libwim;
         let mut wimgapi = None;
@@ -122,7 +123,8 @@ impl WimEngineManager {
         index: u32,
         paths: &[&str],
     ) -> Result<bool, String> {
-        self.libwim.image_contains_any_path(image_file, index, paths)
+        self.libwim
+            .image_contains_any_path(image_file, index, paths)
     }
 
     /// 应用/释放镜像；wimgapi 失败时回退 libwim。
@@ -133,18 +135,47 @@ impl WimEngineManager {
         index: u32,
         progress_tx: Option<Sender<WimProgress>>,
     ) -> Result<(), String> {
+        self.apply_image_cancellable(image_file, target_dir, index, progress_tx, None)
+    }
+
+    pub fn apply_image_cancellable(
+        &self,
+        image_file: &str,
+        target_dir: &str,
+        index: u32,
+        progress_tx: Option<Sender<WimProgress>>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<(), String> {
+        if cancellation_requested(cancel.as_ref()) {
+            return Err(WIM_OPERATION_CANCELLED.to_owned());
+        }
         if self.active == WimEngine::Wimgapi {
             if let Some(w) = &self.wimgapi {
-                match w.apply_image(image_file, target_dir, index, progress_tx.clone()) {
+                match w.apply_image_cancellable(
+                    image_file,
+                    target_dir,
+                    index,
+                    progress_tx.clone(),
+                    cancel.clone(),
+                ) {
+                    Ok(()) if cancellation_requested(cancel.as_ref()) => {
+                        return Err(WIM_OPERATION_CANCELLED.to_owned());
+                    }
                     Ok(()) => return Ok(()),
                     Err(e) => {
+                        if cancellation_requested(cancel.as_ref()) {
+                            return Err(WIM_OPERATION_CANCELLED.to_owned());
+                        }
                         log::warn!("wimgapi 应用镜像失败，回退 libwim：{}", e);
                     }
                 }
             }
         }
+        if cancellation_requested(cancel.as_ref()) {
+            return Err(WIM_OPERATION_CANCELLED.to_owned());
+        }
         self.libwim
-            .apply_image(image_file, target_dir, index, progress_tx)
+            .apply_image_cancellable(image_file, target_dir, index, progress_tx, cancel)
     }
 
     /// 捕获/备份镜像；wimgapi 失败时回退 libwim（回退前清理 wimgapi 产生的半成品文件）。
@@ -188,5 +219,18 @@ impl WimEngineManager {
             compression,
             progress_tx,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_state_is_detected_before_any_fallback_can_start() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(!cancellation_requested(Some(&cancel)));
+        cancel.store(true, Ordering::SeqCst);
+        assert!(cancellation_requested(Some(&cancel)));
     }
 }

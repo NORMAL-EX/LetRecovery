@@ -25,12 +25,13 @@ import {
   CommandPanel,
 } from '@/components/ui/command'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
-import { getSidebar, getDocPage } from '@/lib/docs'
-import { useLang, useT } from '@/lib/i18n'
+import { docTitle, getDocPage } from '@/lib/docs'
+import { getSidebar } from '@/lib/docs-navigation'
+import { useLang, useT } from '@/lib/i18n-hooks'
 import { cn } from '@/lib/utils'
 
 interface SearchItem {
-  value: string
+  searchValue: string
   label: string
   url: string
 }
@@ -39,9 +40,37 @@ interface SearchGroup {
   items: SearchItem[]
 }
 
+function normalizeSearchValue(value: string): string {
+  return value
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(/[\p{P}\p{S}\s]+/gu, ' ')
+    .trim()
+}
+
+function isSearchItem(item: unknown): item is SearchItem {
+  if (typeof item !== 'object' || item === null) return false
+  return (
+    'searchValue' in item &&
+    typeof item.searchValue === 'string' &&
+    'label' in item &&
+    typeof item.label === 'string'
+  )
+}
+
+function matchesSearch(item: unknown, query: string): boolean {
+  if (!isSearchItem(item)) return false
+  const terms = normalizeSearchValue(query).split(' ').filter(Boolean)
+  return terms.every((term) => item.searchValue.includes(term))
+}
+
+function searchItemLabel(item: unknown): string {
+  return isSearchItem(item) ? item.label : ''
+}
+
 /** 文档搜索（仿 coss.com/ui command-menu）。始终挂载，由 `active`（是否在文档页）
- *  控制显隐——宽度/透明度做过渡，所以进出文档页都有平滑的展开/收起动画。
- *  按当前语言检索：value 里塞进标题 + 描述 + 各级小标题，所以能搜到文档内容。 */
+ * 控制显隐，保证进出文档页都有宽度/透明度过渡。索引由构建期解析出的
+ * 页面标题、描述、各级标题和正文可见文本组成。 */
 export default function DocsSearch({
   active,
   className,
@@ -61,10 +90,14 @@ export default function DocsSearch({
           .filter((i) => i.link)
           .map((item) => {
             const page = getDocPage(item.link as string, lang)
-            const headings = page?.headings.map((h) => h.title).join(' ') ?? ''
-            const desc = page?.frontmatter.description ?? ''
+            const title = page ? docTitle(page) : item.text
+            const headings = page?.headings.map((heading) => heading.title).join(' ') ?? ''
+            const description = String(page?.frontmatter.description ?? '')
+            const body = page?.searchText ?? ''
             return {
-              value: `${group.text} ${item.text} ${desc} ${headings}`,
+              searchValue: normalizeSearchValue(
+                `${group.text} ${item.text} ${title} ${description} ${headings} ${body}`,
+              ),
               label: item.text,
               url: item.link as string,
             }
@@ -75,7 +108,9 @@ export default function DocsSearch({
 
   // 离开文档页时关闭弹窗，避免再次进入时残留打开状态
   useEffect(() => {
-    if (!active) setOpen(false)
+    if (active) return
+    const timeout = window.setTimeout(() => setOpen(false), 0)
+    return () => window.clearTimeout(timeout)
   }, [active])
 
   // ⌘K / Ctrl+K / "/" 打开（仅在文档页生效）
@@ -128,7 +163,11 @@ export default function DocsSearch({
       </div>
 
       <CommandDialogPopup>
-        <Command items={groups}>
+        <Command
+          items={groups}
+          filter={matchesSearch}
+          itemToStringValue={searchItemLabel}
+        >
           <CommandInput placeholder={t.docs.searchPlaceholder} />
           <CommandPanel>
             <CommandEmpty className="p-0">
@@ -149,7 +188,7 @@ export default function DocsSearch({
                   <CommandCollection>
                     {(item: SearchItem) => (
                       <CommandItem
-                        key={item.value}
+                        key={item.url}
                         className="flex w-full items-center gap-2"
                         render={
                           <Link to={item.url} onClick={() => setOpen(false)} />

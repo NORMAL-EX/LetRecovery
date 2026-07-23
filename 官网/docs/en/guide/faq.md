@@ -25,6 +25,10 @@ Yes. The desktop `LetRecovery.exe` automatically detects WinPE and **installs in
 Image formats: WIM, ESD, SWM, GHO, ISO, and the i386 text-mode setup media of original XP/2003.
 Installable target systems cover Windows **XP / 2003 / 7 / 8 / 10 / 11**.
 
+## Should I choose PCA2011 or PCA2023?
+
+Keep **Auto** selected in normal use. Before formatting, LetRecovery checks firmware trust, Secure Boot, the ESP, and EFI signatures in the image. Bundled offline compatibility resources can supply BootEx for older modern Windows images. Windows 7/8.1 do not show this control, and UefiSeven cannot upgrade Windows 7 to PCA2023. See [Secure Boot and PCA2011 / PCA2023](/guide/secure-boot-pca).
+
 ## What configuration is required to run? Do I really need 4 GB of RAM?
 
 Running the desktop client requires Windows 10/11 (64-bit) plus administrator privileges. At least 4 GB of free memory is recommended, but this is only a **recommendation**—the program does **not** enforce a memory check.
@@ -62,7 +66,7 @@ See [Image Engine](/guide/wim-engine).
 
 ## Will releasing a new version change the website's version number?
 
-Yes. Day-to-day development happens on separate branches or repositories and doesn't affect the live site; but once those changes pass review and are merged into the LetRecovery repo's `main` branch, EdgeOne Pages rebuilds and redeploys the website. Since the website's version number is generated from the build date (e.g. `v2026.06.07`), it updates along with that rebuild.
+Yes, but an ordinary website rebuild does not change it. The website displays the fixed released version stored in `官网/version.json`. Only after the LetRecovery Release workflow successfully publishes a new version does it write the corresponding Release tag to that file and commit the change automatically. On `main`, that version commit causes EdgeOne Pages to rebuild and deploy the website.
 
 ## Why don't I see `libwim-15.dll` inside the PE image?
 

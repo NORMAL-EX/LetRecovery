@@ -172,11 +172,9 @@ impl DismCmd {
 
             // 尝试创建目录（可能盘符存在但目录不存在）
             if let Some(parent) = path.parent() {
-                if parent.exists() {
-                    if std::fs::create_dir_all(path).is_ok() {
-                        log::info!("[DismCmd] 创建 PE 临时目录: {}", dir);
-                        return dir.to_string();
-                    }
+                if parent.exists() && std::fs::create_dir_all(path).is_ok() {
+                    log::info!("[DismCmd] 创建 PE 临时目录: {}", dir);
+                    return dir.to_string();
                 }
             }
         }
@@ -225,6 +223,11 @@ impl DismCmd {
         force_unsigned: bool,
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
+        // Do not defer an invalid boot-start driver to Boot Manager. DISM's /ForceUnsigned can
+        // report success while Secure Boot later stops the installed OS with 0xc0000428.
+        if force_unsigned {
+            bail!("refusing to add unsigned offline drivers");
+        }
         // 规范化路径（确保以反斜杠结尾，与 PE 端保持一致）
         let image_path = Self::normalize_image_path(image_path);
         let driver_path_normalized = driver_path.trim().to_string();
@@ -261,10 +264,6 @@ impl DismCmd {
             args.push("/Recurse".to_string());
         }
 
-        if force_unsigned {
-            args.push("/ForceUnsigned".to_string());
-        }
-
         // 执行命令
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         self.execute_with_progress_args(&args_ref, progress_tx, &tr!("驱动添加"))
@@ -285,7 +284,7 @@ impl DismCmd {
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
         // 直接使用 /Recurse 参数一次性添加整个目录
-        self.add_driver_offline(image_path, driver_dir, true, true, progress_tx)
+        self.add_driver_offline(image_path, driver_dir, true, false, progress_tx)
     }
 
     // ========================================================================
@@ -426,7 +425,10 @@ impl DismCmd {
         );
 
         if success_count == 0 && !cab_files.is_empty() {
-            bail!("{}", tr!("所有 CAB 包添加失败: {}", format!("{:?}", failed_packages)));
+            bail!(
+                "{}",
+                tr!("所有 CAB 包添加失败: {}", format!("{:?}", failed_packages))
+            );
         }
 
         Ok(())
@@ -688,7 +690,14 @@ impl DismCmd {
                     Self::send_progress(&progress_tx, 100, &tr!("{}完成", operation_name));
                     Ok(())
                 } else {
-                    bail!("{}", tr!("{}失败，退出代码: {}", operation_name, format!("{:?}", status.code())))
+                    bail!(
+                        "{}",
+                        tr!(
+                            "{}失败，退出代码: {}",
+                            operation_name,
+                            format!("{:?}", status.code())
+                        )
+                    )
                 }
             }
             Err(e) => Err(e),
@@ -711,40 +720,38 @@ impl DismCmd {
         // 处理 stdout
         if let Some(stdout) = stdout {
             let reader = BufReader::new(stdout);
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    // 尝试转换编码
-                    let decoded_line = if line.is_ascii() {
-                        line
-                    } else {
-                        gbk_to_utf8(line.as_bytes())
-                    };
+            for line in reader.lines().map_while(Result::ok) {
+                // 尝试转换编码
+                let decoded_line = if line.is_ascii() {
+                    line
+                } else {
+                    gbk_to_utf8(line.as_bytes())
+                };
 
-                    // 解析进度
-                    if let Some(pct) = Self::parse_progress_line(&decoded_line) {
-                        if pct != last_progress {
-                            last_progress = pct;
-                            Self::send_progress(
-                                progress_tx,
-                                pct,
-                                &tr!("{}中... {}%", operation_name, pct),
-                            );
-                        }
+                // 解析进度
+                if let Some(pct) = Self::parse_progress_line(&decoded_line) {
+                    if pct != last_progress {
+                        last_progress = pct;
+                        Self::send_progress(
+                            progress_tx,
+                            pct,
+                            &tr!("{}中... {}%", operation_name, pct),
+                        );
                     }
+                }
 
-                    // 检测错误信息
-                    if decoded_line.contains("Error")
-                        || decoded_line.contains("错误")
-                        || decoded_line.contains("失败")
-                    {
-                        error_output.push_str(&decoded_line);
-                        error_output.push('\n');
-                    }
+                // 检测错误信息
+                if decoded_line.contains("Error")
+                    || decoded_line.contains("错误")
+                    || decoded_line.contains("失败")
+                {
+                    error_output.push_str(&decoded_line);
+                    error_output.push('\n');
+                }
 
-                    // 打印日志
-                    if !decoded_line.trim().is_empty() {
-                        log::trace!("[DISM] {}", decoded_line);
-                    }
+                // 打印日志
+                if !decoded_line.trim().is_empty() {
+                    log::trace!("[DISM] {}", decoded_line);
                 }
             }
         }
@@ -752,19 +759,17 @@ impl DismCmd {
         // 处理 stderr
         if let Some(stderr) = stderr {
             let reader = BufReader::new(stderr);
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    let decoded_line = if line.is_ascii() {
-                        line
-                    } else {
-                        gbk_to_utf8(line.as_bytes())
-                    };
+            for line in reader.lines().map_while(Result::ok) {
+                let decoded_line = if line.is_ascii() {
+                    line
+                } else {
+                    gbk_to_utf8(line.as_bytes())
+                };
 
-                    if !decoded_line.trim().is_empty() {
-                        error_output.push_str(&decoded_line);
-                        error_output.push('\n');
-                        log::trace!("[DISM ERR] {}", decoded_line);
-                    }
+                if !decoded_line.trim().is_empty() {
+                    error_output.push_str(&decoded_line);
+                    error_output.push('\n');
+                    log::trace!("[DISM ERR] {}", decoded_line);
                 }
             }
         }
@@ -893,7 +898,10 @@ impl DismCmd {
 impl Default for DismCmd {
     fn default() -> Self {
         Self::new().unwrap_or_else(|e| {
-            log::error!("[DismCmd] 初始化 DISM 命令行执行器失败，回退到 PATH 中的 dism.exe: {}", e);
+            log::error!(
+                "[DismCmd] 初始化 DISM 命令行执行器失败，回退到 PATH 中的 dism.exe: {}",
+                e
+            );
             Self {
                 dism_path: PathBuf::from("dism.exe"),
             }
@@ -962,16 +970,25 @@ mod tests {
     fn test_normalize_image_path() {
         assert_eq!(DismCmd::normalize_image_path("D:"), "D:\\");
         assert_eq!(DismCmd::normalize_image_path("D:\\"), "D:\\");
-        assert_eq!(DismCmd::normalize_image_path("D:\\Windows"), "D:\\Windows\\");
         assert_eq!(
-            DismCmd::normalize_image_path("  C:\\Test  "),
-            "C:\\Test\\"
+            DismCmd::normalize_image_path("D:\\Windows"),
+            "D:\\Windows\\"
         );
+        assert_eq!(DismCmd::normalize_image_path("  C:\\Test  "), "C:\\Test\\");
     }
 
     #[test]
+    fn unsigned_driver_override_is_rejected_before_path_or_process_access() {
+        let dism = DismCmd::new().expect("DISM command boundary should initialize");
+        let error = dism
+            .add_driver_offline(r"Z:\missing-image", r"Z:\missing-driver", true, true, None)
+            .expect_err("/ForceUnsigned must be rejected");
+        assert!(error.to_string().contains("unsigned offline drivers"));
+    }
+
+    #[test]
+    #[ignore = "requires an explicit Windows integration test because it inspects or creates the configured scratch directory"]
     fn test_ensure_scratch_directory() {
-        // 这个测试会根据运行环境返回不同结果
         let scratch = DismCmd::ensure_scratch_directory();
         assert!(!scratch.is_empty());
     }

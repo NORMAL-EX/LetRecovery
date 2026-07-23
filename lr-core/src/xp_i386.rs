@@ -45,6 +45,58 @@ pub fn is_valid_i386(dir: &Path) -> bool {
         && dir.join("ntdetect.com").exists()
 }
 
+const REQUIRED_SOURCE_FILES: [&[&str]; 5] = [
+    &["biosinfo.inf"],
+    &["setupdd.sy_"],
+    &["ntkrnlmp.ex_"],
+    &["ntfs.sy_", "ntfs.sys"],
+    &["setupreg.hiv"],
+];
+
+/// Read-only, fail-closed validation for an original XP/2003 text-mode source.
+///
+/// The source directory itself must be named `I386` or `AMD64`. This function performs no target
+/// disk access and is therefore suitable for the desktop staging gate and the PE preflight gate.
+pub fn validate_i386_source(dir: &Path) -> Result<&'static str, String> {
+    let architecture = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_uppercase)
+        .ok_or_else(|| format!("XP/2003 安装源目录名无效: {}", dir.display()))?;
+    let architecture = match architecture.as_str() {
+        "I386" => "I386",
+        "AMD64" => "AMD64",
+        _ => {
+            return Err(format!(
+                "XP/2003 文本模式安装源必须是 I386 或 AMD64 目录: {}",
+                dir.display()
+            ));
+        }
+    };
+    if !dir.is_dir() {
+        return Err(format!("找不到 XP/2003 安装源目录: {}", dir.display()));
+    }
+
+    let missing: Vec<String> = [
+        &["setupldr.bin"][..],
+        &["txtsetup.sif"][..],
+        &["ntdetect.com"][..],
+    ]
+    .into_iter()
+    .chain(REQUIRED_SOURCE_FILES)
+    .filter(|names| !names.iter().any(|name| dir.join(name).is_file()))
+    .map(|names| names.join("/"))
+    .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "源 {} 缺少文本安装必需文件: {}。这不是完整的 XP/2003 安装源。",
+            dir.display(),
+            missing.join(", ")
+        ));
+    }
+    Ok(architecture)
+}
+
 /// 从 i386 源目录做硬盘文本安装准备。成功后重启即进入 XP 文本安装。
 ///
 /// - `i386_src`：i386 目录（如挂载 ISO 的 `G:\I386`，或已复制到数据分区的副本）。
@@ -58,6 +110,7 @@ pub fn install_from_i386(
     bin_dir: &Path,
     custom_sif: Option<&Path>,
 ) -> Result<String, String> {
+    validate_i386_source(i386_src)?;
     let win = win_partition.trim_end_matches('\\'); // "C:"
     let mut log = String::new();
 
@@ -130,7 +183,17 @@ pub fn install_from_i386(
     //    （照搬 DSI 的容错——它直接忽略 xcopy 退出码）。但比 DSI 更稳：拷完后在【目标】里复测核心
     //    文件是否到位，而不是去猜「xcopy 加 /C 后非 0 退出」到底是部分跳过还是整体失败。
     let out = new_command("xcopy")
-        .args([src.as_str(), ls_src.as_str(), "/E", "/I", "/H", "/C", "/R", "/Y", "/Q"])
+        .args([
+            src.as_str(),
+            ls_src.as_str(),
+            "/E",
+            "/I",
+            "/H",
+            "/C",
+            "/R",
+            "/Y",
+            "/Q",
+        ])
         .output()
         .map_err(|e| format!("xcopy 执行失败: {e}"))?;
     log.push_str(&gbk_to_utf8(&out.stdout));
@@ -186,7 +249,9 @@ pub fn install_from_i386(
     // 1.5) 建空 $OEM$（OemPreinstall=Yes 需要它存在；空目录无副作用）。失败要记日志：
     //      否则文本安装阶段会因 OemPreinstall=Yes 找不到 $OEM$ 而报错。
     if let Err(e) = create_dir_all_retry(&format!("{win}\\$WIN_NT$.~LS\\$OEM$")) {
-        log.push_str(&format!("警告: 建 $WIN_NT$.~LS\\$OEM$ 失败（{e}）；OemPreinstall=Yes 可能在文本阶段报错\n"));
+        log.push_str(&format!(
+            "警告: 建 $WIN_NT$.~LS\\$OEM$ 失败（{e}）；OemPreinstall=Yes 可能在文本阶段报错\n"
+        ));
     }
 
     // 1.6) 建 $WIN_NT$.~BT（文本启动阶段的 BootPath）：照搬 DSI——
@@ -212,7 +277,9 @@ pub fn install_from_i386(
             ));
         }
     } else {
-        log.push_str("警告: 源中无 SYSTEM32 子目录（部分重封装介质如此），$WIN_NT$.~BT\\SYSTEM32 跳过\n");
+        log.push_str(
+            "警告: 源中无 SYSTEM32 子目录（部分重封装介质如此），$WIN_NT$.~BT\\SYSTEM32 跳过\n",
+        );
     }
     let (mut bt_copied, mut bt_missing) = (0usize, 0usize);
     for name in nt5_bootfiles() {
@@ -257,14 +324,22 @@ pub fn install_from_i386(
     // 文本期存储驱动集成（按架构）：驱动 .sys 同时拷进源($WIN_NT$.~LS\<arch>)与引导($WIN_NT$.~BT)。
     let xp_drv = bin_dir.join("drivers").join("xp");
     let roots = if src_sub_name == "AMD64" {
-        vec![xp_drv.join("amd64"), xp_drv.join("ahci"), xp_drv.join("nvme")]
+        vec![
+            xp_drv.join("amd64"),
+            xp_drv.join("ahci"),
+            xp_drv.join("nvme"),
+        ]
     } else {
         vec![xp_drv.join("x86")]
     };
     let drivers = crate::xp_textmode_drv::scan_driver_roots(&roots);
     log.push_str(&format!(
         "文本期存储驱动：架构={}，发现 {} 个可集成驱动\n",
-        if src_sub_name == "AMD64" { "amd64" } else { "x86" },
+        if src_sub_name == "AMD64" {
+            "amd64"
+        } else {
+            "x86"
+        },
         drivers.len()
     ));
     // 32 位 i386 介质却一个文本期存储驱动都没扫到：自带的 AHCI/NVMe 驱动是 64 位（仅 AMD64 介质可用），
@@ -294,8 +369,11 @@ pub fn install_from_i386(
             gbk_to_utf8(&raw)
         };
         let txt = normalize_crlf(&txt);
-        let (final_txtsetup, drvlog) =
-            crate::xp_textmode_drv::integrate(&txt, &drivers, &[Path::new(&ls_src), Path::new(&bt)]);
+        let (final_txtsetup, drvlog) = crate::xp_textmode_drv::integrate(
+            &txt,
+            &drivers,
+            &[Path::new(&ls_src), Path::new(&bt)],
+        );
         log.push_str(&drvlog);
         // 原是 GBK 就编回 GBK（集成追加的都是 ASCII，是 GBK 子集，无损）；原本就是纯 ASCII/UTF-8 才按 UTF-8 写。
         if was_utf8 {
@@ -388,7 +466,9 @@ pub fn install_from_i386(
     log.push_str(&gbk_to_utf8(&out.stderr));
     if !out.status.success() {
         // bootsect 偶有非 0 但实际已写成功，故不直接判错；但要醒目提示以便对照实机现象。
-        log.push_str("⚠ 警告: bootsect 返回非 0——引导扇区可能未写成功，若重启进不去文本安装请重做此步\n");
+        log.push_str(
+            "⚠ 警告: bootsect 返回非 0——引导扇区可能未写成功，若重启进不去文本安装请重做此步\n",
+        );
     }
     log.push_str("已用 bootsect /nt52 写引导码\n");
 
@@ -400,7 +480,9 @@ pub fn install_from_i386(
 /// 不清会让 `std::fs::copy`/`write` 抛 os error 5（拒绝访问）。失败忽略（文件不存在或本就无属性）。
 fn clear_file_attrs(path: &str) {
     if Path::new(path).exists() {
-        let _ = new_command("attrib").args(["-R", "-S", "-H", path]).output();
+        let _ = new_command("attrib")
+            .args(["-R", "-S", "-H", path])
+            .output();
     }
 }
 
@@ -510,25 +592,20 @@ fn ini_header_name(line: &str) -> Option<&str> {
 
 /// 用 diskpart 把指定盘符（如 `"C"`）的卷标记为「活动分区」。仅 MBR 有意义。
 fn set_volume_active(letter: &str) -> Result<String, String> {
-    use std::io::Write;
     let script = format!("select volume {letter}\r\nactive\r\nexit\r\n");
-    let tmp = std::env::temp_dir().join("lr_xp_set_active.txt");
-    {
-        let mut f =
-            std::fs::File::create(&tmp).map_err(|e| format!("创建 diskpart 脚本失败: {e}"))?;
-        f.write_all(script.as_bytes())
-            .map_err(|e| format!("写 diskpart 脚本失败: {e}"))?;
-    }
-    let tmp_str = tmp.to_string_lossy().into_owned();
-    let out = new_command("diskpart")
-        .args(["/s", tmp_str.as_str()])
-        .output()
-        .map_err(|e| format!("diskpart 执行失败: {e}"))?;
-    let _ = std::fs::remove_file(&tmp);
-    let so = gbk_to_utf8(&out.stdout);
-    if !out.status.success() {
-        return Err(format!("diskpart 返回非 0: {}", so.trim()));
-    }
+    let out = crate::diskpart::execute_script(
+        &std::env::temp_dir(),
+        "lr-xp-set-active",
+        "diskpart",
+        &script,
+    )
+    .map_err(|e| format!("diskpart 执行失败: {e}"))?;
+    let so = crate::diskpart::validated_stdout(&out).map_err(|detail| {
+        format!(
+            "diskpart 未能把 {letter}: 设为活动分区（可能目标是 GPT/动态盘/逻辑分区，无法设活动）：\n{}",
+            detail.trim()
+        )
+    })?;
     // diskpart 即使内部失败（目标是 GPT/动态盘/逻辑分区，无法设活动）也常返回 0，故再按输出里的错误标志判一次。
     // 用【否定检测】：只有命中已知错误词才算失败，绝不会把成功误判为失败 → 不会挡住本能正常设活动的盘。
     if diskpart_reported_failure(&so) {
@@ -681,9 +758,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_preflight_accepts_complete_i386_and_rejects_incomplete_media() {
+        let root = std::env::temp_dir().join(format!(
+            "letrecovery-xp-source-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("I386");
+        std::fs::create_dir_all(&source).unwrap();
+        for name in [
+            "setupldr.bin",
+            "txtsetup.sif",
+            "ntdetect.com",
+            "biosinfo.inf",
+            "setupdd.sy_",
+            "ntkrnlmp.ex_",
+            "ntfs.sy_",
+            "setupreg.hiv",
+        ] {
+            std::fs::write(source.join(name), b"test").unwrap();
+        }
+        assert_eq!(validate_i386_source(&source).unwrap(), "I386");
+        std::fs::remove_file(source.join("setupreg.hiv")).unwrap();
+        assert!(validate_i386_source(&source)
+            .unwrap_err()
+            .contains("setupreg.hiv"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn diskpart_reported_failure_negative_detection() {
         // 成功串（中/英）→ 不算失败（关键：成功串里没有「无法/错误/cannot/is not/error」）
-        assert!(!diskpart_reported_failure("DiskPart 已将当前分区标记为活动分区。"));
+        assert!(!diskpart_reported_failure(
+            "DiskPart 已将当前分区标记为活动分区。"
+        ));
         assert!(!diskpart_reported_failure(
             "DiskPart marked the current partition as active."
         ));
@@ -773,7 +884,10 @@ mod tests {
     fn normalize_crlf_converts_lf_and_keeps_crlf() {
         assert_eq!(normalize_crlf("a\nb"), "a\r\nb\r\n");
         assert_eq!(normalize_crlf("a\r\nb\r\n"), "a\r\nb\r\n\r\n");
-        assert_eq!(normalize_crlf("[Data]\nAutoPartition=0"), "[Data]\r\nAutoPartition=0\r\n");
+        assert_eq!(
+            normalize_crlf("[Data]\nAutoPartition=0"),
+            "[Data]\r\nAutoPartition=0\r\n"
+        );
     }
 
     #[test]

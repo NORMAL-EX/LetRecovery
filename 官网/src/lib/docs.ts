@@ -4,7 +4,7 @@
 //   中文源文件 /docs/guide/x.md      → 逻辑路由 /docs/guide/x
 //   英文源文件 /docs/en/guide/x.md   → 逻辑路由 /docs/guide/x（去掉 /en）
 
-import type { Lang } from './i18n'
+import type { Lang } from './i18n-context'
 
 export interface Heading {
   level: number
@@ -27,113 +27,18 @@ export interface DocPageData {
   html: string
   /** 原始 markdown 正文（去掉 frontmatter），用于"复制 Markdown" */
   raw: string
+  /** 构建期从可见 Markdown token 提取的正文搜索文本 */
+  searchText: string
   frontmatter: DocFrontmatter
   headings: Heading[]
-}
-
-export interface SidebarItem {
-  text: string
-  link?: string
-  items?: SidebarItem[]
-  collapsed?: boolean
 }
 
 interface MarkdownModule {
   html: string
   raw: string
+  searchText: string
   frontmatter: DocFrontmatter
   headings: Heading[]
-}
-
-// 侧边栏：中英文链接一致（语言无关），仅文字不同。
-export const sidebarZh: SidebarItem[] = [
-  {
-    text: '介绍',
-    items: [
-      { text: 'LetRecovery 是什么？', link: '/docs/guide/what-is-letrecovery' },
-      { text: '快速开始', link: '/docs/guide/getting-started' },
-    ],
-  },
-  {
-    text: '核心功能',
-    items: [
-      { text: '系统安装', link: '/docs/guide/system-install' },
-      { text: '简易模式', link: '/docs/guide/easy-mode' },
-      { text: '系统备份', link: '/docs/guide/system-backup' },
-      { text: '在线下载', link: '/docs/guide/online-download' },
-      { text: 'BitLocker 加密盘重装', link: '/docs/guide/bitlocker' },
-      { text: '高级选项', link: '/docs/guide/advanced-options' },
-      { text: '工具箱', link: '/docs/guide/toolbox' },
-    ],
-  },
-  {
-    text: '进阶',
-    items: [
-      { text: '无损扩大 C 盘', link: '/docs/guide/expand-c-drive' },
-      { text: 'Windows XP / 2003 安装', link: '/docs/guide/xp-install' },
-      { text: '镜像引擎', link: '/docs/guide/wim-engine' },
-    ],
-  },
-  {
-    text: '参考',
-    items: [
-      { text: '命令行参数', link: '/docs/reference/command-line' },
-    ],
-  },
-  {
-    text: '更多',
-    items: [
-      { text: '常见问题', link: '/docs/guide/faq' },
-      { text: '交流社区', link: '/docs/guide/community' },
-    ],
-  },
-]
-
-export const sidebarEn: SidebarItem[] = [
-  {
-    text: 'Introduction',
-    items: [
-      { text: 'What is LetRecovery?', link: '/docs/guide/what-is-letrecovery' },
-      { text: 'Getting Started', link: '/docs/guide/getting-started' },
-    ],
-  },
-  {
-    text: 'Core Features',
-    items: [
-      { text: 'System Installation', link: '/docs/guide/system-install' },
-      { text: 'Easy Mode', link: '/docs/guide/easy-mode' },
-      { text: 'System Backup', link: '/docs/guide/system-backup' },
-      { text: 'Online Download', link: '/docs/guide/online-download' },
-      { text: 'BitLocker Reinstall', link: '/docs/guide/bitlocker' },
-      { text: 'Advanced Options', link: '/docs/guide/advanced-options' },
-      { text: 'Toolbox', link: '/docs/guide/toolbox' },
-    ],
-  },
-  {
-    text: 'Advanced',
-    items: [
-      { text: 'Lossless C: Expansion', link: '/docs/guide/expand-c-drive' },
-      { text: 'Windows XP / 2003 Setup', link: '/docs/guide/xp-install' },
-      { text: 'Image Engine', link: '/docs/guide/wim-engine' },
-    ],
-  },
-  {
-    text: 'Reference',
-    items: [
-      { text: 'Command-Line Reference', link: '/docs/reference/command-line' },
-    ],
-  },
-  {
-    text: 'More',
-    items: [
-      { text: 'FAQ', link: '/docs/guide/faq' },
-      { text: 'Community', link: '/docs/guide/community' },
-    ],
-  },
-]
-
-export function getSidebar(lang: Lang): SidebarItem[] {
-  return lang === 'en' ? sidebarEn : sidebarZh
 }
 
 // 构建期把每篇文档都吃进来（中英文都在）。
@@ -162,6 +67,7 @@ for (const [file, mod] of Object.entries(modules)) {
     file,
     html: mod.html,
     raw: mod.raw ?? '',
+    searchText: mod.searchText ?? '',
     frontmatter: mod.frontmatter ?? {},
     headings: mod.headings ?? [],
   }
@@ -189,11 +95,4 @@ export function docTitle(page: DocPageData): string {
   if (page.frontmatter.title) return String(page.frontmatter.title)
   const h1 = page.headings.find((h) => h.level === 1)
   return h1?.title ?? page.route.split('/').filter(Boolean).pop() ?? '文档'
-}
-
-/** /docs 默认跳转到的第一篇文档（中英一致） */
-export const firstDocLink = '/docs/guide/what-is-letrecovery'
-
-export function isActiveLink(pathname: string, link: string): boolean {
-  return normalize(pathname) === normalize(link)
 }

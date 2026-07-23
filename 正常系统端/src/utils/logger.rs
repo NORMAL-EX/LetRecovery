@@ -1,15 +1,16 @@
 //! 日志管理模块
-//! 
+//!
 //! 提供文件日志记录功能，支持：
 //! - 日志文件存储在 `{软件运行目录}/log` 目录
 //! - 日志实时刷新到文件
 //! - 可在运行时动态开关日志
 //! - 日志状态持久化到配置文件
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
+use lr_core::operation::{unix_time_millis, OperationError, SupportBundleBuilder};
 use parking_lot::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::SubscriberExt;
@@ -34,10 +35,10 @@ impl LogManager {
     }
 
     /// 初始化日志系统
-    /// 
+    ///
     /// # Arguments
     /// * `enabled` - 是否启用日志记录
-    /// 
+    ///
     /// # Returns
     /// 如果初始化成功返回 Ok(())
     pub fn init(enabled: bool) -> anyhow::Result<()> {
@@ -50,8 +51,8 @@ impl LogManager {
         }
 
         // 配置环境过滤器
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
         if enabled {
             // 创建文件日志写入器（按日期滚动）
@@ -77,9 +78,7 @@ impl LogManager {
                 .with_filter(env_filter);
 
             // 初始化 tracing 订阅器
-            tracing_subscriber::registry()
-                .with(file_layer)
-                .init();
+            tracing_subscriber::registry().with(file_layer).init();
 
             // 保存守卫以保持日志文件打开
             let lock = LOG_GUARD.get_or_init(|| RwLock::new(None));
@@ -95,9 +94,7 @@ impl LogManager {
                 .with_writer(std::io::sink)
                 .with_filter(EnvFilter::new("off"));
 
-            tracing_subscriber::registry()
-                .with(noop_layer)
-                .init();
+            tracing_subscriber::registry().with(noop_layer).init();
 
             // 仍然设置 log 兼容层（但输出会被过滤）
             Self::setup_log_compat();
@@ -118,19 +115,19 @@ impl LogManager {
     }
 
     /// 设置日志启用状态
-    /// 
+    ///
     /// 注意：此方法仅更新状态标志，不会动态重新初始化日志系统
     /// 新状态将在下次程序启动时生效
     pub fn set_enabled(enabled: bool) {
         LOG_ENABLED.store(enabled, Ordering::SeqCst);
-        
+
         if enabled {
             log::info!("日志记录已启用（将在重启后完全生效）");
         }
     }
 
     /// 刷新日志缓冲区
-    /// 
+    ///
     /// 强制将所有缓冲的日志写入文件
     pub fn flush() {
         // non_blocking writer 会在 guard 被 drop 时自动刷新
@@ -141,7 +138,7 @@ impl LogManager {
     }
 
     /// 获取当前日志文件路径
-    /// 
+    ///
     /// 返回当天的日志文件路径
     pub fn get_current_log_file() -> PathBuf {
         let log_dir = Self::get_log_dir();
@@ -149,10 +146,74 @@ impl LogManager {
         log_dir.join(format!("LetRecovery.{}.log", today))
     }
 
+    /// Export a self-contained, sanitized support bundle without collecting
+    /// configuration files or credentials. Unreadable log files are skipped so
+    /// a partially damaged log directory does not prevent diagnostics export.
+    pub fn export_support_bundle(destination: &Path) -> Result<(), OperationError> {
+        Self::flush();
+
+        let mut builder = SupportBundleBuilder::new(
+            "LetRecovery",
+            env!("BUILD_VERSION"),
+            "desktop",
+            unix_time_millis(),
+        )?;
+        builder.add_environment("os", std::env::consts::OS)?;
+        builder.add_environment("architecture", std::env::consts::ARCH)?;
+        builder.add_environment("logging_enabled", Self::is_enabled().to_string())?;
+        builder.add_environment(
+            "build_profile",
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+        )?;
+
+        let mut attached = 0usize;
+        for (index, log_path) in Self::latest_log_files(3).into_iter().enumerate() {
+            match builder.add_text_file(format!("runtime_log_{}", index + 1), &log_path) {
+                Ok(()) => attached += 1,
+                Err(error) => {
+                    log::warn!("跳过无法读取的支持包日志附件: {}", error);
+                }
+            }
+        }
+        builder.add_environment("log_attachment_count", attached.to_string())?;
+        builder.build().write_json(destination)
+    }
+
+    fn latest_log_files(limit: usize) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(Self::get_log_dir()) else {
+            return Vec::new();
+        };
+        let mut files: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let is_log = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("log"));
+                if !is_log {
+                    return None;
+                }
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((path, modified))
+            })
+            .collect();
+        files.sort_by(|left, right| right.1.cmp(&left.1));
+        files
+            .into_iter()
+            .take(limit)
+            .map(|(path, _)| path)
+            .collect()
+    }
+
     /// 清理旧日志文件
-    /// 
+    ///
     /// 删除指定天数之前的日志文件
-    /// 
+    ///
     /// # Arguments
     /// * `days` - 保留最近多少天的日志
     pub fn cleanup_old_logs(days: u32) -> anyhow::Result<()> {
@@ -162,11 +223,11 @@ impl LogManager {
         }
 
         let cutoff = chrono::Local::now() - chrono::Duration::days(days as i64);
-        
+
         for entry in std::fs::read_dir(&log_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_file() {
                 if let Ok(metadata) = path.metadata() {
                     if let Ok(modified) = metadata.modified() {

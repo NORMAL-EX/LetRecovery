@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "generated_on": "2026-07-11",
+  "sources": [
+    {
+      "id": "windows10-kb5087544-x64",
+      "origin": "Microsoft Update Catalog KB5087544",
+      "file": "windows10.0-kb5087544-x64_68a4c876ce2f0f6782cabf595944150e96ae0d78.cab",
+      "size": 894951063,
+      "sha256": "569bfde4bd685044e345a6a1dde71387b03ce116b89d85650ede5e0413c5719b"
+    },
+    {
+      "id": "windows10-kb5087544-x86",
+      "origin": "Microsoft Update Catalog KB5087544",
+      "file": "windows10.0-kb5087544-x86_81010ffc1e0a532f21cc771b9d70f87008a78ef9.cab",
+      "size": 575103731,
+      "sha256": "a290df0cfe68dece595233fdad40ceb83ed2bfbf5db1830f5cad2aa907911bd6"
+    },
+    {
+      "id": "windows11-25h2-zh-cn-v2-x64",
+      "origin": "Microsoft Windows 11 25H2 download",
+      "file": "Win11_25H2_Chinese_Simplified_x64_v2.iso",
+      "size": 8543608832,
+      "sha256": "7408581e67bc455ebaafb9230e531abf45b1c8864a22114a1b03893f897102e4"
+    }
+  ],
+  "packages": [
+    {
+      "file": "pca2023-legacy-amd64.wim",
+      "source": "windows10-kb5087544-x64",
+      "target_wim_architecture": 9,
+      "size": 10962710,
+      "sha256": "3c1784d878dc91b2dcad28bfab080865adafb310a1b453b659884b23e3957ab9",
+      "bootmgfw_version": "10.0.28000.322",
+      "bootmgfw_sha256": "1b97a5127b0245f9901449f9c06bf6a4fbeac6b3a8ff40867acfd61ceb0a9060",
+      "bootmgr_sha256": "777cbf9a6dfa98eee60104a52fdbba5ce420599fb6856c0fb7214d73fe50fae9"
+    },
+    {
+      "file": "pca2023-windows10-x86.wim",
+      "source": "windows10-kb5087544-x86",
+      "target_wim_architecture": 0,
+      "size": 10626580,
+      "sha256": "4d753319c1e7f45db524c41243d8dcc649f2cd289ea794322e9dbb92b9e96fba",
+      "bootmgfw_version": "10.0.28000.322",
+      "bootmgfw_sha256": "3b6cb51c2231ba7e0e302efffef62d8eea11736cb6a8b7c5cb3057705e4903c2",
+      "bootmgr_sha256": "9719f00c5681996c57f7fb92fa1a39d95a0f552f63511d6d840d16a904c3c6e0"
+    },
+    {
+      "file": "pca2023-modern-amd64.wim",
+      "source": "windows11-25h2-zh-cn-v2-x64",
+      "target_wim_architecture": 9,
+      "size": 10968748,
+      "sha256": "aee3d582c60c964184a00ad2e0537420ae90552582cc4414d2516a45a4426093",
+      "bootmgfw_version": "10.0.28000.317",
+      "bootmgfw_sha256": "d15b56f8800fa95efeeb63fb7b0891176fd40e447c10e44c3619e079487cd599",
+      "bootmgr_sha256": "3c00a666849681d5e6a3142b314d8a77b3dd8c03211a214bcc9ff744de42375c",
+      "boot_stl_sha256": "c35dec015bae2369d278435f0ba3bd61445a9571b02136b390447128054c0448"
+    }
+  ]
+}

@@ -56,8 +56,14 @@ mod tests {
     #[test]
     fn roundtrip_and_skip_comments() {
         let entries = vec![
-            ("C:".to_string(), "111111-222222-333333-444444-555555-666666-777777-888888".to_string()),
-            ("D: 数据盘".to_string(), "000000-111111-222222-333333-444444-555555-666666-777777".to_string()),
+            (
+                "C:".to_string(),
+                "111111-222222-333333-444444-555555-666666-777777-888888".to_string(),
+            ),
+            (
+                "D: 数据盘".to_string(),
+                "000000-111111-222222-333333-444444-555555-666666-777777".to_string(),
+            ),
         ];
         let text = serialize_keys(&entries);
         let keys = parse_keys(&text);

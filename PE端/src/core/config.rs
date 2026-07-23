@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use lr_core::boot_pca::BootPcaMode;
+use std::path::{Path, PathBuf};
 
 /// 驱动操作模式
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -22,12 +23,12 @@ impl DriverActionMode {
             _ => Self::None,
         }
     }
-    
+
     /// 是否需要导入驱动
     pub fn should_import(&self) -> bool {
         *self == Self::AutoImport
     }
-    
+
     /// 是否有驱动目录（SaveOnly 或 AutoImport 时都有）
     pub fn has_drivers(&self) -> bool {
         *self != Self::None
@@ -69,7 +70,7 @@ pub struct InstallConfig {
     pub bypass_nro: bool,
     /// 禁用Windows自动更新
     pub disable_windows_update: bool,
-    /// 禁用Windows安全中心
+    /// 深度移除 Microsoft Defender Antivirus 杀毒引擎（保留安全中心等组件）
     pub disable_windows_defender: bool,
     /// 禁用系统保留空间
     pub disable_reserved_storage: bool,
@@ -87,7 +88,7 @@ pub struct InstallConfig {
     pub volume_label: String,
     /// 自定义无人值守文件（数据目录下的相对文件名，空=使用内置生成）
     pub custom_unattend_file: String,
-    
+
     // Win7 专用选项
     /// Win7 UEFI 补丁（使用 UefiSeven）
     pub win7_uefi_patch: bool,
@@ -106,6 +107,11 @@ pub struct InstallConfig {
     /// 目标镜像是否为 XP/2003：为真时写 XP 引导（ntldr/boot.ini 或 UEFI/GPT）而非 bcdboot。
     pub is_xp: bool,
 
+    /// Original I386/AMD64 text-mode media staged as a directory by the desktop client.
+    pub is_xp_i386: bool,
+    /// Safe single directory component beneath the staged source root (`I386` or `AMD64`).
+    pub xp_source_arch: String,
+
     // XP 专用选项（仅 is_xp 为真时生效）
     /// XP 注入 USB3(xHCI) 驱动（默认勾选）
     pub xp_inject_usb3_driver: bool,
@@ -115,7 +121,22 @@ pub struct InstallConfig {
     /// 是否在释放镜像前运行 diskpart 脚本（数据分区暂存的 diskpart 目录）。
     pub run_diskpart_scripts: bool,
 
-    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    /// 引导模式：0=自动，1=UEFI，2=Legacy。
+    pub boot_mode: u8,
+    /// UEFI Windows Boot Manager 签名选择。
+    pub boot_pca_mode: BootPcaMode,
+    /// PCA2023 兼容包在数据目录中的安全相对路径；空表示不需要。
+    pub pca_compat_package: String,
+    /// 暂存兼容包的 SHA-256。
+    pub pca_compat_sha256: String,
+    /// 兼容包内要提取的 WIM 卷索引。
+    pub pca_compat_image_index: u32,
+    /// 兼容包绑定的目标 Windows build。
+    pub pca_compat_target_build: u32,
+    /// 兼容包绑定的目标 WIM architecture 值。
+    pub pca_compat_target_architecture: u16,
+
+    /// 界面语言代码（如 "zh-TW"、"en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
 }
 
@@ -131,7 +152,7 @@ impl InstallConfig {
             self.restore_drivers
         }
     }
-    
+
     /// 判断是否有驱动目录需要处理
     pub fn has_driver_data(&self) -> bool {
         self.driver_action_mode.has_drivers() || self.restore_drivers
@@ -181,7 +202,7 @@ pub struct BackupConfig {
     /// WIM 镜像引擎：0=libwim（默认），1=wimgapi。由正常系统端随重启传入。
     pub wim_engine: u8,
 
-    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    /// 界面语言代码（如 "zh-TW"、"en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
 }
 
@@ -211,8 +232,51 @@ impl ConfigFileManager {
     /// 临时数据目录名
     const DATA_DIR: &'static str = "LetRecovery_Data";
 
-    fn scan_letters() -> &'static [char] {
-        &['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']
+    fn scan_letters() -> impl Iterator<Item = char> {
+        let system_drive = std::env::var("SystemDrive")
+            .ok()
+            .and_then(|value| {
+                value
+                    .chars()
+                    .find(|character| character.is_ascii_alphabetic())
+            })
+            .map(|character| character.to_ascii_uppercase());
+        (b'A'..=b'Z')
+            .map(char::from)
+            .filter(move |letter| Some(*letter) != system_drive)
+    }
+
+    /// Resolve a file staged by the desktop client without allowing an INI value to escape the
+    /// LetRecovery data directory. Staged images and custom unattend files are single files, not
+    /// arbitrary relative paths.
+    pub fn resolve_staged_file(data_dir: &str, file_name: &str) -> Result<PathBuf> {
+        lr_core::download_integrity::validate_download_filename(file_name)
+            .map_err(|error| anyhow::anyhow!("无效的暂存文件名 {file_name:?}: {error}"))?;
+        Ok(Path::new(data_dir).join(file_name))
+    }
+
+    /// Resolve a two-level staged XP source while keeping both INI-controlled path components
+    /// confined to the LetRecovery data directory.
+    pub fn resolve_staged_xp_source(
+        data_dir: &str,
+        source_root: &str,
+        source_arch: &str,
+    ) -> Result<PathBuf> {
+        for (field, value) in [("ImagePath", source_root), ("XpSourceArch", source_arch)] {
+            lr_core::download_integrity::validate_download_filename(value).map_err(|error| {
+                anyhow::anyhow!("无效的 XP 暂存目录字段 {field}={value:?}: {error}")
+            })?;
+        }
+        if !matches!(source_arch.to_ascii_uppercase().as_str(), "I386" | "AMD64") {
+            anyhow::bail!("XpSourceArch 必须是 I386 或 AMD64");
+        }
+        let path = Path::new(data_dir).join(source_root).join(source_arch);
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("读取 XP 暂存源失败: {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("XP 暂存源不是普通目录: {}", path.display());
+        }
+        Ok(path)
     }
 
     fn normalize_partition(partition: &str) -> String {
@@ -271,7 +335,12 @@ impl ConfigFileManager {
         let mut configs = Vec::new();
         for letter in Self::scan_letters() {
             let partition = format!("{}:", letter);
-            let config_path = format!("{}\\{}\\{}", partition, Self::DATA_DIR, Self::INSTALL_CONFIG);
+            let config_path = format!(
+                "{}\\{}\\{}",
+                partition,
+                Self::DATA_DIR,
+                Self::INSTALL_CONFIG
+            );
             if Path::new(&config_path).exists() {
                 log::info!("找到安装配置分区: {}", partition);
                 let config = Self::read_install_config(&partition)?;
@@ -331,9 +400,7 @@ impl ConfigFileManager {
                 && !config.session_id.is_empty()
                 && marker.session_id != config.session_id
             {
-                anyhow::bail!(
-                    "安装标记 SessionId 与配置 SessionId 不一致，已中止"
-                );
+                anyhow::bail!("安装标记 SessionId 与配置 SessionId 不一致，已中止");
             }
             let config_target = Self::normalize_partition(&config.target_partition);
             if !config_target.is_empty() && config_target != marker.partition {
@@ -350,8 +417,12 @@ impl ConfigFileManager {
     }
 
     /// 查找包含安装标记文件的分区
+    #[allow(
+        dead_code,
+        reason = "legacy marker lookup retained for custom PE integrations"
+    )]
     pub fn find_install_marker_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let marker_path = format!("{}:\\{}", letter, Self::INSTALL_MARKER);
             if Path::new(&marker_path).exists() {
                 log::info!("找到安装标记分区: {}:", letter);
@@ -363,7 +434,7 @@ impl ConfigFileManager {
 
     /// 查找包含备份标记文件的分区
     pub fn find_backup_marker_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let marker_path = format!("{}:\\{}", letter, Self::BACKUP_MARKER);
             if Path::new(&marker_path).exists() {
                 log::info!("找到备份标记分区: {}:", letter);
@@ -375,7 +446,7 @@ impl ConfigFileManager {
 
     /// 查找包含扩容标记文件的分区
     pub fn find_expand_marker_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
+        for letter in Self::scan_letters() {
             let marker_path = format!("{}:\\{}", letter, Self::EXPAND_MARKER);
             if Path::new(&marker_path).exists() {
                 log::info!("找到扩容标记分区: {}:", letter);
@@ -385,32 +456,53 @@ impl ConfigFileManager {
         None
     }
 
-    /// 查找包含配置文件的数据分区
-    pub fn find_data_partition() -> Option<String> {
-        for letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'] {
-            let config_path = format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::INSTALL_CONFIG);
-            if Path::new(&config_path).exists() {
-                log::info!("找到安装配置分区: {}:", letter);
-                return Some(format!("{}:", letter));
-            }
-            let backup_config_path =
-                format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::BACKUP_CONFIG);
-            if Path::new(&backup_config_path).exists() {
-                log::info!("找到备份配置分区: {}:", letter);
-                return Some(format!("{}:", letter));
-            }
-            let expand_config_path =
-                format!("{}:\\{}\\{}", letter, Self::DATA_DIR, Self::EXPAND_CONFIG);
-            if Path::new(&expand_config_path).exists() {
-                log::info!("找到扩容配置分区: {}:", letter);
-                return Some(format!("{}:", letter));
+    /// 检测操作类型 (安装或备份)
+    fn find_unique_config_partition(config_name: &str) -> Option<String> {
+        let matches = Self::scan_letters()
+            .filter_map(|letter| {
+                let path = format!("{}:\\{}\\{}", letter, Self::DATA_DIR, config_name);
+                Path::new(&path).is_file().then(|| format!("{}:", letter))
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [partition] => Some(partition.clone()),
+            [] => None,
+            _ => {
+                log::error!(
+                    "multiple data partitions contain task configuration {}: {:?}",
+                    config_name,
+                    matches
+                );
+                None
             }
         }
-        None
     }
 
-    /// 检测操作类型 (安装或备份)
+    pub fn find_data_partition_for(operation: OperationType) -> Option<String> {
+        match operation {
+            OperationType::Install => Self::find_install_task().ok().map(|task| task.0),
+            OperationType::Backup => Self::find_unique_config_partition(Self::BACKUP_CONFIG),
+            OperationType::Expand => Self::find_unique_config_partition(Self::EXPAND_CONFIG),
+        }
+    }
+
+    fn has_install_artifacts() -> bool {
+        Self::scan_letters().into_iter().any(|letter| {
+            Path::new(&format!("{}:\\{}", letter, Self::INSTALL_MARKER)).exists()
+                || Path::new(&format!(
+                    "{}:\\{}\\{}",
+                    letter,
+                    Self::DATA_DIR,
+                    Self::INSTALL_CONFIG
+                ))
+                .exists()
+        })
+    }
+
     pub fn detect_operation_type() -> Option<OperationType> {
+        if Self::has_install_artifacts() {
+            return Some(OperationType::Install);
+        }
         // 先检查安装标记
         if Self::find_install_task().is_ok() {
             return Some(OperationType::Install);
@@ -418,7 +510,7 @@ impl ConfigFileManager {
 
         // 再检查备份标记
         if Self::find_backup_marker_partition().is_some() {
-            if let Some(data_part) = Self::find_data_partition() {
+            if let Some(data_part) = Self::find_data_partition_for(OperationType::Backup) {
                 let backup_config_path =
                     format!("{}\\{}\\{}", data_part, Self::DATA_DIR, Self::BACKUP_CONFIG);
                 if Path::new(&backup_config_path).exists() {
@@ -429,7 +521,7 @@ impl ConfigFileManager {
 
         // 再检查扩容标记
         if Self::find_expand_marker_partition().is_some() {
-            if let Some(data_part) = Self::find_data_partition() {
+            if let Some(data_part) = Self::find_data_partition_for(OperationType::Expand) {
                 let expand_config_path =
                     format!("{}\\{}\\{}", data_part, Self::DATA_DIR, Self::EXPAND_CONFIG);
                 if Path::new(&expand_config_path).exists() {
@@ -450,8 +542,7 @@ impl ConfigFileManager {
             Self::EXPAND_CONFIG
         );
         log::info!("读取扩容配置: {}", config_path);
-        let content =
-            std::fs::read_to_string(&config_path).context("读取扩容配置文件失败")?;
+        let content = std::fs::read_to_string(&config_path).context("读取扩容配置文件失败")?;
         Self::deserialize_expand_config(&content)
     }
 
@@ -487,8 +578,7 @@ impl ConfigFileManager {
             Self::INSTALL_CONFIG
         );
         log::info!("读取安装配置: {}", config_path);
-        let content =
-            std::fs::read_to_string(&config_path).context("读取安装配置文件失败")?;
+        let content = std::fs::read_to_string(&config_path).context("读取安装配置文件失败")?;
         Self::deserialize_install_config(&content)
     }
 
@@ -501,8 +591,7 @@ impl ConfigFileManager {
             Self::BACKUP_CONFIG
         );
         log::info!("读取备份配置: {}", config_path);
-        let content =
-            std::fs::read_to_string(&config_path).context("读取备份配置文件失败")?;
+        let content = std::fs::read_to_string(&config_path).context("读取备份配置文件失败")?;
         Self::deserialize_backup_config(&content)
     }
 
@@ -570,8 +659,10 @@ impl ConfigFileManager {
 
     /// 反序列化安装配置
     fn deserialize_install_config(content: &str) -> Result<InstallConfig> {
-        let mut config = InstallConfig::default();
-        config.volume_index = 1; // 默认值
+        let mut config = InstallConfig {
+            volume_index: 1,
+            ..InstallConfig::default()
+        };
 
         for line in content.lines() {
             let line = line.trim();
@@ -599,9 +690,28 @@ impl ConfigFileManager {
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "IsXp" => config.is_xp = value.parse().unwrap_or(false),
-                    "RunDiskpartScripts" => config.run_diskpart_scripts = value.parse().unwrap_or(false),
+                    "IsXpI386" => config.is_xp_i386 = value.parse().unwrap_or(false),
+                    "XpSourceArch" => config.xp_source_arch = value.to_string(),
+                    "RunDiskpartScripts" => {
+                        config.run_diskpart_scripts = value.parse().unwrap_or(false)
+                    }
+                    "BootMode" => config.boot_mode = value.parse().unwrap_or(0),
+                    "BootPcaMode" => config.boot_pca_mode = BootPcaMode::from_config_value(value),
+                    "PcaCompatPackage" => config.pca_compat_package = value.to_string(),
+                    "PcaCompatSha256" => config.pca_compat_sha256 = value.to_string(),
+                    "PcaCompatImageIndex" => {
+                        config.pca_compat_image_index = value.parse().unwrap_or(0)
+                    }
+                    "PcaCompatTargetBuild" => {
+                        config.pca_compat_target_build = value.parse().unwrap_or(0)
+                    }
+                    "PcaCompatTargetArchitecture" => {
+                        config.pca_compat_target_architecture = value.parse().unwrap_or(0)
+                    }
                     "Language" => config.language = value.to_string(),
-                    "InstallCabPackages" => config.install_cab_packages = value.parse().unwrap_or(false),
+                    "InstallCabPackages" => {
+                        config.install_cab_packages = value.parse().unwrap_or(false)
+                    }
                     "RemoveShortcutArrow" => {
                         config.remove_shortcut_arrow = value.parse().unwrap_or(false)
                     }
@@ -630,12 +740,22 @@ impl ConfigFileManager {
                     "VolumeLabel" => config.volume_label = value.to_string(),
                     "CustomUnattendFile" => config.custom_unattend_file = value.to_string(),
                     "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
-                    "Win7InjectUsb3Driver" => config.win7_inject_usb3_driver = value.parse().unwrap_or(false),
-                    "Win7InjectNvmeDriver" => config.win7_inject_nvme_driver = value.parse().unwrap_or(false),
+                    "Win7InjectUsb3Driver" => {
+                        config.win7_inject_usb3_driver = value.parse().unwrap_or(false)
+                    }
+                    "Win7InjectNvmeDriver" => {
+                        config.win7_inject_nvme_driver = value.parse().unwrap_or(false)
+                    }
                     "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
-                    "Win7FixStorageBsod" => config.win7_fix_storage_bsod = value.parse().unwrap_or(false),
-                    "XpInjectUsb3Driver" => config.xp_inject_usb3_driver = value.parse().unwrap_or(false),
-                    "XpInjectNvmeDriver" => config.xp_inject_nvme_driver = value.parse().unwrap_or(false),
+                    "Win7FixStorageBsod" => {
+                        config.win7_fix_storage_bsod = value.parse().unwrap_or(false)
+                    }
+                    "XpInjectUsb3Driver" => {
+                        config.xp_inject_usb3_driver = value.parse().unwrap_or(false)
+                    }
+                    "XpInjectNvmeDriver" => {
+                        config.xp_inject_nvme_driver = value.parse().unwrap_or(false)
+                    }
                     _ => {}
                 }
             }
@@ -646,8 +766,10 @@ impl ConfigFileManager {
 
     /// 反序列化备份配置
     fn deserialize_backup_config(content: &str) -> Result<BackupConfig> {
-        let mut config = BackupConfig::default();
-        config.swm_split_size = 4096; // 默认4GB
+        let mut config = BackupConfig {
+            swm_split_size: 4096,
+            ..BackupConfig::default()
+        };
 
         for line in content.lines() {
             let line = line.trim();
@@ -681,6 +803,80 @@ impl ConfigFileManager {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_install_config_defaults_to_auto_boot_selection() {
+        let config = ConfigFileManager::deserialize_install_config(
+            "[Install]\r\nVolumeIndex=4\r\nTargetPartition=C:\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.volume_index, 4);
+        assert_eq!(config.boot_mode, 0);
+        assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
+        assert!(config.pca_compat_package.is_empty());
+        assert_eq!(config.pca_compat_image_index, 0);
+        assert!(!config.is_xp_i386);
+        assert!(config.xp_source_arch.is_empty());
+    }
+
+    #[test]
+    fn reads_explicit_pca2023_selection_from_normal_endpoint() {
+        let config = ConfigFileManager::deserialize_install_config(concat!(
+            "[Install]\r\nBootMode=1\r\nBootPcaMode=pca2023\r\n",
+            "PcaCompatPackage=pca_compat\\package.wim\r\n",
+            "PcaCompatSha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n",
+            "PcaCompatImageIndex=1\r\nPcaCompatTargetBuild=19045\r\n",
+            "PcaCompatTargetArchitecture=9\r\n"
+        ))
+        .unwrap();
+
+        assert_eq!(config.boot_mode, 1);
+        assert_eq!(config.boot_pca_mode, BootPcaMode::Pca2023);
+        assert_eq!(config.pca_compat_package, "pca_compat\\package.wim");
+        assert_eq!(config.pca_compat_image_index, 1);
+        assert_eq!(config.pca_compat_target_build, 19045);
+        assert_eq!(config.pca_compat_target_architecture, 9);
+    }
+
+    #[test]
+    fn resolves_only_confined_staged_xp_source_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "letrecovery-pe-xp-resolver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("xp-source-session").join("I386");
+        std::fs::create_dir_all(&source).unwrap();
+        assert_eq!(
+            ConfigFileManager::resolve_staged_xp_source(
+                &root.to_string_lossy(),
+                "xp-source-session",
+                "I386"
+            )
+            .unwrap(),
+            source
+        );
+        assert!(
+            ConfigFileManager::resolve_staged_xp_source(&root.to_string_lossy(), "..", "I386")
+                .is_err()
+        );
+        assert!(ConfigFileManager::resolve_staged_xp_source(
+            &root.to_string_lossy(),
+            "xp-source-session",
+            "system32"
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// 操作类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OperationType {
@@ -698,6 +894,6 @@ pub struct ExpandConfig {
     pub target_size_mb: u64,
     /// WIM 引擎选择（与其它流程一致）：0=libwim，1=wimgapi。
     pub wim_engine: u8,
-    /// 界面语言代码（如 "en-US"），由正常系统端随重启写入；空=简体中文。
+    /// 界面语言代码（如 "zh-TW"、"en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
 }

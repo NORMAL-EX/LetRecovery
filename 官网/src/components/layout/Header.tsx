@@ -1,6 +1,6 @@
 import { Link, useLocation } from 'react-router-dom'
 import { Github, Sun, Moon, Menu, Check, Languages } from 'lucide-react'
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Menu as DropdownMenu,
@@ -16,10 +16,9 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import DocsSidebar from '@/components/docs/DocsSidebar'
-import DocsSearch from '@/components/docs/DocsSearch'
-import { getSidebar } from '@/lib/docs'
+import { getSidebar } from '@/lib/docs-navigation'
 import { useTheme } from '@/hooks/useTheme'
-import { useLang, useT } from '@/lib/i18n'
+import { useLang, useT } from '@/lib/i18n-hooks'
 import { CircleHalf } from '@/components/icons/CircleHalf'
 import { cn } from '@/lib/utils'
 
@@ -31,6 +30,7 @@ const navItems = [
 ] as const
 
 const GITHUB_URL = 'https://github.com/NORMAL-EX/LetRecovery'
+const DocsSearch = lazy(() => import('@/components/docs/DocsSearch'))
 
 const Header: React.FC = () => {
   const { theme, setTheme, resolvedTheme } = useTheme()
@@ -43,12 +43,16 @@ const Header: React.FC = () => {
   const isActive = (path: string) =>
     path === '/' ? location.pathname === '/' : location.pathname.startsWith(path)
 
-  const getThemeIcon = () => {
-    if (theme === 'system') return <CircleHalf className="size-4" />
-    return resolvedTheme === 'dark' ? <Moon className="size-4" /> : <Sun className="size-4" />
-  }
+  const themeIcon =
+    theme === 'system' ? (
+      <CircleHalf className="size-4" />
+    ) : resolvedTheme === 'dark' ? (
+      <Moon className="size-4" />
+    ) : (
+      <Sun className="size-4" />
+    )
 
-  const GithubButton = () => (
+  const githubButton = (
     <Button
       variant="ghost"
       size="icon"
@@ -59,7 +63,7 @@ const Header: React.FC = () => {
     </Button>
   )
 
-  const LanguageMenu = () => (
+  const languageMenu = (
     <DropdownMenu>
       <MenuTrigger
         render={
@@ -82,12 +86,12 @@ const Header: React.FC = () => {
     </DropdownMenu>
   )
 
-  const ThemeMenu = () => (
+  const themeMenu = (
     <DropdownMenu>
       <MenuTrigger
         render={
           <Button variant="ghost" size="icon">
-            {getThemeIcon()}
+            {themeIcon}
             <span className="sr-only">{t.common.toggleTheme}</span>
           </Button>
         }
@@ -223,10 +227,26 @@ const Header: React.FC = () => {
             aria-hidden="true"
           />
 
-          <DocsSearch active={isDocs} />
-          <GithubButton />
-          <LanguageMenu />
-          <ThemeMenu />
+          {/* 始终保留 lazy 边界：组件加载后会以 active=false 常驻，进入文档页时
+              才能从宽度 0 平滑展开；不能再改回 isDocs 条件挂载。 */}
+          <Suspense
+            fallback={
+              <div
+                aria-hidden="true"
+                className={cn(
+                  'overflow-hidden transition-all duration-300 ease-out',
+                  isDocs
+                    ? 'w-9 opacity-100 md:w-40 lg:w-56'
+                    : 'w-0 opacity-0',
+                )}
+              />
+            }
+          >
+            <DocsSearch active={isDocs} />
+          </Suspense>
+          {githubButton}
+          {languageMenu}
+          {themeMenu}
         </div>
       </div>
     </header>

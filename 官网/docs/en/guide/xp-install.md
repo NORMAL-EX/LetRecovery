@@ -8,7 +8,7 @@ description: Install Windows XP / 2003 with LetRecovery, covering both the i386 
 LetRecovery offers fairly complete support even for these "ancient" systems. XP/2003 is entirely different from Win7+ — it has no `install.wim`, no native UEFI support, and no NVMe/USB3 drivers, so it takes two dedicated paths.
 
 ::: warning General prerequisites
-- XP/2003 **cannot** be installed in place on the "currently running system drive"; you must enter WinPE first.
+- You may start a reinstall by selecting the currently running system drive. LetRecovery first stages the original `I386/AMD64` source on another data partition, configures a PE boot entry, and then enters WinPE to format and deploy it. It does not overwrite the live Windows volume from the desktop session.
 - Setup formats the target partition, so back up first.
 :::
 
@@ -28,6 +28,7 @@ For **original install discs**, LetRecovery follows the mature NT5 hard-disk ins
 Key points:
 
 - **Legacy/BIOS + MBR only** — GPT/UEFI targets are blocked when setup is launched.
+- **Reinstalling the current system drive is supported** — when the current Windows partition is selected, the program validates and stages the complete `I386/AMD64` source (including the sibling `I386` WOW payload for XP x64), then reboots into PE. PE validates the confined staging directory and required files again before formatting.
 - **AMD64 architecture takes priority** — XP x64 / 2003 x64 media contain both `\AMD64` (the complete 64-bit source) and `\I386` (incomplete WOW support files); the program prefers the complete source and avoids mistakenly using the incomplete `\I386`. Pure 32-bit media with only `\I386` falls back normally.
 - **Storage drivers integrated for the text phase** — so that AHCI/NVMe is recognized even in the blue-background text phase, setup scans the driver directories by architecture and merges them into `txtsetup.sif`.
 
@@ -84,6 +85,6 @@ The bundled genahci/stornvme are **x64** and only work for 64-bit XP/2003. **32-
 - You have an **original install disc** and the target machine is traditional SATA/BIOS → use **Path 1 (i386 text-mode)**.
 - The target machine is **modern NVMe / you want UEFI boot** → **Path 2 (UEFI-enabled XP x64 image)** is more convenient.
 
-::: tip Real-hardware regression
-The XP/2003 install chain depends on a real reinstall environment, so we recommend regression testing on a VM/real machine first. When reporting issues, please attach the `[XP-UEFI]`, `[XP-DRV]`, `[TXTDRV]` sections from the log.
+::: tip Reporting Issues
+If you encounter problems during the XP/2003 installation, please include the `[XP-UEFI]`, `[XP-DRV]`, `[TXTDRV]`, and similar sections from the log when reporting the issue.
 :::

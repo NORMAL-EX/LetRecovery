@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useT } from '@/lib/i18n'
+import { useT } from '@/lib/i18n-hooks'
 
 /** "复制 Markdown" —— 把当前文档的原始 markdown 复制到剪贴板（仿 coss.com/ui） */
 export default function DocsCopyPage({ raw }: { raw: string }) {

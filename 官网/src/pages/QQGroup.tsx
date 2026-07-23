@@ -16,7 +16,7 @@ import {
   DialogPanel,
 } from '@/components/ui/dialog'
 import { Users, QrCode, ExternalLink } from 'lucide-react'
-import { useT } from '@/lib/i18n'
+import { useT } from '@/lib/i18n-hooks'
 
 const groups = [
   {

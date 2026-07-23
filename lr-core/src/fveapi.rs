@@ -558,7 +558,10 @@ mod imp {
                 return Err(FveError::Unknown);
             }
             if hr == HR_VOLUME_LOCKED {
-                log::info!("fveapi: 开卷 {} 卷已锁定(0x80310000)，已取得句柄用于解锁", drive);
+                log::info!(
+                    "fveapi: 开卷 {} 卷已锁定(0x80310000)，已取得句柄用于解锁",
+                    drive
+                );
             } else {
                 log::info!("fveapi: 开卷 {} 成功 hr=0x{:08X}", drive, hr);
             }
@@ -648,7 +651,9 @@ mod imp {
                     match self.api.auth_from_passphrase {
                         Some(f) => f(secret_w.as_ptr(), &mut *auth),
                         None => {
-                            log::warn!("fveapi: 缺 FveAuthElementFromPassPhraseW 导出，无法用口令解锁");
+                            log::warn!(
+                                "fveapi: 缺 FveAuthElementFromPassPhraseW 导出，无法用口令解锁"
+                            );
                             return Err(FveError::NotSupported);
                         }
                     }

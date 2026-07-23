@@ -2,12 +2,12 @@
 
 # LetRecovery
 
-**一款免费开源的 Windows 系统重装工具**
+**一款免费用于非商业场景、源代码公开的 Windows 系统重装工具**
 
 [English](README_en.md) | 简体中文
 
 [![License](https://img.shields.io/badge/License-PolyForm%20NC-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
 
 <img width="803" height="600" alt="image" src="https://github.com/user-attachments/assets/8760ea53-785c-48ba-a6ce-dc3e154d3926" />
@@ -16,7 +16,7 @@
 
 ---
 
-> 💡 **LetRecovery 永久免费、开源。** 请仅从本页下方的官方渠道获取，谨防第三方付费倒卖。
+> 💡 **LetRecovery 在 PolyForm Noncommercial 1.0.0 许可范围内免费使用并公开源代码。** 该许可证不是 OSI 认可的传统开源许可证，禁止商业用途。请仅从本页下方的官方渠道获取。
 
 ## ✨ 功能特性
 
@@ -33,6 +33,7 @@
 
 ### 🌐 在线下载
 - **系统镜像 / 常用软件** - 在线获取，Aria2 多线程加速
+- **PE 完整性与定制兼容** - 联网下载优先校验 SHA-256，并兼容现有 MD5 配置；随包 `bin/pe` 保持用户可定制，不会因修改 WIM 被远端哈希阻断
 
 ### 🔧 高级选项
 - 格式化分区、引导修复（UEFI / Legacy）
@@ -55,10 +56,13 @@
 
 ### 系统要求
 
-- Windows 10/11 (64位)
+- 正常系统端：Windows 10/11（64 位）
+- WinPE 端：与项目发布包配套的 64 位 WinPE
 - 管理员权限
 - 至少 4GB 可用内存
 - 支持 UEFI 或 Legacy BIOS 启动
+
+可部署的目标镜像范围比运行环境更广，包含功能列表中列出的 Windows XP/2003 及较新 Windows 版本；旧系统能否正常启动仍取决于硬件、固件模式和驱动支持。
 
 ### 使用方法
 
@@ -76,29 +80,15 @@
 
 ```
 LetRecovery/
+├── lr-core/             # 两端共享的纯逻辑与 Windows 适配层
 ├── 正常系统端/          # Windows 桌面环境版本
-│   ├── src/
-│   │   ├── app.rs       # 主应用程序
-│   │   ├── core/        # 核心功能模块
-│   │   │   ├── bcdedit.rs   # BCD 引导编辑
-│   │   │   ├── disk.rs      # 磁盘分区管理
-│   │   │   ├── dism.rs      # DISM 镜像操作
-│   │   │   ├── ghost.rs     # GHO 镜像恢复
-│   │   │   └── registry.rs  # 注册表操作
-│   │   ├── download/    # 下载管理模块
-│   │   │   ├── aria2.rs     # Aria2 下载引擎
-│   │   │   └── manager.rs   # 下载管理器
-│   │   ├── ui/          # 用户界面
-│   │   └── utils/       # 工具函数
-│   └── Cargo.toml
-├── PE端/               # WinPE 环境版本
-│   ├── src/
-│   │   ├── app.rs
-│   │   ├── core/
-│   │   ├── ui/
-│   │   └── utils/
-│   └── Cargo.toml
-└── LICENSE
+├── PE端/                # WinPE 环境版本
+├── 官网/                # React/Vite 官网
+├── assets/              # 发布时使用的语言和资源文件
+├── docs/                # 设计与第三方二进制溯源文档
+├── Cargo.toml           # Rust workspace
+├── Cargo.lock           # 已锁定的应用依赖图
+└── LICENSE              # PolyForm Noncommercial 1.0.0
 ```
 
 ---
@@ -108,12 +98,12 @@ LetRecovery/
 | 技术 | 用途 |
 |------|------|
 | **Rust** | 主要编程语言 |
-| **egui/eframe** | 跨平台 GUI 框架 |
+| **原生 Win32 / windows-rs** | 正常系统端与 PE 端界面、Windows API 边界 |
 | **tokio** | 异步运行时 |
-| **windows-rs** | Windows API 绑定 |
 | **aria2** | 高速下载引擎 |
-| **DISM** | 系统镜像部署 |
+| **wimlib / WIMGAPI / DISM** | 系统镜像部署、捕获与驱动维护 |
 | **Ghost** | GHO 镜像恢复 |
+| **React / TypeScript / Vite** | 官网和文档站 |
 
 ---
 
@@ -121,8 +111,10 @@ LetRecovery/
 
 ### 前置条件
 
-- Rust 1.75 或更高版本
-- Visual Studio Build Tools (Windows)
+- Rust 1.88 或更高版本（CI 使用 1.88.0）
+- Visual Studio Build Tools 2022，并安装“使用 C++ 的桌面开发”和 Windows 10/11 SDK
+- Node.js 22 与 npm（仅构建官网时需要）
+- 完整发布打包还需要 7-Zip 与 Windows DISM/ADK 环境
 
 ### 构建步骤
 
@@ -131,14 +123,30 @@ LetRecovery/
 git clone https://github.com/NORMAL-EX/LetRecovery.git
 cd LetRecovery
 
-# 构建正常系统端
-cd 正常系统端
-cargo build --release
+# 在 workspace 根目录按锁文件构建两端
+cargo build --workspace --release --locked
 
-# 构建 PE 端
-cd ../PE端
-cargo build --release
+# 构建官网
+cd 官网
+npm ci
+npm run lint
+npm run type-check
+npm run build
 ```
+
+提交前应运行：
+
+```bash
+cargo fmt --all --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests" -- -D warnings -A clippy::uninlined_format_args
+cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
+cargo test -p lr-core --locked
+cargo test -p letrecovery-pe --locked --features non-elevated-tests
+cargo test -p LetRecovery --locked --features non-elevated-tests
+```
+
+CI 会在 Pull Request 和 `main` push 上编译全部测试目标、运行确定性单元测试并构建官网。CI 不会执行真实格式化、分区、BCD、DISM 写盘或重启；这些流程必须在隔离虚拟机和专用测试盘上另行验证。内置 `libwim-15.dll` 的版本、许可证和哈希见 [第三方二进制清单](docs/THIRD_PARTY_BINARIES.md)。
 
 ---
 
@@ -146,9 +154,13 @@ cargo build --release
 
 本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE) 许可证。
 
+这是一个 source-available（源代码公开）许可证，不是 OSI 批准的开源许可证，也不应笼统描述为传统意义上的“开源软件”。
+
 - ✅ 允许个人学习、研究和非商业使用
 - ✅ 允许修改和分发（需保留版权声明）
 - ❌ 禁止商业用途
+
+安全问题请按 [SECURITY.md](SECURITY.md) 中的方式私下报告。参与开发前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 

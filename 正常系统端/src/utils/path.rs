@@ -18,6 +18,16 @@ pub fn get_pe_dir() -> PathBuf {
     get_bin_dir().join("pe")
 }
 
+/// 获取联网下载 PE 的受管缓存目录。
+///
+/// `bin/pe` 是随包分发、允许用户自行定制的本地 PE；联网下载必须放在独立目录，
+/// 才能在后续使用时继续按服务端声明的 SHA-256/MD5 严格校验。
+pub fn get_pe_download_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .map(|directory| directory.join("LetRecovery").join("pe"))
+        .unwrap_or_else(|| get_exe_dir().join("cache").join("pe"))
+}
+
 /// 获取 tools 目录路径
 ///
 /// 工具类原来各自一个文件夹（如 tools\SpaceSniffer.exe），现已直接平铺到 bin 根目录。

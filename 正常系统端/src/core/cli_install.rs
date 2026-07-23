@@ -18,11 +18,11 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
-use crate::tr;
 use crate::core::disk::DiskManager;
 use crate::core::install_config::{ConfigFileManager, InstallConfig};
 use crate::core::pe::PeManager;
-use crate::ui::advanced_options::AdvancedOptions;
+use crate::core::ui_state::AdvancedOptionsData;
+use crate::tr;
 
 fn default_volume_index() -> u32 {
     1
@@ -47,6 +47,10 @@ struct CliInstallSpec {
     /// 是否 GHO；缺省按扩展名自动判断。
     #[serde(default)]
     is_gho: Option<bool>,
+    /// Whether the selected image is an XP/2003 image. Older JSON remains compatible and
+    /// defaults to false.
+    #[serde(default)]
+    is_xp: bool,
     /// 驱动处理：0=不处理 1=仅备份 2=自动导入（默认 0）。
     #[serde(default)]
     driver_action_mode: u8,
@@ -80,14 +84,13 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
     };
 
     // 2) 高级选项（可选）
-    let advanced: AdvancedOptions = match advanced_path {
+    let advanced: AdvancedOptionsData = match advanced_path {
         Some(p) => {
-            let text = std::fs::read_to_string(p)
-                .with_context(|| tr!("读取高级选项失败: {}", p))?;
-            serde_json::from_str(&text)
-                .with_context(|| tr!("解析高级选项 JSON 失败: {}", p))?
+            let text =
+                std::fs::read_to_string(p).with_context(|| tr!("读取高级选项失败: {}", p))?;
+            serde_json::from_str(&text).with_context(|| tr!("解析高级选项 JSON 失败: {}", p))?
         }
-        None => AdvancedOptions::default(),
+        None => AdvancedOptionsData::default(),
     };
 
     // 3) 校验
@@ -110,11 +113,26 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
     log::info!("[CLI INSTALL] 镜像: {}", spec.image_path);
     log::info!("[CLI INSTALL] PE: {}", spec.pe_path);
 
+    // The CLI follows the same fail-closed path as the GUI. Prepare any
+    // required compatibility package before selecting or creating storage.
+    let pca_compat_package = crate::core::pca_preflight::verify_before_disk_write(
+        &spec.image_path,
+        spec.volume_index,
+        is_gho,
+        spec.is_xp,
+        true,
+        lr_core::boot_pca::BootPcaMode::Auto,
+    )
+    .map_err(|error| anyhow!(error))?;
+
     // 4) 数据分区（暂存配置 + 镜像）
-    let image_size = std::fs::metadata(&spec.image_path).map(|m| m.len()).unwrap_or(0);
+    let image_size = std::fs::metadata(&spec.image_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     let data_partition = match &spec.data_partition {
         Some(p) => p.clone(),
-        None => match DiskManager::find_suitable_data_partition(&spec.target_partition, image_size) {
+        None => match DiskManager::find_suitable_data_partition(&spec.target_partition, image_size)
+        {
             Ok(Some((p, _auto))) => p,
             Ok(None) => {
                 return Err(anyhow!(
@@ -132,8 +150,21 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
 
     // 5) 把镜像放进数据目录（InstallConfig.image_path 存相对文件名）
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-    std::fs::create_dir_all(&data_dir)
-        .with_context(|| tr!("创建数据目录失败: {}", data_dir))?;
+    std::fs::create_dir_all(&data_dir).with_context(|| tr!("创建数据目录失败: {}", data_dir))?;
+    let pca_compat_metadata = if let Some(package) = pca_compat_package.as_ref() {
+        let staged_path =
+            std::path::Path::new(&data_dir).join(lr_core::pca_compat::STAGED_PACKAGE_RELATIVE_PATH);
+        package
+            .persist_to(&staged_path)
+            .map_err(|error| anyhow!(tr!("保存 PCA2023 兼容包失败：{}", error)))?;
+        Some((
+            package.sha256().to_string(),
+            package.image_index(),
+            package.target(),
+        ))
+    } else {
+        None
+    };
     let image_filename = std::path::Path::new(&spec.image_path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -144,7 +175,8 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
     } else {
         log::info!(
             "[CLI INSTALL] 拷贝镜像到数据目录: {} -> {}",
-            spec.image_path, staged_image
+            spec.image_path,
+            staged_image
         );
         std::fs::copy(&spec.image_path, &staged_image)
             .with_context(|| tr!("拷贝镜像失败: {} -> {}", spec.image_path, staged_image))?;
@@ -189,17 +221,43 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         win7_fix_acpi_bsod: advanced.win7_fix_acpi_bsod,
         win7_fix_storage_bsod: advanced.win7_fix_storage_bsod,
         wim_engine: lr_core::active_engine().as_u8(),
-        // CLI 不强制标记 XP；PE 端会按「释放后系统缺少 \Windows\Boot」兜底识别 XP，
-        // 并据此写 XP 引导 + 注入下列驱动（GUI 路径则显式设置 is_xp）。
-        is_xp: false,
+        is_xp: spec.is_xp,
+        is_xp_i386: false,
+        xp_source_arch: String::new(),
         xp_inject_usb3_driver: advanced.xp_inject_usb3_driver,
         xp_inject_nvme_driver: advanced.xp_inject_nvme_driver,
         run_diskpart_scripts: false,
+        boot_mode: 0,
+        boot_pca_mode: lr_core::boot_pca::BootPcaMode::Auto,
+        pca_compat_package: pca_compat_metadata
+            .as_ref()
+            .map(|_| lr_core::pca_compat::STAGED_PACKAGE_RELATIVE_PATH.to_string())
+            .unwrap_or_default(),
+        pca_compat_sha256: pca_compat_metadata
+            .as_ref()
+            .map(|metadata| metadata.0.clone())
+            .unwrap_or_default(),
+        pca_compat_image_index: pca_compat_metadata
+            .as_ref()
+            .map(|metadata| metadata.1)
+            .unwrap_or(0),
+        pca_compat_target_build: pca_compat_metadata
+            .as_ref()
+            .map(|metadata| metadata.2.build)
+            .unwrap_or(0),
+        pca_compat_target_architecture: pca_compat_metadata
+            .as_ref()
+            .map(|metadata| metadata.2.architecture)
+            .unwrap_or(0),
     };
 
     // 7) 写安装配置（含目标盘标记；自定义无人值守 XML 会被复制进数据目录）
-    ConfigFileManager::write_install_config(&spec.target_partition, &data_partition, &install_config)
-        .map_err(|e| anyhow!("{}", tr!("写入安装配置失败: {}", e)))?;
+    ConfigFileManager::write_install_config(
+        &spec.target_partition,
+        &data_partition,
+        &install_config,
+    )
+    .map_err(|e| anyhow!("{}", tr!("写入安装配置失败: {}", e)))?;
 
     // 8) 设置下次重启进 PE
     let display_name = spec
@@ -216,7 +274,13 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
     if spec.auto_reboot {
         log::info!("[CLI INSTALL] 即将重启进入 PE 完成安装...");
         let _ = crate::utils::cmd::create_command("shutdown")
-            .args(["/r", "/t", "5", "/c", "LetRecovery 即将重启进入 PE 完成系统安装..."])
+            .args([
+                "/r",
+                "/t",
+                "5",
+                "/c",
+                "LetRecovery 即将重启进入 PE 完成系统安装...",
+            ])
             .spawn();
     } else {
         log::info!("[CLI INSTALL] 未启用自动重启，请手动重启进入 PE 完成安装。");

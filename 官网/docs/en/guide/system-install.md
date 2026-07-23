@@ -46,6 +46,8 @@ In the **install via PE** and **PE client** installation flows, image integrity 
 
 LetRecovery automatically detects UEFI / Legacy (GPT→UEFI, MBR→Legacy) and writes the matching boot files. When needed, you can also manually specify `Auto / UEFI / Legacy` in the **Boot mode** dropdown. This dropdown is always visible; when unattended is enabled, it shares a row with the "Customize unattended" button, otherwise it occupies its own row.
 
+For supported Windows 10/11 and Server 2016+ UEFI images, LetRecovery also checks the Secure Boot PCA2011/PCA2023 trust generation before disk writes and uses bundled offline resources when an older image lacks BootEx. **Auto** is the recommended setting; see [Secure Boot and PCA2011 / PCA2023](/guide/secure-boot-pca) for the full decision process and legacy Windows limits.
+
 ## Custom partition script (advanced)
 
 Once [Advanced Options](/guide/advanced-options) is enabled, an extra "Run Diskpart script" option appears: place `.cmd` / `.bat` / `.txt` scripts into `<program directory>\diskpart\`, and the installation runs them **before formatting** (installation is aborted if a script fails). This is useful for scenarios that need a special partition layout.

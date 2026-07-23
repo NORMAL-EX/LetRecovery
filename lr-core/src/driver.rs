@@ -27,7 +27,6 @@ use windows::Win32::Foundation::{GetLastError, BOOL, HWND};
 const DIGCF_PRESENT: u32 = 0x0000_0002;
 const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
 
-const SPDRP_DRIVER: u32 = 0x0000_0009;
 const SPDRP_INF_PATH: u32 = 0x0000_0010;
 const SPDRP_HARDWAREID: u32 = 0x0000_0001;
 const SPDRP_DEVICEDESC: u32 = 0x0000_0000;
@@ -36,18 +35,8 @@ const SPDRP_CLASS: u32 = 0x0000_0007;
 const SPDRP_CLASSGUID: u32 = 0x0000_0008;
 
 const ERROR_NO_MORE_ITEMS: u32 = 259;
-const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
-
 const INSTALLFLAG_FORCE: u32 = 0x0000_0001;
-const INSTALLFLAG_READONLY: u32 = 0x0000_0002;
 const INSTALLFLAG_NONINTERACTIVE: u32 = 0x0000_0004;
-
-const DRIVER_PACKAGE_REPAIR: u32 = 0x0000_0001;
-const DRIVER_PACKAGE_FORCE: u32 = 0x0000_0004;
-const DRIVER_PACKAGE_LEGACY_MODE: u32 = 0x0000_0010;
-
-const SP_COPY_NOOVERWRITE: u32 = 0x0000_0008;
-const SP_COPY_OEMINF_CATALOG_ONLY: u32 = 0x0004_0000;
 
 const REG_SZ: u32 = 1;
 const REG_MULTI_SZ: u32 = 7;
@@ -74,34 +63,6 @@ impl Default for SpDevInfoData {
             class_guid: [0; 16],
             dev_inst: 0,
             reserved: 0,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SpDrvInfoDataW {
-    cb_size: u32,
-    driver_type: u32,
-    reserved: usize,
-    description: [u16; 256],
-    mfg_name: [u16; 256],
-    provider_name: [u16; 256],
-    driver_date: u64,
-    driver_version: u64,
-}
-
-impl Default for SpDrvInfoDataW {
-    fn default() -> Self {
-        Self {
-            cb_size: std::mem::size_of::<Self>() as u32,
-            driver_type: 0,
-            reserved: 0,
-            description: [0; 256],
-            mfg_name: [0; 256],
-            provider_name: [0; 256],
-            driver_date: 0,
-            driver_version: 0,
         }
     }
 }
@@ -147,12 +108,6 @@ type FnSetupCopyOEMInfW = unsafe extern "system" fn(
     destination_inf_file_name_component: *mut *mut u16,
 ) -> BOOL;
 
-type FnSetupUninstallOEMInfW = unsafe extern "system" fn(
-    inf_file_name: *const u16,
-    flags: u32,
-    reserved: *mut c_void,
-) -> BOOL;
-
 type FnSetupGetInfDriverStoreLocationW = unsafe extern "system" fn(
     file_name: *const u16,
     alternate_platform_info: *const c_void,
@@ -169,29 +124,6 @@ type FnDiInstallDriverW = unsafe extern "system" fn(
     flags: u32,
     need_reboot: *mut BOOL,
 ) -> BOOL;
-
-type FnUpdateDriverForPlugAndPlayDevicesW = unsafe extern "system" fn(
-    hwnd_parent: HWND,
-    hardware_id: *const u16,
-    full_inf_path: *const u16,
-    install_flags: u32,
-    b_reboot_required: *mut BOOL,
-) -> BOOL;
-
-// DIFx API (difxapi.dll) - 可选，用于驱动包管理
-type FnDriverPackageInstallW = unsafe extern "system" fn(
-    inf_path: *const u16,
-    flags: u32,
-    installer_info: *const c_void,
-    need_reboot: *mut BOOL,
-) -> u32;
-
-type FnDriverPackageUninstallW = unsafe extern "system" fn(
-    inf_path: *const u16,
-    flags: u32,
-    installer_info: *const c_void,
-    need_reboot: *mut BOOL,
-) -> u32;
 
 // ============================================================================
 // 辅助函数
@@ -210,7 +142,9 @@ fn path_to_wide(path: &Path) -> Vec<u16> {
 /// 将 UTF-16 缓冲区转换为 Rust 字符串
 fn wide_to_string(wide: &[u16]) -> String {
     let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-    OsString::from_wide(&wide[..len]).to_string_lossy().into_owned()
+    OsString::from_wide(&wide[..len])
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// 获取最后的 Win32 错误码
@@ -259,29 +193,22 @@ struct SetupApi {
     get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW,
     destroy_device_info_list: FnSetupDiDestroyDeviceInfoList,
     copy_oem_inf: FnSetupCopyOEMInfW,
-    uninstall_oem_inf: FnSetupUninstallOEMInfW,
     get_inf_driver_store_location: Option<FnSetupGetInfDriverStoreLocationW>,
 }
 
 impl SetupApi {
     fn new() -> Result<Self> {
-        let lib = unsafe { Library::new("setupapi.dll") }
-            .context("无法加载 setupapi.dll")?;
+        let lib = unsafe { Library::new("setupapi.dll") }.context("无法加载 setupapi.dll")?;
 
         unsafe {
-            let get_class_devs: FnSetupDiGetClassDevsW = 
-                *lib.get(b"SetupDiGetClassDevsW")?;
-            let enum_device_info: FnSetupDiEnumDeviceInfo = 
-                *lib.get(b"SetupDiEnumDeviceInfo")?;
-            let get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW = 
+            let get_class_devs: FnSetupDiGetClassDevsW = *lib.get(b"SetupDiGetClassDevsW")?;
+            let enum_device_info: FnSetupDiEnumDeviceInfo = *lib.get(b"SetupDiEnumDeviceInfo")?;
+            let get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW =
                 *lib.get(b"SetupDiGetDeviceRegistryPropertyW")?;
-            let destroy_device_info_list: FnSetupDiDestroyDeviceInfoList = 
+            let destroy_device_info_list: FnSetupDiDestroyDeviceInfoList =
                 *lib.get(b"SetupDiDestroyDeviceInfoList")?;
-            let copy_oem_inf: FnSetupCopyOEMInfW = 
-                *lib.get(b"SetupCopyOEMInfW")?;
-            let uninstall_oem_inf: FnSetupUninstallOEMInfW = 
-                *lib.get(b"SetupUninstallOEMInfW")?;
-            
+            let copy_oem_inf: FnSetupCopyOEMInfW = *lib.get(b"SetupCopyOEMInfW")?;
+
             // 这个函数在 Windows 8+ 才有
             let get_inf_driver_store_location = lib
                 .get::<FnSetupGetInfDriverStoreLocationW>(b"SetupGetInfDriverStoreLocationW")
@@ -295,7 +222,6 @@ impl SetupApi {
                 get_device_registry_property,
                 destroy_device_info_list,
                 copy_oem_inf,
-                uninstall_oem_inf,
                 get_inf_driver_store_location,
             })
         }
@@ -364,10 +290,8 @@ impl SetupApi {
         let mut index = 0u32;
         loop {
             let mut dev_info_data = SpDevInfoData::default();
-            
-            let result = unsafe {
-                (self.enum_device_info)(dev_info, index, &mut dev_info_data)
-            };
+
+            let result = unsafe { (self.enum_device_info)(dev_info, index, &mut dev_info_data) };
 
             if result.0 == 0 {
                 let err = get_last_error();
@@ -379,9 +303,9 @@ impl SetupApi {
             }
 
             // 获取 INF 路径
-            if let Some(inf_path) = self.get_device_property_string(
-                dev_info, &dev_info_data, SPDRP_INF_PATH
-            ) {
+            if let Some(inf_path) =
+                self.get_device_property_string(dev_info, &dev_info_data, SPDRP_INF_PATH)
+            {
                 // 检查是否为 OEM 驱动
                 let is_oem = inf_path.to_lowercase().starts_with("oem");
 
@@ -427,6 +351,50 @@ impl SetupApi {
         Ok(drivers)
     }
 
+    /// Enumerates hardware IDs for every present device, including devices that do not yet have
+    /// an INF bound in the running Windows or WinPE environment.
+    fn enumerate_present_hardware_ids(&self) -> Result<Vec<String>> {
+        let mut hardware_ids = Vec::new();
+        let dev_info = unsafe {
+            (self.get_class_devs)(
+                null_mut(),
+                null_mut(),
+                HWND::default(),
+                DIGCF_PRESENT | DIGCF_ALLCLASSES,
+            )
+        };
+        if dev_info.is_null() || dev_info == (-1isize as *mut c_void) {
+            bail!("SetupDiGetClassDevsW 失败: {}", get_last_error());
+        }
+
+        let mut index = 0u32;
+        loop {
+            let mut dev_info_data = SpDevInfoData::default();
+            let result = unsafe { (self.enum_device_info)(dev_info, index, &mut dev_info_data) };
+            if result.0 == 0 {
+                if get_last_error() == ERROR_NO_MORE_ITEMS {
+                    break;
+                }
+                index += 1;
+                continue;
+            }
+
+            if let Some(hardware_id) =
+                self.get_device_property_string(dev_info, &dev_info_data, SPDRP_HARDWAREID)
+            {
+                if !hardware_id.trim().is_empty() {
+                    hardware_ids.push(hardware_id);
+                }
+            }
+            index += 1;
+        }
+
+        unsafe {
+            let _ = (self.destroy_device_info_list)(dev_info);
+        }
+        Ok(hardware_ids)
+    }
+
     /// 安装 INF 驱动文件到驱动存储
     fn install_inf(&self, inf_path: &Path) -> Result<String> {
         let wide_path = path_to_wide(inf_path);
@@ -455,27 +423,10 @@ impl SetupApi {
         Ok(wide_to_string(&dest_buffer))
     }
 
-    /// 卸载 OEM INF 文件
-    fn uninstall_inf(&self, inf_name: &str) -> Result<()> {
-        let wide_name = to_wide(inf_name);
-
-        // SUOI_FORCEDELETE = 1
-        let result = unsafe {
-            (self.uninstall_oem_inf)(wide_name.as_ptr(), 1, null_mut())
-        };
-
-        if result.0 == 0 {
-            let err = get_last_error();
-            bail!("SetupUninstallOEMInf 失败: 错误码 {}", err);
-        }
-
-        Ok(())
-    }
-
     /// 获取 INF 文件在驱动存储中的完整路径
     fn get_driver_store_path(&self, inf_name: &str) -> Option<PathBuf> {
         let func = self.get_inf_driver_store_location?;
-        
+
         let wide_name = to_wide(inf_name);
         let mut buffer = vec![0u16; 520];
         let mut required_size: u32 = 0;
@@ -507,24 +458,18 @@ impl SetupApi {
 struct NewDevApi {
     _lib: Library,
     di_install_driver: FnDiInstallDriverW,
-    update_driver: FnUpdateDriverForPlugAndPlayDevicesW,
 }
 
 impl NewDevApi {
     fn new() -> Result<Self> {
-        let lib = unsafe { Library::new("newdev.dll") }
-            .context("无法加载 newdev.dll")?;
+        let lib = unsafe { Library::new("newdev.dll") }.context("无法加载 newdev.dll")?;
 
         unsafe {
-            let di_install_driver: FnDiInstallDriverW = 
-                *lib.get(b"DiInstallDriverW")?;
-            let update_driver: FnUpdateDriverForPlugAndPlayDevicesW = 
-                *lib.get(b"UpdateDriverForPlugAndPlayDevicesW")?;
+            let di_install_driver: FnDiInstallDriverW = *lib.get(b"DiInstallDriverW")?;
 
             Ok(Self {
                 _lib: lib,
                 di_install_driver,
-                update_driver,
             })
         }
     }
@@ -541,51 +486,12 @@ impl NewDevApi {
         };
 
         let result = unsafe {
-            (self.di_install_driver)(
-                HWND::default(),
-                wide_path.as_ptr(),
-                flags,
-                &mut need_reboot,
-            )
+            (self.di_install_driver)(HWND::default(), wide_path.as_ptr(), flags, &mut need_reboot)
         };
 
         if result.0 == 0 {
             let err = get_last_error();
             bail!("DiInstallDriverW 失败: 错误码 {}", err);
-        }
-
-        Ok(need_reboot.0 != 0)
-    }
-
-    /// 更新即插即用设备的驱动
-    fn update_pnp_driver(&self, hardware_id: &str, inf_path: &Path, force: bool) -> Result<bool> {
-        let wide_hwid = to_wide(hardware_id);
-        let wide_path = path_to_wide(inf_path);
-        let mut need_reboot = BOOL::default();
-
-        let flags = if force {
-            INSTALLFLAG_FORCE
-        } else {
-            0
-        };
-
-        let result = unsafe {
-            (self.update_driver)(
-                HWND::default(),
-                wide_hwid.as_ptr(),
-                wide_path.as_ptr(),
-                flags,
-                &mut need_reboot,
-            )
-        };
-
-        if result.0 == 0 {
-            let err = get_last_error();
-            // 错误码 0x0 表示成功但没有更新
-            if err == 0 {
-                return Ok(false);
-            }
-            bail!("UpdateDriverForPlugAndPlayDevicesW 失败: 错误码 {}", err);
         }
 
         Ok(need_reboot.0 != 0)
@@ -618,6 +524,11 @@ impl DriverManager {
     /// 枚举系统中所有已安装的驱动
     pub fn enumerate_all_drivers(&self) -> Result<Vec<DriverInfo>> {
         self.setup_api.enumerate_drivers()
+    }
+
+    /// Enumerates present-device hardware IDs even when a device has no installed driver yet.
+    pub fn enumerate_present_hardware_ids(&self) -> Result<Vec<String>> {
+        self.setup_api.enumerate_present_hardware_ids()
     }
 
     /// 枚举第三方 (OEM) 驱动
@@ -656,15 +567,17 @@ impl DriverManager {
             exported_infs.insert(driver.inf_path.clone());
 
             // 获取驱动存储中的完整路径
-            let driver_store_path = if let Some(full_path) = 
-                self.setup_api.get_driver_store_path(&driver.inf_path) 
-            {
-                full_path
-            } else {
-                // 尝试使用 Windows\INF 目录
-                let windows_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
-                PathBuf::from(&windows_dir).join("INF").join(&driver.inf_path)
-            };
+            let driver_store_path =
+                if let Some(full_path) = self.setup_api.get_driver_store_path(&driver.inf_path) {
+                    full_path
+                } else {
+                    // 尝试使用 Windows\INF 目录
+                    let windows_dir =
+                        std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+                    PathBuf::from(&windows_dir)
+                        .join("INF")
+                        .join(&driver.inf_path)
+                };
 
             if !driver_store_path.exists() {
                 log::warn!(
@@ -679,7 +592,7 @@ impl DriverManager {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or(&driver.inf_path);
-            
+
             let dest_dir = destination.join(inf_stem);
             std::fs::create_dir_all(&dest_dir)?;
 
@@ -688,15 +601,13 @@ impl DriverManager {
                 Ok(_) => {
                     log::info!(
                         "[DriverManager] 已导出: {} -> {:?}",
-                        driver.description, dest_dir
+                        driver.description,
+                        dest_dir
                     );
                     success_count += 1;
                 }
                 Err(e) => {
-                    log::error!(
-                        "[DriverManager] 导出失败: {} - {}",
-                        driver.description, e
-                    );
+                    log::error!("[DriverManager] 导出失败: {} - {}", driver.description, e);
                 }
             }
         }
@@ -711,7 +622,7 @@ impl DriverManager {
         // 需要复制整个目录
 
         let parent_dir = inf_path.parent().context("无法获取父目录")?;
-        
+
         // 如果 INF 在 FileRepository 中
         if parent_dir.to_string_lossy().contains("FileRepository") {
             // 复制整个目录
@@ -756,11 +667,11 @@ impl DriverManager {
         // 简单解析 INF 文件查找 .sys 文件
         for line in inf_content.lines() {
             let line = line.trim();
-            
+
             // 查找 CopyFiles 引用的文件
             if line.ends_with(".sys") || line.ends_with(".dll") || line.ends_with(".cat") {
                 let file_name = line.split(',').next().unwrap_or(line).trim();
-                
+
                 // 尝试从 System32\drivers 复制
                 let src_file = system32_drivers.join(file_name);
                 if src_file.exists() {
@@ -808,7 +719,9 @@ impl DriverManager {
 
         log::info!(
             "[DriverManager] 驱动导入完成: 成功 {}, 失败 {}, 需要重启: {}",
-            success_count, fail_count, need_reboot
+            success_count,
+            fail_count,
+            need_reboot
         );
 
         Ok((success_count, fail_count, need_reboot))
@@ -821,7 +734,10 @@ impl DriverManager {
             match newdev.install_driver(inf_path, force) {
                 Ok(reboot) => return Ok(reboot),
                 Err(e) => {
-                    log::warn!("[DriverManager] DiInstallDriver 失败: {}, 尝试 SetupCopyOEMInf", e);
+                    log::warn!(
+                        "[DriverManager] DiInstallDriver 失败: {}, 尝试 SetupCopyOEMInf",
+                        e
+                    );
                 }
             }
         }
@@ -837,7 +753,7 @@ impl DriverManager {
         let mut inf_files = Vec::new();
 
         if !dir.is_dir() {
-            bail!("{} 不是目录", format!("{:?}", dir));
+            bail!("{dir:?} 不是目录");
         }
 
         for entry in walkdir::WalkDir::new(dir)
@@ -848,7 +764,7 @@ impl DriverManager {
             let path = entry.path();
             if path.is_file() {
                 if let Some(ext) = path.extension() {
-                    if ext.to_ascii_lowercase() == "inf" {
+                    if ext.eq_ignore_ascii_case("inf") {
                         inf_files.push(path.to_path_buf());
                     }
                 }
@@ -859,7 +775,7 @@ impl DriverManager {
     }
 
     /// 导入驱动到离线系统（PE环境下使用）
-    /// 
+    ///
     /// 完整的离线驱动注入，包括：
     /// 1. 复制驱动文件到 DriverStore\FileRepository
     /// 2. 复制 .sys 文件到 System32\drivers
@@ -890,9 +806,7 @@ impl DriverManager {
             .join("Windows")
             .join("System32")
             .join("drivers");
-        let inf_dir = offline_root
-            .join("Windows")
-            .join("INF");
+        let inf_dir = offline_root.join("Windows").join("INF");
 
         std::fs::create_dir_all(&driver_store)?;
         std::fs::create_dir_all(&system_drivers)?;
@@ -921,9 +835,14 @@ impl DriverManager {
                 .unwrap_or("unknown.inf");
 
             // 1. 复制到 DriverStore\FileRepository
-            let target_store_dir = driver_store.join(format!("{}.inf_amd64_offline{:08x}", inf_name, oem_index));
+            let target_store_dir =
+                driver_store.join(format!("{}.inf_amd64_offline{:08x}", inf_name, oem_index));
             if let Err(e) = Self::copy_dir_recursive(inf_source_dir, &target_store_dir) {
-                log::error!("[DriverManager] 复制到DriverStore失败: {:?} - {}", inf_path, e);
+                log::error!(
+                    "[DriverManager] 复制到DriverStore失败: {:?} - {}",
+                    inf_path,
+                    e
+                );
                 fail_count += 1;
                 continue;
             }
@@ -940,7 +859,11 @@ impl DriverManager {
             let source_inf = target_store_dir.join(inf_filename);
             if source_inf.exists() {
                 if let Err(e) = std::fs::copy(&source_inf, &oem_inf_path) {
-                    log::warn!("[DriverManager] 复制INF到Windows\\INF失败: {} - {}", oem_inf_name, e);
+                    log::warn!(
+                        "[DriverManager] 复制INF到Windows\\INF失败: {} - {}",
+                        oem_inf_name,
+                        e
+                    );
                 }
             }
 
@@ -957,12 +880,17 @@ impl DriverManager {
 
             success_count += 1;
             oem_index += 1;
-            log::info!("[DriverManager] 离线安装成功: {:?} -> {}", inf_path, oem_inf_name);
+            log::info!(
+                "[DriverManager] 离线安装成功: {:?} -> {}",
+                inf_path,
+                oem_inf_name
+            );
         }
 
         log::info!(
             "[DriverManager] 离线驱动导入完成: 成功 {}, 失败 {}",
-            success_count, fail_count
+            success_count,
+            fail_count
         );
 
         Ok((success_count, fail_count))
@@ -971,15 +899,15 @@ impl DriverManager {
     /// 获取下一个可用的 OEM INF 编号
     fn get_next_oem_index(inf_dir: &Path) -> u32 {
         let mut max_index = 0u32;
-        
+
         if let Ok(entries) = std::fs::read_dir(inf_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy().to_lowercase();
-                
+
                 if name_str.starts_with("oem") && name_str.ends_with(".inf") {
                     // 提取数字部分
-                    let num_part = &name_str[3..name_str.len()-4];
+                    let num_part = &name_str[3..name_str.len() - 4];
                     if let Ok(num) = num_part.parse::<u32>() {
                         if num > max_index {
                             max_index = num;
@@ -988,7 +916,7 @@ impl DriverManager {
                 }
             }
         }
-        
+
         max_index + 1
     }
 
@@ -998,7 +926,7 @@ impl DriverManager {
         for entry in std::fs::read_dir(driver_store_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_file() {
                 if let Some(ext) = path.extension() {
                     if ext.to_string_lossy().to_lowercase() == "sys" {
@@ -1007,9 +935,17 @@ impl DriverManager {
                             let dest = system_drivers.join(filename);
                             if !dest.exists() {
                                 if let Err(e) = std::fs::copy(&path, &dest) {
-                                    log::warn!("[DriverManager] 复制sys文件失败: {:?} - {}", filename, e);
+                                    log::warn!(
+                                        "[DriverManager] 复制sys文件失败: {:?} - {}",
+                                        filename,
+                                        e
+                                    );
                                 } else {
-                                    log::info!("[DriverManager] 已复制: {:?} -> {:?}", filename, dest);
+                                    log::info!(
+                                        "[DriverManager] 已复制: {:?} -> {:?}",
+                                        filename,
+                                        dest
+                                    );
                                 }
                             }
                         }
@@ -1028,7 +964,7 @@ impl DriverManager {
         _oem_inf_name: &str,
     ) -> Result<()> {
         use crate::registry::OfflineRegistry;
-        
+
         // 查找 INF 文件
         let inf_path = driver_store_dir.join(inf_filename);
         if !inf_path.exists() {
@@ -1036,12 +972,11 @@ impl DriverManager {
         }
 
         // 读取并解析 INF 文件
-        let inf_content = std::fs::read_to_string(&inf_path)
-            .unwrap_or_default();
-        
+        let inf_content = std::fs::read_to_string(&inf_path).unwrap_or_default();
+
         // 解析服务信息
         let service_info = Self::parse_inf_service_info(&inf_content);
-        
+
         if service_info.is_empty() {
             log::info!("[DriverManager] INF 中未找到服务定义: {}", inf_filename);
             return Ok(());
@@ -1053,14 +988,14 @@ impl DriverManager {
             .join("System32")
             .join("config")
             .join("SYSTEM");
-        
+
         if !system_hive.exists() {
             log::warn!("[DriverManager] SYSTEM hive 不存在: {:?}", system_hive);
             return Ok(());
         }
 
         let hive_key = format!("drv_offline_{}", std::process::id());
-        
+
         // 尝试加载注册表
         if let Err(e) = OfflineRegistry::load_hive(&hive_key, &system_hive.to_string_lossy()) {
             log::warn!("[DriverManager] 加载SYSTEM hive失败: {}", e);
@@ -1068,20 +1003,21 @@ impl DriverManager {
         }
 
         // 注册每个服务
-        for (service_name, service_binary, service_type, start_type, error_control) in &service_info {
+        for (service_name, service_binary, service_type, start_type, error_control) in &service_info
+        {
             let service_key = format!(
                 "HKLM\\{}\\ControlSet001\\Services\\{}",
                 hive_key, service_name
             );
-            
+
             // 创建服务键
             let _ = OfflineRegistry::create_key(&service_key);
-            
+
             // 设置服务属性
             let _ = OfflineRegistry::set_dword(&service_key, "Type", *service_type);
             let _ = OfflineRegistry::set_dword(&service_key, "Start", *start_type);
             let _ = OfflineRegistry::set_dword(&service_key, "ErrorControl", *error_control);
-            
+
             // 设置 ImagePath (使用 REG_EXPAND_SZ)
             let image_path = if service_binary.contains('\\') || service_binary.contains('/') {
                 service_binary.clone()
@@ -1089,7 +1025,7 @@ impl DriverManager {
                 format!("System32\\drivers\\{}", service_binary)
             };
             let _ = OfflineRegistry::set_expand_string(&service_key, "ImagePath", &image_path);
-            
+
             // 同时设置 ControlSet002 (如果存在)
             let service_key2 = format!(
                 "HKLM\\{}\\ControlSet002\\Services\\{}",
@@ -1100,16 +1036,19 @@ impl DriverManager {
             let _ = OfflineRegistry::set_dword(&service_key2, "Start", *start_type);
             let _ = OfflineRegistry::set_dword(&service_key2, "ErrorControl", *error_control);
             let _ = OfflineRegistry::set_expand_string(&service_key2, "ImagePath", &image_path);
-            
+
             log::info!(
                 "[DriverManager] 已注册服务: {} (Type={}, Start={}, ImagePath={})",
-                service_name, service_type, start_type, image_path
+                service_name,
+                service_type,
+                start_type,
+                image_path
             );
         }
 
         // 卸载注册表
         let _ = OfflineRegistry::unload_hive(&hive_key);
-        
+
         Ok(())
     }
 
@@ -1118,23 +1057,24 @@ impl DriverManager {
     fn parse_inf_service_info(inf_content: &str) -> Vec<(String, String, u32, u32, u32)> {
         let mut services = Vec::new();
         let mut current_section = String::new();
-        let mut service_install_sections: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        
+        let mut service_install_sections: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
         // 第一遍：找到 AddService 指令，获取服务名和安装段名
         for line in inf_content.lines() {
             let line = line.trim();
-            
+
             // 跳过注释和空行
             if line.is_empty() || line.starts_with(';') {
                 continue;
             }
-            
+
             // 检查段名
             if line.starts_with('[') && line.ends_with(']') {
-                current_section = line[1..line.len()-1].to_lowercase();
+                current_section = line[1..line.len() - 1].to_lowercase();
                 continue;
             }
-            
+
             // 查找 AddService 指令
             let lower_line = line.to_lowercase();
             if lower_line.starts_with("addservice") {
@@ -1152,21 +1092,21 @@ impl DriverManager {
                 }
             }
         }
-        
+
         // 第二遍：解析服务安装段
         current_section.clear();
         let mut service_type: u32 = 1; // SERVICE_KERNEL_DRIVER
-        let mut start_type: u32 = 3;   // SERVICE_DEMAND_START
+        let mut start_type: u32 = 3; // SERVICE_DEMAND_START
         let mut error_control: u32 = 1; // SERVICE_ERROR_NORMAL
         let mut service_binary = String::new();
-        
+
         for line in inf_content.lines() {
             let line = line.trim();
-            
+
             if line.is_empty() || line.starts_with(';') {
                 continue;
             }
-            
+
             if line.starts_with('[') && line.ends_with(']') {
                 // 保存之前段的服务信息
                 if let Some(service_name) = service_install_sections.get(&current_section) {
@@ -1180,23 +1120,23 @@ impl DriverManager {
                         ));
                     }
                 }
-                
+
                 // 重置并切换到新段
-                current_section = line[1..line.len()-1].to_lowercase();
+                current_section = line[1..line.len() - 1].to_lowercase();
                 service_type = 1;
                 start_type = 3;
                 error_control = 1;
                 service_binary.clear();
                 continue;
             }
-            
+
             // 解析服务段中的属性
             if service_install_sections.contains_key(&current_section) {
                 let parts: Vec<&str> = line.splitn(2, '=').collect();
                 if parts.len() == 2 {
                     let key = parts[0].trim().to_lowercase();
                     let value = parts[1].trim();
-                    
+
                     match key.as_str() {
                         "servicetype" => {
                             service_type = Self::parse_inf_number(value);
@@ -1216,7 +1156,7 @@ impl DriverManager {
                 }
             }
         }
-        
+
         // 保存最后一个段
         if let Some(service_name) = service_install_sections.get(&current_section) {
             if !service_binary.is_empty() {
@@ -1229,7 +1169,7 @@ impl DriverManager {
                 ));
             }
         }
-        
+
         services
     }
 
@@ -1237,7 +1177,7 @@ impl DriverManager {
     fn parse_inf_number(value: &str) -> u32 {
         let value = value.split(';').next().unwrap_or("").trim();
         let value = value.split(',').next().unwrap_or("").trim();
-        
+
         if value.to_lowercase().starts_with("0x") {
             u32::from_str_radix(&value[2..], 16).unwrap_or(0)
         } else {
@@ -1249,16 +1189,12 @@ impl DriverManager {
     fn resolve_inf_path(value: &str) -> String {
         // 移除注释
         let value = value.split(';').next().unwrap_or("").trim();
-        
+
         // 提取文件名（去掉 %xx% 路径部分）
         // %12%\xxx.sys -> xxx.sys
         // %dirid%\path\xxx.sys -> xxx.sys
-        let filename = value
-            .rsplit(|c| c == '\\' || c == '/')
-            .next()
-            .unwrap_or(value)
-            .trim();
-        
+        let filename = value.rsplit(['\\', '/']).next().unwrap_or(value).trim();
+
         filename.to_string()
     }
 
@@ -1284,7 +1220,7 @@ impl DriverManager {
             .join("FileRepository");
 
         if !driver_store.exists() {
-            bail!("驱动存储目录不存在: {}", format!("{:?}", driver_store));
+            bail!("驱动存储目录不存在: {driver_store:?}");
         }
 
         let mut success_count = 0;
@@ -1297,7 +1233,7 @@ impl DriverManager {
             if path.is_dir() {
                 // 检查是否为 OEM 驱动（目录名包含 oem）
                 let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                
+
                 // 只导出第三方驱动（包含 oem 或不在系统自带列表中）
                 if Self::is_third_party_driver(dir_name) {
                     let dest_dir = destination.join(dir_name);
@@ -1321,7 +1257,7 @@ impl DriverManager {
     /// 判断是否为第三方驱动
     fn is_third_party_driver(dir_name: &str) -> bool {
         let lower = dir_name.to_lowercase();
-        
+
         // OEM 驱动
         if lower.contains("oem") {
             return true;
@@ -1329,17 +1265,67 @@ impl DriverManager {
 
         // 常见系统自带驱动前缀（跳过这些）
         let system_prefixes = [
-            "acpi", "amd", "atiilhag", "basicdisplay", "basicrender",
-            "compositebus", "disk", "display", "dual", "ehstorclass",
-            "fdc", "floppy", "hdaudio", "hid", "i8042prt", "input",
-            "kdnic", "keyboard", "ks", "monitor", "mouse", "mshdc",
-            "msisadrv", "mssecflt", "netio", "ntfs", "nvraid", "pci",
-            "pcmcia", "pdc", "portcls", "processr", "rdyboost", "sata",
-            "scsi", "sd", "serial", "spaceport", "storage", "swenum",
-            "sysaudio", "termdd", "uaspstor", "ufs", "umbus", "umdf",
-            "umpnpmgr", "usb", "vdrvroot", "vga", "volmgr", "volsnap",
-            "wdf", "wdma", "wfp", "win32k", "winhv", "wmilib", "wof",
-            "ws2ifsl", "wudf",
+            "acpi",
+            "amd",
+            "atiilhag",
+            "basicdisplay",
+            "basicrender",
+            "compositebus",
+            "disk",
+            "display",
+            "dual",
+            "ehstorclass",
+            "fdc",
+            "floppy",
+            "hdaudio",
+            "hid",
+            "i8042prt",
+            "input",
+            "kdnic",
+            "keyboard",
+            "ks",
+            "monitor",
+            "mouse",
+            "mshdc",
+            "msisadrv",
+            "mssecflt",
+            "netio",
+            "ntfs",
+            "nvraid",
+            "pci",
+            "pcmcia",
+            "pdc",
+            "portcls",
+            "processr",
+            "rdyboost",
+            "sata",
+            "scsi",
+            "sd",
+            "serial",
+            "spaceport",
+            "storage",
+            "swenum",
+            "sysaudio",
+            "termdd",
+            "uaspstor",
+            "ufs",
+            "umbus",
+            "umdf",
+            "umpnpmgr",
+            "usb",
+            "vdrvroot",
+            "vga",
+            "volmgr",
+            "volsnap",
+            "wdf",
+            "wdma",
+            "wfp",
+            "win32k",
+            "winhv",
+            "wmilib",
+            "wof",
+            "ws2ifsl",
+            "wudf",
         ];
 
         for prefix in &system_prefixes {
@@ -1379,10 +1365,7 @@ pub fn export_drivers(destination: &str) -> Result<usize> {
 /// - 成功导出的驱动数量
 pub fn export_drivers_from_system(system_partition: &str, destination: &str) -> Result<usize> {
     let manager = DriverManager::new()?;
-    manager.export_drivers_from_system(
-        Path::new(system_partition),
-        Path::new(destination),
-    )
+    manager.export_drivers_from_system(Path::new(system_partition), Path::new(destination))
 }
 
 /// 导入驱动
@@ -1408,10 +1391,7 @@ pub fn import_drivers(driver_path: &str, force: bool) -> Result<(usize, usize, b
 /// - (成功数, 失败数)
 pub fn import_drivers_offline(offline_root: &str, driver_path: &str) -> Result<(usize, usize)> {
     let manager = DriverManager::new()?;
-    manager.import_drivers_offline(
-        Path::new(offline_root),
-        Path::new(driver_path),
-    )
+    manager.import_drivers_offline(Path::new(offline_root), Path::new(driver_path))
 }
 
 /// 枚举所有 OEM 驱动
@@ -1424,6 +1404,12 @@ pub fn list_oem_drivers() -> Result<Vec<DriverInfo>> {
 pub fn list_all_drivers() -> Result<Vec<DriverInfo>> {
     let manager = DriverManager::new()?;
     manager.enumerate_all_drivers()
+}
+
+/// 枚举当前存在设备的硬件 ID，包括尚未绑定 INF 的设备。
+pub fn list_present_hardware_ids() -> Result<Vec<String>> {
+    let manager = DriverManager::new()?;
+    manager.enumerate_present_hardware_ids()
 }
 
 #[cfg(test)]

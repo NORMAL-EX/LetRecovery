@@ -1,6 +1,11 @@
 //! 硬件信息模块
 //! 使用纯 WinAPI 获取硬件信息
 
+mod names;
+
+use names::is_placeholder;
+pub use names::{beautify_gpu_name, beautify_manufacturer_name, beautify_memory_manufacturer};
+
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::mem::{size_of, zeroed};
@@ -9,41 +14,40 @@ use std::os::windows::ffi::OsStringExt;
 use crate::tr;
 
 use windows::core::{BSTR, PCWSTR, VARIANT};
-use windows::Win32::Foundation::{BOOL, CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW,
-    ENUM_CURRENT_SETTINGS,
+    EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW, ENUM_CURRENT_SETTINGS,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoInitializeSecurity, CoSetProxyBlanket, CoUninitialize,
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL,
     RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, SAFEARRAY,
 };
+use windows::Win32::System::Ioctl::{
+    PropertyStandardQuery, StorageDeviceProperty, DISK_GEOMETRY_EX,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_QUERY_PROPERTY,
+    STORAGE_PROPERTY_QUERY,
+};
+use windows::Win32::System::Ole::SafeArrayGetElement;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE,
-    KEY_READ, REG_VALUE_TYPE,
+    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
+    REG_VALUE_TYPE,
 };
 use windows::Win32::System::SystemInformation::{
     GetNativeSystemInfo, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO,
 };
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    FILE_FLAGS_AND_ATTRIBUTES,
-};
-use windows::Win32::System::IO::DeviceIoControl;
-use windows::Win32::System::Ioctl::{
-    IOCTL_STORAGE_QUERY_PROPERTY, IOCTL_DISK_GET_LENGTH_INFO,
-    STORAGE_PROPERTY_QUERY, StorageDeviceProperty, PropertyStandardQuery,
+use windows::Win32::System::Variant::{
+    VARENUM, VT_ARRAY, VT_BSTR, VT_EMPTY, VT_I2, VT_I4, VT_I8, VT_NULL, VT_UI1, VT_UI2, VT_UI4,
+    VT_UI8,
 };
 use windows::Win32::System::Wmi::{
-    IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices,
-    WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
+    IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator,
+    WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
 };
-use windows::Win32::System::Variant::{
-    VT_NULL, VT_EMPTY, VT_BSTR, VT_I4, VT_UI4, VT_I2, VT_UI2, VT_UI1, VT_I8, VT_UI8, VT_ARRAY,
-    VARENUM,
-};
-use windows::Win32::System::Ole::SafeArrayGetElement;
+use windows::Win32::System::IO::DeviceIoControl;
 
 /// 设备类型枚举
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -276,9 +280,7 @@ struct ComInitGuard {
 
 impl ComInitGuard {
     fn new() -> Self {
-        let initialized = unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).is_ok()
-        };
+        let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
         if initialized {
             let _ = unsafe {
                 CoInitializeSecurity(
@@ -314,35 +316,35 @@ impl WmiConnection {
     /// 连接到指定的 WMI 命名空间
     fn connect(namespace: &str) -> Option<Self> {
         unsafe {
-            let locator: IWbemLocator = CoCreateInstance(
-                &WbemLocator,
-                None,
-                CLSCTX_INPROC_SERVER,
-            ).ok()?;
+            let locator: IWbemLocator =
+                CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).ok()?;
 
             let namespace_bstr = BSTR::from(namespace);
-            let services = locator.ConnectServer(
-                &namespace_bstr,
-                &BSTR::new(),
-                &BSTR::new(),
-                &BSTR::new(),
-                0,
-                &BSTR::new(),
-                None,
-            ).ok()?;
+            let services = locator
+                .ConnectServer(
+                    &namespace_bstr,
+                    &BSTR::new(),
+                    &BSTR::new(),
+                    &BSTR::new(),
+                    0,
+                    &BSTR::new(),
+                    None,
+                )
+                .ok()?;
 
             // CoSetProxyBlanket 正确的 8 个参数:
             // pproxy, dwauthnsvc, dwauthzsvc, pserverprincname, dwauthnlevel, dwimplevel, pauthinfo, dwcapabilities
             CoSetProxyBlanket(
                 &services,
-                RPC_C_AUTHN_DEFAULT,    // dwauthnsvc - 身份验证服务
-                RPC_C_AUTHZ_NONE,       // dwauthzsvc - 授权服务
-                None,                   // pserverprincname - 服务器主体名称
-                RPC_C_AUTHN_LEVEL_CALL, // dwauthnlevel - 身份验证级别
+                RPC_C_AUTHN_DEFAULT,         // dwauthnsvc - 身份验证服务
+                RPC_C_AUTHZ_NONE,            // dwauthzsvc - 授权服务
+                None,                        // pserverprincname - 服务器主体名称
+                RPC_C_AUTHN_LEVEL_CALL,      // dwauthnlevel - 身份验证级别
                 RPC_C_IMP_LEVEL_IMPERSONATE, // dwimplevel - 模拟级别
-                None,                   // pauthinfo - 身份验证信息
-                EOAC_NONE,              // dwcapabilities - 能力标志
-            ).ok()?;
+                None,                        // pauthinfo - 身份验证信息
+                EOAC_NONE,                   // dwcapabilities - 能力标志
+            )
+            .ok()?;
 
             Some(Self { services })
         }
@@ -359,12 +361,15 @@ impl WmiConnection {
             let query_lang = BSTR::from("WQL");
             let query_str = BSTR::from(wql);
 
-            let enumerator = self.services.ExecQuery(
-                &query_lang,
-                &query_str,
-                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-                None,
-            ).ok()?;
+            let enumerator = self
+                .services
+                .ExecQuery(
+                    &query_lang,
+                    &query_str,
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                    None,
+                )
+                .ok()?;
 
             Some(WmiQueryResult { enumerator })
         }
@@ -411,7 +416,11 @@ impl WmiObject {
             let prop_name = BSTR::from(property);
             let mut value = VARIANT::default();
 
-            if self.inner.Get(&prop_name, 0, &mut value, None, None).is_ok() {
+            if self
+                .inner
+                .Get(&prop_name, 0, &mut value, None, None)
+                .is_ok()
+            {
                 variant_to_string(&value)
             } else {
                 None
@@ -425,7 +434,11 @@ impl WmiObject {
             let prop_name = BSTR::from(property);
             let mut value = VARIANT::default();
 
-            if self.inner.Get(&prop_name, 0, &mut value, None, None).is_ok() {
+            if self
+                .inner
+                .Get(&prop_name, 0, &mut value, None, None)
+                .is_ok()
+            {
                 variant_to_u32(&value)
             } else {
                 None
@@ -439,7 +452,11 @@ impl WmiObject {
             let prop_name = BSTR::from(property);
             let mut value = VARIANT::default();
 
-            if self.inner.Get(&prop_name, 0, &mut value, None, None).is_ok() {
+            if self
+                .inner
+                .Get(&prop_name, 0, &mut value, None, None)
+                .is_ok()
+            {
                 variant_to_u64(&value)
             } else {
                 None
@@ -453,7 +470,11 @@ impl WmiObject {
             let prop_name = BSTR::from(property);
             let mut value = VARIANT::default();
 
-            if self.inner.Get(&prop_name, 0, &mut value, None, None).is_ok() {
+            if self
+                .inner
+                .Get(&prop_name, 0, &mut value, None, None)
+                .is_ok()
+            {
                 variant_to_u16_array(&value)
             } else {
                 None
@@ -477,7 +498,7 @@ fn get_variant_vt(var: &VARIANT) -> VARENUM {
 /// 将 VARIANT 转换为字符串
 fn variant_to_string(var: &VARIANT) -> Option<String> {
     let vt = get_variant_vt(var);
-    
+
     if vt == VT_NULL || vt == VT_EMPTY {
         return None;
     }
@@ -621,7 +642,7 @@ fn variant_to_u16_array(var: &VARIANT) -> Option<Vec<u16>> {
 
         // 检查是否为数组类型 VT_ARRAY | VT_I2 或 VT_ARRAY | VT_UI2
         let is_array = (vt.0 & VT_ARRAY.0) != 0;
-        
+
         if !is_array {
             // 不是数组，尝试作为单个值处理
             if let Some(val) = variant_to_u32(var) {
@@ -636,7 +657,7 @@ fn variant_to_u16_array(var: &VARIANT) -> Option<Vec<u16>> {
         let var_ptr = var as *const VARIANT as *const u8;
         let parray_ptr = var_ptr.add(8) as *const *mut SAFEARRAY;
         let parray = *parray_ptr;
-        
+
         if parray.is_null() {
             return None;
         }
@@ -689,7 +710,11 @@ fn get_memory_sticks_wmi() -> Vec<MemoryStickInfo> {
 
         let bank_label = obj.get_string("BankLabel").unwrap_or_default();
         let manufacturer = obj.get_string("Manufacturer").unwrap_or_default();
-        let part_number = obj.get_string("PartNumber").unwrap_or_default().trim().to_string();
+        let part_number = obj
+            .get_string("PartNumber")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let speed = obj.get_u32("Speed").unwrap_or(0);
         let device_locator = obj.get_string("DeviceLocator").unwrap_or_default();
         let smbios_memory_type = obj.get_u32("SMBIOSMemoryType").unwrap_or(0);
@@ -804,7 +829,9 @@ fn get_battery_wmi_info() -> (Option<u32>, Option<u32>, Option<String>) {
         return (None, None, None);
     };
 
-    let Some(result) = wmi.query("SELECT DesignCapacity, FullChargeCapacity, Name FROM Win32_Battery") else {
+    let Some(result) =
+        wmi.query("SELECT DesignCapacity, FullChargeCapacity, Name FROM Win32_Battery")
+    else {
         return (None, None, None);
     };
 
@@ -866,7 +893,8 @@ fn get_bitlocker_status_wmi(drive_letter: &str) -> BitLockerStatus {
     let _com = ComInitGuard::new();
 
     // BitLocker 信息在 root\cimv2\Security\MicrosoftVolumeEncryption 命名空间
-    let Some(wmi) = WmiConnection::connect("ROOT\\CIMV2\\Security\\MicrosoftVolumeEncryption") else {
+    let Some(wmi) = WmiConnection::connect("ROOT\\CIMV2\\Security\\MicrosoftVolumeEncryption")
+    else {
         // 尝试备用方法：通过注册表检查
         return get_bitlocker_status_registry(drive_letter);
     };
@@ -933,9 +961,14 @@ fn get_bitlocker_status_registry(drive_letter: &str) -> BitLockerStatus {
         drive_letter
     };
 
-    let subkey = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\BitLocker\\Volumes\\{}", drive);
+    let subkey = format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\BitLocker\\Volumes\\{}",
+        drive
+    );
 
-    if let Some(protection_type) = read_registry_dword(HKEY_LOCAL_MACHINE, &subkey, "ProtectionType") {
+    if let Some(protection_type) =
+        read_registry_dword(HKEY_LOCAL_MACHINE, &subkey, "ProtectionType")
+    {
         return match protection_type {
             0 => BitLockerStatus::NotEncrypted,
             1 | 2 => BitLockerStatus::Encrypted,
@@ -979,65 +1012,216 @@ impl HardwareInfo {
         Ok(info)
     }
 
-    pub fn to_formatted_text(&self, sys_info: Option<&crate::core::system_info::SystemInfo>) -> String {
+    pub fn to_formatted_text(
+        &self,
+        sys_info: Option<&crate::core::system_info::SystemInfo>,
+    ) -> String {
         let mut lines = Vec::new();
         let arch_str = match self.os.architecture.as_str() {
-            "64 位" => "X64", "32 位" => "X86", "ARM64" => "ARM64", _ => &self.os.architecture,
+            "64 位" => "X64",
+            "32 位" => "X86",
+            "ARM64" => "ARM64",
+            _ => &self.os.architecture,
         };
-        lines.push(tr!("系统名称: {} {} [10.0.{} ({})]", self.os.name, arch_str, self.os.build_number, self.os.version));
+        lines.push(tr!(
+            "系统名称: {} {} [10.0.{} ({})]",
+            self.os.name,
+            arch_str,
+            self.os.build_number,
+            self.os.version
+        ));
         lines.push(tr!("计算机名: {}", self.computer_name));
-        if !self.os.install_date.is_empty() { lines.push(tr!("安装日期: {}", self.os.install_date)); }
-        let boot_mode = sys_info.map(|s| format!("{}", s.boot_mode)).unwrap_or_else(|| tr!("未知"));
-        lines.push(tr!("启动模式: {}  设备类型: {}", boot_mode, self.device_type));
-        let tpm_str = if let Some(s) = sys_info { if s.tpm_enabled { tr!("已开启 v{}", s.tpm_version) } else { tr!("未开启") } } else { tr!("未知") };
-        let secure_boot_str = if let Some(s) = sys_info { if s.secure_boot { "已启用" } else { "未启用" } } else { "未知" };
-        let bitlocker_str = match self.system_bitlocker_status { BitLockerStatus::Encrypted => "是", BitLockerStatus::NotEncrypted => "否", BitLockerStatus::EncryptionInProgress => "加密中", BitLockerStatus::DecryptionInProgress => "解密中", BitLockerStatus::Unknown => "未知", };
-        lines.push(tr!(" TPM模块: {} 安全启动: {} BitLocker加密启动: {}", tpm_str, secure_boot_str, bitlocker_str));
+        if !self.os.install_date.is_empty() {
+            lines.push(tr!("安装日期: {}", self.os.install_date));
+        }
+        let boot_mode = sys_info
+            .map(|s| format!("{}", s.boot_mode))
+            .unwrap_or_else(|| tr!("未知"));
+        lines.push(tr!(
+            "启动模式: {}  设备类型: {}",
+            boot_mode,
+            self.device_type
+        ));
+        let tpm_str = if let Some(s) = sys_info {
+            if s.tpm_enabled {
+                tr!("已开启 v{}", s.tpm_version)
+            } else {
+                tr!("未开启")
+            }
+        } else {
+            tr!("未知")
+        };
+        let secure_boot_str = if let Some(s) = sys_info {
+            if s.secure_boot {
+                "已启用"
+            } else {
+                "未启用"
+            }
+        } else {
+            "未知"
+        };
+        let bitlocker_str = match self.system_bitlocker_status {
+            BitLockerStatus::Encrypted => "是",
+            BitLockerStatus::NotEncrypted => "否",
+            BitLockerStatus::EncryptionInProgress => "加密中",
+            BitLockerStatus::DecryptionInProgress => "解密中",
+            BitLockerStatus::Unknown => "未知",
+        };
+        lines.push(tr!(
+            " TPM模块: {} 安全启动: {} BitLocker加密启动: {}",
+            tpm_str,
+            secure_boot_str,
+            bitlocker_str
+        ));
         let mfr_beautified = beautify_manufacturer_name(&self.computer_manufacturer);
         lines.push(tr!("电脑型号: {} {}", mfr_beautified, self.computer_model));
         lines.push(tr!("  制造商: {}", mfr_beautified));
-        if !self.system_serial_number.is_empty() { lines.push(tr!("设备编号: {}", self.system_serial_number)); }
-        let mb_product = if !self.motherboard.product.is_empty() && !is_placeholder(&self.motherboard.product) { &self.motherboard.product } else { "未知" };
+        if !self.system_serial_number.is_empty() {
+            lines.push(tr!("设备编号: {}", self.system_serial_number));
+        }
+        let mb_product =
+            if !self.motherboard.product.is_empty() && !is_placeholder(&self.motherboard.product) {
+                &self.motherboard.product
+            } else {
+                "未知"
+            };
         lines.push(tr!("主板型号: {}", mb_product));
-        let mb_serial = if !self.motherboard.serial_number.is_empty() && !is_placeholder(&self.motherboard.serial_number) { &self.motherboard.serial_number } else { "未知" };
+        let mb_serial = if !self.motherboard.serial_number.is_empty()
+            && !is_placeholder(&self.motherboard.serial_number)
+        {
+            &self.motherboard.serial_number
+        } else {
+            "未知"
+        };
         lines.push(tr!("主板编号: {}", mb_serial));
-        let mb_version = if !self.motherboard.version.is_empty() && !is_placeholder(&self.motherboard.version) { &self.motherboard.version } else { "N/A" };
-        let bios_version = if !self.bios.version.is_empty() { &self.bios.version } else { "未知" };
-        let bios_date = if !self.bios.release_date.is_empty() { &self.bios.release_date } else { "未知" };
-        lines.push(tr!("主板版本: {}  BIOS版本: {}  更新日期: {}", mb_version, bios_version, bios_date));
+        let mb_version =
+            if !self.motherboard.version.is_empty() && !is_placeholder(&self.motherboard.version) {
+                &self.motherboard.version
+            } else {
+                "N/A"
+            };
+        let bios_version = if !self.bios.version.is_empty() {
+            &self.bios.version
+        } else {
+            "未知"
+        };
+        let bios_date = if !self.bios.release_date.is_empty() {
+            &self.bios.release_date
+        } else {
+            "未知"
+        };
+        lines.push(tr!(
+            "主板版本: {}  BIOS版本: {}  更新日期: {}",
+            mb_version,
+            bios_version,
+            bios_date
+        ));
         lines.push(tr!(" CPU型号: {}", self.cpu.name));
-        let ai_str = if self.cpu.supports_ai { " [支持AI人工智能]" } else { "" };
-        lines.push(tr!("  核心数: {} 线程数: {}{}", self.cpu.cores, self.cpu.logical_processors, ai_str));
+        let ai_str = if self.cpu.supports_ai {
+            " [支持AI人工智能]"
+        } else {
+            ""
+        };
+        lines.push(tr!(
+            "  核心数: {} 线程数: {}{}",
+            self.cpu.cores,
+            self.cpu.logical_processors,
+            ai_str
+        ));
         let total_gb = self.memory.total_physical as f64 / (1024.0 * 1024.0 * 1024.0);
         let available_gb = self.memory.available_physical as f64 / (1024.0 * 1024.0 * 1024.0);
-        lines.push(tr!("内存信息: 总大小 {} GB ({} GB可用) 插槽数: {}", format!("{:.0}", total_gb.round()), format!("{:.1}", available_gb), self.memory.slot_count));
+        lines.push(tr!(
+            "内存信息: 总大小 {} GB ({} GB可用) 插槽数: {}",
+            format!("{:.0}", total_gb.round()),
+            format!("{:.1}", available_gb),
+            self.memory.slot_count
+        ));
         for (i, stick) in self.memory.sticks.iter().enumerate() {
             let mfr = beautify_memory_manufacturer(&stick.manufacturer);
             let capacity_gb = stick.capacity / (1024 * 1024 * 1024);
-            let mem_type = if !stick.memory_type.is_empty() { &stick.memory_type } else { "DDR" };
-            let part = if !stick.part_number.is_empty() && !is_placeholder(&stick.part_number) { &stick.part_number } else { "Unknown" };
-            lines.push(format!("          {}: {} {}/{}GB/{} {}", i + 1, mfr, part, capacity_gb, mem_type, stick.speed));
+            let mem_type = if !stick.memory_type.is_empty() {
+                &stick.memory_type
+            } else {
+                "DDR"
+            };
+            let part = if !stick.part_number.is_empty() && !is_placeholder(&stick.part_number) {
+                &stick.part_number
+            } else {
+                "Unknown"
+            };
+            lines.push(format!(
+                "          {}: {} {}/{}GB/{} {}",
+                i + 1,
+                mfr,
+                part,
+                capacity_gb,
+                mem_type,
+                stick.speed
+            ));
         }
         if !self.gpus.is_empty() {
-            lines.push(tr!("显卡信息: 1: {}", beautify_gpu_name(&self.gpus[0].name)));
-            for (i, gpu) in self.gpus.iter().skip(1).enumerate() { lines.push(format!("          {}: {}", i + 2, beautify_gpu_name(&gpu.name))); }
+            lines.push(tr!(
+                "显卡信息: 1: {}",
+                beautify_gpu_name(&self.gpus[0].name)
+            ));
+            for (i, gpu) in self.gpus.iter().skip(1).enumerate() {
+                lines.push(format!(
+                    "          {}: {}",
+                    i + 2,
+                    beautify_gpu_name(&gpu.name)
+                ));
+            }
         }
         if !self.network_adapters.is_empty() {
             lines.push(tr!("网卡信息: 1: {}", self.network_adapters[0].description));
-            for (i, adapter) in self.network_adapters.iter().skip(1).enumerate() { lines.push(format!("          {}: {}", i + 2, adapter.description)); }
+            for (i, adapter) in self.network_adapters.iter().skip(1).enumerate() {
+                lines.push(format!("          {}: {}", i + 2, adapter.description));
+            }
         }
         if let Some(battery) = &self.battery {
-            let charging_str = if battery.is_charging { "充电中" } else if battery.is_ac_connected { "未充电" } else { "放电中" };
-            lines.push(tr!("电池信息: 当前电量: {}% 充电状态: {}", battery.charge_percent, charging_str));
-            if !battery.model.is_empty() && !is_placeholder(&battery.model) { lines.push(tr!("    型号: {}", battery.model)); }
-            if !battery.manufacturer.is_empty() && !is_placeholder(&battery.manufacturer) { lines.push(tr!("  制造商: {} ", beautify_manufacturer_name(&battery.manufacturer))); }
-            if battery.design_capacity_mwh > 0 { lines.push(tr!("设计容量: {} mWh", battery.design_capacity_mwh)); }
-            if battery.full_charge_capacity_mwh > 0 { lines.push(tr!("最大容量: {} mWh", battery.full_charge_capacity_mwh)); }
-            if battery.current_capacity_mwh > 0 { lines.push(tr!("当前容量: {} mWh", battery.current_capacity_mwh)); }
+            let charging_str = if battery.is_charging {
+                "充电中"
+            } else if battery.is_ac_connected {
+                "未充电"
+            } else {
+                "放电中"
+            };
+            lines.push(tr!(
+                "电池信息: 当前电量: {}% 充电状态: {}",
+                battery.charge_percent,
+                charging_str
+            ));
+            if !battery.model.is_empty() && !is_placeholder(&battery.model) {
+                lines.push(tr!("    型号: {}", battery.model));
+            }
+            if !battery.manufacturer.is_empty() && !is_placeholder(&battery.manufacturer) {
+                lines.push(tr!(
+                    "  制造商: {} ",
+                    beautify_manufacturer_name(&battery.manufacturer)
+                ));
+            }
+            if battery.design_capacity_mwh > 0 {
+                lines.push(tr!("设计容量: {} mWh", battery.design_capacity_mwh));
+            }
+            if battery.full_charge_capacity_mwh > 0 {
+                lines.push(tr!("最大容量: {} mWh", battery.full_charge_capacity_mwh));
+            }
+            if battery.current_capacity_mwh > 0 {
+                lines.push(tr!("当前容量: {} mWh", battery.current_capacity_mwh));
+            }
         }
         if !self.disks.is_empty() {
-            lines.push(tr!("硬盘信息: 1: {}", Self::format_disk_info(&self.disks[0])));
-            for (i, disk) in self.disks.iter().skip(1).enumerate() { lines.push(format!("          {}: {}", i + 2, Self::format_disk_info(disk))); }
+            lines.push(tr!(
+                "硬盘信息: 1: {}",
+                Self::format_disk_info(&self.disks[0])
+            ));
+            for (i, disk) in self.disks.iter().skip(1).enumerate() {
+                lines.push(format!(
+                    "          {}: {}",
+                    i + 2,
+                    Self::format_disk_info(disk)
+                ));
+            }
         }
         lines.join("\n")
     }
@@ -1045,42 +1229,130 @@ impl HardwareInfo {
     fn format_disk_info(disk: &DiskInfo) -> String {
         let size_gb = disk.size as f64 / (1024.0 * 1024.0 * 1024.0);
         let ssd_str = if disk.is_ssd { "固态" } else { "机械" };
-        let partition_style = if !disk.partition_style.is_empty() { &disk.partition_style } else { "未知" };
-        format!("{} [{:.1}GB-{}-{}-{}]", disk.model, size_gb, disk.interface_type, partition_style, ssd_str)
+        let partition_style = if !disk.partition_style.is_empty() {
+            &disk.partition_style
+        } else {
+            "未知"
+        };
+        format!(
+            "{} [{:.1}GB-{}-{}-{}]",
+            disk.model, size_gb, disk.interface_type, partition_style, ssd_str
+        )
     }
 
     fn get_computer_info(info: &mut HardwareInfo) {
-        if let Some(name) = read_registry_string(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName", "ComputerName") { info.computer_name = name; }
-        if let Some(manufacturer) = read_registry_string(HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS", "SystemManufacturer") { info.computer_manufacturer = manufacturer; }
-        if let Some(model) = read_registry_string(HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS", "SystemProductName") { info.computer_model = model; }
+        if let Some(name) = read_registry_string(
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName",
+            "ComputerName",
+        ) {
+            info.computer_name = name;
+        }
+        if let Some(manufacturer) = read_registry_string(
+            HKEY_LOCAL_MACHINE,
+            r"HARDWARE\DESCRIPTION\System\BIOS",
+            "SystemManufacturer",
+        ) {
+            info.computer_manufacturer = manufacturer;
+        }
+        if let Some(model) = read_registry_string(
+            HKEY_LOCAL_MACHINE,
+            r"HARDWARE\DESCRIPTION\System\BIOS",
+            "SystemProductName",
+        ) {
+            info.computer_model = model;
+        }
     }
 
     fn get_os_info() -> OsInfo {
         let mut os_info = OsInfo::default();
         let nt_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
-        let build_number: u32 = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "CurrentBuild").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let build_number: u32 = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "CurrentBuild")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         if let Some(name) = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "ProductName") {
-            if build_number >= 22000 && name.contains("Windows 10") { os_info.name = name.replace("Windows 10", "Windows 11"); } else { os_info.name = name; }
+            if build_number >= 22000 && name.contains("Windows 10") {
+                os_info.name = name.replace("Windows 10", "Windows 11");
+            } else {
+                os_info.name = name;
+            }
         } else {
-            os_info.name = if build_number >= 22000 { "Windows 11".to_string() } else if build_number >= 10240 { "Windows 10".to_string() } else { "Windows".to_string() };
+            os_info.name = if build_number >= 22000 {
+                "Windows 11".to_string()
+            } else if build_number >= 10240 {
+                "Windows 10".to_string()
+            } else {
+                "Windows".to_string()
+            };
         }
-        if let Some(display_version) = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "DisplayVersion") { os_info.version = display_version; }
-        else if let Some(release_id) = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "ReleaseId") { os_info.version = release_id; }
-        if build_number > 0 { let ubr = read_registry_dword(HKEY_LOCAL_MACHINE, nt_path, "UBR").map(|u| format!(".{}", u)).unwrap_or_default(); os_info.build_number = format!("{}{}", build_number, ubr); }
-        unsafe { let mut sys_info: SYSTEM_INFO = zeroed(); GetNativeSystemInfo(&mut sys_info); os_info.architecture = match sys_info.Anonymous.Anonymous.wProcessorArchitecture.0 { 0 => "32 位".to_string(), 9 => "64 位".to_string(), 12 => "ARM64".to_string(), _ => "未知".to_string(), }; }
-        if let Some(product_id) = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "ProductId") { os_info.product_id = product_id; }
-        if let Some(owner) = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "RegisteredOwner") { os_info.registered_owner = owner; }
-        if let Some(install_date) = read_registry_dword(HKEY_LOCAL_MACHINE, nt_path, "InstallDate") { if let Some(dt) = chrono::DateTime::from_timestamp(install_date as i64, 0) { os_info.install_date = dt.format("%Y-%m-%d %H:%M:%S").to_string(); } }
+        if let Some(display_version) =
+            read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "DisplayVersion")
+        {
+            os_info.version = display_version;
+        } else if let Some(release_id) =
+            read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "ReleaseId")
+        {
+            os_info.version = release_id;
+        }
+        if build_number > 0 {
+            let ubr = read_registry_dword(HKEY_LOCAL_MACHINE, nt_path, "UBR")
+                .map(|u| format!(".{}", u))
+                .unwrap_or_default();
+            os_info.build_number = format!("{}{}", build_number, ubr);
+        }
+        unsafe {
+            let mut sys_info: SYSTEM_INFO = zeroed();
+            GetNativeSystemInfo(&mut sys_info);
+            os_info.architecture = match sys_info.Anonymous.Anonymous.wProcessorArchitecture.0 {
+                0 => "32 位".to_string(),
+                9 => "64 位".to_string(),
+                12 => "ARM64".to_string(),
+                _ => "未知".to_string(),
+            };
+        }
+        if let Some(product_id) = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "ProductId") {
+            os_info.product_id = product_id;
+        }
+        if let Some(owner) = read_registry_string(HKEY_LOCAL_MACHINE, nt_path, "RegisteredOwner") {
+            os_info.registered_owner = owner;
+        }
+        if let Some(install_date) = read_registry_dword(HKEY_LOCAL_MACHINE, nt_path, "InstallDate")
+        {
+            if let Some(dt) = chrono::DateTime::from_timestamp(install_date as i64, 0) {
+                os_info.install_date = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+            }
+        }
         os_info
     }
 
     fn get_cpu_info() -> CpuInfo {
         let mut cpu_info = CpuInfo::default();
-        unsafe { let mut sys_info: SYSTEM_INFO = zeroed(); GetNativeSystemInfo(&mut sys_info); cpu_info.logical_processors = sys_info.dwNumberOfProcessors; cpu_info.architecture = match sys_info.Anonymous.Anonymous.wProcessorArchitecture.0 { 0 => "x86".to_string(), 9 => "x64".to_string(), 12 => "ARM64".to_string(), _ => "未知".to_string(), }; }
+        unsafe {
+            let mut sys_info: SYSTEM_INFO = zeroed();
+            GetNativeSystemInfo(&mut sys_info);
+            cpu_info.logical_processors = sys_info.dwNumberOfProcessors;
+            cpu_info.architecture = match sys_info.Anonymous.Anonymous.wProcessorArchitecture.0 {
+                0 => "x86".to_string(),
+                9 => "x64".to_string(),
+                12 => "ARM64".to_string(),
+                _ => "未知".to_string(),
+            };
+        }
         let cpu_path = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0";
-        if let Some(name) = read_registry_string(HKEY_LOCAL_MACHINE, cpu_path, "ProcessorNameString") { cpu_info.name = name.trim().to_string(); cpu_info.supports_ai = check_cpu_ai_support(&cpu_info.name); }
-        if let Some(vendor) = read_registry_string(HKEY_LOCAL_MACHINE, cpu_path, "VendorIdentifier") { cpu_info.manufacturer = vendor; }
-        if let Some(mhz) = read_registry_dword(HKEY_LOCAL_MACHINE, cpu_path, "~MHz") { cpu_info.max_clock_speed = mhz; cpu_info.current_clock_speed = mhz; }
+        if let Some(name) =
+            read_registry_string(HKEY_LOCAL_MACHINE, cpu_path, "ProcessorNameString")
+        {
+            cpu_info.name = name.trim().to_string();
+            cpu_info.supports_ai = check_cpu_ai_support(&cpu_info.name);
+        }
+        if let Some(vendor) = read_registry_string(HKEY_LOCAL_MACHINE, cpu_path, "VendorIdentifier")
+        {
+            cpu_info.manufacturer = vendor;
+        }
+        if let Some(mhz) = read_registry_dword(HKEY_LOCAL_MACHINE, cpu_path, "~MHz") {
+            cpu_info.max_clock_speed = mhz;
+            cpu_info.current_clock_speed = mhz;
+        }
         cpu_info.cores = get_physical_core_count().unwrap_or(cpu_info.logical_processors);
         cpu_info
     }
@@ -1116,9 +1388,21 @@ impl HardwareInfo {
     fn get_motherboard_info() -> MotherboardInfo {
         let mut mb_info = MotherboardInfo::default();
         let bios_path = r"HARDWARE\DESCRIPTION\System\BIOS";
-        if let Some(manufacturer) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BaseBoardManufacturer") { mb_info.manufacturer = manufacturer; }
-        if let Some(product) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BaseBoardProduct") { mb_info.product = product; }
-        if let Some(version) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BaseBoardVersion") { mb_info.version = version; }
+        if let Some(manufacturer) =
+            read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BaseBoardManufacturer")
+        {
+            mb_info.manufacturer = manufacturer;
+        }
+        if let Some(product) =
+            read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BaseBoardProduct")
+        {
+            mb_info.product = product;
+        }
+        if let Some(version) =
+            read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BaseBoardVersion")
+        {
+            mb_info.version = version;
+        }
 
         // 使用 WMI 获取主板序列号
         if let Some(serial) = get_baseboard_serial_wmi() {
@@ -1131,16 +1415,26 @@ impl HardwareInfo {
     fn get_bios_info() -> BiosInfo {
         let mut bios_info = BiosInfo::default();
         let bios_path = r"HARDWARE\DESCRIPTION\System\BIOS";
-        if let Some(vendor) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BIOSVendor") { bios_info.manufacturer = vendor; }
-        if let Some(version) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BIOSVersion") { bios_info.version = version; }
-        if let Some(date) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BIOSReleaseDate") { bios_info.release_date = date; }
-        if let Some(smbios) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "SystemBiosVersion") { bios_info.smbios_version = smbios; }
+        if let Some(vendor) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BIOSVendor") {
+            bios_info.manufacturer = vendor;
+        }
+        if let Some(version) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BIOSVersion") {
+            bios_info.version = version;
+        }
+        if let Some(date) = read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "BIOSReleaseDate") {
+            bios_info.release_date = date;
+        }
+        if let Some(smbios) =
+            read_registry_string(HKEY_LOCAL_MACHINE, bios_path, "SystemBiosVersion")
+        {
+            bios_info.smbios_version = smbios;
+        }
         bios_info
     }
 
     fn get_disk_info() -> Vec<DiskInfo> {
         let mut disks = Vec::new();
-        let partition_styles = get_disk_partition_styles();
+        let partition_layouts = get_disk_partition_styles();
 
         // 使用 WMI 获取磁盘大小
         let disk_sizes = get_disk_sizes_wmi();
@@ -1151,10 +1445,15 @@ impl HardwareInfo {
                 disk.disk_index = i;
                 // 使用综合检测方法判断是否为SSD
                 disk.is_ssd = detect_disk_is_ssd(i, &disk.model, &disk.interface_type);
-                if let Some(style) = partition_styles.get(&i) { disk.partition_style = style.clone(); }
+                if let Some((style, partition_count)) = partition_layouts.get(&i) {
+                    disk.partition_style = style.clone();
+                    disk.partitions = *partition_count;
+                }
                 // 如果DeviceIoControl没有获取到大小，使用WMI的结果
                 if disk.size == 0 {
-                    if let Some(&size) = disk_sizes.get(&i) { disk.size = size; }
+                    if let Some(&size) = disk_sizes.get(&i) {
+                        disk.size = size;
+                    }
                 }
                 disks.push(disk);
             }
@@ -1173,9 +1472,14 @@ impl HardwareInfo {
                 if (device.StateFlags & DISPLAY_DEVICE_ACTIVE_FLAG) != 0 {
                     let device_string = wchar_to_string(&device.DeviceString);
                     if !device_string.contains("Remote") && !device_string.is_empty() {
-                        let mut gpu = GpuInfo::default();
-                        gpu.name = device_string.trim().to_string();
-                        if let Some((resolution, refresh)) = get_display_mode(&device.DeviceName) { gpu.current_resolution = resolution; gpu.refresh_rate = refresh; }
+                        let mut gpu = GpuInfo {
+                            name: device_string.trim().to_string(),
+                            ..GpuInfo::default()
+                        };
+                        if let Some((resolution, refresh)) = get_display_mode(&device.DeviceName) {
+                            gpu.current_resolution = resolution;
+                            gpu.refresh_rate = refresh;
+                        }
                         gpus.push(gpu);
                     }
                 }
@@ -1189,29 +1493,101 @@ impl HardwareInfo {
 
     fn get_network_adapters() -> Vec<NetworkAdapterInfo> {
         let mut adapters = Vec::new();
-        #[repr(C)] #[allow(non_snake_case)] struct IP_ADDR_STRING { Next: *mut IP_ADDR_STRING, IpAddress: [i8; 16], IpMask: [i8; 16], Context: u32, }
-        #[repr(C)] #[allow(non_snake_case)] struct IP_ADAPTER_INFO { Next: *mut IP_ADAPTER_INFO, ComboIndex: u32, AdapterName: [i8; 260], Description: [i8; 132], AddressLength: u32, Address: [u8; 8], Index: u32, Type: u32, DhcpEnabled: u32, CurrentIpAddress: *mut IP_ADDR_STRING, IpAddressList: IP_ADDR_STRING, GatewayList: IP_ADDR_STRING, DhcpServer: IP_ADDR_STRING, HaveWins: i32, PrimaryWinsServer: IP_ADDR_STRING, SecondaryWinsServer: IP_ADDR_STRING, LeaseObtained: i64, LeaseExpires: i64, }
-        #[link(name = "iphlpapi")] extern "system" { fn GetAdaptersInfo(AdapterInfo: *mut IP_ADAPTER_INFO, SizePointer: *mut u32) -> u32; }
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct IP_ADDR_STRING {
+            Next: *mut IP_ADDR_STRING,
+            IpAddress: [i8; 16],
+            IpMask: [i8; 16],
+            Context: u32,
+        }
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct IP_ADAPTER_INFO {
+            Next: *mut IP_ADAPTER_INFO,
+            ComboIndex: u32,
+            AdapterName: [i8; 260],
+            Description: [i8; 132],
+            AddressLength: u32,
+            Address: [u8; 8],
+            Index: u32,
+            Type: u32,
+            DhcpEnabled: u32,
+            CurrentIpAddress: *mut IP_ADDR_STRING,
+            IpAddressList: IP_ADDR_STRING,
+            GatewayList: IP_ADDR_STRING,
+            DhcpServer: IP_ADDR_STRING,
+            HaveWins: i32,
+            PrimaryWinsServer: IP_ADDR_STRING,
+            SecondaryWinsServer: IP_ADDR_STRING,
+            LeaseObtained: i64,
+            LeaseExpires: i64,
+        }
+        #[link(name = "iphlpapi")]
+        extern "system" {
+            fn GetAdaptersInfo(AdapterInfo: *mut IP_ADAPTER_INFO, SizePointer: *mut u32) -> u32;
+        }
         unsafe {
             let mut buf_len: u32 = 0;
             let result = GetAdaptersInfo(std::ptr::null_mut(), &mut buf_len);
-            if result != 111 && result != 0 { return adapters; }
-            if buf_len == 0 { return adapters; }
+            if result != 111 && result != 0 {
+                return adapters;
+            }
+            if buf_len == 0 {
+                return adapters;
+            }
             let mut buffer: Vec<u8> = vec![0u8; buf_len as usize];
             let adapter_info = buffer.as_mut_ptr() as *mut IP_ADAPTER_INFO;
-            if GetAdaptersInfo(adapter_info, &mut buf_len) != 0 { return adapters; }
+            if GetAdaptersInfo(adapter_info, &mut buf_len) != 0 {
+                return adapters;
+            }
             let mut current = adapter_info;
             while !current.is_null() {
                 let adapter = &*current;
-                let description_bytes: Vec<u8> = adapter.Description.iter().take_while(|&&b| b != 0).map(|&b| b as u8).collect();
+                let description_bytes: Vec<u8> = adapter
+                    .Description
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| b as u8)
+                    .collect();
                 let description = String::from_utf8_lossy(&description_bytes).to_string();
-                let mac = if adapter.AddressLength > 0 { adapter.Address[..adapter.AddressLength as usize].iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(":") } else { String::new() };
+                let mac = if adapter.AddressLength > 0 {
+                    adapter.Address[..adapter.AddressLength as usize]
+                        .iter()
+                        .map(|b| format!("{:02X}", b))
+                        .collect::<Vec<_>>()
+                        .join(":")
+                } else {
+                    String::new()
+                };
                 let mut ip_addresses = Vec::new();
-                let ip_bytes: Vec<u8> = adapter.IpAddressList.IpAddress.iter().take_while(|&&b| b != 0).map(|&b| b as u8).collect();
+                let ip_bytes: Vec<u8> = adapter
+                    .IpAddressList
+                    .IpAddress
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| b as u8)
+                    .collect();
                 let ip = String::from_utf8_lossy(&ip_bytes).to_string();
-                if !ip.is_empty() && ip != "0.0.0.0" { ip_addresses.push(ip); }
-                let adapter_type = match adapter.Type { 6 => tr!("以太网"), 71 => tr!("无线网络"), _ => tr!("类型 {}", adapter.Type) };
-                if !description.is_empty() { adapters.push(NetworkAdapterInfo { name: description.clone(), description, mac_address: mac, ip_addresses, adapter_type, status: tr!("已连接"), speed: 0 }); }
+                if !ip.is_empty() && ip != "0.0.0.0" {
+                    ip_addresses.push(ip);
+                }
+                let adapter_type = match adapter.Type {
+                    6 => tr!("以太网"),
+                    71 => tr!("无线网络"),
+                    _ => tr!("类型 {}", adapter.Type),
+                };
+                if !description.is_empty() {
+                    adapters.push(NetworkAdapterInfo {
+                        name: description.clone(),
+                        description,
+                        mac_address: mac,
+                        ip_addresses,
+                        adapter_type,
+                        status: tr!("已连接"),
+                        speed: 0,
+                    });
+                }
                 current = adapter.Next;
             }
         }
@@ -1225,7 +1601,11 @@ impl HardwareInfo {
 
     fn get_system_serial_number() -> String {
         // 首先尝试从注册表获取
-        if let Some(serial) = read_registry_string(HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS", "SystemSerialNumber") {
+        if let Some(serial) = read_registry_string(
+            HKEY_LOCAL_MACHINE,
+            r"HARDWARE\DESCRIPTION\System\BIOS",
+            "SystemSerialNumber",
+        ) {
             if !serial.is_empty() && !is_placeholder(&serial) {
                 return serial;
             }
@@ -1266,16 +1646,29 @@ impl HardwareInfo {
     }
 
     fn get_battery_info() -> Option<BatteryInfo> {
-        #[link(name = "kernel32")] extern "system" { fn GetSystemPowerStatus(lpSystemPowerStatus: *mut SYSTEM_POWER_STATUS) -> i32; }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetSystemPowerStatus(lpSystemPowerStatus: *mut SYSTEM_POWER_STATUS) -> i32;
+        }
         unsafe {
             let mut power_status: SYSTEM_POWER_STATUS = zeroed();
-            if GetSystemPowerStatus(&mut power_status) == 0 { return None; }
-            if power_status.BatteryFlag == 128 || power_status.BatteryFlag == 255 { return None; }
+            if GetSystemPowerStatus(&mut power_status) == 0 {
+                return None;
+            }
+            if power_status.BatteryFlag == 128 || power_status.BatteryFlag == 255 {
+                return None;
+            }
 
-            let mut battery = BatteryInfo::default();
-            battery.charge_percent = if power_status.BatteryLifePercent <= 100 { power_status.BatteryLifePercent } else { 0 };
-            battery.is_ac_connected = power_status.ACLineStatus == 1;
-            battery.is_charging = (power_status.BatteryFlag & 8) != 0;
+            let mut battery = BatteryInfo {
+                charge_percent: if power_status.BatteryLifePercent <= 100 {
+                    power_status.BatteryLifePercent
+                } else {
+                    0
+                },
+                is_ac_connected: power_status.ACLineStatus == 1,
+                is_charging: (power_status.BatteryFlag & 8) != 0,
+                ..BatteryInfo::default()
+            };
 
             // 使用 WMI 获取电池详细信息
             let (design_capacity, full_charge_capacity, name) = get_battery_wmi_info();
@@ -1295,7 +1688,9 @@ impl HardwareInfo {
             }
 
             if battery.full_charge_capacity_mwh > 0 && battery.charge_percent > 0 {
-                battery.current_capacity_mwh = (battery.full_charge_capacity_mwh as f64 * battery.charge_percent as f64 / 100.0) as u32;
+                battery.current_capacity_mwh = (battery.full_charge_capacity_mwh as f64
+                    * battery.charge_percent as f64
+                    / 100.0) as u32;
             }
 
             Some(battery)
@@ -1305,9 +1700,21 @@ impl HardwareInfo {
 
 fn check_cpu_ai_support(cpu_name: &str) -> bool {
     let name_lower = cpu_name.to_lowercase();
-    if name_lower.contains("core ultra") { return true; }
-    if name_lower.contains("ryzen") && (name_lower.contains("7940") || name_lower.contains("7945") || name_lower.contains("7840") || name_lower.contains("7640") || name_lower.contains("ai")) { return true; }
-    if name_lower.contains("snapdragon") && name_lower.contains("x") { return true; }
+    if name_lower.contains("core ultra") {
+        return true;
+    }
+    if name_lower.contains("ryzen")
+        && (name_lower.contains("7940")
+            || name_lower.contains("7945")
+            || name_lower.contains("7840")
+            || name_lower.contains("7640")
+            || name_lower.contains("ai"))
+    {
+        return true;
+    }
+    if name_lower.contains("snapdragon") && name_lower.contains("x") {
+        return true;
+    }
     false
 }
 
@@ -1318,8 +1725,10 @@ fn check_cpu_ai_support(cpu_name: &str) -> bool {
 ///
 /// # Returns
 /// HashMap<磁盘编号, 分区样式字符串>，分区样式为 "GPT"、"MBR" 或 "RAW"
-fn get_disk_partition_styles() -> HashMap<u32, String> {
-    use windows::Win32::System::Ioctl::{IOCTL_DISK_GET_DRIVE_LAYOUT_EX, PARTITION_STYLE_GPT, PARTITION_STYLE_MBR};
+fn get_disk_partition_styles() -> HashMap<u32, (String, u32)> {
+    use windows::Win32::System::Ioctl::{
+        IOCTL_DISK_GET_DRIVE_LAYOUT_EX, PARTITION_STYLE_GPT, PARTITION_STYLE_MBR,
+    };
 
     // PARTITION_STYLE_RAW = 2 (Windows SDK winioctl.h)
     const PARTITION_STYLE_RAW_VALUE: u32 = 2;
@@ -1337,7 +1746,7 @@ fn get_disk_partition_styles() -> HashMap<u32, String> {
 
     // 遍历物理磁盘 0-15（与 get_disk_info 保持一致）
     for disk_index in 0u32..16 {
-        let partition_style = unsafe {
+        let partition_layout = unsafe {
             // 构造物理磁盘路径
             let disk_path = format!("\\\\.\\PhysicalDrive{}", disk_index);
             let wide_path: Vec<u16> = disk_path.encode_utf16().chain(std::iter::once(0)).collect();
@@ -1377,27 +1786,32 @@ fn get_disk_partition_styles() -> HashMap<u32, String> {
             let _ = CloseHandle(handle);
 
             // 检查 IOCTL 是否成功，且返回了足够的数据（至少8字节用于头部）
-            if result.is_ok() && bytes_returned >= size_of::<DriveLayoutInformationExHeader>() as u32 {
+            if result.is_ok()
+                && bytes_returned >= size_of::<DriveLayoutInformationExHeader>() as u32
+            {
                 let layout_header = &*(buffer.as_ptr() as *const DriveLayoutInformationExHeader);
 
                 // 将分区样式常量转换为字符串
                 if layout_header.partition_style == PARTITION_STYLE_GPT.0 as u32 {
-                    Some("GPT".to_string())
+                    Some(("GPT".to_string(), layout_header.partition_count))
                 } else if layout_header.partition_style == PARTITION_STYLE_MBR.0 as u32 {
-                    Some("MBR".to_string())
+                    Some(("MBR".to_string(), layout_header.partition_count))
                 } else if layout_header.partition_style == PARTITION_STYLE_RAW_VALUE {
-                    Some("RAW".to_string())
+                    Some(("RAW".to_string(), layout_header.partition_count))
                 } else {
                     // 未知的分区样式值
-                    Some(format!("UNKNOWN({})", layout_header.partition_style))
+                    Some((
+                        format!("UNKNOWN({})", layout_header.partition_style),
+                        layout_header.partition_count,
+                    ))
                 }
             } else {
                 None
             }
         };
 
-        if let Some(style) = partition_style {
-            styles.insert(disk_index, style);
+        if let Some(layout) = partition_layout {
+            styles.insert(disk_index, layout);
         }
     }
 
@@ -1411,6 +1825,8 @@ fn get_disk_partition_styles() -> HashMap<u32, String> {
 
 /// 磁盘类型检测结果
 #[derive(Debug, Clone, Copy, PartialEq)]
+// Preserve the user-facing industry abbreviations.
+#[allow(clippy::upper_case_acronyms)]
 pub enum DiskMediaType {
     /// 固态硬盘
     SSD,
@@ -1442,36 +1858,41 @@ struct WmiDiskMediaInfo {
 fn get_wmi_disk_media_info() -> HashMap<u32, WmiDiskMediaInfo> {
     let _com = ComInitGuard::new();
     let mut disk_info_map = HashMap::new();
-    
+
     // 连接到 Storage 命名空间
     let Some(wmi) = WmiConnection::connect("ROOT\\Microsoft\\Windows\\Storage") else {
         return disk_info_map;
     };
-    
+
     // 查询 MSFT_PhysicalDisk
-    let Some(result) = wmi.query("SELECT DeviceId, FriendlyName, MediaType, BusType, SpindleSpeed FROM MSFT_PhysicalDisk") else {
+    let Some(result) = wmi.query(
+        "SELECT DeviceId, FriendlyName, MediaType, BusType, SpindleSpeed FROM MSFT_PhysicalDisk",
+    ) else {
         return disk_info_map;
     };
-    
+
     for obj in result {
         let device_id = obj.get_string("DeviceId").unwrap_or_default();
         let friendly_name = obj.get_string("FriendlyName").unwrap_or_default();
         let media_type = obj.get_u32("MediaType").unwrap_or(0) as u16;
         let bus_type = obj.get_u32("BusType").unwrap_or(0) as u16;
         let spindle_speed = obj.get_u32("SpindleSpeed").unwrap_or(0);
-        
+
         // DeviceId 通常是数字字符串，如 "0", "1" 等
         if let Ok(disk_index) = device_id.parse::<u32>() {
-            disk_info_map.insert(disk_index, WmiDiskMediaInfo {
-                device_id,
-                friendly_name,
-                media_type,
-                bus_type,
-                spindle_speed,
-            });
+            disk_info_map.insert(
+                disk_index,
+                WmiDiskMediaInfo {
+                    device_id,
+                    friendly_name,
+                    media_type,
+                    bus_type,
+                    spindle_speed,
+                },
+            );
         }
     }
-    
+
     disk_info_map
 }
 
@@ -1481,7 +1902,7 @@ mod bus_type {
     pub const SCSI: u16 = 1;
     pub const ATAPI: u16 = 2;
     pub const ATA: u16 = 3;
-    pub const IEEE1394: u16 = 4;  // FireWire
+    pub const IEEE1394: u16 = 4; // FireWire
     pub const SSA: u16 = 5;
     pub const FIBRE_CHANNEL: u16 = 6;
     pub const USB: u16 = 7;
@@ -1489,13 +1910,13 @@ mod bus_type {
     pub const ISCSI: u16 = 9;
     pub const SAS: u16 = 10;
     pub const SATA: u16 = 11;
-    pub const SD: u16 = 12;       // Secure Digital
-    pub const MMC: u16 = 13;      // MultiMedia Card
+    pub const SD: u16 = 12; // Secure Digital
+    pub const MMC: u16 = 13; // MultiMedia Card
     pub const VIRTUAL: u16 = 14;
     pub const FILE_BACKED_VIRTUAL: u16 = 15;
     pub const STORAGE_SPACES: u16 = 16;
     pub const NVME: u16 = 17;
-    pub const SCM: u16 = 18;      // Storage Class Memory
+    pub const SCM: u16 = 18; // Storage Class Memory
 }
 
 /// MediaType 常量定义 (来自 MSFT_PhysicalDisk)
@@ -1503,7 +1924,7 @@ mod media_type {
     pub const UNSPECIFIED: u16 = 0;
     pub const HDD: u16 = 3;
     pub const SSD: u16 = 4;
-    pub const SCM: u16 = 5;  // Storage Class Memory
+    pub const SCM: u16 = 5; // Storage Class Memory
 }
 
 /// 使用 IOCTL_STORAGE_QUERY_PROPERTY 检测硬盘是否有寻道延迟
@@ -1513,7 +1934,7 @@ fn detect_seek_penalty(disk_index: u32) -> Option<bool> {
     // StorageDeviceSeekPenaltyProperty = 7
     const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY: u32 = 7;
     const IOCTL_STORAGE_QUERY_PROPERTY_CODE: u32 = 0x002D1400;
-    
+
     #[repr(C)]
     #[allow(non_snake_case, dead_code)]
     struct DEVICE_SEEK_PENALTY_DESCRIPTOR {
@@ -1521,11 +1942,11 @@ fn detect_seek_penalty(disk_index: u32) -> Option<bool> {
         Size: u32,
         IncursSeekPenalty: u8,
     }
-    
+
     unsafe {
         let disk_path = format!("\\\\.\\PhysicalDrive{}", disk_index);
         let wide_path: Vec<u16> = disk_path.encode_utf16().chain(std::iter::once(0)).collect();
-        
+
         let handle = match CreateFileW(
             PCWSTR(wide_path.as_ptr()),
             0,
@@ -1538,14 +1959,16 @@ fn detect_seek_penalty(disk_index: u32) -> Option<bool> {
             Ok(h) if h != INVALID_HANDLE_VALUE => h,
             _ => return None,
         };
-        
+
         let mut query: STORAGE_PROPERTY_QUERY = zeroed();
-        query.PropertyId = windows::Win32::System::Ioctl::STORAGE_PROPERTY_ID(STORAGE_DEVICE_SEEK_PENALTY_PROPERTY as i32);
+        query.PropertyId = windows::Win32::System::Ioctl::STORAGE_PROPERTY_ID(
+            STORAGE_DEVICE_SEEK_PENALTY_PROPERTY as i32,
+        );
         query.QueryType = PropertyStandardQuery;
-        
+
         let mut descriptor: DEVICE_SEEK_PENALTY_DESCRIPTOR = zeroed();
         let mut bytes_returned: u32 = 0;
-        
+
         let result = DeviceIoControl(
             handle,
             IOCTL_STORAGE_QUERY_PROPERTY_CODE,
@@ -1556,13 +1979,13 @@ fn detect_seek_penalty(disk_index: u32) -> Option<bool> {
             Some(&mut bytes_returned),
             None,
         );
-        
+
         let _ = CloseHandle(handle);
-        
+
         if result.is_ok() && bytes_returned >= size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>() as u32 {
             return Some(descriptor.IncursSeekPenalty != 0);
         }
-        
+
         None
     }
 }
@@ -1571,7 +1994,7 @@ fn detect_seek_penalty(disk_index: u32) -> Option<bool> {
 fn detect_trim_support(disk_index: u32) -> Option<bool> {
     const STORAGE_DEVICE_TRIM_PROPERTY: u32 = 8;
     const IOCTL_STORAGE_QUERY_PROPERTY_CODE: u32 = 0x002D1400;
-    
+
     #[repr(C)]
     #[allow(non_snake_case, dead_code)]
     struct DEVICE_TRIM_DESCRIPTOR {
@@ -1579,11 +2002,11 @@ fn detect_trim_support(disk_index: u32) -> Option<bool> {
         Size: u32,
         TrimEnabled: u8,
     }
-    
+
     unsafe {
         let disk_path = format!("\\\\.\\PhysicalDrive{}", disk_index);
         let wide_path: Vec<u16> = disk_path.encode_utf16().chain(std::iter::once(0)).collect();
-        
+
         let handle = match CreateFileW(
             PCWSTR(wide_path.as_ptr()),
             0,
@@ -1596,14 +2019,15 @@ fn detect_trim_support(disk_index: u32) -> Option<bool> {
             Ok(h) if h != INVALID_HANDLE_VALUE => h,
             _ => return None,
         };
-        
+
         let mut query: STORAGE_PROPERTY_QUERY = zeroed();
-        query.PropertyId = windows::Win32::System::Ioctl::STORAGE_PROPERTY_ID(STORAGE_DEVICE_TRIM_PROPERTY as i32);
+        query.PropertyId =
+            windows::Win32::System::Ioctl::STORAGE_PROPERTY_ID(STORAGE_DEVICE_TRIM_PROPERTY as i32);
         query.QueryType = PropertyStandardQuery;
-        
+
         let mut descriptor: DEVICE_TRIM_DESCRIPTOR = zeroed();
         let mut bytes_returned: u32 = 0;
-        
+
         let result = DeviceIoControl(
             handle,
             IOCTL_STORAGE_QUERY_PROPERTY_CODE,
@@ -1614,13 +2038,13 @@ fn detect_trim_support(disk_index: u32) -> Option<bool> {
             Some(&mut bytes_returned),
             None,
         );
-        
+
         let _ = CloseHandle(handle);
-        
+
         if result.is_ok() && bytes_returned >= size_of::<DEVICE_TRIM_DESCRIPTOR>() as u32 {
             return Some(descriptor.TrimEnabled != 0);
         }
-        
+
         None
     }
 }
@@ -1628,71 +2052,176 @@ fn detect_trim_support(disk_index: u32) -> Option<bool> {
 /// 通过型号名称判断是否为已知的SSD
 fn is_known_ssd_by_model(model: &str) -> Option<bool> {
     let model_lower = model.to_lowercase();
-    
+
     // 1. 明确的SSD关键词 → 一定是SSD
     let ssd_keywords = ["ssd", "nvme", "solid state", "m.2 pcie"];
     for keyword in &ssd_keywords {
-        if model_lower.contains(keyword) { return Some(true); }
+        if model_lower.contains(keyword) {
+            return Some(true);
+        }
     }
-    
+
     // 2. 明确的HDD关键词/系列 → 一定是HDD
     let hdd_series = [
         // Seagate HDD系列
-        "barracuda", "ironwolf", "skyhawk", "exos", "firecuda", "backup plus", "expansion",
+        "barracuda",
+        "ironwolf",
+        "skyhawk",
+        "exos",
+        "firecuda",
+        "backup plus",
+        "expansion",
         // WD HDD系列
-        "wd blue", "wd black", "wd red", "wd purple", "wd gold", "wd elements", "my book", "easystore", "my passport ultra",
+        "wd blue",
+        "wd black",
+        "wd red",
+        "wd purple",
+        "wd gold",
+        "wd elements",
+        "my book",
+        "easystore",
+        "my passport ultra",
         // Toshiba HDD系列
-        "toshiba dt", "toshiba hdw", "toshiba md", "toshiba p300", "toshiba x300", "toshiba n300", "toshiba s300", "canvio",
+        "toshiba dt",
+        "toshiba hdw",
+        "toshiba md",
+        "toshiba p300",
+        "toshiba x300",
+        "toshiba n300",
+        "toshiba s300",
+        "canvio",
         // Hitachi/HGST
-        "hitachi", "hgst", "ultrastar", "deskstar", "travelstar",
+        "hitachi",
+        "hgst",
+        "ultrastar",
+        "deskstar",
+        "travelstar",
         // 其他HDD特征
-        "hard disk", "hdd"
+        "hard disk",
+        "hdd",
     ];
     for series in &hdd_series {
         if model_lower.contains(series) {
             // 特殊处理：某些系列同时有HDD和SSD版本，需要检查是否有"ssd"后缀
-            if !model_lower.contains("ssd") { return Some(false); }
+            if !model_lower.contains("ssd") {
+                return Some(false);
+            }
         }
     }
-    
+
     // 3. 已知SSD品牌和型号前缀
     let ssd_patterns = [
         // 三星 NVMe/SATA SSD
-        "samsung 9", "samsung 8", "samsung 7", "mzvl", "mzvp", "mzql", "pm9", "pm981", "pm991",
+        "samsung 9",
+        "samsung 8",
+        "samsung 7",
+        "mzvl",
+        "mzvp",
+        "mzql",
+        "pm9",
+        "pm981",
+        "pm991",
         // 西数 SSD (WD SN系列是NVMe SSD)
-        "wd sn", "wd_black sn", "wd blue sn", "wd green sn",
+        "wd sn",
+        "wd_black sn",
+        "wd blue sn",
+        "wd green sn",
         // Intel SSD
-        "intel ssd", "intel optane", "ssdpe", "ssdsc",
+        "intel ssd",
+        "intel optane",
+        "ssdpe",
+        "ssdsc",
         // 海力士/美光
-        "hynix", "micron", "crucial", "p1", "p2", "p3", "p5", "mx500", "bx500",
+        "hynix",
+        "micron",
+        "crucial",
+        "p1",
+        "p2",
+        "p3",
+        "p5",
+        "mx500",
+        "bx500",
         // 金士顿 SSD
-        "kingston a", "kingston nv", "kingston kc", "kingston snv", "kingston sa", "sa400", "nv1", "nv2",
+        "kingston a",
+        "kingston nv",
+        "kingston kc",
+        "kingston snv",
+        "kingston sa",
+        "sa400",
+        "nv1",
+        "nv2",
         // 闪迪
-        "sandisk", "extreme pro", "extreme portable", "ultra 3d",
+        "sandisk",
+        "extreme pro",
+        "extreme portable",
+        "ultra 3d",
         // 其他品牌
-        "adata", "xpg", "plextor", "corsair", "patriot", "pny", "transcend", "lexar",
+        "adata",
+        "xpg",
+        "plextor",
+        "corsair",
+        "patriot",
+        "pny",
+        "transcend",
+        "lexar",
         // NVMe型号前缀
-        "hfm", "pc711", "pc801", "kxg", "thns", "kbg",
+        "hfm",
+        "pc711",
+        "pc801",
+        "kxg",
+        "thns",
+        "kbg",
         // 国产品牌
-        "fanxiang", "梵想", "zhitai", "致态", "changjiang", "长江", "gloway", "光威",
-        "netac", "朗科", "colorful", "七彩虹", "aigo", "爱国者", "hikvision", "海康威视",
-        "orico ssd", "kioxia", "铠侠",
+        "fanxiang",
+        "梵想",
+        "zhitai",
+        "致态",
+        "changjiang",
+        "长江",
+        "gloway",
+        "光威",
+        "netac",
+        "朗科",
+        "colorful",
+        "七彩虹",
+        "aigo",
+        "爱国者",
+        "hikvision",
+        "海康威视",
+        "orico ssd",
+        "kioxia",
+        "铠侠",
         // 移动SSD
-        "t5", "t7", "x5", "my passport ssd"
+        "t5",
+        "t7",
+        "x5",
+        "my passport ssd",
     ];
     for pattern in &ssd_patterns {
-        if model_lower.contains(pattern) { return Some(true); }
+        if model_lower.contains(pattern) {
+            return Some(true);
+        }
     }
-    
+
     // 4. USB闪存盘品牌/关键词
     let usb_flash_patterns = [
-        "datatraveler", "cruzer", "sandisk ultra", "usb flash", "flash drive",
-        "transcend jetflash", "pny attache", "lexar jumpdrive", "kingston dtig", "kingston dtse"
+        "datatraveler",
+        "cruzer",
+        "sandisk ultra",
+        "usb flash",
+        "flash drive",
+        "transcend jetflash",
+        "pny attache",
+        "lexar jumpdrive",
+        "kingston dtig",
+        "kingston dtse",
     ];
     for pattern in &usb_flash_patterns {
-        if model_lower.contains(pattern) { return Some(false); } // 不是SSD，也不是HDD
+        if model_lower.contains(pattern) {
+            return Some(false);
+        } // 不是SSD，也不是HDD
     }
-    
+
     // 无法通过型号判断
     None
 }
@@ -1700,43 +2229,68 @@ fn is_known_ssd_by_model(model: &str) -> Option<bool> {
 /// 通过型号名称判断USB设备是否为外置机械硬盘
 fn is_known_usb_hdd(model: &str) -> bool {
     let model_lower = model.to_lowercase();
-    
+
     // 已知的USB外置机械硬盘品牌/系列
     let usb_hdd_patterns = [
-        "wd elements", "wd easystore", "wd my book", "wd my passport ultra",
-        "seagate expansion", "seagate backup plus", "seagate portable", "seagate game drive",
-        "toshiba canvio", "toshiba store",
-        "lacie", "g-drive", "g-technology",
+        "wd elements",
+        "wd easystore",
+        "wd my book",
+        "wd my passport ultra",
+        "seagate expansion",
+        "seagate backup plus",
+        "seagate portable",
+        "seagate game drive",
+        "toshiba canvio",
+        "toshiba store",
+        "lacie",
+        "g-drive",
+        "g-technology",
         "transcend storejet",
-        "silicon power armor"
+        "silicon power armor",
     ];
-    
+
     for pattern in &usb_hdd_patterns {
-        if model_lower.contains(pattern) { return true; }
+        if model_lower.contains(pattern) {
+            return true;
+        }
     }
-    
+
     false
 }
 
 /// 通过型号名称判断USB设备是否为外置SSD
 fn is_known_usb_ssd(model: &str) -> bool {
     let model_lower = model.to_lowercase();
-    
+
     // 已知的USB外置SSD品牌/系列
     let usb_ssd_patterns = [
-        "samsung t5", "samsung t7", "samsung x5",
-        "sandisk extreme portable", "sandisk extreme pro portable",
-        "wd my passport ssd", "wd_black p50", "wd_black p40",
-        "crucial x6", "crucial x8", "crucial x9", "crucial x10",
-        "seagate fast ssd", "seagate one touch ssd",
-        "lacie rugged ssd", "lacie portable ssd",
-        "nvme portable", "usb ssd", "portable ssd"
+        "samsung t5",
+        "samsung t7",
+        "samsung x5",
+        "sandisk extreme portable",
+        "sandisk extreme pro portable",
+        "wd my passport ssd",
+        "wd_black p50",
+        "wd_black p40",
+        "crucial x6",
+        "crucial x8",
+        "crucial x9",
+        "crucial x10",
+        "seagate fast ssd",
+        "seagate one touch ssd",
+        "lacie rugged ssd",
+        "lacie portable ssd",
+        "nvme portable",
+        "usb ssd",
+        "portable ssd",
     ];
-    
+
     for pattern in &usb_ssd_patterns {
-        if model_lower.contains(pattern) { return true; }
+        if model_lower.contains(pattern) {
+            return true;
+        }
     }
-    
+
     false
 }
 
@@ -1744,27 +2298,34 @@ fn is_known_usb_ssd(model: &str) -> bool {
 /// 返回 true 表示是 SSD，false 表示是 HDD
 fn detect_disk_is_ssd(disk_index: u32, model: &str, interface: &str) -> bool {
     // 获取 WMI 信息（如果可用）
-    static WMI_DISK_INFO: std::sync::OnceLock<HashMap<u32, WmiDiskMediaInfo>> = std::sync::OnceLock::new();
+    static WMI_DISK_INFO: std::sync::OnceLock<HashMap<u32, WmiDiskMediaInfo>> =
+        std::sync::OnceLock::new();
     let wmi_info = WMI_DISK_INFO.get_or_init(get_wmi_disk_media_info);
-    
+
     let wmi_disk = wmi_info.get(&disk_index);
-    
+
     // =====================================================
     // 第1层：接口类型快速判断
     // =====================================================
-    
+
     // NVMe 接口 → 一定是 SSD
-    if interface.to_uppercase() == "NVME" { return true; }
-    if let Some(info) = wmi_disk {
-        if info.bus_type == bus_type::NVME { return true; }
-        // SCM (Storage Class Memory) → 类似 SSD
-        if info.bus_type == bus_type::SCM { return true; }
+    if interface.to_uppercase() == "NVME" {
+        return true;
     }
-    
+    if let Some(info) = wmi_disk {
+        if info.bus_type == bus_type::NVME {
+            return true;
+        }
+        // SCM (Storage Class Memory) → 类似 SSD
+        if info.bus_type == bus_type::SCM {
+            return true;
+        }
+    }
+
     // =====================================================
     // 第2层：WMI MSFT_PhysicalDisk MediaType（最可靠）
     // =====================================================
-    
+
     if let Some(info) = wmi_disk {
         match info.media_type {
             media_type::SSD => return true,
@@ -1783,12 +2344,16 @@ fn detect_disk_is_ssd(disk_index: u32, model: &str, interface: &str) -> bool {
                     // 未知转速，很可能是老式 HDD
                     return false;
                 }
-                
+
                 // USB 设备特殊处理
                 if info.bus_type == bus_type::USB {
                     // USB 设备需要更精细的判断
-                    if is_known_usb_ssd(model) { return true; }
-                    if is_known_usb_hdd(model) { return false; }
+                    if is_known_usb_ssd(model) {
+                        return true;
+                    }
+                    if is_known_usb_hdd(model) {
+                        return false;
+                    }
                     // USB 闪存盘和小型 USB SSD 通常 SpindleSpeed = 0
                     // 无法确定时，默认为非 SSD（避免误判）
                 }
@@ -1796,11 +2361,11 @@ fn detect_disk_is_ssd(disk_index: u32, model: &str, interface: &str) -> bool {
             _ => {}
         }
     }
-    
+
     // =====================================================
     // 第3层：IOCTL 检测
     // =====================================================
-    
+
     // SeekPenalty 检测（非常可靠）
     if let Some(has_seek_penalty) = detect_seek_penalty(disk_index) {
         // 无寻道延迟 = SSD
@@ -1821,7 +2386,7 @@ fn detect_disk_is_ssd(disk_index: u32, model: &str, interface: &str) -> bool {
             return false;
         }
     }
-    
+
     // Trim 支持检测（辅助参考）
     if let Some(has_trim) = detect_trim_support(disk_index) {
         if has_trim {
@@ -1834,23 +2399,23 @@ fn detect_disk_is_ssd(disk_index: u32, model: &str, interface: &str) -> bool {
             return true;
         }
     }
-    
+
     // =====================================================
     // 第4层：型号名称匹配（最后手段）
     // =====================================================
-    
+
     if let Some(is_ssd) = is_known_ssd_by_model(model) {
         return is_ssd;
     }
-    
+
     // =====================================================
     // 默认判断
     // =====================================================
-    
+
     // 根据接口类型做最后推断
     match interface.to_uppercase().as_str() {
-        "NVME" => true,   // 前面应该已经处理了
-        "SCSI" | "SAS" => false,  // 服务器磁盘通常是 HDD
+        "NVME" => true,          // 前面应该已经处理了
+        "SCSI" | "SAS" => false, // 服务器磁盘通常是 HDD
         "USB" => {
             // USB 设备默认为非 SSD（保守判断）
             // 因为 USB 闪存盘很常见，误判会困扰用户
@@ -1863,71 +2428,49 @@ fn detect_disk_is_ssd(disk_index: u32, model: &str, interface: &str) -> bool {
     }
 }
 
-/// 检查字符串是否为占位符值（如 "To Be Filled", "Default string" 等）
-pub fn is_placeholder_str(s: &str) -> bool {
-    let lower = s.to_lowercase();
-    lower.contains("to be filled") || lower.contains("default string") || lower == "none" || lower == "n/a" || lower == "unknown" || lower.is_empty()
-}
-
-fn is_placeholder(s: &str) -> bool {
-    is_placeholder_str(s)
-}
-
-pub fn beautify_manufacturer_name(name: &str) -> String {
-    let name_lower = name.to_lowercase();
-    if name_lower.contains("asus") || name_lower.contains("asustek") { return "华硕电脑".to_string(); }
-    if name_lower.contains("lenovo") { return "联想".to_string(); }
-    if name_lower.contains("dell") { return "戴尔".to_string(); }
-    if name_lower.contains("hp") || name_lower.contains("hewlett") { return "惠普".to_string(); }
-    if name_lower.contains("acer") { return "宏碁".to_string(); }
-    if name_lower.contains("msi") || name_lower.contains("micro-star") { return "微星".to_string(); }
-    if name_lower.contains("gigabyte") { return "技嘉".to_string(); }
-    if name_lower.contains("huawei") { return "华为".to_string(); }
-    if name_lower.contains("xiaomi") { return "小米".to_string(); }
-    if name_lower.contains("honor") { return "荣耀".to_string(); }
-    if name_lower.contains("samsung") { return "三星".to_string(); }
-    if name_lower.contains("apple") { return "苹果".to_string(); }
-    if name_lower.contains("microsoft") { return "微软".to_string(); }
-    if name_lower.contains("razer") { return "雷蛇".to_string(); }
-    if name_lower.contains("alienware") { return "外星人".to_string(); }
-    name.to_string()
-}
-
-pub fn beautify_memory_manufacturer(name: &str) -> String {
-    let name_lower = name.to_lowercase();
-    if name_lower.contains("micron") { return "镁光".to_string(); }
-    if name_lower.contains("samsung") { return "三星".to_string(); }
-    if name_lower.contains("hynix") { return "海力士".to_string(); }
-    if name_lower.contains("kingston") { return "金士顿".to_string(); }
-    if name_lower.contains("corsair") { return "海盗船".to_string(); }
-    if name_lower.contains("g.skill") || name_lower.contains("gskill") { return "芝奇".to_string(); }
-    if name_lower.contains("crucial") { return "英睿达".to_string(); }
-    if name_lower.contains("adata") { return "威刚".to_string(); }
-    if name.is_empty() || is_placeholder(name) { return "未知".to_string(); }
-    name.to_string()
-}
-
-pub fn beautify_gpu_name(name: &str) -> String {
-    let mut result = name.to_string();
-    if result.to_lowercase().contains("nvidia") { result = result.replace("NVIDIA", "英伟达").replace("nvidia", "英伟达"); }
-    if result.to_lowercase().contains("intel") && !result.contains("英特尔") { result = result.replace("Intel", "英特尔").replace("intel", "英特尔"); }
-    result
-}
-
 fn read_registry_string(hkey: HKEY, subkey: &str, value_name: &str) -> Option<String> {
     unsafe {
         let subkey_wide: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
-        let value_name_wide: Vec<u16> = value_name.encode_utf16().chain(std::iter::once(0)).collect();
+        let value_name_wide: Vec<u16> = value_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut key_handle: HKEY = HKEY::default();
-        if RegOpenKeyExW(hkey, PCWSTR(subkey_wide.as_ptr()), 0, KEY_READ, &mut key_handle).is_err() { return None; }
+        if RegOpenKeyExW(
+            hkey,
+            PCWSTR(subkey_wide.as_ptr()),
+            0,
+            KEY_READ,
+            &mut key_handle,
+        )
+        .is_err()
+        {
+            return None;
+        }
         let mut buffer: Vec<u8> = vec![0u8; 1024];
         let mut buffer_size = buffer.len() as u32;
         let mut value_type: REG_VALUE_TYPE = REG_VALUE_TYPE(0);
-        let result = RegQueryValueExW(key_handle, PCWSTR(value_name_wide.as_ptr()), None, Some(&mut value_type), Some(buffer.as_mut_ptr()), Some(&mut buffer_size));
+        let result = RegQueryValueExW(
+            key_handle,
+            PCWSTR(value_name_wide.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(buffer.as_mut_ptr()),
+            Some(&mut buffer_size),
+        );
         let _ = RegCloseKey(key_handle);
-        if result.is_err() || value_type.0 != 1 { return None; }
+        if result.is_err() || value_type.0 != 1 {
+            return None;
+        }
         let len = (buffer_size as usize) / 2;
-        if len > 0 { let wide: Vec<u16> = buffer[..len * 2].chunks(2).map(|c| u16::from_le_bytes([c[0], c.get(1).copied().unwrap_or(0)])).collect(); let s = OsString::from_wide(&wide[..wide.len().saturating_sub(1)]); return Some(s.to_string_lossy().to_string()); }
+        if len > 0 {
+            let wide: Vec<u16> = buffer[..len * 2]
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c.get(1).copied().unwrap_or(0)]))
+                .collect();
+            let s = OsString::from_wide(&wide[..wide.len().saturating_sub(1)]);
+            return Some(s.to_string_lossy().to_string());
+        }
         None
     }
 }
@@ -1935,43 +2478,172 @@ fn read_registry_string(hkey: HKEY, subkey: &str, value_name: &str) -> Option<St
 fn read_registry_dword(hkey: HKEY, subkey: &str, value_name: &str) -> Option<u32> {
     unsafe {
         let subkey_wide: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
-        let value_name_wide: Vec<u16> = value_name.encode_utf16().chain(std::iter::once(0)).collect();
+        let value_name_wide: Vec<u16> = value_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut key_handle: HKEY = HKEY::default();
-        if RegOpenKeyExW(hkey, PCWSTR(subkey_wide.as_ptr()), 0, KEY_READ, &mut key_handle).is_err() { return None; }
+        if RegOpenKeyExW(
+            hkey,
+            PCWSTR(subkey_wide.as_ptr()),
+            0,
+            KEY_READ,
+            &mut key_handle,
+        )
+        .is_err()
+        {
+            return None;
+        }
         let mut value: u32 = 0;
         let mut buffer_size = size_of::<u32>() as u32;
         let mut value_type: REG_VALUE_TYPE = REG_VALUE_TYPE(0);
-        let result = RegQueryValueExW(key_handle, PCWSTR(value_name_wide.as_ptr()), None, Some(&mut value_type), Some(&mut value as *mut u32 as *mut u8), Some(&mut buffer_size));
+        let result = RegQueryValueExW(
+            key_handle,
+            PCWSTR(value_name_wide.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(&mut value as *mut u32 as *mut u8),
+            Some(&mut buffer_size),
+        );
         let _ = RegCloseKey(key_handle);
-        if result.is_err() || value_type.0 != 4 { return None; }
+        if result.is_err() || value_type.0 != 4 {
+            return None;
+        }
         Some(value)
     }
 }
 
-fn wchar_to_string(wchars: &[u16]) -> String { let len = wchars.iter().position(|&c| c == 0).unwrap_or(wchars.len()); OsString::from_wide(&wchars[..len]).to_string_lossy().to_string() }
+fn wchar_to_string(wchars: &[u16]) -> String {
+    let len = wchars.iter().position(|&c| c == 0).unwrap_or(wchars.len());
+    OsString::from_wide(&wchars[..len])
+        .to_string_lossy()
+        .to_string()
+}
 
 fn query_disk_info(path: &str) -> Option<DiskInfo> {
     unsafe {
         let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-        let handle = match CreateFileW(PCWSTR(path_wide.as_ptr()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), HANDLE::default()) { Ok(h) if h != INVALID_HANDLE_VALUE => h, _ => return None };
+        let handle = match CreateFileW(
+            PCWSTR(path_wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            HANDLE::default(),
+        ) {
+            Ok(h) if h != INVALID_HANDLE_VALUE => h,
+            _ => return None,
+        };
         let mut query: STORAGE_PROPERTY_QUERY = zeroed();
         query.PropertyId = StorageDeviceProperty;
         query.QueryType = PropertyStandardQuery;
         let mut buffer = vec![0u8; 4096];
         let mut bytes_returned: u32 = 0;
-        if DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, Some(&query as *const _ as *const std::ffi::c_void), size_of::<STORAGE_PROPERTY_QUERY>() as u32, Some(buffer.as_mut_ptr() as *mut std::ffi::c_void), buffer.len() as u32, Some(&mut bytes_returned), None).is_err() || bytes_returned == 0 { let _ = CloseHandle(handle); return None; }
+        if DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(&query as *const _ as *const std::ffi::c_void),
+            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            Some(buffer.as_mut_ptr() as *mut std::ffi::c_void),
+            buffer.len() as u32,
+            Some(&mut bytes_returned),
+            None,
+        )
+        .is_err()
+            || bytes_returned == 0
+        {
+            let _ = CloseHandle(handle);
+            return None;
+        }
         let descriptor = &*(buffer.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR);
         let mut disk = DiskInfo::default();
-        if descriptor.ProductIdOffset > 0 && (descriptor.ProductIdOffset as usize) < buffer.len() { let offset = descriptor.ProductIdOffset as usize; if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) { disk.model = String::from_utf8_lossy(&buffer[offset..offset + end]).trim().to_string(); } }
-        if descriptor.SerialNumberOffset > 0 && (descriptor.SerialNumberOffset as usize) < buffer.len() { let offset = descriptor.SerialNumberOffset as usize; if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) { disk.serial_number = String::from_utf8_lossy(&buffer[offset..offset + end]).trim().to_string(); } }
-        if descriptor.ProductRevisionOffset > 0 && (descriptor.ProductRevisionOffset as usize) < buffer.len() { let offset = descriptor.ProductRevisionOffset as usize; if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) { disk.firmware_revision = String::from_utf8_lossy(&buffer[offset..offset + end]).trim().to_string(); } }
-        disk.interface_type = match descriptor.BusType { 1 => "SCSI".to_string(), 3 => "ATA".to_string(), 7 => "USB".to_string(), 11 => "SATA".to_string(), 17 => "NVMe".to_string(), _ => format!("Unknown({})", descriptor.BusType) };
-        disk.media_type = if descriptor.RemovableMedia != 0 { "可移动".to_string() } else { "固定".to_string() };
+        if descriptor.ProductIdOffset > 0 && (descriptor.ProductIdOffset as usize) < buffer.len() {
+            let offset = descriptor.ProductIdOffset as usize;
+            if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) {
+                disk.model = String::from_utf8_lossy(&buffer[offset..offset + end])
+                    .trim()
+                    .to_string();
+            }
+        }
+        if descriptor.SerialNumberOffset > 0
+            && (descriptor.SerialNumberOffset as usize) < buffer.len()
+        {
+            let offset = descriptor.SerialNumberOffset as usize;
+            if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) {
+                disk.serial_number = String::from_utf8_lossy(&buffer[offset..offset + end])
+                    .trim()
+                    .to_string();
+            }
+        }
+        if descriptor.ProductRevisionOffset > 0
+            && (descriptor.ProductRevisionOffset as usize) < buffer.len()
+        {
+            let offset = descriptor.ProductRevisionOffset as usize;
+            if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) {
+                disk.firmware_revision = String::from_utf8_lossy(&buffer[offset..offset + end])
+                    .trim()
+                    .to_string();
+            }
+        }
+        disk.interface_type = match descriptor.BusType {
+            1 => "SCSI".to_string(),
+            3 => "ATA".to_string(),
+            7 => "USB".to_string(),
+            11 => "SATA".to_string(),
+            17 => "NVMe".to_string(),
+            _ => format!("Unknown({})", descriptor.BusType),
+        };
+        disk.media_type = if descriptor.RemovableMedia != 0 {
+            "可移动".to_string()
+        } else {
+            "固定".to_string()
+        };
         let mut length_info: GET_LENGTH_INFORMATION = zeroed();
         let mut bytes_ret: u32 = 0;
-        if DeviceIoControl(handle, IOCTL_DISK_GET_LENGTH_INFO, None, 0, Some(&mut length_info as *mut _ as *mut std::ffi::c_void), size_of::<GET_LENGTH_INFORMATION>() as u32, Some(&mut bytes_ret), None).is_ok() { disk.size = length_info.length as u64; }
+        if DeviceIoControl(
+            handle,
+            IOCTL_DISK_GET_LENGTH_INFO,
+            None,
+            0,
+            Some(&mut length_info as *mut _ as *mut std::ffi::c_void),
+            size_of::<GET_LENGTH_INFORMATION>() as u32,
+            Some(&mut bytes_ret),
+            None,
+        )
+        .is_ok()
+        {
+            disk.size = length_info.length as u64;
+        }
+        if disk.size == 0 {
+            let mut geometry_buffer = vec![0u8; 256];
+            let mut geometry_bytes = 0u32;
+            if DeviceIoControl(
+                handle,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                None,
+                0,
+                Some(geometry_buffer.as_mut_ptr().cast()),
+                geometry_buffer.len() as u32,
+                Some(&mut geometry_bytes),
+                None,
+            )
+            .is_ok()
+                && geometry_bytes >= size_of::<DISK_GEOMETRY_EX>() as u32
+            {
+                let geometry =
+                    std::ptr::read_unaligned(geometry_buffer.as_ptr().cast::<DISK_GEOMETRY_EX>());
+                if geometry.DiskSize > 0 {
+                    disk.size = geometry.DiskSize as u64;
+                }
+            }
+        }
         let _ = CloseHandle(handle);
-        if !disk.model.is_empty() || disk.size > 0 { Some(disk) } else { None }
+        if !disk.model.is_empty() || disk.size > 0 {
+            Some(disk)
+        } else {
+            None
+        }
     }
 }
 
@@ -1979,32 +2651,78 @@ fn get_display_mode(device_name: &[u16]) -> Option<(String, u32)> {
     unsafe {
         let mut devmode: DEVMODEW = zeroed();
         devmode.dmSize = size_of::<DEVMODEW>() as u16;
-        if EnumDisplaySettingsW(PCWSTR(device_name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut devmode) != BOOL(0) { return Some((format!("{}x{}", devmode.dmPelsWidth, devmode.dmPelsHeight), devmode.dmDisplayFrequency)); }
+        if EnumDisplaySettingsW(
+            PCWSTR(device_name.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut devmode,
+        ) != BOOL(0)
+        {
+            return Some((
+                format!("{}x{}", devmode.dmPelsWidth, devmode.dmPelsHeight),
+                devmode.dmDisplayFrequency,
+            ));
+        }
         None
     }
 }
 
 fn get_physical_core_count() -> Option<u32> {
-    #[repr(C)] #[allow(non_snake_case)] struct SYSTEM_LOGICAL_PROCESSOR_INFORMATION { ProcessorMask: usize, Relationship: u32, Reserved: [u64; 2], }
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct SYSTEM_LOGICAL_PROCESSOR_INFORMATION {
+        ProcessorMask: usize,
+        Relationship: u32,
+        Reserved: [u64; 2],
+    }
     const RELATION_PROCESSOR_CORE: u32 = 0;
-    #[link(name = "kernel32")] extern "system" { fn GetLogicalProcessorInformation(buffer: *mut SYSTEM_LOGICAL_PROCESSOR_INFORMATION, return_length: *mut u32) -> i32; }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLogicalProcessorInformation(
+            buffer: *mut SYSTEM_LOGICAL_PROCESSOR_INFORMATION,
+            return_length: *mut u32,
+        ) -> i32;
+    }
     unsafe {
         let mut length: u32 = 0;
         let _ = GetLogicalProcessorInformation(std::ptr::null_mut(), &mut length);
-        if length == 0 { return None; }
+        if length == 0 {
+            return None;
+        }
         let count = length as usize / size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
         let mut buffer: Vec<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> = Vec::with_capacity(count);
         // 先零初始化再 set_len，避免读取未初始化内存（clippy::uninit_vec）
         std::ptr::write_bytes(buffer.as_mut_ptr(), 0, count);
         buffer.set_len(count);
-        if GetLogicalProcessorInformation(buffer.as_mut_ptr(), &mut length) == 0 { return None; }
+        if GetLogicalProcessorInformation(buffer.as_mut_ptr(), &mut length) == 0 {
+            return None;
+        }
         let actual_count = length as usize / size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
-        let physical_cores = buffer[..actual_count].iter().filter(|info| info.Relationship == RELATION_PROCESSOR_CORE).count() as u32;
-        if physical_cores > 0 { Some(physical_cores) } else { None }
+        let physical_cores = buffer[..actual_count]
+            .iter()
+            .filter(|info| info.Relationship == RELATION_PROCESSOR_CORE)
+            .count() as u32;
+        if physical_cores > 0 {
+            Some(physical_cores)
+        } else {
+            None
+        }
     }
 }
 
 pub fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024; const MB: u64 = KB * 1024; const GB: u64 = MB * 1024; const TB: u64 = GB * 1024;
-    if bytes >= TB { format!("{:.2} TB", bytes as f64 / TB as f64) } else if bytes >= GB { format!("{:.2} GB", bytes as f64 / GB as f64) } else if bytes >= MB { format!("{:.2} MB", bytes as f64 / MB as f64) } else if bytes >= KB { format!("{:.2} KB", bytes as f64 / KB as f64) } else { format!("{} Bytes", bytes) }
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+    if bytes >= TB {
+        format!("{:.2} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} Bytes", bytes)
+    }
 }
