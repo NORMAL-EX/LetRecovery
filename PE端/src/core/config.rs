@@ -292,6 +292,27 @@ impl ConfigFileManager {
         }
     }
 
+    fn rebind_session_matched_target(
+        config: &mut InstallConfig,
+        marker_partition: &str,
+    ) -> Result<String> {
+        let marker_partition = Self::normalize_partition(marker_partition);
+        if marker_partition.is_empty() {
+            anyhow::bail!("安装标记所在分区无效，已中止");
+        }
+
+        let configured_target = Self::normalize_partition(&config.target_partition);
+        if !configured_target.is_empty() && configured_target != marker_partition {
+            log::info!(
+                "[CONFIG] PE 盘符已变化，SessionId 精确匹配后将目标分区从 {} 重绑定为 {}",
+                configured_target,
+                marker_partition
+            );
+        }
+        config.target_partition.clone_from(&marker_partition);
+        Ok(marker_partition)
+    }
+
     fn read_ini_value(content: &str, key: &str) -> String {
         for line in content.lines() {
             let line = line.trim();
@@ -379,15 +400,9 @@ impl ConfigFileManager {
         }
 
         if exact_matches.len() == 1 {
-            let (data_partition, target_partition, config) = exact_matches.remove(0);
-            let config_target = Self::normalize_partition(&config.target_partition);
-            if !config_target.is_empty() && config_target != target_partition {
-                anyhow::bail!(
-                    "安装配置目标分区({})与标记分区({})不一致，已中止",
-                    config_target,
-                    target_partition
-                );
-            }
+            let (data_partition, marker_partition, mut config) = exact_matches.remove(0);
+            let target_partition =
+                Self::rebind_session_matched_target(&mut config, &marker_partition)?;
             return Ok((data_partition, target_partition, config));
         } else if exact_matches.len() > 1 {
             anyhow::bail!("发现多个相同 SessionId 的安装任务，已中止");
@@ -821,6 +836,20 @@ mod tests {
         assert_eq!(config.pca_compat_image_index, 0);
         assert!(!config.is_xp_i386);
         assert!(config.xp_source_arch.is_empty());
+    }
+
+    #[test]
+    fn session_match_rebinds_target_to_the_marker_current_drive_letter() {
+        let mut config = InstallConfig {
+            session_id: "LR-session".to_string(),
+            target_partition: "C:".to_string(),
+            ..InstallConfig::default()
+        };
+
+        let target = ConfigFileManager::rebind_session_matched_target(&mut config, "e:\\").unwrap();
+
+        assert_eq!(target, "E:");
+        assert_eq!(config.target_partition, "E:");
     }
 
     #[test]
