@@ -487,7 +487,7 @@ impl ConfigFileManager {
     }
 
     fn has_install_artifacts() -> bool {
-        Self::scan_letters().into_iter().any(|letter| {
+        Self::scan_letters().any(|letter| {
             Path::new(&format!("{}:\\{}", letter, Self::INSTALL_MARKER)).exists()
                 || Path::new(&format!(
                     "{}:\\{}\\{}",
