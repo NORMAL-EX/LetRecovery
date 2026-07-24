@@ -1035,6 +1035,8 @@
     "界面语言:": "Schnittstellensprache:",
     "盘符": "Laufwerksbuchstabe",
     "目录中没有找到驱动文件（.inf）或 CAB 包（.cab）": "Im Verzeichnis wurden keine Treiberdateien (.inf) oder CAB-Pakete (.cab) gefunden.",
+    "驱动导出完成，但目标目录中没有找到任何 INF 驱动包": "Der Treiberexport wurde abgeschlossen, aber im Zielordner wurden keine INF-Treiberpakete gefunden.",
+    "未找到可导出的第三方驱动": "Es wurden keine exportierbaren Drittanbietertreiber gefunden.",
     "目标 SYSTEM 配置单元不存在: {}": "Zielsystemstruktur existiert nicht: {}",
     "目标分区:": "Zielpartition:",
     "目标分区可用空间不足！\n源分区已用: {} GB\n目标分区可用: {} GB": "Nicht genügend freier Speicherplatz auf der Zielpartition!\nVerwendete Quellpartition: {} GB\nVerfügbare Zielpartition: {} GB",

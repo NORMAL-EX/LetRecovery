@@ -9,13 +9,16 @@ use std::path::Path;
 pub fn export_drivers_offline(source_partition: &str, export_dir: &str) -> Result<(), String> {
     let dism = crate::core::dism::Dism::new();
     dism.export_drivers_from_system(source_partition, export_dir)
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
 /// 导出当前系统驱动
 pub fn export_drivers_online(export_dir: &str) -> Result<(), String> {
     let dism = crate::core::dism::Dism::new();
-    dism.export_drivers(export_dir).map_err(|e| e.to_string())
+    dism.export_drivers(export_dir)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// 导入驱动到离线系统

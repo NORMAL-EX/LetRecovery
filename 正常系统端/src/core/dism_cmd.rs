@@ -5,8 +5,8 @@
 //! - 离线 CAB 包导入（Add-Package）
 //! - 驱动导出
 //!
-//! 优先使用程序目录下的 `bin\Dism\dism.exe`，
-//! 如果不存在则回退到系统 DISM。
+//! 优先使用当前 Windows/WinPE 自带的 `dism.exe`，仅在系统副本不可用时
+//! 回退到程序目录下的兼容副本。
 //!
 //! 注意：该模块可在正常系统和 PE 环境下运行，
 //! 临时目录会根据运行环境自动选择。
@@ -47,10 +47,9 @@ pub struct DismCmd {
 impl DismCmd {
     /// 创建 DISM 命令行执行器
     ///
-    /// 按以下优先级查找 dism.exe：
-    /// 1. `{程序目录}\bin\Dism\dism.exe`
-    /// 2. PE 环境路径 (X:\Windows\System32\dism.exe 等)
-    /// 3. 系统 DISM
+    /// WinPE must prefer its inbox servicing stack, while full Windows must prefer the
+    /// matching `%WINDIR%\System32\dism.exe`. A partial or older bundled ADK directory is
+    /// retained only as a compatibility fallback.
     pub fn new() -> Result<Self> {
         let dism_path = Self::find_dism_executable()?;
         log::info!("[DismCmd] 使用 DISM: {}", dism_path.display());
@@ -59,60 +58,42 @@ impl DismCmd {
 
     /// 查找 DISM 可执行文件
     fn find_dism_executable() -> Result<PathBuf> {
-        // 优先级1: 程序目录下的 bin\Dism\dism.exe
-        let local_dism = get_exe_dir().join("bin").join("Dism").join("dism.exe");
-        if local_dism.exists() {
-            log::info!("[DismCmd] 找到本地 DISM: {}", local_dism.display());
-            return Ok(local_dism);
-        }
-
-        // 优先级2: PE 环境路径
-        let pe_paths = [
-            PathBuf::from(r"X:\Windows\System32\dism.exe"),
-            PathBuf::from(r"X:\Windows\System32\Dism\dism.exe"),
-        ];
-        for path in &pe_paths {
-            if path.exists() {
-                log::info!("[DismCmd] 找到 PE 环境 DISM: {}", path.display());
-                return Ok(path.clone());
-            }
-        }
-
-        // 优先级3: 尝试检测 PE 环境的其他可能盘符
-        for letter in ['X', 'Y', 'Z', 'W'] {
-            let path = PathBuf::from(format!(r"{}:\Windows\System32\dism.exe", letter));
-            if path.exists() {
-                log::info!("[DismCmd] 找到 PE 环境 DISM: {}", path.display());
-                return Ok(path);
-            }
-        }
-
-        // 优先级4: 检查系统 DISM 是否可用
-        let system_dism = PathBuf::from("dism.exe");
-        if Self::verify_dism_available(&system_dism) {
-            log::info!("[DismCmd] 使用系统 DISM");
-            return Ok(system_dism);
-        }
-
-        // 优先级5: 尝试 System32 目录
+        let is_pe = crate::core::system_info::SystemInfo::check_pe_environment();
         if let Ok(windir) = std::env::var("WINDIR") {
             let system32_dism = PathBuf::from(&windir).join("System32").join("Dism.exe");
             if system32_dism.exists() {
-                log::info!("[DismCmd] 找到 System32 DISM: {}", system32_dism.display());
+                log::info!(
+                    "[DismCmd] 使用{}系统 DISM: {}",
+                    if is_pe { " PE" } else { "" },
+                    system32_dism.display()
+                );
                 return Ok(system32_dism);
             }
         }
 
-        // 优先级6: 常见系统路径
-        let system_paths = [
-            PathBuf::from(r"C:\Windows\System32\dism.exe"),
-            PathBuf::from(r"C:\Windows\System32\Dism\dism.exe"),
-        ];
-        for path in &system_paths {
-            if path.exists() {
-                log::info!("[DismCmd] 找到系统 DISM: {}", path.display());
-                return Ok(path.clone());
+        if is_pe {
+            for letter in ['X', 'Y', 'Z', 'W'] {
+                let path = PathBuf::from(format!(r"{}:\Windows\System32\dism.exe", letter));
+                if path.exists() {
+                    log::info!("[DismCmd] 找到 PE 环境 DISM: {}", path.display());
+                    return Ok(path);
+                }
             }
+        }
+
+        let system_dism = PathBuf::from("dism.exe");
+        if Self::verify_dism_available(&system_dism) {
+            log::info!("[DismCmd] 使用 PATH 中的系统 DISM");
+            return Ok(system_dism);
+        }
+
+        let local_dism = get_exe_dir().join("bin").join("Dism").join("dism.exe");
+        if local_dism.exists() {
+            log::warn!(
+                "[DismCmd] 系统 DISM 不可用，回退到随附兼容副本: {}",
+                local_dism.display()
+            );
+            return Ok(local_dism);
         }
 
         bail!(
@@ -437,6 +418,26 @@ impl DismCmd {
     // ========================================================================
     // 驱动导出
     // ========================================================================
+
+    /// 从当前在线 Windows 导出全部第三方驱动。
+    pub fn export_drivers_online(
+        &self,
+        destination: &str,
+        progress_tx: Option<Sender<DismCmdProgress>>,
+    ) -> Result<()> {
+        let destination = destination.trim().to_string();
+        std::fs::create_dir_all(&destination).context(tr!("创建导出目录失败"))?;
+        Self::send_progress(&progress_tx, 0, &tr!("正在准备导出驱动..."));
+        let scratch_dir = Self::ensure_scratch_directory();
+        let args = [
+            "/Online".to_string(),
+            "/Export-Driver".to_string(),
+            format!("/Destination:{destination}"),
+            format!("/scratchdir:{scratch_dir}"),
+        ];
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        self.execute_with_progress_args(&refs, progress_tx, &tr!("驱动导出"))
+    }
 
     /// 从离线映像导出驱动
     ///

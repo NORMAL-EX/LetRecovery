@@ -98,10 +98,10 @@ impl InstallExecutionPhase {
             Self::AwaitBitLockerDecryption => (1, 3),
             Self::VerifyPcaBeforeDiskWrite => (1, 3),
             Self::ResolveStableTarget => (3, 4),
-            Self::RunDiskpartScripts => (4, 6),
-            Self::ResolveTargetAfterDiskpart => (6, 7),
-            Self::FormatTarget => (7, 10),
-            Self::ExportHostDrivers => (10, 14),
+            Self::ExportHostDrivers => (4, 8),
+            Self::RunDiskpartScripts => (8, 10),
+            Self::ResolveTargetAfterDiskpart => (10, 11),
+            Self::FormatTarget => (11, 14),
             Self::ApplyXpTextModeSource | Self::ApplyGhostImage | Self::ApplyWimImage => (14, 84),
             Self::ProcessDrivers => (84, 90),
             Self::RepairBoot => (90, 96),
@@ -348,6 +348,10 @@ impl NativeInstallExecutor {
 
     fn append_direct_phases(intent: &StartInstallIntent, phases: &mut Vec<InstallExecutionPhase>) {
         phases.push(InstallExecutionPhase::ResolveStableTarget);
+        if intent.options.export_drivers && !intent.options.is_xp_i386 {
+            // Driver preservation must complete while the source Windows volume is still intact.
+            phases.push(InstallExecutionPhase::ExportHostDrivers);
+        }
         if intent.options.run_diskpart_scripts {
             phases.push(InstallExecutionPhase::RunDiskpartScripts);
             phases.push(InstallExecutionPhase::ResolveTargetAfterDiskpart);
@@ -362,9 +366,6 @@ impl NativeInstallExecutor {
             return;
         }
 
-        if intent.options.export_drivers {
-            phases.push(InstallExecutionPhase::ExportHostDrivers);
-        }
         phases.push(if intent.is_gho {
             InstallExecutionPhase::ApplyGhostImage
         } else {
@@ -476,7 +477,7 @@ mod tests {
     fn image_application_owns_most_of_direct_install_progress() {
         assert_eq!(
             InstallExecutionPhase::FormatTarget.weighted_overall_progress(100),
-            10
+            14
         );
         assert_eq!(
             InstallExecutionPhase::ApplyWimImage.weighted_overall_progress(0),
@@ -550,6 +551,22 @@ mod tests {
         assert!(pca < first_write);
         assert!(plan.contains(&InstallExecutionPhase::ApplyWimImage));
         assert!(!plan.contains(&InstallExecutionPhase::ApplyGhostImage));
+    }
+
+    #[test]
+    fn direct_plan_exports_requested_drivers_before_target_writes() {
+        let plan =
+            NativeInstallExecutor::build_plan(&intent(InstallMode::Direct), &direct_context())
+                .unwrap();
+        let export = plan
+            .iter()
+            .position(|phase| *phase == InstallExecutionPhase::ExportHostDrivers)
+            .unwrap();
+        let format = plan
+            .iter()
+            .position(|phase| *phase == InstallExecutionPhase::FormatTarget)
+            .unwrap();
+        assert!(export < format);
     }
 
     #[test]

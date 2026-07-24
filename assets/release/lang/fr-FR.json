@@ -1035,6 +1035,8 @@
     "界面语言:": "Langue de l'interface :",
     "盘符": "Lettre de lecteur",
     "目录中没有找到驱动文件（.inf）或 CAB 包（.cab）": "Aucun fichier de pilote (.inf) ni package CAB (.cab) n'a été trouvé dans le répertoire.",
+    "驱动导出完成，但目标目录中没有找到任何 INF 驱动包": "L'exportation des pilotes est terminée, mais aucun package de pilote INF n'a été trouvé dans le dossier de destination.",
+    "未找到可导出的第三方驱动": "Aucun pilote tiers exportable n'a été trouvé.",
     "目标 SYSTEM 配置单元不存在: {}": "La ruche SYSTEM cible n'existe pas : {}",
     "目标分区:": "Partition cible :",
     "目标分区可用空间不足！\n源分区已用: {} GB\n目标分区可用: {} GB": "Espace libre insuffisant sur la partition cible !\nPartition source utilisée : {} Go\nPartition cible disponible : {} Go",

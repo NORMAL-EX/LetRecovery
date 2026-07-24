@@ -1,16 +1,24 @@
 use std::fmt;
 use std::mem::size_of;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, DeleteObject, EndPaint, FillRect, GdiFlush, GetDC, InvalidateRect, ReleaseDC,
     SetBkColor, SetBkMode, SetTextColor, UpdateWindow, HBRUSH, HDC, HFONT, PAINTSTRUCT,
     TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{
+    CancelWaitableTimer, CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS,
+};
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, DRAWITEMSTRUCT, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
     INITCOMMONCONTROLSEX,
@@ -23,16 +31,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawMenuBar, EnableMenuItem,
     GetClientRect, GetMessageW, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
-    LoadCursorW, MoveWindow, PeekMessageW, PostQuitMessage, RegisterClassExW, SendMessageW,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-    BN_CLICKED, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HMENU,
-    IDC_ARROW, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED, MF_GRAYED, MINMAXINFO, MSG, PM_REMOVE,
-    SC_CLOSE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO,
-    WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_DLGMODALFRAME, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_VISIBLE,
+    LoadCursorW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, BN_CLICKED, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    GWLP_USERDATA, HMENU, IDC_ARROW, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED, MF_GRAYED, MINMAXINFO,
+    MSG, PM_REMOVE, SC_CLOSE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_DLGMODALFRAME, WS_MAXIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 #[cfg(any(test, feature = "non-elevated-tests"))]
@@ -57,9 +65,9 @@ use super::window::{
 
 const CLASS_NAME: PCWSTR = w!("LetRecovery.PE.Native.Progress");
 const WORKER_TIMER_ID: usize = 1;
-const ANIMATION_TIMER_ID: usize = 2;
 const WORKER_POLL_INTERVAL_MS: u32 = 50;
-const ANIMATION_FRAME_INTERVAL_MS: u32 = 16;
+const ANIMATION_FRAME_INTERVAL_MS: i32 = 16;
+const WM_ANIMATION_FRAME: u32 = WM_APP + 0x51;
 const ID_CLOSE: u16 = 2001;
 const ID_BACK: u16 = 2002;
 const ID_DETAILS: u16 = 2003;
@@ -70,6 +78,106 @@ const PREFERRED_HEIGHT: i32 = 440;
 const SS_CENTER_STYLE: u32 = 0x0000_0001;
 const SS_RIGHT_STYLE: u32 = 0x0000_0002;
 const SS_CENTERIMAGE_STYLE: u32 = 0x0000_0200;
+
+struct AnimationTicker {
+    stop: Arc<AtomicBool>,
+    pending: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AnimationTicker {
+    fn start(hwnd: HWND) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(AtomicBool::new(false));
+        let stop_for_worker = Arc::clone(&stop);
+        let pending_for_worker = Arc::clone(&pending);
+        let hwnd_value = hwnd.0 as usize;
+        let worker = thread::spawn(move || {
+            let post_frame = || {
+                if !pending_for_worker.swap(true, Ordering::AcqRel) {
+                    let hwnd = HWND(hwnd_value as *mut _);
+                    if unsafe {
+                        PostMessageW(
+                            hwnd,
+                            WM_ANIMATION_FRAME,
+                            WPARAM::default(),
+                            LPARAM::default(),
+                        )
+                    }
+                    .is_err()
+                    {
+                        pending_for_worker.store(false, Ordering::Release);
+                    }
+                }
+            };
+
+            // A high-resolution waitable timer keeps frame production independent from the
+            // low-priority WM_TIMER path. Older WinPE builds may reject the high-resolution
+            // flag, so retry with a regular waitable timer before using the sleep fallback.
+            let timer = unsafe {
+                CreateWaitableTimerExW(
+                    None,
+                    PCWSTR::null(),
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                    TIMER_ALL_ACCESS.0,
+                )
+                .or_else(|_| CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0))
+            };
+            if let Ok(timer) = timer {
+                let due_time = -1_i64;
+                if unsafe {
+                    SetWaitableTimer(
+                        timer,
+                        &due_time,
+                        ANIMATION_FRAME_INTERVAL_MS,
+                        None,
+                        None,
+                        false,
+                    )
+                }
+                .is_ok()
+                {
+                    while !stop_for_worker.load(Ordering::Acquire) {
+                        if unsafe { WaitForSingleObject(timer, 1000) } == WAIT_OBJECT_0 {
+                            post_frame();
+                        }
+                    }
+                    let _ = unsafe { CancelWaitableTimer(timer) };
+                    let _ = unsafe { CloseHandle(timer) };
+                    return;
+                }
+                let _ = unsafe { CloseHandle(timer) };
+            }
+
+            while !stop_for_worker.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(ANIMATION_FRAME_INTERVAL_MS as u64));
+                post_frame();
+            }
+        });
+        Self {
+            stop,
+            pending,
+            worker: Some(worker),
+        }
+    }
+
+    fn acknowledge_frame(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for AnimationTicker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 fn progress_window_style() -> WINDOW_STYLE {
     WINDOW_STYLE(
@@ -258,6 +366,7 @@ struct NativeProgressWindow {
     advanced_options: Option<AdvancedOptionsSummary>,
     row_labels: Vec<HWND>,
     row_icons: Vec<RECT>,
+    animation_ticker: Option<AnimationTicker>,
     spinner_started: Instant,
     spinner_rect: RECT,
     step_bar: RECT,
@@ -304,6 +413,7 @@ impl NativeProgressWindow {
             advanced_options,
             row_labels: Vec::new(),
             row_icons: Vec::new(),
+            animation_ticker: None,
             spinner_started: Instant::now(),
             spinner_rect: RECT::default(),
             step_bar: RECT::default(),
@@ -356,12 +466,10 @@ impl NativeProgressWindow {
         self.layout(hwnd);
         self.render_full_presentation(hwnd);
 
-        if SetTimer(hwnd, ANIMATION_TIMER_ID, ANIMATION_FRAME_INTERVAL_MS, None) == 0 {
-            return Err(windows::core::Error::from_win32());
-        }
+        self.animation_ticker = Some(AnimationTicker::start(hwnd));
         if self.start_worker {
             if SetTimer(hwnd, WORKER_TIMER_ID, WORKER_POLL_INTERVAL_MS, None) == 0 {
-                let _ = KillTimer(hwnd, ANIMATION_TIMER_ID);
+                self.animation_ticker.take();
                 return Err(windows::core::Error::from_win32());
             }
             let mut session = WorkflowSession::new_for_operation(Some(self.operation_type));
@@ -371,7 +479,7 @@ impl NativeProgressWindow {
         #[cfg(feature = "non-elevated-tests")]
         if !self.start_worker && self.preview_state == PreviewState::Running {
             if SetTimer(hwnd, WORKER_TIMER_ID, WORKER_POLL_INTERVAL_MS, None) == 0 {
-                let _ = KillTimer(hwnd, ANIMATION_TIMER_ID);
+                self.animation_ticker.take();
                 return Err(windows::core::Error::from_win32());
             }
             let (session, sender) = WorkflowSession::new_message_preview(self.operation_type);
@@ -1062,7 +1170,7 @@ fn step_status_icon(status: StepStatus) -> StepStatusIcon {
 fn step_text_color(status: StepStatus, palette: Palette) -> windows::Win32::Foundation::COLORREF {
     match status {
         StepStatus::Completed => palette.progress,
-        StepStatus::InProgress => palette.accent_border,
+        StepStatus::InProgress => palette.accent_fill,
         StepStatus::Failed => palette.error,
         StepStatus::Pending => palette.text_secondary,
     }
@@ -1212,8 +1320,11 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
-        WM_TIMER if wparam.0 == ANIMATION_TIMER_ID => {
+        WM_ANIMATION_FRAME => {
             if let Some(window) = window {
+                if let Some(ticker) = &window.animation_ticker {
+                    ticker.acknowledge_frame();
+                }
                 if window.state.page == NativePage::Progress
                     && window.presentation.terminal == ProgressTerminal::Running
                     && window.spinner_rect.right > window.spinner_rect.left
@@ -1415,7 +1526,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             let _ = KillTimer(hwnd, WORKER_TIMER_ID);
-            let _ = KillTimer(hwnd, ANIMATION_TIMER_ID);
+            if let Some(window) = window {
+                window.animation_ticker.take();
+            }
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -1498,7 +1611,11 @@ mod tests {
         );
         assert_eq!(
             step_text_color(StepStatus::InProgress, Palette::DARK),
-            Palette::DARK.accent_border
+            Palette::DARK.accent_fill
+        );
+        assert_eq!(
+            step_text_color(StepStatus::InProgress, Palette::LIGHT),
+            Palette::LIGHT.accent_fill
         );
     }
 

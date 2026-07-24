@@ -8396,7 +8396,7 @@ impl NativeWindow {
                 overall: ProgressValue::new(0, 100),
                 step: ProgressValue::new(0, 100),
                 status: ProgressStatus::Running,
-                status_text: crate::tr!("准备中"),
+                status_text: String::new(),
                 cancellable: true,
             },
             BACKUP_TIMER_ID,
@@ -8660,7 +8660,7 @@ impl NativeWindow {
                     }) => {
                         state.overall = ProgressValue::new(0, total_phases as u64);
                         state.current_step = crate::tr!("安装任务已启动");
-                        state.status_text = crate::tr!("正在安装");
+                        state.status_text.clear();
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::PhaseStarted {
                         phase,

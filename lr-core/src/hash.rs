@@ -22,6 +22,20 @@ pub fn sha256_reader<R: Read>(
     mut reader: R,
     mut on_progress: impl FnMut(u64),
 ) -> std::io::Result<String> {
+    sha256_reader_cancellable(&mut reader, |total| {
+        on_progress(total);
+        Ok(())
+    })
+}
+
+/// Stream SHA-256 calculation with a fallible progress callback.
+///
+/// Callers can return `ErrorKind::Interrupted` from the callback to stop a
+/// long re-read promptly without publishing a partial digest.
+pub fn sha256_reader_cancellable<R: Read>(
+    mut reader: R,
+    mut on_progress: impl FnMut(u64) -> std::io::Result<()>,
+) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20]; // 1 MiB
     let mut total = 0u64;
@@ -32,7 +46,7 @@ pub fn sha256_reader<R: Read>(
         }
         hasher.update(&buf[..n]);
         total += n as u64;
-        on_progress(total);
+        on_progress(total)?;
     }
     Ok(to_hex(&hasher.finalize()))
 }
@@ -72,6 +86,15 @@ pub fn sha256_file(
 ) -> std::io::Result<String> {
     let file = File::open(path)?;
     sha256_reader(file, on_progress)
+}
+
+/// Calculate a file SHA-256 while allowing the caller to cancel between read blocks.
+pub fn sha256_file_cancellable(
+    path: impl AsRef<Path>,
+    on_progress: impl FnMut(u64) -> std::io::Result<()>,
+) -> std::io::Result<String> {
+    let file = File::open(path)?;
+    sha256_reader_cancellable(file, on_progress)
 }
 
 /// Calculate an MD5 digest from a reader.
@@ -156,6 +179,23 @@ mod tests {
         let h = sha256_reader(&data[..], |t| last = t).unwrap();
         assert_eq!(h, sha256_bytes(&data));
         assert_eq!(last, data.len() as u64); // 进度最终到达总字节数
+    }
+
+    #[test]
+    fn cancellable_reader_stops_without_returning_a_digest() {
+        let data = vec![0x61u8; 3_000_000];
+        let error = sha256_reader_cancellable(&data[..], |total| {
+            if total >= 1 << 20 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("the callback must be able to stop hashing");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
     }
 
     #[test]

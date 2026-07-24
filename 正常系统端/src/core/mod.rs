@@ -8,7 +8,6 @@ pub mod cli_install;
 pub mod disk;
 pub mod dism;
 pub mod dism_cmd;
-pub mod dismapi;
 pub mod driver;
 pub mod gho_password;
 pub mod ghost;

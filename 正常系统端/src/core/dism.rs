@@ -3,7 +3,7 @@
 //! 该模块封装了 Windows 系统镜像操作功能：
 //! - 镜像释放/应用：使用 wimlib (libwim-15.dll)
 //! - 镜像备份/捕获：使用 wimlib (libwim-15.dll)
-//! - 离线驱动导入：使用 dism.exe 命令行（优先使用 {程序目录}\bin\Dism\dism.exe）
+//! - 离线驱动导入：优先使用当前 Windows/WinPE 自带的 dism.exe
 //! - 离线 CAB 包导入：使用 dism.exe 命令行
 //! - 镜像信息获取：使用 wimlib (libwim-15.dll) + WIM XML 解析
 //! - 系统信息获取：使用 advapi32.dll (离线注册表)
@@ -21,6 +21,7 @@ use crate::tr;
 use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZMS, WIM_COMPRESS_LZX};
 use lr_core::wimlib::WimlibManager;
 use lr_core::WimEngineManager;
+use walkdir::WalkDir;
 
 /// 操作进度
 #[derive(Debug, Clone)]
@@ -514,36 +515,57 @@ impl Dism {
     // 驱动操作 - 使用 setupapi.dll/newdev.dll
     // ========================================================================
 
-    /// 导出驱动 - 优先 DISM API(DismExportDriver)，失败回退手工导出
+    fn count_exported_inf_files(destination: &Path) -> usize {
+        WalkDir::new(destination)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry
+                        .path()
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("inf"))
+            })
+            .count()
+    }
+
+    fn require_exported_drivers(destination: &Path) -> Result<usize> {
+        let count = Self::count_exported_inf_files(destination);
+        if count == 0 {
+            anyhow::bail!(
+                "{}",
+                tr!("驱动导出完成，但目标目录中没有找到任何 INF 驱动包")
+            );
+        }
+        Ok(count)
+    }
+
+    /// 导出当前在线 Windows 的第三方驱动。
     /// 在正常环境下导出当前系统的第三方驱动（在线映像）
-    pub fn export_drivers(&self, destination: &str) -> Result<()> {
+    pub fn export_drivers(&self, destination: &str) -> Result<usize> {
         std::fs::create_dir_all(destination)?;
 
         if self.is_pe {
             anyhow::bail!("{}", tr!("PE环境下无法导出当前系统驱动，请使用 export_drivers_from_system 并指定目标系统分区"));
         }
 
-        // 优先：DISM API 在线导出（等价 dism /online /export-driver）
-        match crate::core::dismapi::DismApi::load() {
-            Ok(api) => match api.export_drivers_online(Path::new(destination), None) {
+        match DismCmd::new().and_then(|dism| dism.export_drivers_online(destination, None)) {
+            Ok(()) => match Self::require_exported_drivers(Path::new(destination)) {
                 Ok(count) => {
-                    log::info!(
-                        "[Dism] DismExportDriver(在线) 成功导出 {} 个驱动 -> {}",
-                        count,
-                        destination
-                    );
-                    return Ok(());
+                    log::info!("[Dism] DISM 在线导出完成，共 {} 个 INF", count);
+                    return Ok(count);
                 }
-                Err(e) => {
-                    log::warn!("[Dism] DismExportDriver(在线) 失败: {}，回退手工导出", e);
+                Err(error) => {
+                    log::warn!("[Dism] DISM 在线导出返回空目录: {error}，回退 SetupAPI");
                 }
             },
-            Err(e) => {
-                log::warn!("[Dism] 加载 dismapi.dll 失败: {}，回退手工导出", e);
+            Err(error) => {
+                log::warn!("[Dism] DISM 在线导出失败: {error}，回退 SetupAPI");
             }
         }
 
-        // 回退：SetupAPI 枚举 + 手工复制 DriverStore
         log::info!(
             "[Dism] 使用 Windows API(SetupAPI) 导出驱动到: {}",
             destination
@@ -551,17 +573,20 @@ impl Dism {
         let manager = DriverManager::new()
             .map_err(|e| anyhow::anyhow!("{}", tr!("驱动管理器初始化失败: {}", e)))?;
         let count = manager.export_drivers(Path::new(destination), true)?;
+        if count == 0 {
+            anyhow::bail!("{}", tr!("未找到可导出的第三方驱动"));
+        }
         log::info!("[Dism] 成功导出 {} 个驱动", count);
-        Ok(())
+        Ok(count)
     }
 
     /// 从指定系统分区导出驱动 (PE/正常环境均可)
-    /// 优先 DISM API(DismExportDriver)，失败回退手工遍历 DriverStore
+    /// 优先使用受支持的 DISM `/Export-Driver`，失败回退手工遍历 DriverStore。
     pub fn export_drivers_from_system(
         &self,
         system_partition: &str,
         destination: &str,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         std::fs::create_dir_all(destination)?;
 
         // 判断目标是否就是“当前运行系统”：非 PE 且盘符等于 %SystemDrive% → 用在线映像，
@@ -578,38 +603,25 @@ impl Dism {
         let is_online_target =
             !self.is_pe && target_drive.is_some() && target_drive == system_drive;
 
-        match crate::core::dismapi::DismApi::load() {
-            Ok(api) => {
-                let result = if is_online_target {
-                    log::info!(
-                        "[Dism] DismExportDriver: 目标为当前运行系统，使用在线映像导出 -> {}",
-                        destination
-                    );
-                    api.export_drivers_online(Path::new(destination), None)
-                } else {
-                    log::info!(
-                        "[Dism] DismExportDriver: 离线映像 {} -> {}",
-                        system_partition,
-                        destination
-                    );
-                    api.export_drivers_offline(
-                        Path::new(system_partition),
-                        Path::new(destination),
-                        None,
-                    )
-                };
-                match result {
-                    Ok(count) => {
-                        log::info!("[Dism] DismExportDriver 成功导出 {} 个驱动", count);
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::warn!("[Dism] DismExportDriver 失败: {}，回退手工导出", e);
-                    }
-                }
+        let dism_result = DismCmd::new().and_then(|dism| {
+            if is_online_target {
+                dism.export_drivers_online(destination, None)
+            } else {
+                dism.export_drivers_offline(system_partition, destination, None)
             }
-            Err(e) => {
-                log::warn!("[Dism] 加载 dismapi.dll 失败: {}，回退手工导出", e);
+        });
+        match dism_result {
+            Ok(()) => match Self::require_exported_drivers(Path::new(destination)) {
+                Ok(count) => {
+                    log::info!("[Dism] DISM 驱动导出完成，共 {} 个 INF", count);
+                    return Ok(count);
+                }
+                Err(error) => {
+                    log::warn!("[Dism] DISM 驱动导出返回空目录: {error}，回退手工导出");
+                }
+            },
+            Err(error) => {
+                log::warn!("[Dism] DISM 驱动导出失败: {error}，回退手工导出");
             }
         }
 
@@ -623,8 +635,11 @@ impl Dism {
             .map_err(|e| anyhow::anyhow!("{}", tr!("驱动管理器初始化失败: {}", e)))?;
         let count = manager
             .export_drivers_from_system(Path::new(system_partition), Path::new(destination))?;
+        if count == 0 {
+            anyhow::bail!("{}", tr!("未找到可导出的第三方驱动"));
+        }
         log::info!("[Dism] 成功导出 {} 个驱动", count);
-        Ok(())
+        Ok(count)
     }
 
     /// 导入驱动 - 使用 Windows API
@@ -664,7 +679,7 @@ impl Dism {
             need_reboot
         );
 
-        if fail > 0 && success == 0 {
+        if success == 0 {
             anyhow::bail!("{}", tr!("所有驱动导入失败"));
         }
         Ok(())
@@ -676,7 +691,7 @@ impl Dism {
     /// - 支持普通驱动（.inf 文件）
     /// - 支持 CAB 包（Windows 更新）
     ///
-    /// 优先使用 {程序目录}\bin\Dism\dism.exe
+    /// 优先使用当前 Windows/WinPE 自带的 DISM，随包副本只作兼容回退。
     pub fn add_drivers_offline(&self, image_path: &str, driver_path: &str) -> Result<()> {
         log::info!("[Dism] 离线导入驱动: {} -> {}", driver_path, image_path);
 
@@ -713,7 +728,7 @@ impl Dism {
 
                 log::info!("[Dism] 备用方法完成: 成功 {}, 失败 {}", success, fail);
 
-                if fail > 0 && success == 0 {
+                if success == 0 {
                     anyhow::bail!("{}", tr!("所有驱动导入失败"));
                 }
                 Ok(())
@@ -1128,5 +1143,23 @@ impl Dism {
 impl Default for Dism {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Dism;
+
+    #[test]
+    fn exported_driver_validation_rejects_empty_and_counts_nested_inf_files() {
+        let temporary =
+            lr_core::scoped_temp_file::ScopedTempDir::create_in(&std::env::temp_dir(), "lr-dism")
+                .expect("temporary driver directory");
+        assert_eq!(Dism::count_exported_inf_files(temporary.path()), 0);
+        let nested = temporary.path().join("driver");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("OEM42.INF"), b"[Version]\r\n").unwrap();
+        std::fs::write(nested.join("readme.txt"), b"ignored").unwrap();
+        assert_eq!(Dism::count_exported_inf_files(temporary.path()), 1);
     }
 }

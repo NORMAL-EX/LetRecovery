@@ -1035,6 +1035,8 @@
     "界面语言:": "Interface Language:",
     "盘符": "Drive Letter",
     "目录中没有找到驱动文件（.inf）或 CAB 包（.cab）": "No driver files (.inf) or CAB packages (.cab) were found in the directory.",
+    "驱动导出完成，但目标目录中没有找到任何 INF 驱动包": "Driver export completed, but no INF driver packages were found in the destination directory.",
+    "未找到可导出的第三方驱动": "No third-party drivers are available to export.",
     "目标 SYSTEM 配置单元不存在: {}": "Target SYSTEM hive does not exist: {}",
     "目标分区:": "Target Partition:",
     "目标分区可用空间不足！\n源分区已用: {} GB\n目标分区可用: {} GB": "Insufficient free space on the target partition!\nSource partition used: {} GB\nTarget partition available: {} GB",

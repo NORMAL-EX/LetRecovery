@@ -569,7 +569,13 @@ impl ProductionInstallBackend {
             let destination_identity = std::fs::canonicalize(&destination)
                 .map_err(|error| Self::error("canonicalize_staged_image", error))?;
             if source_identity == destination_identity {
-                self.verify_staged_image(&destination, cancellation)?;
+                self.verify_staged_image(&destination, reporter, cancellation, 0, 99)?;
+                Self::report(
+                    reporter,
+                    InstallExecutionPhase::CopySourceImage,
+                    100,
+                    file_name.clone(),
+                );
                 self.staged_image_name = Some(file_name);
                 return Ok(());
             }
@@ -619,9 +625,9 @@ impl ProductionInstallBackend {
                     ));
                 }
                 let percentage = if total == 0 {
-                    100
+                    65
                 } else {
-                    ((copied.saturating_mul(100) / total).min(100)) as u8
+                    ((copied.saturating_mul(65) / total).min(65)) as u8
                 };
                 Self::report(
                     reporter,
@@ -652,6 +658,12 @@ impl ProductionInstallBackend {
             .sync_all()
             .map_err(|error| Self::error("sync_staged_image", error))?;
         drop(writer);
+        Self::report(
+            reporter,
+            InstallExecutionPhase::CopySourceImage,
+            66,
+            file_name.clone(),
+        );
         let staged_size = std::fs::metadata(temporary.path())
             .map_err(|error| Self::error("inspect_staged_image", error))?
             .len();
@@ -663,26 +675,49 @@ impl ProductionInstallBackend {
                 ),
             ));
         }
-        let staged_sha256 = lr_core::hash::sha256_file(temporary.path(), |_| {})
-            .map_err(|error| Self::error("hash_staged_image", error))?;
+        let staged_sha256 = lr_core::hash::sha256_file_cancellable(temporary.path(), |hashed| {
+            if cancellation.is_cancelled() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "staged image hashing was cancelled",
+                ));
+            }
+            let percentage = if total == 0 {
+                82
+            } else {
+                66 + ((hashed.saturating_mul(16) / total).min(16)) as u8
+            };
+            Self::report(
+                reporter,
+                InstallExecutionPhase::CopySourceImage,
+                percentage,
+                file_name.clone(),
+            );
+            Ok(())
+        })
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::Interrupted && cancellation.is_cancelled() {
+                InstallBackendError::new("cancelled", "staged image hashing was cancelled")
+            } else {
+                Self::error("hash_staged_image", error)
+            }
+        })?;
         if staged_sha256 != copied_sha256 {
             return Err(InstallBackendError::new(
                 "staged_image_hash_mismatch",
                 "staged image differs from the source byte stream",
             ));
         }
-        self.verify_staged_image(temporary.path(), cancellation)?;
+        self.verify_staged_image(temporary.path(), reporter, cancellation, 82, 17)?;
         temporary
             .persist_replace(&destination)
             .map_err(|error| Self::error("commit_staged_image", error))?;
-        let committed_sha256 = lr_core::hash::sha256_file(&destination, |_| {})
-            .map_err(|error| Self::error("hash_committed_staged_image", error))?;
-        if committed_sha256 != copied_sha256 {
-            return Err(InstallBackendError::new(
-                "committed_staged_image_hash_mismatch",
-                "published staged image changed after verification",
-            ));
-        }
+        Self::report(
+            reporter,
+            InstallExecutionPhase::CopySourceImage,
+            100,
+            file_name.clone(),
+        );
         self.staged_image_name = Some(file_name);
         Ok(())
     }
@@ -690,7 +725,10 @@ impl ProductionInstallBackend {
     fn verify_staged_image(
         &self,
         path: &Path,
+        reporter: &mut dyn InstallExecutionReporter,
         cancellation: &dyn InstallCancellation,
+        progress_base: u8,
+        progress_span: u8,
     ) -> Result<(), InstallBackendError> {
         use super::image_verify::{ImageVerifier, VerifyStatus};
 
@@ -701,10 +739,43 @@ impl ProductionInstallBackend {
             ));
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let result = ImageVerifier::with_cancel_flag(Arc::clone(&cancel))
-            .verify(&path.to_string_lossy(), None);
-        if cancellation.is_cancelled() {
-            cancel.store(true, Ordering::SeqCst);
+        let cancel_for_worker = Arc::clone(&cancel);
+        let path = path.to_string_lossy().into_owned();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result =
+                ImageVerifier::with_cancel_flag(cancel_for_worker).verify(&path, Some(progress_tx));
+            let _ = result_tx.send(result);
+        });
+        let result = loop {
+            while let Ok(progress) = progress_rx.try_recv() {
+                let mapped = progress_base.saturating_add(
+                    ((u16::from(progress.percentage) * u16::from(progress_span)) / 100) as u8,
+                );
+                Self::report(
+                    reporter,
+                    InstallExecutionPhase::CopySourceImage,
+                    mapped.min(progress_base.saturating_add(progress_span)),
+                    progress.status,
+                );
+            }
+            match result_rx.try_recv() {
+                Ok(result) => break result,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(InstallBackendError::new(
+                        "staged_verify_worker_disconnected",
+                        "the staged image verification worker ended without a result",
+                    ));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if cancellation.is_cancelled() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        if result.status == VerifyStatus::Cancelled || cancellation.is_cancelled() {
             return Err(InstallBackendError::new(
                 "cancelled",
                 "staged image verification was cancelled",
@@ -1255,31 +1326,38 @@ impl ProductionInstallBackend {
         Ok(())
     }
 
-    fn process_drivers(&self, intent: &StartInstallIntent) {
+    fn process_drivers(&self, intent: &StartInstallIntent) -> Result<(), InstallBackendError> {
         if !self.driver_backup.exists() {
-            return;
+            return if intent.options.export_drivers
+                && intent.options.driver_action != DriverAction::None
+            {
+                Err(InstallBackendError::new(
+                    "driver_backup_missing",
+                    "the requested driver backup directory is missing",
+                ))
+            } else {
+                Ok(())
+            };
         }
         let backup = self.driver_backup.to_string_lossy();
         match intent.options.driver_action {
             DriverAction::AutoImport => {
-                if let Err(error) = super::dism::Dism::new()
+                super::dism::Dism::new()
                     .add_drivers_offline(&format!("{}\\", self.target), &backup)
-                {
-                    // Preserve the legacy best-effort policy: image deployment
-                    // must not be reported as failed solely due to driver import.
-                    log::error!("[NATIVE INSTALL] driver import failed: {error}");
-                }
-                let _ = std::fs::remove_dir_all(&self.driver_backup);
+                    .map_err(|error| Self::error("import_preserved_drivers", error))?;
+                std::fs::remove_dir_all(&self.driver_backup)
+                    .map_err(|error| Self::error("clear_imported_driver_backup", error))?;
             }
             DriverAction::SaveOnly => {
                 let destination = PathBuf::from(format!("{}\\LetRecovery_Drivers", self.target));
-                if let Err(error) = Self::copy_directory(&self.driver_backup, &destination) {
-                    log::error!("[NATIVE INSTALL] preserving driver backup failed: {error}");
-                }
-                let _ = std::fs::remove_dir_all(&self.driver_backup);
+                Self::copy_directory(&self.driver_backup, &destination)
+                    .map_err(|error| Self::error("preserve_driver_backup", error))?;
+                std::fs::remove_dir_all(&self.driver_backup)
+                    .map_err(|error| Self::error("clear_preserved_driver_backup", error))?;
             }
             DriverAction::None => {}
         }
+        Ok(())
     }
 
     fn format_target_compat(&self, intent: &StartInstallIntent) -> Result<(), InstallBackendError> {
@@ -1649,18 +1727,17 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                         std::fs::remove_dir_all(&self.driver_backup)
                             .map_err(|error| Self::error("clear_driver_backup", error))?;
                     }
-                    // Driver preservation is optional.  The legacy install
-                    // worker warned and continued when export failed so an
-                    // otherwise valid image deployment was never blocked by
-                    // a host-driver enumeration problem.
-                    if let Err(error) = super::dism::Dism::new()
-                        .export_drivers(&self.driver_backup.to_string_lossy())
-                    {
-                        log::warn!(
-                            "[NATIVE INSTALL] host driver export failed; continuing without the optional backup: {error}"
-                        );
+                    let dism = super::dism::Dism::new();
+                    if dism.is_pe_environment() {
+                        dism.export_drivers_from_system(
+                            &format!("{}\\", self.target),
+                            &self.driver_backup.to_string_lossy(),
+                        )
+                    } else {
+                        dism.export_drivers(&self.driver_backup.to_string_lossy())
                     }
-                    Ok(())
+                    .map(|_| ())
+                    .map_err(|error| Self::error("export_host_drivers", error))
                 }
                 InstallExecutionPhase::ApplyXpTextModeSource => {
                     self.deactivate_xp_sibling_partitions();
@@ -1681,10 +1758,7 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                 InstallExecutionPhase::ApplyWimImage => {
                     self.apply_wim(intent, reporter, cancellation)
                 }
-                InstallExecutionPhase::ProcessDrivers => {
-                    self.process_drivers(intent);
-                    Ok(())
-                }
+                InstallExecutionPhase::ProcessDrivers => self.process_drivers(intent),
                 InstallExecutionPhase::RepairBoot => self.repair_boot(intent),
                 InstallExecutionPhase::ApplyAdvancedOptions => {
                     let advanced = Self::legacy_advanced(intent);
@@ -1714,17 +1788,14 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                 InstallExecutionPhase::PersistPcaCompatibilityPackage => self.persist_pca_package(),
                 InstallExecutionPhase::ExportDriversToPeData => {
                     let destination = Path::new(&self.data_dir()?).join("drivers");
-                    // Keep the old Via-PE policy as well: exported host
-                    // drivers improve compatibility but are not required to
-                    // stage and execute the selected system image.
-                    if let Err(error) =
-                        super::dism::Dism::new().export_drivers(&destination.to_string_lossy())
-                    {
-                        log::warn!(
-                            "[NATIVE INSTALL] PE driver export failed; continuing without the optional backup: {error}"
-                        );
+                    if destination.exists() {
+                        std::fs::remove_dir_all(&destination)
+                            .map_err(|error| Self::error("clear_pe_driver_backup", error))?;
                     }
-                    Ok(())
+                    super::dism::Dism::new()
+                        .export_drivers(&destination.to_string_lossy())
+                        .map(|_| ())
+                        .map_err(|error| Self::error("export_drivers_to_pe_data", error))
                 }
                 InstallExecutionPhase::VerifySourceImage => {
                     self.verify_source_image(intent, reporter, cancellation)
