@@ -190,9 +190,24 @@ fn main() -> anyhow::Result<()> {
 
     log::info!("==================== LetRecovery PE 启动 ====================");
     log::info!(
-        "版本: {} | 日志文件: {}",
+        "版本: {} | 包版本: {} | 日志文件: {}",
+        env!("BUILD_VERSION"),
         env!("CARGO_PKG_VERSION"),
         log_file_path().display()
+    );
+    let firmware = lr_core::boot_pca::inspect_firmware_pca();
+    log::info!(
+        "[诊断环境] PE 程序: build={} | package={} | arch={}",
+        env!("BUILD_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH
+    );
+    log::info!(
+        "[诊断环境] PE 固件: Secure Boot={} | PCA2011 revoked={} | PCA2023 trusted={} | probe_error={}",
+        diagnostic_option(firmware.secure_boot_enabled),
+        diagnostic_option(firmware.revokes_pca2011),
+        diagnostic_option(firmware.trusts_pca2023),
+        firmware.error.as_deref().unwrap_or("无")
     );
 
     // Deterministic, side-effect-free visual entry for the native PE progress shell, including the
@@ -296,6 +311,14 @@ fn main() -> anyhow::Result<()> {
         show_error_message(&tr!("启动失败: {} - {}", "LetRecovery PE", error));
     }
     Ok(())
+}
+
+fn diagnostic_option(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "是",
+        Some(false) => "否",
+        None => "未知",
+    }
 }
 
 /// BitLocker 密钥透传解锁。

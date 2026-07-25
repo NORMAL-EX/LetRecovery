@@ -1977,6 +1977,7 @@
     "完成系统安装时发生错误。": "An error occurred while completing the system installation.",
     "准备 PE 安装环境失败，未进入重启阶段。": "The PE installation environment could not be prepared. The reboot stage was not reached.",
     "系统镜像校验失败，未复制到 PE 环境。": "System image verification failed. The image was not copied to the PE environment.",
+    "系统镜像校验失败，未复制到 PE 环境。\r\n可能原因：镜像损坏或下载不完整、SWM 分卷缺失、源磁盘读取异常，或安全软件拦截校验组件（诊断代码：IMG_VERIFY_FAILED）。": "System image verification failed. The image was not copied to PE.\r\nPossible causes: a damaged or incomplete image, missing SWM parts, a source-disk read error, or security software blocking the verification component (diagnostic code: IMG_VERIFY_FAILED).",
     "复制系统镜像到 PE 数据分区失败。": "Copying the system image to the PE data partition failed.",
     "准备 UEFISeven 启动文件失败。": "Preparing the UEFISeven boot files failed.",
     "写入 PE 安装配置失败，未进入重启阶段。": "Writing the PE installation configuration failed. The reboot stage was not reached.",

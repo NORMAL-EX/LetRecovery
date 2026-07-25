@@ -320,6 +320,32 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     log::info!("目标分区: {}", config.target_partition);
     log::info!("镜像文件: {}", config.image_path);
+    log::info!(
+        "[诊断环境] PE 安装任务: target={} | image_file={} | volume_index={} | format={} | boot_mode={} | boot_signature={:?} | target_build={} | target_arch={}",
+        config.target_partition,
+        config.image_path,
+        config.volume_index,
+        if config.is_xp_i386 {
+            "XP-I386"
+        } else if config.is_gho {
+            "GHO/GHS"
+        } else {
+            "WIM/ESD/SWM"
+        },
+        match config.boot_mode {
+            1 => "UEFI",
+            2 => "Legacy",
+            _ => "Auto",
+        },
+        config.boot_pca_mode,
+        config.pca_compat_target_build,
+        match config.pca_compat_target_architecture {
+            0 => "x86",
+            9 => "x64",
+            12 => "ARM64",
+            _ => "未知",
+        }
+    );
 
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
     let resolved_source = if config.is_xp_i386 {

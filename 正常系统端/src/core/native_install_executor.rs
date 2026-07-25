@@ -192,9 +192,9 @@ pub enum InstallExecutionError {
 impl InstallExecutionError {
     /// Returns a concise localized message suitable for the progress page.
     ///
-    /// Backend `code` and `detail` are intentionally excluded here: they remain available through
-    /// [`std::fmt::Display`] for logs and support diagnostics, while the user sees a stable message
-    /// for the failed safety boundary.
+    /// Backend `detail` is intentionally excluded here: it remains available through
+    /// [`std::fmt::Display`] for logs and support diagnostics. Source-image verification uses a
+    /// fixed, non-sensitive support code plus common causes so a screenshot remains actionable.
     pub fn user_message(&self) -> String {
         match self {
             Self::DevelopmentBuildDenied => {
@@ -207,6 +207,12 @@ impl InstallExecutionError {
                 crate::tr!("目标分区已被 BitLocker 锁定。请先解锁分区，再重新开始安装。")
             }
             Self::Cancelled => crate::tr!("安装已取消。"),
+            Self::Backend {
+                phase: InstallExecutionPhase::VerifySourceImage,
+                ..
+            } => crate::tr!(
+                "系统镜像校验失败，未复制到 PE 环境。\r\n可能原因：镜像损坏或下载不完整、SWM 分卷缺失、源磁盘读取异常，或安全软件拦截校验组件（诊断代码：IMG_VERIFY_FAILED）。"
+            ),
             Self::Backend { phase, .. } => phase.user_failure_message(),
         }
     }
@@ -658,6 +664,19 @@ mod tests {
         assert!(diagnostic.contains("wim_apply_failed"));
         assert!(diagnostic.contains("diagnostic-only-detail-0x80070005"));
         assert!(diagnostic.contains("ApplyWimImage"));
+
+        let image_error = InstallExecutionError::Backend {
+            phase: InstallExecutionPhase::VerifySourceImage,
+            source: InstallBackendError::new(
+                "source_image_verification_failed",
+                "private-source-path-and-low-level-detail",
+            ),
+        };
+        let image_message = image_error.user_message();
+        assert!(image_message.contains("IMG_VERIFY_FAILED"));
+        assert!(image_message.contains(&crate::tr!("可能原因")));
+        assert!(!image_message.contains("private-source-path"));
+        assert!(!image_message.contains("source_image_verification_failed"));
     }
 
     #[test]

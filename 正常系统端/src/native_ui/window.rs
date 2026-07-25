@@ -119,7 +119,7 @@ use crate::core::native_expand_c_executor::{
 };
 use crate::core::native_install_backend::ProductionInstallBackend;
 use crate::core::native_install_controller::{
-    InstallTarget, NativeInstallState, SelectedImageMetadata,
+    InstallMode, InstallTarget, NativeInstallState, SelectedImageMetadata, StartInstallIntent,
 };
 use crate::core::native_install_executor::{
     BitLockerRequirement, InstallExecutionContext, InstallExecutionEvent, NativeInstallExecutor,
@@ -593,6 +593,16 @@ fn localized_bitlocker_status(status: &crate::core::bitlocker::VolumeStatus) -> 
     crate::tr!(status.as_str())
 }
 
+fn image_architecture_label(architecture: Option<u16>) -> &'static str {
+    match architecture {
+        Some(0) => "x86",
+        Some(9) => "x64",
+        Some(12) => "ARM64",
+        Some(_) => "不支持的架构",
+        None => "未知",
+    }
+}
+
 fn download_failure_message(error: &DownloadWorkerError) -> String {
     let normalized = error.message.to_ascii_lowercase();
     if error.stage == DownloadFailureStage::Transfer
@@ -660,6 +670,19 @@ fn centered_command_button_x(content_left: i32, content_width: i32, button_width
     content_left + (content_width - button_width).max(0) / 2
 }
 
+fn shared_install_mode_label_width(
+    boot_label_text_width: i32,
+    pca_label_text_width: i32,
+    padding: i32,
+    minimum: i32,
+    maximum: i32,
+) -> i32 {
+    boot_label_text_width
+        .max(pca_label_text_width)
+        .saturating_add(padding.max(0))
+        .clamp(minimum.max(0), maximum.max(minimum.max(0)))
+}
+
 fn preserved_pe_selection(
     preferred_filename: Option<&str>,
     available: &[OnlinePE],
@@ -723,11 +746,11 @@ mod layout_tests {
         minimum_window_size, page_switch_requires_full_layout, pca_pending_status,
         pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
         pca_target_uses_uefi, preferred_window_size, preserved_pe_selection,
-        primary_state_refresh_for_page, tool_backend_result_succeeded,
-        unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
-        Page, PcaPendingStatus, PcaTargetContext, PcaTargetKey, PcaTargetMessage,
-        PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
-        DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
+        primary_state_refresh_for_page, shared_install_mode_label_width,
+        tool_backend_result_succeeded, unattended_checked_for_source_preference,
+        BitLockerGateCompletion, InstallControlSnapshot, Page, PcaPendingStatus, PcaTargetContext,
+        PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
+        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_controller::CatalogueState;
@@ -829,6 +852,13 @@ mod layout_tests {
         let backup = command_bar_layout(1_000, 8, 120, [false, false, true]);
         assert_eq!(backup.x, [None, None, Some(880)]);
         assert_eq!(backup.left_edge, 880);
+    }
+
+    #[test]
+    fn boot_mode_and_signature_labels_share_the_widest_measured_column() {
+        assert_eq!(shared_install_mode_label_width(56, 56, 2, 60, 132), 60);
+        assert_eq!(shared_install_mode_label_width(72, 94, 2, 60, 132), 96);
+        assert_eq!(shared_install_mode_label_width(72, 180, 2, 60, 132), 132);
     }
 
     #[test]
@@ -3235,18 +3265,24 @@ impl NativeWindow {
             self.scale(24),
             true,
         );
-        let boot_label_width = self.scale(if compact_chinese { 60 } else { 76 });
+        let install_mode_label_width = shared_install_mode_label_width(
+            measure_text(hwnd, self.font, &crate::tr!("引导模式:"), None).width,
+            measure_text(hwnd, self.font, &crate::tr!("启动签名:"), None).width,
+            self.scale(2),
+            self.scale(60),
+            self.scale(132),
+        );
         let boot_mode_closed_height = theme::combo_closed_height(h.boot_mode, metrics.field_height);
         let second_row_height = boot_mode_closed_height.max(self.scale(24));
         let _ = MoveWindow(
             h.boot_label,
             content_left,
             centered_control_y_ceil(second_y, second_row_height, metrics.label_height),
-            boot_label_width,
+            install_mode_label_width,
             metrics.label_height,
             true,
         );
-        let boot_mode_x = content_left + boot_label_width + self.scale(4);
+        let boot_mode_x = content_left + install_mode_label_width + self.scale(4);
         let boot_mode_width = self.scale(124);
         let _ = MoveWindow(
             h.boot_mode,
@@ -3423,18 +3459,17 @@ impl NativeWindow {
         } else {
             content_left
         };
-        let pca_label_width = self.scale(if compact_chinese { 72 } else { 98 });
         let pca_closed_height = theme::combo_closed_height(h.pca_mode, metrics.field_height);
         let pca_row_height = pca_closed_height.max(metrics.label_height);
         let _ = MoveWindow(
             h.pca_label,
             pca_x,
             centered_control_y_ceil(pca_row_y, pca_row_height, metrics.label_height),
-            pca_label_width.min((content_right - pca_x).max(0)),
+            install_mode_label_width.min((content_right - pca_x).max(0)),
             metrics.label_height,
             true,
         );
-        let pca_combo_x = pca_x + pca_label_width + self.scale(4);
+        let pca_combo_x = pca_x + install_mode_label_width + self.scale(4);
         let _ = MoveWindow(
             h.pca_mode,
             pca_combo_x,
@@ -8312,6 +8347,143 @@ impl NativeWindow {
         .start_intent()
     }
 
+    fn log_install_diagnostic_environment(&self, intent: &StartInstallIntent) {
+        use std::collections::BTreeSet;
+
+        log::info!("========== 安装诊断环境 ==========");
+        let image_path = std::path::Path::new(&intent.image_path);
+        let image_name = image_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<未知文件名>");
+        let image_format = image_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_else(|| "未知".to_owned());
+        let image_size = std::fs::metadata(image_path)
+            .map(|metadata| metadata.len())
+            .ok()
+            .or_else(|| {
+                self.image_volumes
+                    .iter()
+                    .find(|volume| volume.index == intent.volume_index)
+                    .map(|volume| volume.size_bytes)
+            });
+        log::info!(
+            "[诊断环境] 镜像: file={} | format={} | size_bytes={}",
+            image_name,
+            image_format,
+            image_size
+                .map(|size| size.to_string())
+                .unwrap_or_else(|| "未知".to_owned())
+        );
+
+        if let Some(volume) = self
+            .image_volumes
+            .iter()
+            .find(|volume| volume.index == intent.volume_index)
+        {
+            log::info!(
+                "[诊断环境] 目标系统: name={} | index={} | version={}.{} | build={} | arch={}",
+                volume.name,
+                volume.index,
+                volume
+                    .major_version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "未知".to_owned()),
+                volume
+                    .minor_version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "未知".to_owned()),
+                volume
+                    .build
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "未知".to_owned()),
+                image_architecture_label(volume.architecture)
+            );
+        } else if intent.options.is_xp_i386 {
+            log::info!(
+                "[诊断环境] 目标系统: Windows XP/2003 文本模式源 | index={}",
+                intent.volume_index
+            );
+        } else if intent.is_gho {
+            log::info!(
+                "[诊断环境] 目标系统: GHO/GHS 不透明镜像，无法可靠自动识别版本 | index={}",
+                intent.volume_index
+            );
+        } else {
+            log::warn!(
+                "[诊断环境] 目标系统: 镜像卷元数据不可用 | index={}",
+                intent.volume_index
+            );
+        }
+
+        let target = self.partitions.iter().find(|partition| {
+            partition.disk_number == Some(intent.target_disk_number)
+                && partition.partition_number == Some(intent.target_partition_number)
+        });
+        log::info!(
+            "[诊断环境] 安装目标: volume={} | disk={} | partition={} | style={} | BitLocker={}",
+            intent.target_partition,
+            intent.target_disk_number,
+            intent.target_partition_number,
+            target
+                .map(|partition| partition.partition_style.to_string())
+                .unwrap_or_else(|| "未知".to_owned()),
+            target
+                .map(|partition| partition.bitlocker_status.as_str())
+                .unwrap_or("未知")
+        );
+
+        let disk_numbers = self
+            .partitions
+            .iter()
+            .filter_map(|partition| partition.disk_number)
+            .collect::<BTreeSet<_>>();
+        let encrypted_data_volumes = self
+            .partitions
+            .iter()
+            .filter(|partition| {
+                partition.disk_number != Some(intent.target_disk_number)
+                    || partition.partition_number != Some(intent.target_partition_number)
+            })
+            .filter(|partition| partition.bitlocker_status.is_encrypted())
+            .map(|partition| partition.letter.as_str())
+            .collect::<Vec<_>>();
+        log::info!(
+            "[诊断环境] 磁盘结构: mapped_disks={} | visible_volumes={} | encrypted_non_target_volumes={}",
+            disk_numbers.len(),
+            self.partitions.len(),
+            if encrypted_data_volumes.is_empty() {
+                "无".to_owned()
+            } else {
+                encrypted_data_volumes.join(",")
+            }
+        );
+
+        match intent.mode {
+            InstallMode::Direct => {
+                log::info!("[诊断环境] 使用 PE: 不使用（当前环境直接安装）");
+            }
+            InstallMode::ViaPe => {
+                if let Some(pe) = intent
+                    .selected_pe
+                    .and_then(|index| self.pe_catalogue.get(index))
+                {
+                    log::info!(
+                        "[诊断环境] 使用 PE: {} | file={}",
+                        pe.display_name,
+                        pe.filename
+                    );
+                } else {
+                    log::warn!("[诊断环境] 使用 PE: 已选择 ViaPE，但目录项不可用");
+                }
+            }
+        }
+        log::info!("==================================");
+    }
+
     unsafe fn enter_progress(&mut self, hwnd: HWND, initial: LongTaskProgress, timer_id: usize) {
         let Some(handles) = &self.handles else { return };
         let redraw = redraw::suspend(hwnd);
@@ -8460,6 +8632,7 @@ impl NativeWindow {
             }
             return;
         }
+        self.log_install_diagnostic_environment(&intent);
         let pending = PendingBitLockerIntent::Install(intent.clone());
         match pending.locked_volumes(&self.partitions) {
             Ok(locked) if !locked.is_empty() => {
@@ -11815,7 +11988,7 @@ unsafe fn draw_line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF
 
 #[cfg(test)]
 mod tests {
-    use super::HardwareCopyFeedback;
+    use super::{image_architecture_label, HardwareCopyFeedback};
 
     #[test]
     fn hardware_copy_feedback_expires_back_to_the_normal_caption() {
@@ -11825,5 +11998,13 @@ mod tests {
         assert_eq!(feedback.caption_key(), "已复制");
         feedback.expire();
         assert_eq!(feedback.caption_key(), "复制信息");
+    }
+
+    #[test]
+    fn diagnostic_architecture_labels_match_wim_codes() {
+        assert_eq!(image_architecture_label(Some(0)), "x86");
+        assert_eq!(image_architecture_label(Some(9)), "x64");
+        assert_eq!(image_architecture_label(Some(12)), "ARM64");
+        assert_eq!(image_architecture_label(None), "未知");
     }
 }

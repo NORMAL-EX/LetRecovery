@@ -47,6 +47,17 @@ fn main() -> anyhow::Result<()> {
     app_config.apply_wim_engine();
 
     log::info!("LetRecovery 启动中...");
+    log::info!(
+        "[诊断环境] 软件版本: build={} | package={} | channel={} | arch={}",
+        env!("BUILD_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        if crate::build_info::DEV {
+            "dev-build"
+        } else {
+            "production"
+        },
+        std::env::consts::ARCH
+    );
 
     // 检查命令行参数，处理PE环境下的自动安装/备份
     let args: Vec<String> = std::env::args().collect();
@@ -216,6 +227,9 @@ fn main() -> anyhow::Result<()> {
         }
     };
     let preloaded_config = Arc::new(preloaded_config);
+    if app_config.log_enabled {
+        log_partition_environment(&preloaded_config.partitions);
+    }
 
     log::info!("预加载完成，初始化 GUI...");
 
@@ -330,6 +344,35 @@ fn log_machine_info() {
     let sys_info = core::system_info::SystemInfo::collect().ok();
     match core::hardware_info::HardwareInfo::collect() {
         Ok(hw) => {
+            log::info!(
+                "[诊断环境] 源系统: {} | version={} | build={} | arch={}",
+                hw.os.name,
+                hw.os.version,
+                hw.os.build_number,
+                hw.os.architecture
+            );
+            log::info!("[诊断环境] 运行平台: {}", hw.machine_environment_summary());
+            log::info!(
+                "[诊断环境] 磁盘结构: 物理磁盘={} | 物理分区总数={}",
+                hw.disks.len(),
+                hw.disks
+                    .iter()
+                    .map(|disk| u64::from(disk.partitions))
+                    .fold(0u64, u64::saturating_add)
+            );
+            log::info!(
+                "[诊断环境] 系统卷 BitLocker: {:?}",
+                hw.system_bitlocker_status
+            );
+            if let Some(si) = &sys_info {
+                log::info!(
+                    "[诊断环境] 固件: {} | Secure Boot: {}",
+                    si.boot_mode,
+                    if si.secure_boot { "开" } else { "关" }
+                );
+            } else {
+                log::warn!("[诊断环境] 固件: 未知 | Secure Boot: 未知（系统信息采集失败）");
+            }
             let text = hw.to_formatted_text(sys_info.as_ref());
             for line in text.lines() {
                 if !line.trim().is_empty() {
@@ -351,6 +394,45 @@ fn log_machine_info() {
         }
     }
     log::info!("==================================");
+}
+
+fn log_partition_environment(partitions: &[core::disk::Partition]) {
+    use std::collections::BTreeSet;
+
+    let disk_numbers = partitions
+        .iter()
+        .filter_map(|partition| partition.disk_number)
+        .collect::<BTreeSet<_>>();
+    let unresolved = partitions
+        .iter()
+        .filter(|partition| partition.disk_number.is_none())
+        .count();
+    log::info!(
+        "[诊断环境] 固定卷库存: 已映射物理磁盘={} | 可见固定卷={} | 磁盘号未知卷={}",
+        disk_numbers.len(),
+        partitions.len(),
+        unresolved
+    );
+    for partition in partitions {
+        log::info!(
+            "[诊断环境] 卷 {}: disk={} | partition={} | style={} | size={}MB | free={}MB | system={} | windows={} | BitLocker={}",
+            partition.letter,
+            partition
+                .disk_number
+                .map(|number| number.to_string())
+                .unwrap_or_else(|| "未知".to_owned()),
+            partition
+                .partition_number
+                .map(|number| number.to_string())
+                .unwrap_or_else(|| "未知".to_owned()),
+            partition.partition_style,
+            partition.total_size_mb,
+            partition.free_size_mb,
+            partition.is_system_partition,
+            partition.has_windows,
+            partition.bitlocker_status.as_str()
+        );
+    }
 }
 
 /// 检查系统核心组件完整性（用于检测极限精简系统）

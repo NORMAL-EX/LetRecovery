@@ -1972,6 +1972,7 @@
     "完成系统安装时发生错误。": "Une erreur s'est produite lors de la fin de l'installation du système.",
     "准备 PE 安装环境失败，未进入重启阶段。": "L'environnement d'installation PE n'a pas pu être préparé. L'étape de redémarrage n'a pas été atteinte.",
     "系统镜像校验失败，未复制到 PE 环境。": "La vérification de l'image système a échoué. L'image n'a pas été copiée dans l'environnement PE.",
+    "系统镜像校验失败，未复制到 PE 环境。\r\n可能原因：镜像损坏或下载不完整、SWM 分卷缺失、源磁盘读取异常，或安全软件拦截校验组件（诊断代码：IMG_VERIFY_FAILED）。": "La vérification de l'image système a échoué. L'image n'a pas été copiée vers PE.\r\nCauses possibles : image endommagée ou incomplète, parties SWM manquantes, erreur de lecture du disque source ou blocage du composant de vérification par un logiciel de sécurité (code de diagnostic : IMG_VERIFY_FAILED).",
     "复制系统镜像到 PE 数据分区失败。": "La copie de l'image système sur la partition de données PE a échoué.",
     "准备 UEFISeven 启动文件失败。": "La préparation des fichiers de démarrage UEFISeven a échoué.",
     "写入 PE 安装配置失败，未进入重启阶段。": "L'écriture de la configuration d'installation PE a échoué. L'étape de redémarrage n'a pas été atteinte.",
