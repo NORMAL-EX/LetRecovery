@@ -320,6 +320,32 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     log::info!("目标分区: {}", config.target_partition);
     log::info!("镜像文件: {}", config.image_path);
+    log::info!(
+        "[诊断环境] PE 安装任务: target={} | image_file={} | volume_index={} | format={} | boot_mode={} | boot_signature={:?} | target_build={} | target_arch={}",
+        config.target_partition,
+        config.image_path,
+        config.volume_index,
+        if config.is_xp_i386 {
+            "XP-I386"
+        } else if config.is_gho {
+            "GHO/GHS"
+        } else {
+            "WIM/ESD/SWM"
+        },
+        match config.boot_mode {
+            1 => "UEFI",
+            2 => "Legacy",
+            _ => "Auto",
+        },
+        config.boot_pca_mode,
+        config.pca_compat_target_build,
+        match config.pca_compat_target_architecture {
+            0 => "x86",
+            9 => "x64",
+            12 => "ARM64",
+            _ => "未知",
+        }
+    );
 
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
     let resolved_source = if config.is_xp_i386 {
@@ -948,6 +974,48 @@ pub(crate) fn generate_unattend_xml(
     } else {
         escape_xml_text(&config.custom_username)
     };
+    let builtin = lr_core::unattend_account::render_builtin_administrator_unattend(
+        &config.builtin_administrator,
+        2,
+    )
+    .map_err(|error| anyhow::anyhow!("内置 Administrator 配置无效: {error}"))?;
+    let (specialize_account_command, user_accounts, auto_logon) = if let Some(builtin) = builtin {
+        log::info!(
+            "[UNATTEND] 使用内置 RID-500 Administrator，账户名={}，自动登录={}，密码=已设置",
+            config.builtin_administrator.account_name,
+            config.builtin_administrator.auto_logon
+        );
+        (
+            builtin.specialize_command,
+            builtin.user_accounts,
+            builtin.auto_logon,
+        )
+    } else {
+        (
+            String::new(),
+            format!(
+                r#"<UserAccounts>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Password><Value></Value><PlainText>true</PlainText></Password>
+                        <Description>Local User</Description>
+                        <DisplayName>{username}</DisplayName>
+                        <Group>Administrators</Group>
+                        <Name>{username}</Name>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>"#
+            ),
+            format!(
+                r#"<AutoLogon>
+                <Password><Value></Value><PlainText>true</PlainText></Password>
+                <Enabled>true</Enabled>
+                <LogonCount>1</LogonCount>
+                <Username>{username}</Username>
+            </AutoLogon>"#
+            ),
+        )
+    };
 
     let scripts_dir = get_scripts_dir_name();
 
@@ -1023,11 +1091,25 @@ pub(crate) fn generate_unattend_xml(
     let xml_content = if is_win7 {
         // Windows 7 专用无人值守配置
         // Win7 不支持: HideOnlineAccountScreens, HideWirelessSetupInOOBE, SkipMachineOOBE, SkipUserOOBE, HideLocalAccountScreen, HideOEMRegistrationScreen(家庭版)
-        generate_win7_unattend_xml(&username, scripts_dir, &first_logon_commands, arch_str)
+        generate_win7_unattend_xml(
+            scripts_dir,
+            &first_logon_commands,
+            arch_str,
+            &specialize_account_command,
+            &user_accounts,
+            &auto_logon,
+        )
     } else if is_win8 {
         // Windows 8/8.1 无人值守配置
         // Win8 支持部分 Win10 的选项，但不支持所有
-        generate_win8_unattend_xml(&username, scripts_dir, &first_logon_commands, arch_str)
+        generate_win8_unattend_xml(
+            scripts_dir,
+            &first_logon_commands,
+            arch_str,
+            &specialize_account_command,
+            &user_accounts,
+            &auto_logon,
+        )
     } else {
         // Windows 10/11 无人值守配置（默认）
         let international = crate::core::dism_exe::DismExe::new()?
@@ -1041,11 +1123,13 @@ pub(crate) fn generate_unattend_xml(
             international.time_zone
         );
         generate_win10_unattend_xml(
-            &username,
             scripts_dir,
             &first_logon_commands,
             arch_str,
             &international,
+            &specialize_account_command,
+            &user_accounts,
+            &auto_logon,
         )
     };
 
@@ -1096,10 +1180,12 @@ fn escape_xml_text(value: &str) -> String {
 /// - 不支持 HideOEMRegistrationScreen（家庭版不支持）
 /// - 需要设置 NetworkLocation 来跳过网络位置选择
 fn generate_win7_unattend_xml(
-    username: &str,
     scripts_dir: &str,
     first_logon_commands: &str,
     arch: &str,
+    specialize_account_command: &str,
+    user_accounts: &str,
+    auto_logon: &str,
 ) -> String {
     // Win7 使用最小化的OOBE配置以确保兼容所有版本（包括家庭版）
     format!(
@@ -1126,6 +1212,7 @@ fn generate_win7_unattend_xml(
                     <Path>cmd /c if exist %SystemDrive%\{scripts_dir}\deploy.bat call %SystemDrive%\{scripts_dir}\deploy.bat</Path>
                     <Description>Run custom deploy script</Description>
                 </RunSynchronousCommand>
+                {specialize_account_command}
             </RunSynchronous>
         </component>
     </settings>
@@ -1136,29 +1223,8 @@ fn generate_win7_unattend_xml(
                 <ProtectYourPC>3</ProtectYourPC>
                 <NetworkLocation>Home</NetworkLocation>
             </OOBE>
-            <UserAccounts>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value></Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local User</Description>
-                        <DisplayName>{username}</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>{username}</Name>
-                    </LocalAccount>
-                </LocalAccounts>
-            </UserAccounts>
-            <AutoLogon>
-                <Password>
-                    <Value></Value>
-                    <PlainText>true</PlainText>
-                </Password>
-                <Enabled>true</Enabled>
-                <LogonCount>1</LogonCount>
-                <Username>{username}</Username>
-            </AutoLogon>
+            {user_accounts}
+            {auto_logon}
             <FirstLogonCommands>{first_logon_commands}
             </FirstLogonCommands>
         </component>
@@ -1166,8 +1232,10 @@ fn generate_win7_unattend_xml(
 </unattend>"#,
         arch = arch,
         scripts_dir = scripts_dir,
-        username = username,
-        first_logon_commands = first_logon_commands
+        first_logon_commands = first_logon_commands,
+        specialize_account_command = specialize_account_command,
+        user_accounts = user_accounts,
+        auto_logon = auto_logon
     )
 }
 
@@ -1179,10 +1247,12 @@ fn generate_win7_unattend_xml(
 /// - 不支持 HideWirelessSetupInOOBE
 /// - 不支持 SkipMachineOOBE / SkipUserOOBE
 fn generate_win8_unattend_xml(
-    username: &str,
     scripts_dir: &str,
     first_logon_commands: &str,
     arch: &str,
+    specialize_account_command: &str,
+    user_accounts: &str,
+    auto_logon: &str,
 ) -> String {
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -1208,6 +1278,7 @@ fn generate_win8_unattend_xml(
                     <Path>cmd /c if exist %SystemDrive%\{scripts_dir}\deploy.bat call %SystemDrive%\{scripts_dir}\deploy.bat</Path>
                     <Description>Run custom deploy script</Description>
                 </RunSynchronousCommand>
+                {specialize_account_command}
             </RunSynchronous>
         </component>
     </settings>
@@ -1219,29 +1290,8 @@ fn generate_win8_unattend_xml(
                 <ProtectYourPC>3</ProtectYourPC>
                 <NetworkLocation>Home</NetworkLocation>
             </OOBE>
-            <UserAccounts>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value></Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local User</Description>
-                        <DisplayName>{username}</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>{username}</Name>
-                    </LocalAccount>
-                </LocalAccounts>
-            </UserAccounts>
-            <AutoLogon>
-                <Password>
-                    <Value></Value>
-                    <PlainText>true</PlainText>
-                </Password>
-                <Enabled>true</Enabled>
-                <LogonCount>1</LogonCount>
-                <Username>{username}</Username>
-            </AutoLogon>
+            {user_accounts}
+            {auto_logon}
             <FirstLogonCommands>{first_logon_commands}
             </FirstLogonCommands>
         </component>
@@ -1249,8 +1299,10 @@ fn generate_win8_unattend_xml(
 </unattend>"#,
         arch = arch,
         scripts_dir = scripts_dir,
-        username = username,
-        first_logon_commands = first_logon_commands
+        first_logon_commands = first_logon_commands,
+        specialize_account_command = specialize_account_command,
+        user_accounts = user_accounts,
+        auto_logon = auto_logon
     )
 }
 
@@ -1262,11 +1314,13 @@ fn generate_win8_unattend_xml(
 ///
 /// 注：SkipMachineOOBE / SkipUserOOBE 已被微软弃用且在 Win11 上不可靠，故不再使用。
 fn generate_win10_unattend_xml(
-    username: &str,
     scripts_dir: &str,
     first_logon_commands: &str,
     arch: &str,
     international: &crate::core::dism_exe::OfflineInternationalSettings,
+    specialize_account_command: &str,
+    user_accounts: &str,
+    auto_logon: &str,
 ) -> String {
     let ui_language = escape_xml_text(&international.ui_language);
     let system_locale = escape_xml_text(&international.system_locale);
@@ -1294,6 +1348,7 @@ fn generate_win10_unattend_xml(
                     <Path>cmd /c if exist %SystemDrive%\{scripts_dir}\deploy.bat call %SystemDrive%\{scripts_dir}\deploy.bat</Path>
                     <Description>Run custom deploy script</Description>
                 </RunSynchronousCommand>
+                {specialize_account_command}
             </RunSynchronous>
         </component>
     </settings>
@@ -1313,29 +1368,8 @@ fn generate_win10_unattend_xml(
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
             </OOBE>
-            <UserAccounts>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value></Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local User</Description>
-                        <DisplayName>{username}</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>{username}</Name>
-                    </LocalAccount>
-                </LocalAccounts>
-            </UserAccounts>
-            <AutoLogon>
-                <Password>
-                    <Value></Value>
-                    <PlainText>true</PlainText>
-                </Password>
-                <Enabled>true</Enabled>
-                <LogonCount>1</LogonCount>
-                <Username>{username}</Username>
-            </AutoLogon>
+            {user_accounts}
+            {auto_logon}
             <FirstLogonCommands>{first_logon_commands}
             </FirstLogonCommands>
         </component>
@@ -1343,8 +1377,10 @@ fn generate_win10_unattend_xml(
 </unattend>"#,
         arch = arch,
         scripts_dir = scripts_dir,
-        username = username,
         first_logon_commands = first_logon_commands,
+        specialize_account_command = specialize_account_command,
+        user_accounts = user_accounts,
+        auto_logon = auto_logon,
         input_locale = input_locale,
         system_locale = system_locale,
         ui_language = ui_language,
@@ -1367,11 +1403,13 @@ mod workflow_session_tests {
             time_zone: "China Standard Time".to_string(),
         };
         let xml = generate_win10_unattend_xml(
-            "测试用户",
             "LetRecoveryScripts",
             "",
             "amd64",
             &international,
+            "",
+            "<UserAccounts><AdministratorPassword><Value>test</Value><PlainText>true</PlainText></AdministratorPassword></UserAccounts>",
+            "<AutoLogon><Enabled>true</Enabled><Username>Administrator</Username></AutoLogon>",
         );
         assert!(xml.contains("<UILanguage>zh-CN</UILanguage>"));
         assert!(xml.contains("<InputLocale>0804:00000804</InputLocale>"));

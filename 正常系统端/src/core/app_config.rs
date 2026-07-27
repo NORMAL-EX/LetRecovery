@@ -198,6 +198,7 @@ impl AppConfig {
 
     fn normalized(mut self) -> Self {
         self.download_threads = normalize_download_threads(self.download_threads);
+        self.install_prefs.advanced_options.apply_runtime_defaults();
         // Easy mode deliberately exposes a reduced, fixed installation policy.  Old config files
         // can contain both switches after upgrading from builds where the two settings were
         // independent; normalize that impossible UI state before any page is created.

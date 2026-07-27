@@ -4,33 +4,457 @@
 //! browse files, capture Wi-Fi credentials, touch an offline registry, or start installation.
 
 use std::cell::Cell;
+use std::ffi::c_void;
 use std::mem::size_of;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::HFONT;
-use windows::Win32::UI::Controls::SetScrollInfo;
-use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateRectRgn,
+    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetBkColor, GetDC,
+    InvalidateRect, ReleaseDC, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, DT_LEFT,
+    DT_NOPREFIX, DT_SINGLELINE, HBRUSH, HFONT, HRGN, PAINTSTRUCT, RGN_ERROR, SRCCOPY, TRANSPARENT,
+};
+use windows::Win32::UI::Controls::{SetScrollInfo, DRAWITEMSTRUCT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetCapture, IsWindowEnabled, ReleaseCapture, SetCapture, TrackMouseEvent,
+    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetScrollInfo, GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW,
-    ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_OWNERDRAW, ES_AUTOHSCROLL, HMENU,
+    CreateWindowExW, GetCursorPos, GetParent, GetPropW, GetScrollBarInfo, GetScrollInfo,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, MoveWindow, PostMessageW, RemovePropW,
+    ScrollWindowEx, SendMessageW, SetPropW, ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX,
+    BS_AUTORADIOBUTTON, BS_OWNERDRAW, ES_AUTOHSCROLL, ES_PASSWORD, HMENU, HTCLIENT, OBJID_VSCROLL,
     SB_BOTTOM, SB_ENDSCROLL, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION,
-    SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE, SIF_TRACKPOS,
-    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_MOUSEWHEEL, WM_NCDESTROY, WM_SETFONT,
-    WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VSCROLL,
+    SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLBARINFO, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE,
+    SIF_TRACKPOS, SW_HIDE, SW_INVALIDATE, SW_SCROLLCHILDREN, SW_SHOW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+    WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCDESTROY, WM_NCHITTEST,
+    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCPAINT, WM_PAINT, WM_SETFONT, WM_SIZE, WM_THEMECHANGED,
+    WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_GROUP, WS_TABSTOP, WS_VSCROLL,
 };
 
-use super::super::controls::{center_single_line_edit_in_row, child, wide, InnoMetrics};
+use super::super::controls::{
+    alpha_blend_premultiplied_bgra, center_single_line_edit_in_row, child, wide, InnoMetrics,
+};
+use super::super::scrollbar_compositor;
 use super::super::theme::{apply_control_theme, NativeControlKind, Palette};
-use crate::core::ui_state::AdvancedOptionsData;
+use crate::core::ui_state::{default_install_username, AdvancedOptionsData};
 
 const ID_FIRST: u16 = 700;
 const MIN_THREE_COLUMN_WIDTH: i32 = 320;
 const MIN_TWO_COLUMN_WIDTH: i32 = 250;
 const COLUMN_GAP: i32 = 16;
+const VERTICAL_SCROLLBAR_WIDTH: i32 = 17;
+const SCROLLBAR_CONTENT_GAP: i32 = 24;
+const SS_OWNERDRAW_STYLE: i32 = 0x0000_000d;
 const VIEWPORT_SUBCLASS_ID: usize = 1;
+const SCROLLBAR_OVERLAY_SUBCLASS_ID: usize = 2;
+const WHEEL_DELTA: i32 = 120;
+const WM_NCMOUSEMOVE_MESSAGE: u32 = 0x00a0;
+const WM_NCMOUSELEAVE_MESSAGE: u32 = 0x02a2;
+const WM_MOUSELEAVE_MESSAGE: u32 = 0x02a3;
+const ADVANCED_SCROLLBAR_STATE_PROPERTY: PCWSTR = w!("LetRecovery.AdvancedScrollbarThemeState");
+const ADVANCED_SCROLLBAR_OVERLAY_PROPERTY: PCWSTR = w!("LetRecovery.AdvancedScrollbarOverlay");
+const ADVANCED_SCROLLBAR_DRAG_OFFSET_PROPERTY: PCWSTR =
+    w!("LetRecovery.AdvancedScrollbarDragOffset");
+const ADVANCED_SCROLLBAR_PROXY_POSITION_PROPERTY: PCWSTR =
+    w!("LetRecovery.AdvancedScrollbarProxyPosition");
+const ADVANCED_SCROLLBAR_PENDING_POSITION_PROPERTY: PCWSTR =
+    w!("LetRecovery.AdvancedScrollbarPendingPosition");
+const ADVANCED_SCROLLBAR_PENDING_CODE_PROPERTY: PCWSTR =
+    w!("LetRecovery.AdvancedScrollbarPendingCode");
+const ADVANCED_SCROLLBAR_FRAME_PENDING_PROPERTY: PCWSTR =
+    w!("LetRecovery.AdvancedScrollbarFramePending");
+const WM_ADVANCED_SCROLLBAR_FRAME: u32 = WM_APP + 0x2d;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdvancedViewportGeometry {
+    content_width: i32,
+    scrollbar_left: i32,
+    scrollbar_width: i32,
+    corner_diameter: i32,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdvancedScrollbarThumb {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[cfg(test)]
+impl AdvancedScrollbarThumb {
+    fn calculate(
+        track_width: i32,
+        track_height: i32,
+        minimum: i32,
+        maximum: i32,
+        page: u32,
+        position: i32,
+        dpi: u32,
+    ) -> Option<Self> {
+        let track_width = track_width.max(0);
+        let track_height = track_height.max(0);
+        let content_length = maximum.saturating_sub(minimum).saturating_add(1).max(1);
+        let page = i32::try_from(page)
+            .unwrap_or(i32::MAX)
+            .clamp(0, content_length);
+        let maximum_position = content_length.saturating_sub(page);
+        if track_width == 0 || track_height == 0 || maximum_position == 0 {
+            return None;
+        }
+
+        let scale = |value: i32| ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32;
+        let padding = scale(5).min(track_height / 2);
+        let available_height = (track_height - padding * 2).max(1);
+        let thumb_height = ((i64::from(available_height) * i64::from(page)
+            / i64::from(content_length)) as i32)
+            .max(scale(28))
+            .min(available_height);
+        let travel = available_height - thumb_height;
+        let clamped_position = position.clamp(minimum, minimum.saturating_add(maximum_position));
+        let top = padding
+            + ((i64::from(travel) * i64::from(clamped_position.saturating_sub(minimum))
+                / i64::from(maximum_position)) as i32);
+        Some(Self {
+            left: 0,
+            top,
+            right: track_width,
+            bottom: top + thumb_height,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EmbeddedScrollbarGlyph {
+    width: i32,
+    height: i32,
+    sizing_left: i32,
+    sizing_top: i32,
+    sizing_right: i32,
+    sizing_bottom: i32,
+    bgra: &'static [u8],
+}
+
+include!(concat!(env!("OUT_DIR"), "/win11_scrollbar_theme.rs"));
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AdvancedScrollbarState {
+    #[default]
+    Normal = 0,
+    Hot = 1,
+    Pressed = 2,
+    Disabled = 3,
+    Hover = 4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdvancedScrollbarPart {
+    TopArrow = 0,
+    UpperTrack = 1,
+    Thumb = 2,
+    LowerTrack = 3,
+    BottomArrow = 4,
+}
+
+const ADVANCED_SCROLLBAR_PARTS: [AdvancedScrollbarPart; 5] = [
+    AdvancedScrollbarPart::TopArrow,
+    AdvancedScrollbarPart::UpperTrack,
+    AdvancedScrollbarPart::Thumb,
+    AdvancedScrollbarPart::LowerTrack,
+    AdvancedScrollbarPart::BottomArrow,
+];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AdvancedScrollbarInteraction {
+    #[default]
+    Normal,
+    Hovered(AdvancedScrollbarPart),
+    Pressed(AdvancedScrollbarPart),
+    Disabled,
+}
+
+impl AdvancedScrollbarInteraction {
+    const fn shows_expanded_parts(self) -> bool {
+        matches!(self, Self::Hovered(_) | Self::Pressed(_))
+    }
+
+    const fn state_for(self, part: AdvancedScrollbarPart) -> AdvancedScrollbarState {
+        match self {
+            Self::Normal => AdvancedScrollbarState::Normal,
+            Self::Hovered(active) => {
+                if active as u8 == part as u8 {
+                    AdvancedScrollbarState::Hot
+                } else {
+                    AdvancedScrollbarState::Hover
+                }
+            }
+            Self::Pressed(active) => {
+                if active as u8 == part as u8 {
+                    AdvancedScrollbarState::Pressed
+                } else {
+                    AdvancedScrollbarState::Hover
+                }
+            }
+            Self::Disabled => AdvancedScrollbarState::Disabled,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdvancedScrollbarGeometry {
+    bar: RECT,
+    top_arrow: RECT,
+    upper_track: RECT,
+    thumb: RECT,
+    lower_track: RECT,
+    bottom_arrow: RECT,
+}
+
+impl AdvancedScrollbarGeometry {
+    fn from_scrollbar_info(info: &SCROLLBARINFO) -> Option<Self> {
+        const STATE_SYSTEM_INVISIBLE: u32 = 0x0000_8000;
+        const STATE_SYSTEM_OFFSCREEN: u32 = 0x0001_0000;
+
+        let bar = info.rcScrollBar;
+        let width = bar.right.saturating_sub(bar.left);
+        let height = bar.bottom.saturating_sub(bar.top);
+        if width <= 0
+            || height <= 0
+            || info.rgstate[0] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN) != 0
+        {
+            return None;
+        }
+
+        let line_button = info.dxyLineButton.clamp(0, height / 2);
+        let track_top = bar.top.saturating_add(line_button);
+        let track_bottom = bar.bottom.saturating_sub(line_button).max(track_top);
+        // SCROLLBARINFO reports the thumb coordinates as offsets from rcScrollBar's leading
+        // edge for a non-client scrollbar. Keep them inside the region between both line buttons
+        // so corrupt or reduced WinPE implementations cannot produce overlapping rectangles.
+        let thumb_top = bar
+            .top
+            .saturating_add(info.xyThumbTop)
+            .clamp(track_top, track_bottom);
+        let thumb_bottom = bar
+            .top
+            .saturating_add(info.xyThumbBottom)
+            .clamp(thumb_top, track_bottom);
+
+        Some(Self {
+            bar,
+            top_arrow: RECT {
+                left: bar.left,
+                top: bar.top,
+                right: bar.right,
+                bottom: track_top,
+            },
+            upper_track: RECT {
+                left: bar.left,
+                top: track_top,
+                right: bar.right,
+                bottom: thumb_top,
+            },
+            thumb: RECT {
+                left: bar.left,
+                top: thumb_top,
+                right: bar.right,
+                bottom: thumb_bottom,
+            },
+            lower_track: RECT {
+                left: bar.left,
+                top: thumb_bottom,
+                right: bar.right,
+                bottom: track_bottom,
+            },
+            bottom_arrow: RECT {
+                left: bar.left,
+                top: track_bottom,
+                right: bar.right,
+                bottom: bar.bottom,
+            },
+        })
+    }
+
+    const fn rect_for(self, part: AdvancedScrollbarPart) -> RECT {
+        match part {
+            AdvancedScrollbarPart::TopArrow => self.top_arrow,
+            AdvancedScrollbarPart::UpperTrack => self.upper_track,
+            AdvancedScrollbarPart::Thumb => self.thumb,
+            AdvancedScrollbarPart::LowerTrack => self.lower_track,
+            AdvancedScrollbarPart::BottomArrow => self.bottom_arrow,
+        }
+    }
+
+    fn hit_test(self, point: POINT) -> Option<AdvancedScrollbarPart> {
+        ADVANCED_SCROLLBAR_PARTS
+            .into_iter()
+            .find(|part| point_in_rect(self.rect_for(*part), point))
+    }
+
+    fn translated(self, dx: i32, dy: i32) -> Self {
+        let translate = |rect: RECT| RECT {
+            left: rect.left.saturating_add(dx),
+            top: rect.top.saturating_add(dy),
+            right: rect.right.saturating_add(dx),
+            bottom: rect.bottom.saturating_add(dy),
+        };
+        Self {
+            bar: translate(self.bar),
+            top_arrow: translate(self.top_arrow),
+            upper_track: translate(self.upper_track),
+            thumb: translate(self.thumb),
+            lower_track: translate(self.lower_track),
+            bottom_arrow: translate(self.bottom_arrow),
+        }
+    }
+}
+
+fn point_in_rect(rect: RECT, point: POINT) -> bool {
+    rect.right > rect.left
+        && rect.bottom > rect.top
+        && point.x >= rect.left
+        && point.x < rect.right
+        && point.y >= rect.top
+        && point.y < rect.bottom
+}
+
+const fn embedded_scrollbar_dpi_index(dpi: u32) -> usize {
+    if dpi < 108 {
+        0
+    } else if dpi < 132 {
+        1
+    } else if dpi < 168 {
+        2
+    } else if dpi < 216 {
+        3
+    } else {
+        4
+    }
+}
+
+fn embedded_scrollbar_thumb_glyph(
+    dark: bool,
+    dpi: u32,
+    state: AdvancedScrollbarState,
+) -> &'static EmbeddedScrollbarGlyph {
+    let mode = usize::from(dark);
+    let dpi = embedded_scrollbar_dpi_index(dpi);
+    &WIN11_SCROLLBAR_THUMB_GLYPHS[((mode * 5 + dpi) * 5) + state as usize]
+}
+
+fn embedded_scrollbar_track_glyph(
+    dark: bool,
+    dpi: u32,
+    state: AdvancedScrollbarState,
+) -> &'static EmbeddedScrollbarGlyph {
+    let mode = usize::from(dark);
+    let dpi = embedded_scrollbar_dpi_index(dpi);
+    &WIN11_SCROLLBAR_TRACK_GLYPHS[((mode * 5 + dpi) * 5) + state as usize]
+}
+
+fn embedded_scrollbar_arrow_glyph(
+    dark: bool,
+    dpi: u32,
+    bottom: bool,
+    state: AdvancedScrollbarState,
+) -> &'static EmbeddedScrollbarGlyph {
+    let mode = usize::from(dark);
+    let dpi = embedded_scrollbar_dpi_index(dpi);
+    &WIN11_SCROLLBAR_ARROW_GLYPHS
+        [((mode * 5 + dpi) * 10) + usize::from(bottom) * 5 + state as usize]
+}
+
+fn nine_slice_coordinate(
+    destination: i32,
+    destination_length: i32,
+    source_length: i32,
+    leading: i32,
+    trailing: i32,
+) -> i32 {
+    if destination_length <= 0 || source_length <= 0 {
+        return 0;
+    }
+    let leading = leading.clamp(0, source_length);
+    let trailing = trailing.clamp(0, source_length - leading);
+    if destination_length < leading + trailing {
+        return ((i64::from(destination) * i64::from(source_length)) / i64::from(destination_length))
+            .clamp(0, i64::from(source_length - 1)) as i32;
+    }
+    if destination < leading {
+        return destination.min(source_length - 1);
+    }
+    if destination >= destination_length - trailing {
+        return (source_length - (destination_length - destination)).clamp(0, source_length - 1);
+    }
+    let source_middle = (source_length - leading - trailing).max(1);
+    let destination_middle = (destination_length - leading - trailing).max(1);
+    leading
+        + ((i64::from(destination - leading) * i64::from(source_middle))
+            / i64::from(destination_middle))
+        .min(i64::from(source_middle - 1)) as i32
+}
+
+fn stretch_scrollbar_glyph(glyph: &EmbeddedScrollbarGlyph, width: i32, height: i32) -> Vec<u8> {
+    if width <= 0 || height <= 0 || glyph.width <= 0 || glyph.height <= 0 {
+        return Vec::new();
+    }
+    let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+    for destination_y in 0..height {
+        let source_y = nine_slice_coordinate(
+            destination_y,
+            height,
+            glyph.height,
+            glyph.sizing_top,
+            glyph.sizing_bottom,
+        );
+        for destination_x in 0..width {
+            let source_x = nine_slice_coordinate(
+                destination_x,
+                width,
+                glyph.width,
+                glyph.sizing_left,
+                glyph.sizing_right,
+            );
+            let source = (source_y as usize * glyph.width as usize + source_x as usize) * 4;
+            let destination =
+                (destination_y as usize * width as usize + destination_x as usize) * 4;
+            pixels[destination..destination + 4].copy_from_slice(&glyph.bgra[source..source + 4]);
+        }
+    }
+    pixels
+}
+
+fn colorref_is_dark(color: u32) -> bool {
+    let red = color & 0xff;
+    let green = (color >> 8) & 0xff;
+    let blue = (color >> 16) & 0xff;
+    red * 299 + green * 587 + blue * 114 < 128_000
+}
+
+impl AdvancedViewportGeometry {
+    fn calculate(width: i32, height: i32, dpi: u32) -> Option<Self> {
+        let width = width.max(0);
+        let height = height.max(0);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let scale = |value: i32| ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32;
+        let scrollbar_width = scale(VERTICAL_SCROLLBAR_WIDTH).clamp(1, width);
+        let content_gap = scale(SCROLLBAR_CONTENT_GAP);
+        Some(Self {
+            content_width: (width - scrollbar_width - content_gap).max(0),
+            scrollbar_left: width - scrollbar_width,
+            scrollbar_width,
+            corner_diameter: scrollbar_width.min(height),
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AdvancedGrid {
@@ -94,9 +518,23 @@ impl ScrollModel {
     }
 }
 
+fn smooth_scroll_step(current: i32, target: i32) -> i32 {
+    let remaining = target.saturating_sub(current);
+    if remaining == 0 {
+        return current;
+    }
+    let distance = remaining.unsigned_abs() as i32;
+    if distance <= 2 {
+        return target;
+    }
+    let step = ((distance * 3 + 9) / 10).max(2);
+    current.saturating_add(step.min(distance) * remaining.signum())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdvancedPageContext {
     pub unattended_enabled: bool,
+    pub builtin_administrator_available: bool,
     pub wifi_available: bool,
     pub show_windows_7: bool,
     pub show_windows_7_uefi: bool,
@@ -107,6 +545,7 @@ impl Default for AdvancedPageContext {
     fn default() -> Self {
         Self {
             unattended_enabled: true,
+            builtin_administrator_available: true,
             wifi_available: false,
             show_windows_7: false,
             show_windows_7_uefi: false,
@@ -173,6 +612,12 @@ pub struct AdvancedPageHandles {
     custom_files: CheckEdit,
     pub identity_header: HWND,
     username: CheckEdit,
+    builtin_administrator: HWND,
+    builtin_administrator_name_label: HWND,
+    builtin_administrator_name: HWND,
+    builtin_administrator_password_label: HWND,
+    builtin_administrator_password: HWND,
+    builtin_administrator_auto_logon: HWND,
     volume_label: CheckEdit,
     pub windows_7_header: HWND,
     windows_7_usb3: CheckEdit,
@@ -189,10 +634,13 @@ pub struct AdvancedPage {
     handles: AdvancedPageHandles,
     context: AdvancedPageContext,
     viewport: HWND,
+    scrollbar_overlay: HWND,
     width: Cell<i32>,
     height: Cell<i32>,
     dpi: Cell<u32>,
     scroll_offset: Cell<i32>,
+    target_scroll_offset: Cell<i32>,
+    wheel_distance_remainder: Cell<i32>,
     content_height: Cell<i32>,
 }
 
@@ -202,6 +650,7 @@ impl AdvancedPage {
         initial: &AdvancedOptionsData,
         context: AdvancedPageContext,
     ) -> windows::core::Result<Self> {
+        let owner = parent;
         let viewport = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             w!("STATIC"),
@@ -216,11 +665,36 @@ impl AdvancedPage {
             HINSTANCE::default(),
             None,
         )?;
+        let scrollbar_overlay = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("STATIC"),
+            PCWSTR::null(),
+            WS_CHILD,
+            0,
+            0,
+            0,
+            0,
+            owner,
+            HMENU::default(),
+            HINSTANCE::default(),
+            None,
+        )?;
         let _ = SetWindowSubclass(
             viewport,
             Some(advanced_viewport_proc),
             VIEWPORT_SUBCLASS_ID,
-            parent.0 as usize,
+            owner.0 as usize,
+        );
+        let _ = SetWindowSubclass(
+            scrollbar_overlay,
+            Some(advanced_scrollbar_overlay_proc),
+            SCROLLBAR_OVERLAY_SUBCLASS_ID,
+            viewport.0 as usize,
+        );
+        let _ = SetPropW(
+            viewport,
+            ADVANCED_SCROLLBAR_OVERLAY_PROPERTY,
+            HANDLE(scrollbar_overlay.0),
         );
         let parent = viewport;
         let mut id = ID_FIRST;
@@ -290,7 +764,7 @@ impl AdvancedPage {
         )?;
 
         let identity_header = label(parent, &crate::tr!("用户与系统盘"), next_id())?;
-        let username = check_edit(
+        let username = radio_edit(
             parent,
             &crate::tr!("自定义用户名"),
             &initial.username,
@@ -298,6 +772,28 @@ impl AdvancedPage {
             next_id(),
             None,
         )?;
+        let builtin_administrator = radio_button(
+            parent,
+            &crate::tr!("启用内置 Administrator 账户"),
+            next_id(),
+            false,
+        )?;
+        let builtin_administrator_name_label =
+            owner_draw_label(parent, &crate::tr!("Administrator 账户名"), next_id())?;
+        let builtin_administrator_name = edit(
+            parent,
+            &initial.builtin_administrator.account_name,
+            next_id(),
+        )?;
+        let builtin_administrator_password_label =
+            owner_draw_label(parent, &crate::tr!("Administrator 密码"), next_id())?;
+        let builtin_administrator_password = password_edit(
+            parent,
+            initial.builtin_administrator.password.expose_secret(),
+            next_id(),
+        )?;
+        let builtin_administrator_auto_logon =
+            checkbox(parent, &crate::tr!("自动登录内置 Administrator"), next_id())?;
         let volume_label = check_edit(
             parent,
             &crate::tr!("自定义系统盘卷标"),
@@ -347,6 +843,12 @@ impl AdvancedPage {
                 custom_files,
                 identity_header,
                 username,
+                builtin_administrator,
+                builtin_administrator_name_label,
+                builtin_administrator_name,
+                builtin_administrator_password_label,
+                builtin_administrator_password,
+                builtin_administrator_auto_logon,
                 volume_label,
                 windows_7_header,
                 windows_7_usb3,
@@ -360,10 +862,13 @@ impl AdvancedPage {
             },
             context,
             viewport,
+            scrollbar_overlay,
             width: Cell::new(0),
             height: Cell::new(0),
             dpi: Cell::new(96),
             scroll_offset: Cell::new(0),
+            target_scroll_offset: Cell::new(0),
+            wheel_distance_remainder: Cell::new(0),
             content_height: Cell::new(0),
         };
         page.apply(initial);
@@ -405,6 +910,22 @@ impl AdvancedPage {
         relocalize_check_edit(h.custom_files, &crate::tr!("复制自定义文件目录"));
         set_text(h.identity_header, &crate::tr!("用户与系统盘"));
         relocalize_check_edit(h.username, &crate::tr!("自定义用户名"));
+        set_text(
+            h.builtin_administrator,
+            &crate::tr!("启用内置 Administrator 账户"),
+        );
+        set_text(
+            h.builtin_administrator_name_label,
+            &crate::tr!("Administrator 账户名"),
+        );
+        set_text(
+            h.builtin_administrator_password_label,
+            &crate::tr!("Administrator 密码"),
+        );
+        set_text(
+            h.builtin_administrator_auto_logon,
+            &crate::tr!("自动登录内置 Administrator"),
+        );
         relocalize_check_edit(h.volume_label, &crate::tr!("自定义系统盘卷标"));
 
         set_text(h.windows_7_header, &crate::tr!("Windows 7 兼容选项"));
@@ -491,7 +1012,21 @@ impl AdvancedPage {
             data.import_custom_files,
             &data.custom_files_path,
         );
-        apply_check_edit(h.username, data.custom_username, &data.username);
+        let builtin_selected = data.builtin_administrator.enabled;
+        apply_check_edit(h.username, !builtin_selected, &data.username);
+        set_checked(h.builtin_administrator, builtin_selected);
+        set_text(
+            h.builtin_administrator_name,
+            &data.builtin_administrator.account_name,
+        );
+        set_text(
+            h.builtin_administrator_password,
+            data.builtin_administrator.password.expose_secret(),
+        );
+        set_checked(
+            h.builtin_administrator_auto_logon,
+            data.builtin_administrator.auto_logon,
+        );
         apply_check_edit(h.volume_label, data.custom_volume_label, &data.volume_label);
         apply_check_edit(
             h.windows_7_usb3,
@@ -540,7 +1075,24 @@ impl AdvancedPage {
         data.import_storage_controller_drivers = is_checked(h.storage_drivers);
         (data.import_registry_file, data.registry_file_path) = read_required_pair(h.registry_file);
         (data.import_custom_files, data.custom_files_path) = read_required_pair(h.custom_files);
-        (data.custom_username, data.username) = read_required_pair(h.username);
+        data.builtin_administrator.enabled = is_checked(h.builtin_administrator);
+        data.custom_username = !data.builtin_administrator.enabled;
+        data.username = read_text(h.username.edit).trim().to_string();
+        if data.custom_username && data.username.is_empty() {
+            data.username = default_install_username();
+            set_text(h.username.edit, &data.username);
+        }
+        data.builtin_administrator.account_name =
+            read_text(h.builtin_administrator_name).trim().to_string();
+        if data.builtin_administrator.account_name.is_empty() {
+            data.builtin_administrator.account_name = "Administrator".to_string();
+            set_text(
+                h.builtin_administrator_name,
+                &data.builtin_administrator.account_name,
+            );
+        }
+        data.builtin_administrator.password = read_text(h.builtin_administrator_password).into();
+        data.builtin_administrator.auto_logon = is_checked(h.builtin_administrator_auto_logon);
         (data.custom_volume_label, data.volume_label) = read_required_pair(h.volume_label);
         (data.win7_inject_usb3_driver, data.win7_usb3_driver_path) =
             read_required_pair(h.windows_7_usb3);
@@ -566,7 +1118,6 @@ impl AdvancedPage {
             h.custom_drivers,
             h.registry_file,
             h.custom_files,
-            h.username,
             h.volume_label,
             h.windows_7_usb3,
             h.windows_7_nvme,
@@ -577,6 +1128,47 @@ impl AdvancedPage {
                 let _ = EnableWindow(browse.button, enabled);
             }
         }
+
+        let builtin_enabled = self.context.unattended_enabled
+            && self.context.builtin_administrator_available
+            && is_checked(h.builtin_administrator);
+        if builtin_enabled {
+            set_checked(h.username.check, false);
+        } else {
+            set_checked(h.username.check, true);
+        }
+        let _ = EnableWindow(h.username.check, true);
+        let _ = EnableWindow(
+            h.username.edit,
+            !builtin_enabled && is_checked(h.username.check),
+        );
+        // A disabled stock STATIC uses USER32's etched two-pass caption renderer even when the
+        // parent supplies an opaque brush. Keep the two captions enabled and let WM_CTLCOLORSTATIC
+        // select the disabled text colour; only the interactive fields are actually disabled.
+        for label in [
+            h.builtin_administrator_name_label,
+            h.builtin_administrator_password_label,
+        ] {
+            let _ = EnableWindow(label, true);
+            let _ = InvalidateRect(label, None, true);
+        }
+        for control in [
+            h.builtin_administrator_name,
+            h.builtin_administrator_password,
+            h.builtin_administrator_auto_logon,
+        ] {
+            let _ = EnableWindow(control, builtin_enabled);
+        }
+    }
+
+    pub unsafe fn handle_dependency_toggle(&self, control: HWND) {
+        let h = &self.handles;
+        if control == h.builtin_administrator && is_checked(control) {
+            set_checked(h.username.check, false);
+        } else if control == h.username.check && is_checked(control) {
+            set_checked(h.builtin_administrator, false);
+        }
+        self.update_dependencies();
     }
 
     pub unsafe fn show(&self, visible: bool) {
@@ -588,9 +1180,19 @@ impl AdvancedPage {
             self.apply_context();
         }
         let _ = ShowWindow(self.viewport, command);
+        let _ = ShowWindow(self.scrollbar_overlay, command);
     }
 
     pub unsafe fn apply_theme(&self, palette: Palette) {
+        // The viewport owns a non-client WS_VSCROLL scrollbar.  Unlike its child controls it is a
+        // plain STATIC, so it never passed through the shared theme path and Windows kept painting
+        // a bright Explorer scrollbar on the dark page.  Theme the owning HWND itself; this keeps
+        // sizing, hit testing and keyboard scrolling native while selecting the matching
+        // DarkMode_Explorer/Explorer scrollbar family.
+        apply_control_theme(self.viewport, palette, NativeControlKind::General);
+        if let Ok(owner) = GetParent(self.viewport) {
+            paint_advanced_scrollbar(self.viewport, owner);
+        }
         for control in self.checkbox_controls() {
             // Reuse the shared checkbox/radio subclass instead of relying on USER32 to recolour
             // captions after a live light/dark switch.  The host theme commonly updates the
@@ -600,6 +1202,12 @@ impl AdvancedPage {
         for pair in self.check_edits() {
             apply_control_theme(pair.edit, palette, NativeControlKind::Field);
         }
+        for control in [
+            self.handles.builtin_administrator_name,
+            self.handles.builtin_administrator_password,
+        ] {
+            apply_control_theme(control, palette, NativeControlKind::Field);
+        }
     }
 
     /// Returns whether `control` toggles one of the conditional Edit/Browse rows.
@@ -608,9 +1216,11 @@ impl AdvancedPage {
     /// forwarded to the top-level window.  Keeping ownership testing here avoids coupling the
     /// controller to the page's generated control IDs.
     pub fn owns_dependency_toggle(&self, control: HWND) -> bool {
-        self.check_edits()
-            .into_iter()
-            .any(|pair| pair.check == control)
+        control == self.handles.builtin_administrator
+            || self
+                .check_edits()
+                .into_iter()
+                .any(|pair| pair.check == control)
     }
 
     pub unsafe fn apply_font(&self, font: HFONT, heading_font: HFONT) {
@@ -633,6 +1243,17 @@ impl AdvancedPage {
         let width = width.max(0);
         let height = height.max(0);
         let _ = MoveWindow(self.viewport, left, top, width, height, true);
+        update_viewport_region(self.viewport, width, height, dpi);
+        if let Some(geometry) = AdvancedViewportGeometry::calculate(width, height, dpi) {
+            let _ = MoveWindow(
+                self.scrollbar_overlay,
+                left + geometry.scrollbar_left,
+                top,
+                (width - geometry.scrollbar_left).max(0),
+                height,
+                true,
+            );
+        }
         self.width.set(width);
         self.height.set(height);
         self.dpi.set(dpi.max(1));
@@ -646,13 +1267,19 @@ impl AdvancedPage {
         };
         self.scroll_offset
             .set(model.clamped_offset(self.scroll_offset.get()));
+        self.target_scroll_offset.set(self.scroll_offset.get());
+        self.wheel_distance_remainder.set(0);
         self.layout_content(width, dpi, -self.scroll_offset.get());
         self.update_scrollbar();
     }
 
     unsafe fn layout_content(&self, width: i32, dpi: u32, origin_y: i32) -> i32 {
         let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
-        let grid = AdvancedGrid::calculate(width, dpi);
+        // WS_VSCROLL owns pixels inside the viewport width. Keep a separate field gap before it
+        // so the final Browse button never uses the scrollbar trough as its right-hand border.
+        let content_width = AdvancedViewportGeometry::calculate(width, self.height.get(), dpi)
+            .map_or(width.max(0), |geometry| geometry.content_width);
+        let grid = AdvancedGrid::calculate(content_width, dpi);
         let mut bottoms = vec![origin_y; grid.columns];
         let section_gap = s(5);
         let h = &self.handles;
@@ -747,6 +1374,36 @@ impl AdvancedPage {
             dpi,
         );
         layout_pair(h.username, x, &mut bottoms[column], grid.column_width, dpi);
+        layout_check(
+            h.builtin_administrator,
+            x,
+            &mut bottoms[column],
+            grid.column_width,
+            dpi,
+        );
+        layout_labeled_edit(
+            h.builtin_administrator_name_label,
+            h.builtin_administrator_name,
+            x,
+            &mut bottoms[column],
+            grid.column_width,
+            dpi,
+        );
+        layout_labeled_edit(
+            h.builtin_administrator_password_label,
+            h.builtin_administrator_password,
+            x,
+            &mut bottoms[column],
+            grid.column_width,
+            dpi,
+        );
+        layout_check(
+            h.builtin_administrator_auto_logon,
+            x + s(20),
+            &mut bottoms[column],
+            (grid.column_width - s(20)).max(0),
+            dpi,
+        );
         layout_pair(
             h.volume_label,
             x,
@@ -820,13 +1477,97 @@ impl AdvancedPage {
         self.viewport
     }
 
+    pub unsafe fn draw_item(&self, item: &DRAWITEMSTRUCT, palette: Palette) -> bool {
+        if item.hwndItem != self.handles.builtin_administrator_name_label
+            && item.hwndItem != self.handles.builtin_administrator_password_label
+        {
+            return false;
+        }
+
+        // Stock disabled STATIC controls use an etched two-pass caption that leaves a visible
+        // duplicate after ScrollWindowEx. These two dependent captions remain ordinary child
+        // HWNDs, but their complete opaque frame and single text pass are deterministic here.
+        let brush = CreateSolidBrush(palette.window);
+        let _ = FillRect(item.hDC, &item.rcItem, brush);
+        let _ = DeleteObject(brush);
+        let _ = SetBkMode(item.hDC, TRANSPARENT);
+        let _ = SetTextColor(
+            item.hDC,
+            if IsWindowEnabled(self.handles.builtin_administrator_name).as_bool() {
+                palette.text
+            } else {
+                palette.text_disabled
+            },
+        );
+
+        let text_length = GetWindowTextLengthW(item.hwndItem).max(0) as usize;
+        if text_length > 0 {
+            let mut text = vec![0u16; text_length + 1];
+            let copied = GetWindowTextW(item.hwndItem, &mut text).max(0) as usize;
+            text.truncate(copied.min(text.len()));
+            let font = SendMessageW(item.hwndItem, WM_GETFONT, WPARAM(0), LPARAM(0));
+            let old_font = (font.0 != 0).then(|| {
+                SelectObject(
+                    item.hDC,
+                    windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _),
+                )
+            });
+            let mut rect = item.rcItem;
+            let _ = DrawTextW(
+                item.hDC,
+                &mut text,
+                &mut rect,
+                DT_LEFT | DT_SINGLELINE | DT_NOPREFIX,
+            );
+            if let Some(old_font) = old_font {
+                let _ = SelectObject(item.hDC, old_font);
+            }
+        }
+        true
+    }
+
     pub unsafe fn scroll_wheel(&self, wheel_delta: i16) -> bool {
         if self.height.get() <= 0 || self.content_height.get() <= self.height.get() {
             return false;
         }
         let line = ((32_i64 * i64::from(self.dpi.get()) + 48) / 96) as i32;
-        let steps = (i32::from(wheel_delta) / 120).clamp(-3, 3);
-        self.set_scroll_offset(self.scroll_offset.get() - steps * line * 3)
+        let distance_numerator = self
+            .wheel_distance_remainder
+            .get()
+            .saturating_add(i32::from(wheel_delta).saturating_mul(line.saturating_mul(3)));
+        let distance = distance_numerator / WHEEL_DELTA;
+        self.wheel_distance_remainder
+            .set(distance_numerator % WHEEL_DELTA);
+        if distance == 0 {
+            return true;
+        }
+
+        let model = ScrollModel {
+            offset: self.scroll_offset.get(),
+            content_height: self.content_height.get(),
+            viewport_height: self.height.get(),
+        };
+        let target = model.clamped_offset(self.target_scroll_offset.get().saturating_sub(distance));
+        let changed = target != self.target_scroll_offset.get();
+        self.target_scroll_offset.set(target);
+        changed || target != self.scroll_offset.get()
+    }
+
+    /// Advances one coalesced wheel-animation frame. Returns `true` while another frame is needed.
+    pub unsafe fn advance_smooth_scroll(&self) -> bool {
+        let current = self.scroll_offset.get();
+        let target = ScrollModel {
+            offset: current,
+            content_height: self.content_height.get(),
+            viewport_height: self.height.get(),
+        }
+        .clamped_offset(self.target_scroll_offset.get());
+        self.target_scroll_offset.set(target);
+        let next = smooth_scroll_step(current, target);
+        if next != current {
+            self.set_scroll_offset(next);
+        }
+        next != target
     }
 
     pub unsafe fn handle_vscroll(&self, request: usize) -> bool {
@@ -845,17 +1586,27 @@ impl AdvancedPage {
             value if value == SB_PAGEUP.0 as u32 => model.offset - model.viewport_height,
             value if value == SB_PAGEDOWN.0 as u32 => model.offset + model.viewport_height,
             value if value == SB_THUMBPOSITION.0 as u32 || value == SB_THUMBTRACK.0 as u32 => {
-                let mut info = SCROLLINFO {
-                    cbSize: size_of::<SCROLLINFO>() as u32,
-                    fMask: SIF_TRACKPOS,
-                    ..Default::default()
-                };
-                let _ = GetScrollInfo(self.viewport, SB_VERT, &mut info);
-                info.nTrackPos
+                let proxy =
+                    GetPropW(self.viewport, ADVANCED_SCROLLBAR_PROXY_POSITION_PROPERTY).0 as usize;
+                if proxy != 0 {
+                    let _ = RemovePropW(self.viewport, ADVANCED_SCROLLBAR_PROXY_POSITION_PROPERTY);
+                    proxy.saturating_sub(1).min(i32::MAX as usize) as i32
+                } else {
+                    let mut info = SCROLLINFO {
+                        cbSize: size_of::<SCROLLINFO>() as u32,
+                        fMask: SIF_TRACKPOS,
+                        ..Default::default()
+                    };
+                    let _ = GetScrollInfo(self.viewport, SB_VERT, &mut info);
+                    info.nTrackPos
+                }
             }
             value if value == SB_ENDSCROLL.0 as u32 => return false,
             _ => return false,
         };
+        self.target_scroll_offset
+            .set(model.clamped_offset(requested));
+        self.wheel_distance_remainder.set(0);
         self.set_scroll_offset(requested)
     }
 
@@ -870,7 +1621,35 @@ impl AdvancedPage {
             return false;
         }
         self.scroll_offset.set(offset);
-        self.layout_content(self.width.get(), self.dpi.get(), -offset);
+        let delta_y = model.offset.saturating_sub(offset);
+        // All advanced-page fields share the viewport as their direct parent. Moving the complete
+        // child tree as one scroll transaction avoids dozens of visible MoveWindow/layout passes
+        // for every wheel-animation frame and every native thumb-track notification.
+        let scroll_result = ScrollWindowEx(
+            self.viewport,
+            0,
+            delta_y,
+            None,
+            None,
+            HRGN::default(),
+            None,
+            SW_SCROLLCHILDREN | SW_INVALIDATE,
+        );
+        if scroll_result == RGN_ERROR.0 {
+            // Fail visibly and deterministically if a reduced WinPE USER32 rejects
+            // ScrollWindowEx; the slower full layout remains a safe compatibility fallback.
+            self.layout_content(self.width.get(), self.dpi.get(), -offset);
+        } else {
+            // These disabled-capable STATIC labels can repaint independently after USER32 has
+            // copied their previous pixels. Repaint them with the advanced page's opaque
+            // WM_CTLCOLORSTATIC background so a second text pass cannot leave a shadow.
+            for label in [
+                self.handles.builtin_administrator_name_label,
+                self.handles.builtin_administrator_password_label,
+            ] {
+                let _ = InvalidateRect(label, None, false);
+            }
+        }
         self.update_scrollbar();
         true
     }
@@ -890,7 +1669,13 @@ impl AdvancedPage {
             nPos: model.clamped_offset(model.offset),
             ..Default::default()
         };
-        let _ = SetScrollInfo(self.viewport, SB_VERT, &info, true);
+        // The sibling overlay is the sole visible scrollbar. Asking USER32 to redraw the hidden
+        // stock non-client bar on every position change races that overlay through a separate DWM
+        // redirection surface and is the primary source of drag flicker.
+        let _ = SetScrollInfo(self.viewport, SB_VERT, &info, false);
+        if let Ok(owner) = GetParent(self.viewport) {
+            paint_advanced_scrollbar(self.viewport, owner);
+        }
     }
 
     unsafe fn apply_context(&self) {
@@ -911,6 +1696,12 @@ impl AdvancedPage {
             for control in [h.system_checks[2], h.system_checks[8], h.system_checks[9]] {
                 set_checked(control, false);
             }
+        }
+        let builtin_available = unattended && self.context.builtin_administrator_available;
+        let _ = EnableWindow(h.builtin_administrator, builtin_available);
+        if !builtin_available {
+            set_checked(h.builtin_administrator, false);
+            set_checked(h.username.check, true);
         }
 
         for control in self.windows_7_controls() {
@@ -983,6 +1774,8 @@ impl AdvancedPage {
         controls.extend(self.check_edits().into_iter().map(|pair| pair.check));
         controls.extend([
             h.storage_drivers,
+            h.builtin_administrator,
+            h.builtin_administrator_auto_logon,
             h.windows_7_acpi,
             h.windows_7_storage,
             h.windows_7_uefi,
@@ -1023,7 +1816,807 @@ impl AdvancedPage {
                 .into_iter()
                 .filter_map(|pair| pair.browse.map(|browse| browse.button)),
         );
+        controls.extend([
+            self.handles.builtin_administrator_name_label,
+            self.handles.builtin_administrator_name,
+            self.handles.builtin_administrator_password_label,
+            self.handles.builtin_administrator_password,
+        ]);
         controls
+    }
+}
+
+unsafe fn update_viewport_region(viewport: HWND, width: i32, height: i32, dpi: u32) {
+    let Some(geometry) = AdvancedViewportGeometry::calculate(width, height, dpi) else {
+        let _ = SetWindowRgn(viewport, None, true);
+        return;
+    };
+
+    // The stock WS_VSCROLL bar remains attached for range, keyboard and accessibility semantics,
+    // but it must never become a second visible renderer behind the themed sibling overlay.
+    // Clipping the viewport to its content rectangle removes the native trough and its dark outer
+    // ring without changing the scrollbar model returned by GetScrollInfo/GetScrollBarInfo.
+    let content = CreateRectRgn(0, 0, geometry.scrollbar_left, height);
+    if content.is_invalid() {
+        let _ = SetWindowRgn(viewport, None, true);
+        return;
+    }
+    if SetWindowRgn(viewport, content, true) == 0 {
+        let _ = DeleteObject(content);
+        let _ = SetWindowRgn(viewport, None, true);
+    }
+}
+
+const fn advanced_scrollbar_part_from_index(index: usize) -> Option<AdvancedScrollbarPart> {
+    match index {
+        0 => Some(AdvancedScrollbarPart::TopArrow),
+        1 => Some(AdvancedScrollbarPart::UpperTrack),
+        2 => Some(AdvancedScrollbarPart::Thumb),
+        3 => Some(AdvancedScrollbarPart::LowerTrack),
+        4 => Some(AdvancedScrollbarPart::BottomArrow),
+        _ => None,
+    }
+}
+
+unsafe fn advanced_scrollbar_interaction(viewport: HWND) -> AdvancedScrollbarInteraction {
+    let value = GetPropW(viewport, ADVANCED_SCROLLBAR_STATE_PROPERTY).0 as usize;
+    match value {
+        1..=5 => advanced_scrollbar_part_from_index(value - 1).map_or(
+            AdvancedScrollbarInteraction::Normal,
+            AdvancedScrollbarInteraction::Hovered,
+        ),
+        6..=10 => advanced_scrollbar_part_from_index(value - 6).map_or(
+            AdvancedScrollbarInteraction::Normal,
+            AdvancedScrollbarInteraction::Pressed,
+        ),
+        11 => AdvancedScrollbarInteraction::Disabled,
+        _ => AdvancedScrollbarInteraction::Normal,
+    }
+}
+
+unsafe fn set_advanced_scrollbar_interaction(
+    viewport: HWND,
+    interaction: AdvancedScrollbarInteraction,
+) -> bool {
+    if advanced_scrollbar_interaction(viewport) == interaction {
+        return false;
+    }
+    if interaction == AdvancedScrollbarInteraction::Normal {
+        let _ = RemovePropW(viewport, ADVANCED_SCROLLBAR_STATE_PROPERTY);
+    } else {
+        let value = match interaction {
+            AdvancedScrollbarInteraction::Normal => 0,
+            AdvancedScrollbarInteraction::Hovered(part) => part as usize + 1,
+            AdvancedScrollbarInteraction::Pressed(part) => part as usize + 6,
+            AdvancedScrollbarInteraction::Disabled => 11,
+        };
+        let _ = SetPropW(
+            viewport,
+            ADVANCED_SCROLLBAR_STATE_PROPERTY,
+            HANDLE(value as *mut core::ffi::c_void),
+        );
+    }
+    true
+}
+
+unsafe fn advanced_scrollbar_geometry(viewport: HWND) -> Option<(AdvancedScrollbarGeometry, bool)> {
+    let mut info = SCROLLBARINFO {
+        cbSize: size_of::<SCROLLBARINFO>() as u32,
+        ..Default::default()
+    };
+    GetScrollBarInfo(viewport, OBJID_VSCROLL, &mut info).ok()?;
+    const STATE_SYSTEM_UNAVAILABLE: u32 = 0x0000_0001;
+    let disabled =
+        !IsWindowEnabled(viewport).as_bool() || info.rgstate[0] & STATE_SYSTEM_UNAVAILABLE != 0;
+    AdvancedScrollbarGeometry::from_scrollbar_info(&info).map(|geometry| (geometry, disabled))
+}
+
+unsafe fn advanced_scrollbar_pointer_interaction(
+    viewport: HWND,
+    point: POINT,
+    pressed: bool,
+) -> AdvancedScrollbarInteraction {
+    let Some((geometry, disabled)) = advanced_scrollbar_geometry(viewport) else {
+        return AdvancedScrollbarInteraction::Normal;
+    };
+    if disabled {
+        AdvancedScrollbarInteraction::Disabled
+    } else if let Some(part) = geometry.hit_test(point) {
+        if pressed {
+            AdvancedScrollbarInteraction::Pressed(part)
+        } else {
+            AdvancedScrollbarInteraction::Hovered(part)
+        }
+    } else {
+        AdvancedScrollbarInteraction::Normal
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdvancedScrollbarProxyRange {
+    track_top: i32,
+    track_bottom: i32,
+    thumb_height: i32,
+    minimum: i32,
+    maximum: i32,
+    page: u32,
+}
+
+fn advanced_scrollbar_position_from_pointer(
+    range: AdvancedScrollbarProxyRange,
+    pointer_y: i32,
+    drag_offset: i32,
+) -> i32 {
+    let thumb_height = range.thumb_height.max(1);
+    let travel = (range.track_bottom - range.track_top - thumb_height).max(0);
+    let maximum_position = range
+        .maximum
+        .saturating_sub(range.minimum)
+        .saturating_sub(range.page.saturating_sub(1) as i32)
+        .max(0);
+    if travel == 0 || maximum_position == 0 {
+        return range.minimum;
+    }
+    let thumb_top = pointer_y
+        .saturating_sub(drag_offset)
+        .clamp(range.track_top, range.track_top.saturating_add(travel));
+    range.minimum.saturating_add(
+        (i64::from(thumb_top - range.track_top) * i64::from(maximum_position) / i64::from(travel))
+            as i32,
+    )
+}
+
+unsafe fn advanced_scrollbar_proxy_position(
+    viewport: HWND,
+    point: POINT,
+    drag_offset: i32,
+) -> Option<i32> {
+    let (geometry, disabled) = advanced_scrollbar_geometry(viewport)?;
+    if disabled {
+        return None;
+    }
+    let mut info = SCROLLINFO {
+        cbSize: size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE | SIF_PAGE,
+        ..Default::default()
+    };
+    let _ = GetScrollInfo(viewport, SB_VERT, &mut info);
+    let track_top = geometry.top_arrow.bottom;
+    let track_bottom = geometry.bottom_arrow.top;
+    let thumb_height = (geometry.thumb.bottom - geometry.thumb.top).max(1);
+    Some(advanced_scrollbar_position_from_pointer(
+        AdvancedScrollbarProxyRange {
+            track_top,
+            track_bottom,
+            thumb_height,
+            minimum: info.nMin,
+            maximum: info.nMax,
+            page: info.nPage,
+        },
+        point.y,
+        drag_offset,
+    ))
+}
+
+unsafe fn send_advanced_scrollbar_proxy_position(viewport: HWND, code: u32, position: i32) {
+    let stored = position.max(0) as usize + 1;
+    let _ = SetPropW(
+        viewport,
+        ADVANCED_SCROLLBAR_PROXY_POSITION_PROPERTY,
+        HANDLE(stored as *mut core::ffi::c_void),
+    );
+    let _ = SendMessageW(
+        viewport,
+        WM_VSCROLL,
+        WPARAM(code as usize),
+        LPARAM(viewport.0 as isize),
+    );
+}
+
+unsafe fn advanced_scrollbar_current_position(viewport: HWND) -> Option<i32> {
+    let mut info = SCROLLINFO {
+        cbSize: size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_POS,
+        ..Default::default()
+    };
+    GetScrollInfo(viewport, SB_VERT, &mut info)
+        .is_ok()
+        .then_some(info.nPos)
+}
+
+fn screen_point_from_lparam(lparam: LPARAM) -> POINT {
+    let packed = lparam.0 as u32;
+    POINT {
+        x: (packed as u16 as i16) as i32,
+        y: ((packed >> 16) as u16 as i16) as i32,
+    }
+}
+
+unsafe fn track_advanced_scrollbar_leave(viewport: HWND) {
+    let mut tracking = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE | TME_NONCLIENT,
+        hwndTrack: viewport,
+        dwHoverTime: 0,
+    };
+    let _ = TrackMouseEvent(&mut tracking);
+}
+
+unsafe fn track_advanced_scrollbar_overlay_leave(overlay: HWND) {
+    let mut tracking = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: overlay,
+        dwHoverTime: 0,
+    };
+    let _ = TrackMouseEvent(&mut tracking);
+}
+
+unsafe fn paint_embedded_scrollbar_glyph(
+    dc: windows::Win32::Graphics::Gdi::HDC,
+    rect: RECT,
+    glyph: &EmbeddedScrollbarGlyph,
+) {
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let pixels = stretch_scrollbar_glyph(glyph, width, height);
+    let _ =
+        alpha_blend_premultiplied_bgra(dc, rect.left, rect.top, width, height, pixels.as_slice());
+}
+
+unsafe fn paint_advanced_scrollbar_to_dc(
+    viewport: HWND,
+    owner: HWND,
+    surface: HWND,
+    dc: windows::Win32::Graphics::Gdi::HDC,
+) {
+    if viewport.0.is_null() || owner.0.is_null() || surface.0.is_null() || dc.is_invalid() {
+        return;
+    }
+
+    let mut surface_rect = RECT::default();
+    let _ = GetWindowRect(surface, &mut surface_rect);
+    let width = (surface_rect.right - surface_rect.left).max(0);
+    let height = (surface_rect.bottom - surface_rect.top).max(0);
+
+    // Ask the owning window for the exact current page brush and text colour. This keeps this
+    // non-client painter synchronized with live light/dark changes without duplicating palette
+    // state inside the viewport subclass.
+    let background = SendMessageW(
+        owner,
+        WM_CTLCOLORSTATIC,
+        WPARAM(dc.0 as usize),
+        LPARAM(viewport.0 as isize),
+    );
+    let background_brush = HBRUSH(background.0 as *mut _);
+    let background_color = GetBkColor(dc);
+    if !background_brush.is_invalid() {
+        let _ = FillRect(
+            dc,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+            background_brush,
+        );
+    }
+    let Some((screen_geometry, disabled)) = advanced_scrollbar_geometry(viewport) else {
+        return;
+    };
+    let geometry = screen_geometry.translated(-surface_rect.left, -surface_rect.top);
+
+    let interaction = if disabled {
+        AdvancedScrollbarInteraction::Disabled
+    } else {
+        advanced_scrollbar_interaction(viewport)
+    };
+    let dark = colorref_is_dark(background_color.0);
+    let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(viewport).max(96);
+
+    // The msstyles resources describe how each part looks once the Windows 11 overlay scrollbar
+    // expands, but USER32 separately controls whether the track and arrow parts are present.
+    // Normal/Disabled must expose only the compact thumb; drawing the track's Normal bitmap here
+    // would leave the permanent dark capsule visible in the user's screenshot.
+    if interaction.shows_expanded_parts() {
+        // The build step removes only the source theme host surface around the opaque track
+        // pixels. Drawing both track halves first preserves the continuous expanded scrollbar
+        // without reintroducing the full-height #202020/white frame around it.
+        paint_embedded_scrollbar_glyph(
+            dc,
+            geometry.upper_track,
+            embedded_scrollbar_track_glyph(
+                dark,
+                dpi,
+                interaction.state_for(AdvancedScrollbarPart::UpperTrack),
+            ),
+        );
+        paint_embedded_scrollbar_glyph(
+            dc,
+            geometry.lower_track,
+            embedded_scrollbar_track_glyph(
+                dark,
+                dpi,
+                interaction.state_for(AdvancedScrollbarPart::LowerTrack),
+            ),
+        );
+        paint_embedded_scrollbar_glyph(
+            dc,
+            geometry.top_arrow,
+            embedded_scrollbar_arrow_glyph(
+                dark,
+                dpi,
+                false,
+                interaction.state_for(AdvancedScrollbarPart::TopArrow),
+            ),
+        );
+        paint_embedded_scrollbar_glyph(
+            dc,
+            geometry.bottom_arrow,
+            embedded_scrollbar_arrow_glyph(
+                dark,
+                dpi,
+                true,
+                interaction.state_for(AdvancedScrollbarPart::BottomArrow),
+            ),
+        );
+    }
+    paint_embedded_scrollbar_glyph(
+        dc,
+        geometry.thumb,
+        embedded_scrollbar_thumb_glyph(
+            dark,
+            dpi,
+            interaction.state_for(AdvancedScrollbarPart::Thumb),
+        ),
+    );
+}
+
+unsafe fn paint_advanced_scrollbar_buffered_to_dc(
+    viewport: HWND,
+    owner: HWND,
+    surface: HWND,
+    target_dc: windows::Win32::Graphics::Gdi::HDC,
+) {
+    if target_dc.is_invalid() {
+        return;
+    }
+    let mut surface_rect = RECT::default();
+    if GetWindowRect(surface, &mut surface_rect).is_err() {
+        return;
+    }
+    let width = (surface_rect.right - surface_rect.left).max(0);
+    let height = (surface_rect.bottom - surface_rect.top).max(0);
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    // Compose the complete scrollbar frame offscreen. Publishing background, tracks, arrows and
+    // thumb in separate screen writes exposes those intermediate states during a thumb drag.
+    let memory_dc = CreateCompatibleDC(target_dc);
+    if memory_dc.is_invalid() {
+        paint_advanced_scrollbar_to_dc(viewport, owner, surface, target_dc);
+        return;
+    }
+    let bitmap = CreateCompatibleBitmap(target_dc, width, height);
+    if bitmap.is_invalid() {
+        let _ = DeleteDC(memory_dc);
+        paint_advanced_scrollbar_to_dc(viewport, owner, surface, target_dc);
+        return;
+    }
+    let old_bitmap = SelectObject(memory_dc, bitmap);
+    paint_advanced_scrollbar_to_dc(viewport, owner, surface, memory_dc);
+    let _ = BitBlt(target_dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
+    let _ = SelectObject(memory_dc, old_bitmap);
+    let _ = DeleteObject(bitmap);
+    let _ = DeleteDC(memory_dc);
+}
+
+fn blend_advanced_scrollbar_glyph(
+    destination: &mut [u8],
+    destination_width: i32,
+    destination_height: i32,
+    rect: RECT,
+    glyph: &EmbeddedScrollbarGlyph,
+) {
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    if width == 0 || height == 0 || destination_width <= 0 || destination_height <= 0 {
+        return;
+    }
+    let source = stretch_scrollbar_glyph(glyph, width, height);
+    for source_y in 0..height {
+        let destination_y = rect.top + source_y;
+        if !(0..destination_height).contains(&destination_y) {
+            continue;
+        }
+        for source_x in 0..width {
+            let destination_x = rect.left + source_x;
+            if !(0..destination_width).contains(&destination_x) {
+                continue;
+            }
+            let source_index = (source_y as usize * width as usize + source_x as usize) * 4;
+            let destination_index =
+                (destination_y as usize * destination_width as usize + destination_x as usize) * 4;
+            let alpha = u32::from(source[source_index + 3]);
+            let inverse_alpha = 255 - alpha;
+            for channel in 0..3 {
+                destination[destination_index + channel] =
+                    (u32::from(source[source_index + channel])
+                        + (u32::from(destination[destination_index + channel]) * inverse_alpha
+                            + 127)
+                            / 255)
+                        .min(255) as u8;
+            }
+            destination[destination_index + 3] = 255;
+        }
+    }
+}
+
+unsafe fn compose_advanced_scrollbar_frame(
+    viewport: HWND,
+    owner: HWND,
+    surface: HWND,
+) -> Option<(i32, i32, u32, Vec<u8>)> {
+    let mut surface_rect = RECT::default();
+    GetWindowRect(surface, &mut surface_rect).ok()?;
+    let width = (surface_rect.right - surface_rect.left).max(0);
+    let height = (surface_rect.bottom - surface_rect.top).max(0);
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let dc = GetDC(surface);
+    if dc.is_invalid() {
+        return None;
+    }
+    let _ = SendMessageW(
+        owner,
+        WM_CTLCOLORSTATIC,
+        WPARAM(dc.0 as usize),
+        LPARAM(viewport.0 as isize),
+    );
+    let background = GetBkColor(dc).0;
+    let _ = ReleaseDC(surface, dc);
+
+    let red = (background & 0xff) as u8;
+    let green = ((background >> 8) & 0xff) as u8;
+    let blue = ((background >> 16) & 0xff) as u8;
+    let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[blue, green, red, 255]);
+    }
+
+    let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(viewport).max(96);
+    let Some((screen_geometry, disabled)) = advanced_scrollbar_geometry(viewport) else {
+        return Some((width, height, dpi, pixels));
+    };
+    let geometry = screen_geometry.translated(-surface_rect.left, -surface_rect.top);
+    let interaction = if disabled {
+        AdvancedScrollbarInteraction::Disabled
+    } else {
+        advanced_scrollbar_interaction(viewport)
+    };
+    let dark = colorref_is_dark(background);
+    if interaction.shows_expanded_parts() {
+        for (rect, glyph) in [
+            (
+                geometry.upper_track,
+                embedded_scrollbar_track_glyph(
+                    dark,
+                    dpi,
+                    interaction.state_for(AdvancedScrollbarPart::UpperTrack),
+                ),
+            ),
+            (
+                geometry.lower_track,
+                embedded_scrollbar_track_glyph(
+                    dark,
+                    dpi,
+                    interaction.state_for(AdvancedScrollbarPart::LowerTrack),
+                ),
+            ),
+            (
+                geometry.top_arrow,
+                embedded_scrollbar_arrow_glyph(
+                    dark,
+                    dpi,
+                    false,
+                    interaction.state_for(AdvancedScrollbarPart::TopArrow),
+                ),
+            ),
+            (
+                geometry.bottom_arrow,
+                embedded_scrollbar_arrow_glyph(
+                    dark,
+                    dpi,
+                    true,
+                    interaction.state_for(AdvancedScrollbarPart::BottomArrow),
+                ),
+            ),
+        ] {
+            blend_advanced_scrollbar_glyph(&mut pixels, width, height, rect, glyph);
+        }
+    }
+    blend_advanced_scrollbar_glyph(
+        &mut pixels,
+        width,
+        height,
+        geometry.thumb,
+        embedded_scrollbar_thumb_glyph(
+            dark,
+            dpi,
+            interaction.state_for(AdvancedScrollbarPart::Thumb),
+        ),
+    );
+    Some((width, height, dpi, pixels))
+}
+
+unsafe fn request_advanced_scrollbar_frame(viewport: HWND) {
+    let overlay = HWND(GetPropW(viewport, ADVANCED_SCROLLBAR_OVERLAY_PROPERTY).0);
+    if overlay.0.is_null()
+        || !GetPropW(overlay, ADVANCED_SCROLLBAR_FRAME_PENDING_PROPERTY)
+            .0
+            .is_null()
+    {
+        return;
+    }
+    let _ = SetPropW(
+        overlay,
+        ADVANCED_SCROLLBAR_FRAME_PENDING_PROPERTY,
+        HANDLE(std::ptr::dangling_mut::<c_void>()),
+    );
+    if PostMessageW(overlay, WM_ADVANCED_SCROLLBAR_FRAME, WPARAM(0), LPARAM(0)).is_err() {
+        let _ = RemovePropW(overlay, ADVANCED_SCROLLBAR_FRAME_PENDING_PROPERTY);
+        let _ = InvalidateRect(overlay, None, false);
+    }
+}
+
+unsafe fn queue_advanced_scrollbar_position(viewport: HWND, code: u32, position: i32) {
+    let stored = position.max(0) as usize + 1;
+    let _ = SetPropW(
+        viewport,
+        ADVANCED_SCROLLBAR_PENDING_POSITION_PROPERTY,
+        HANDLE(stored as *mut c_void),
+    );
+    let _ = SetPropW(
+        viewport,
+        ADVANCED_SCROLLBAR_PENDING_CODE_PROPERTY,
+        HANDLE(code as usize as *mut c_void),
+    );
+    request_advanced_scrollbar_frame(viewport);
+}
+
+unsafe fn publish_advanced_scrollbar_frame(viewport: HWND, overlay: HWND) {
+    let pending_position =
+        GetPropW(viewport, ADVANCED_SCROLLBAR_PENDING_POSITION_PROPERTY).0 as usize;
+    if pending_position != 0 {
+        let code = GetPropW(viewport, ADVANCED_SCROLLBAR_PENDING_CODE_PROPERTY).0 as usize as u32;
+        let _ = RemovePropW(viewport, ADVANCED_SCROLLBAR_PENDING_POSITION_PROPERTY);
+        let _ = RemovePropW(viewport, ADVANCED_SCROLLBAR_PENDING_CODE_PROPERTY);
+        send_advanced_scrollbar_proxy_position(
+            viewport,
+            if code == 0 {
+                SB_THUMBTRACK.0 as u32
+            } else {
+                code
+            },
+            pending_position.saturating_sub(1).min(i32::MAX as usize) as i32,
+        );
+    }
+
+    let composed = GetParent(overlay)
+        .ok()
+        .and_then(|owner| compose_advanced_scrollbar_frame(viewport, owner, overlay));
+    let published = composed
+        .as_ref()
+        .is_some_and(|(width, height, dpi, pixels)| {
+            scrollbar_compositor::publish(overlay, *width, *height, *dpi, pixels)
+        });
+    if !published {
+        let _ = InvalidateRect(overlay, None, false);
+    }
+}
+
+unsafe fn paint_advanced_scrollbar(viewport: HWND, _owner: HWND) {
+    if viewport.0.is_null() {
+        return;
+    }
+    request_advanced_scrollbar_frame(viewport);
+}
+
+unsafe extern "system" fn advanced_scrollbar_overlay_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    let viewport = HWND(reference_data as *mut _);
+    match message {
+        WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        WM_ERASEBKGND => LRESULT(1),
+        WM_MOUSEMOVE => {
+            let mut point = POINT::default();
+            if GetCursorPos(&mut point).is_ok() {
+                let mut repaint = false;
+                let drag = GetPropW(viewport, ADVANCED_SCROLLBAR_DRAG_OFFSET_PROPERTY).0 as usize;
+                if GetCapture() == hwnd && drag != 0 {
+                    if let Some(position) =
+                        advanced_scrollbar_proxy_position(viewport, point, drag as i32 - 1)
+                    {
+                        let queued =
+                            GetPropW(viewport, ADVANCED_SCROLLBAR_PENDING_POSITION_PROPERTY).0
+                                as usize;
+                        let queued = (queued != 0)
+                            .then_some(queued.saturating_sub(1).min(i32::MAX as usize) as i32);
+                        if advanced_scrollbar_current_position(viewport) != Some(position)
+                            && queued != Some(position)
+                        {
+                            // Pointer messages may arrive faster than DWM can present. Keep only
+                            // the newest target and publish at most one queued scrollbar frame.
+                            queue_advanced_scrollbar_position(
+                                viewport,
+                                SB_THUMBTRACK.0 as u32,
+                                position,
+                            );
+                        }
+                    }
+                    repaint = set_advanced_scrollbar_interaction(
+                        viewport,
+                        AdvancedScrollbarInteraction::Pressed(AdvancedScrollbarPart::Thumb),
+                    );
+                } else if GetCapture() != hwnd {
+                    let next = advanced_scrollbar_pointer_interaction(viewport, point, false);
+                    repaint = set_advanced_scrollbar_interaction(viewport, next);
+                    if repaint && matches!(next, AdvancedScrollbarInteraction::Hovered(_)) {
+                        track_advanced_scrollbar_overlay_leave(hwnd);
+                    }
+                }
+                if repaint {
+                    if let Ok(owner) = GetParent(hwnd) {
+                        paint_advanced_scrollbar(viewport, owner);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE_MESSAGE => {
+            if GetCapture() != hwnd
+                && set_advanced_scrollbar_interaction(
+                    viewport,
+                    AdvancedScrollbarInteraction::Normal,
+                )
+            {
+                if let Ok(owner) = GetParent(hwnd) {
+                    paint_advanced_scrollbar(viewport, owner);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let mut point = POINT::default();
+            let Some((geometry, disabled)) = advanced_scrollbar_geometry(viewport) else {
+                return LRESULT(0);
+            };
+            if disabled || GetCursorPos(&mut point).is_err() {
+                return LRESULT(0);
+            }
+            let Some(part) = geometry.hit_test(point) else {
+                return LRESULT(0);
+            };
+            let _ = SetCapture(hwnd);
+            if part == AdvancedScrollbarPart::Thumb {
+                let offset = point.y.saturating_sub(geometry.thumb.top).max(0) as usize + 1;
+                let _ = SetPropW(
+                    viewport,
+                    ADVANCED_SCROLLBAR_DRAG_OFFSET_PROPERTY,
+                    HANDLE(offset as *mut core::ffi::c_void),
+                );
+            } else {
+                let code = match part {
+                    AdvancedScrollbarPart::TopArrow => SB_LINEUP.0 as u32,
+                    AdvancedScrollbarPart::UpperTrack => SB_PAGEUP.0 as u32,
+                    AdvancedScrollbarPart::LowerTrack => SB_PAGEDOWN.0 as u32,
+                    AdvancedScrollbarPart::BottomArrow => SB_LINEDOWN.0 as u32,
+                    AdvancedScrollbarPart::Thumb => unreachable!(),
+                };
+                let _ = SendMessageW(
+                    viewport,
+                    WM_VSCROLL,
+                    WPARAM(code as usize),
+                    LPARAM(viewport.0 as isize),
+                );
+            }
+            let _ = set_advanced_scrollbar_interaction(
+                viewport,
+                AdvancedScrollbarInteraction::Pressed(part),
+            );
+            if let Ok(owner) = GetParent(hwnd) {
+                paint_advanced_scrollbar(viewport, owner);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let mut point = POINT::default();
+            let drag = GetPropW(viewport, ADVANCED_SCROLLBAR_DRAG_OFFSET_PROPERTY).0 as usize;
+            if drag != 0 && GetCursorPos(&mut point).is_ok() {
+                if let Some(position) =
+                    advanced_scrollbar_proxy_position(viewport, point, drag as i32 - 1)
+                {
+                    queue_advanced_scrollbar_position(
+                        viewport,
+                        SB_THUMBPOSITION.0 as u32,
+                        position,
+                    );
+                }
+            }
+            let _ = RemovePropW(viewport, ADVANCED_SCROLLBAR_DRAG_OFFSET_PROPERTY);
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let next = if GetCursorPos(&mut point).is_ok() {
+                advanced_scrollbar_pointer_interaction(viewport, point, false)
+            } else {
+                AdvancedScrollbarInteraction::Normal
+            };
+            let _ = set_advanced_scrollbar_interaction(viewport, next);
+            if matches!(next, AdvancedScrollbarInteraction::Hovered(_)) {
+                track_advanced_scrollbar_overlay_leave(hwnd);
+            }
+            if let Ok(owner) = GetParent(hwnd) {
+                paint_advanced_scrollbar(viewport, owner);
+            }
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            let _ = RemovePropW(viewport, ADVANCED_SCROLLBAR_DRAG_OFFSET_PROPERTY);
+            if set_advanced_scrollbar_interaction(viewport, AdvancedScrollbarInteraction::Normal) {
+                if let Ok(owner) = GetParent(hwnd) {
+                    paint_advanced_scrollbar(viewport, owner);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => SendMessageW(viewport, message, wparam, lparam),
+        WM_ADVANCED_SCROLLBAR_FRAME => {
+            publish_advanced_scrollbar_frame(viewport, hwnd);
+            let _ = RemovePropW(hwnd, ADVANCED_SCROLLBAR_FRAME_PENDING_PROPERTY);
+            if !GetPropW(viewport, ADVANCED_SCROLLBAR_PENDING_POSITION_PROPERTY)
+                .0
+                .is_null()
+            {
+                request_advanced_scrollbar_frame(viewport);
+            }
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            let mut paint = PAINTSTRUCT::default();
+            let dc = BeginPaint(hwnd, &mut paint);
+            if !scrollbar_compositor::is_active(hwnd) {
+                if let Ok(owner) = GetParent(hwnd) {
+                    paint_advanced_scrollbar_buffered_to_dc(viewport, owner, hwnd, dc);
+                }
+            }
+            let _ = EndPaint(hwnd, &paint);
+            LRESULT(0)
+        }
+        WM_NCDESTROY => {
+            scrollbar_compositor::remove(hwnd);
+            let _ = RemovePropW(hwnd, ADVANCED_SCROLLBAR_FRAME_PENDING_PROPERTY);
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(advanced_scrollbar_overlay_proc),
+                SCROLLBAR_OVERLAY_SUBCLASS_ID,
+            );
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
     }
 }
 
@@ -1037,11 +2630,100 @@ unsafe extern "system" fn advanced_viewport_proc(
 ) -> LRESULT {
     let owner = HWND(reference_data as *mut _);
     match message {
-        WM_COMMAND | WM_DRAWITEM | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC
-        | WM_MOUSEWHEEL => SendMessageW(owner, message, wparam, lparam),
+        WM_COMMAND | WM_DRAWITEM | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
+            SendMessageW(owner, message, wparam, lparam)
+        }
+        WM_MOUSEWHEEL => SendMessageW(owner, message, wparam, lparam),
         WM_VSCROLL => SendMessageW(owner, message, wparam, LPARAM(hwnd.0 as isize)),
+        WM_NCMOUSEMOVE_MESSAGE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let point = screen_point_from_lparam(lparam);
+            let previous = advanced_scrollbar_interaction(hwnd);
+            let next = if matches!(previous, AdvancedScrollbarInteraction::Pressed(_)) {
+                previous
+            } else {
+                advanced_scrollbar_pointer_interaction(hwnd, point, false)
+            };
+            if set_advanced_scrollbar_interaction(hwnd, next) {
+                if previous == AdvancedScrollbarInteraction::Normal
+                    && matches!(next, AdvancedScrollbarInteraction::Hovered(_))
+                {
+                    track_advanced_scrollbar_leave(hwnd);
+                }
+                paint_advanced_scrollbar(hwnd, owner);
+            }
+            result
+        }
+        WM_NCMOUSELEAVE_MESSAGE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            if !matches!(
+                advanced_scrollbar_interaction(hwnd),
+                AdvancedScrollbarInteraction::Pressed(_)
+            ) && set_advanced_scrollbar_interaction(hwnd, AdvancedScrollbarInteraction::Normal)
+            {
+                paint_advanced_scrollbar(hwnd, owner);
+            }
+            result
+        }
+        WM_NCLBUTTONDOWN => {
+            let point = screen_point_from_lparam(lparam);
+            let pressed = advanced_scrollbar_pointer_interaction(hwnd, point, true);
+            let did_press = matches!(pressed, AdvancedScrollbarInteraction::Pressed(_));
+            if did_press && set_advanced_scrollbar_interaction(hwnd, pressed) {
+                paint_advanced_scrollbar(hwnd, owner);
+            }
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let mut cursor = POINT::default();
+            let next = if GetCursorPos(&mut cursor).is_ok() {
+                advanced_scrollbar_pointer_interaction(hwnd, cursor, false)
+            } else {
+                AdvancedScrollbarInteraction::Normal
+            };
+            if set_advanced_scrollbar_interaction(hwnd, next) || did_press {
+                if matches!(next, AdvancedScrollbarInteraction::Hovered(_)) {
+                    track_advanced_scrollbar_leave(hwnd);
+                }
+                paint_advanced_scrollbar(hwnd, owner);
+            }
+            result
+        }
+        WM_NCLBUTTONUP => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let point = screen_point_from_lparam(lparam);
+            let next = advanced_scrollbar_pointer_interaction(hwnd, point, false);
+            if set_advanced_scrollbar_interaction(hwnd, next) {
+                if matches!(next, AdvancedScrollbarInteraction::Hovered(_)) {
+                    track_advanced_scrollbar_leave(hwnd);
+                }
+                paint_advanced_scrollbar(hwnd, owner);
+            }
+            result
+        }
+        WM_ENABLE => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            let next = if IsWindowEnabled(hwnd).as_bool() {
+                AdvancedScrollbarInteraction::Normal
+            } else {
+                AdvancedScrollbarInteraction::Disabled
+            };
+            if set_advanced_scrollbar_interaction(hwnd, next) {
+                paint_advanced_scrollbar(hwnd, owner);
+            }
+            result
+        }
+        WM_NCPAINT | WM_NCACTIVATE | WM_SIZE | WM_THEMECHANGED => {
+            let result = DefSubclassProc(hwnd, message, wparam, lparam);
+            paint_advanced_scrollbar(hwnd, owner);
+            result
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_NCDESTROY => {
+            let _ = RemovePropW(hwnd, ADVANCED_SCROLLBAR_STATE_PROPERTY);
+            let _ = RemovePropW(hwnd, ADVANCED_SCROLLBAR_DRAG_OFFSET_PROPERTY);
+            let _ = RemovePropW(hwnd, ADVANCED_SCROLLBAR_PROXY_POSITION_PROPERTY);
+            let _ = RemovePropW(hwnd, ADVANCED_SCROLLBAR_PENDING_POSITION_PROPERTY);
+            let _ = RemovePropW(hwnd, ADVANCED_SCROLLBAR_PENDING_CODE_PROPERTY);
+            let _ = RemovePropW(hwnd, ADVANCED_SCROLLBAR_OVERLAY_PROPERTY);
             let _ = RemoveWindowSubclass(hwnd, Some(advanced_viewport_proc), VIEWPORT_SUBCLASS_ID);
             DefSubclassProc(hwnd, message, wparam, lparam)
         }
@@ -1051,6 +2733,10 @@ unsafe extern "system" fn advanced_viewport_proc(
 
 unsafe fn label(parent: HWND, text: &str, id: u16) -> windows::core::Result<HWND> {
     child(parent, w!("STATIC"), text, 0, id)
+}
+
+unsafe fn owner_draw_label(parent: HWND, text: &str, id: u16) -> windows::core::Result<HWND> {
+    child(parent, w!("STATIC"), text, SS_OWNERDRAW_STYLE, id)
 }
 
 unsafe fn checkbox(parent: HWND, text: &str, id: u16) -> windows::core::Result<HWND> {
@@ -1063,13 +2749,42 @@ unsafe fn checkbox(parent: HWND, text: &str, id: u16) -> windows::core::Result<H
     )
 }
 
+unsafe fn radio_button(
+    parent: HWND,
+    text: &str,
+    id: u16,
+    starts_group: bool,
+) -> windows::core::Result<HWND> {
+    let group_style = if starts_group { WS_GROUP.0 as i32 } else { 0 };
+    child(
+        parent,
+        w!("BUTTON"),
+        text,
+        BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32 | group_style,
+        id,
+    )
+}
+
 unsafe fn edit(parent: HWND, text: &str, id: u16) -> windows::core::Result<HWND> {
+    edit_with_style(parent, text, id, 0)
+}
+
+unsafe fn password_edit(parent: HWND, text: &str, id: u16) -> windows::core::Result<HWND> {
+    edit_with_style(parent, text, id, ES_PASSWORD as u32)
+}
+
+unsafe fn edit_with_style(
+    parent: HWND,
+    text: &str,
+    id: u16,
+    extra_style: u32,
+) -> windows::core::Result<HWND> {
     let text = wide(text);
     let hwnd = CreateWindowExW(
         WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0 | 0x0000_0004),
         w!("EDIT"),
         PCWSTR(text.as_ptr()),
-        WINDOW_STYLE((WS_CHILD | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32),
+        WINDOW_STYLE((WS_CHILD | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32 | extra_style),
         0,
         0,
         0,
@@ -1093,6 +2808,35 @@ unsafe fn check_edit(
 ) -> windows::core::Result<CheckEdit> {
     Ok(CheckEdit {
         check: checkbox(parent, label, check_id)?,
+        edit: edit(parent, text, edit_id)?,
+        browse: browse
+            .map(|(id, target)| {
+                Ok::<BrowseControl, windows::core::Error>(BrowseControl {
+                    button: child(
+                        parent,
+                        w!("BUTTON"),
+                        &crate::tr!("浏览..."),
+                        BS_OWNERDRAW | WS_TABSTOP.0 as i32,
+                        id,
+                    )?,
+                    id,
+                    target,
+                })
+            })
+            .transpose()?,
+    })
+}
+
+unsafe fn radio_edit(
+    parent: HWND,
+    label: &str,
+    text: &str,
+    check_id: u16,
+    edit_id: u16,
+    browse: Option<(u16, AdvancedBrowseTarget)>,
+) -> windows::core::Result<CheckEdit> {
+    Ok(CheckEdit {
+        check: radio_button(parent, label, check_id, true)?,
         edit: edit(parent, text, edit_id)?,
         browse: browse
             .map(|(id, target)| {
@@ -1200,6 +2944,22 @@ unsafe fn layout_pair(pair: CheckEdit, x: i32, y: &mut i32, width: i32, dpi: u32
     *y += s(30);
 }
 
+unsafe fn layout_labeled_edit(label: HWND, edit: HWND, x: i32, y: &mut i32, width: i32, dpi: u32) {
+    let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
+    let field_height = InnoMetrics::for_dpi(dpi).field_height;
+    let _ = MoveWindow(label, x + s(20), *y, (width - s(20)).max(0), s(24), true);
+    *y += s(24);
+    let _ = MoveWindow(
+        edit,
+        x + s(20),
+        *y,
+        (width - s(20)).max(0),
+        field_height,
+        true,
+    );
+    *y += s(30);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,6 +2968,7 @@ mod tests {
     fn context_defaults_do_not_expose_version_specific_options() {
         let context = AdvancedPageContext::default();
         assert!(context.unattended_enabled);
+        assert!(context.builtin_administrator_available);
         assert!(!context.wifi_available);
         assert!(!context.show_windows_7);
         assert!(!context.show_xp);
@@ -1307,6 +3068,313 @@ mod tests {
     }
 
     #[test]
+    fn final_column_reserves_scrollbar_width_and_a_separate_field_gap() {
+        for (width, height, dpi) in [(1_017, 640, 96), (1_200, 900, 144), (1_640, 960, 192)] {
+            let geometry = AdvancedViewportGeometry::calculate(width, height, dpi).unwrap();
+            let grid = AdvancedGrid::calculate(geometry.content_width, dpi);
+            let final_column = grid.columns - 1;
+            let final_field_right = grid.x(0, final_column) + grid.column_width;
+            assert!(final_field_right <= geometry.content_width);
+            assert!(geometry.content_width < geometry.scrollbar_left);
+            assert_eq!(
+                geometry.scrollbar_left - geometry.content_width,
+                ((i64::from(SCROLLBAR_CONTENT_GAP) * i64::from(dpi) + 48) / 96) as i32
+            );
+            assert_eq!(geometry.corner_diameter, geometry.scrollbar_width);
+        }
+    }
+
+    #[test]
+    fn custom_scrollbar_thumb_uses_the_full_theme_frame_and_tracks_both_endpoints() {
+        let first = AdvancedScrollbarThumb::calculate(26, 625, 0, 999, 400, 0, 144).unwrap();
+        let last = AdvancedScrollbarThumb::calculate(26, 625, 0, 999, 400, 600, 144).unwrap();
+        assert_eq!(first.right - first.left, 26);
+        assert_eq!(first.top, 8);
+        assert_eq!(last.bottom, 617);
+        assert_eq!(first.bottom - first.top, last.bottom - last.top);
+        assert!(first.bottom < last.top);
+        assert_eq!(
+            AdvancedScrollbarThumb::calculate(26, 625, 0, 399, 400, 0, 144),
+            None
+        );
+    }
+
+    #[test]
+    fn scrollbar_pointer_proxy_maps_drag_to_native_range_endpoints() {
+        let range = AdvancedScrollbarProxyRange {
+            track_top: 10,
+            track_bottom: 110,
+            thumb_height: 20,
+            minimum: 100,
+            maximum: 1_099,
+            page: 400,
+        };
+        let position = |pointer_y| advanced_scrollbar_position_from_pointer(range, pointer_y, 5);
+        assert_eq!(position(-500), 100);
+        assert_eq!(position(15), 100);
+        assert_eq!(position(55), 400);
+        assert_eq!(position(95), 700);
+        assert_eq!(position(500), 700);
+        assert_eq!(
+            advanced_scrollbar_position_from_pointer(
+                AdvancedScrollbarProxyRange {
+                    track_top: 10,
+                    track_bottom: 30,
+                    thumb_height: 20,
+                    minimum: 42,
+                    maximum: 99,
+                    page: 10,
+                },
+                20,
+                5,
+            ),
+            42
+        );
+    }
+
+    #[test]
+    fn extracted_scrollbar_theme_maps_five_dpi_buckets_and_preserves_round_caps() {
+        assert_eq!(embedded_scrollbar_dpi_index(96), 0);
+        assert_eq!(embedded_scrollbar_dpi_index(120), 1);
+        assert_eq!(embedded_scrollbar_dpi_index(144), 2);
+        assert_eq!(embedded_scrollbar_dpi_index(192), 3);
+        assert_eq!(embedded_scrollbar_dpi_index(240), 4);
+
+        let glyph = embedded_scrollbar_thumb_glyph(true, 144, AdvancedScrollbarState::Normal);
+        assert_eq!((glyph.width, glyph.height), (26, 16));
+        let stretched = stretch_scrollbar_glyph(glyph, 26, 96);
+        assert_eq!(stretched.len(), 26 * 96 * 4);
+        // Both end caps come straight from different source rows instead of repeating the centre.
+        assert_ne!(&stretched[..26 * 4], &stretched[7 * 26 * 4..8 * 26 * 4]);
+        assert_ne!(
+            &stretched[95 * 26 * 4..96 * 26 * 4],
+            &stretched[88 * 26 * 4..89 * 26 * 4]
+        );
+    }
+
+    #[test]
+    fn extracted_scrollbar_transparency_removes_source_frame_backgrounds() {
+        fn opaque_bounds(glyph: &EmbeddedScrollbarGlyph) -> Option<(i32, i32, i32, i32)> {
+            let mut left = glyph.width;
+            let mut top = glyph.height;
+            let mut right = 0;
+            let mut bottom = 0;
+            let mut found = false;
+            for y in 0..glyph.height {
+                for x in 0..glyph.width {
+                    let alpha = glyph.bgra[((y * glyph.width + x) * 4 + 3) as usize];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    found = true;
+                    left = left.min(x);
+                    top = top.min(y);
+                    right = right.max(x + 1);
+                    bottom = bottom.max(y + 1);
+                }
+            }
+            found.then_some((left, top, right, bottom))
+        }
+
+        for dark in [false, true] {
+            let normal = embedded_scrollbar_thumb_glyph(dark, 144, AdvancedScrollbarState::Normal);
+            let hot = embedded_scrollbar_thumb_glyph(dark, 144, AdvancedScrollbarState::Hot);
+            let arrow =
+                embedded_scrollbar_arrow_glyph(dark, 144, false, AdvancedScrollbarState::Normal);
+            let track = embedded_scrollbar_track_glyph(dark, 144, AdvancedScrollbarState::Normal);
+            let track_hot = embedded_scrollbar_track_glyph(dark, 144, AdvancedScrollbarState::Hot);
+
+            assert_eq!(
+                normal.bgra[3], 0,
+                "thumb source background must be transparent"
+            );
+            assert_eq!(
+                arrow.bgra[3], 0,
+                "arrow source background must be transparent"
+            );
+            assert!(
+                track.bgra.chunks_exact(4).all(|pixel| pixel[3] == 0),
+                "the hidden normal track must not leave its source host surface behind"
+            );
+            assert_eq!(
+                track_hot.bgra[3], 0,
+                "expanded track source host surface must be transparent"
+            );
+            assert!(
+                track_hot.bgra.chunks_exact(4).any(|pixel| pixel[3] != 0),
+                "expanded track must retain its visible theme pixels"
+            );
+
+            let transparent_pixels = normal
+                .bgra
+                .chunks_exact(4)
+                .filter(|pixel| pixel[3] == 0)
+                .count();
+            assert!(
+                transparent_pixels * 2 > (normal.width * normal.height) as usize,
+                "the thin normal thumb must not retain an opaque frame-sized rectangle"
+            );
+
+            let normal_bounds = opaque_bounds(normal).expect("normal thumb has visible pixels");
+            let hot_bounds = opaque_bounds(hot).expect("hot thumb has visible pixels");
+            assert!(
+                hot_bounds.2 - hot_bounds.0 > normal_bounds.2 - normal_bounds.0,
+                "hovered thumb must be wider than the resting indicator"
+            );
+        }
+    }
+
+    #[test]
+    fn composition_frame_blends_theme_pixels_onto_one_opaque_background() {
+        let glyph = embedded_scrollbar_thumb_glyph(true, 144, AdvancedScrollbarState::Hot);
+        let mut frame = vec![0_u8; (glyph.width * glyph.height * 4) as usize];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[32, 32, 32, 255]);
+        }
+        blend_advanced_scrollbar_glyph(
+            &mut frame,
+            glyph.width,
+            glyph.height,
+            RECT {
+                left: 0,
+                top: 0,
+                right: glyph.width,
+                bottom: glyph.height,
+            },
+            glyph,
+        );
+
+        assert!(frame.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        let transparent = glyph
+            .bgra
+            .chunks_exact(4)
+            .position(|pixel| pixel[3] == 0)
+            .expect("theme source includes transparent host pixels");
+        assert_eq!(
+            &frame[transparent * 4..transparent * 4 + 4],
+            &[32, 32, 32, 255]
+        );
+        let visible = glyph
+            .bgra
+            .chunks_exact(4)
+            .position(|pixel| pixel[3] != 0)
+            .expect("theme source includes visible thumb pixels");
+        assert_ne!(&frame[visible * 4..visible * 4 + 3], &[32, 32, 32]);
+    }
+
+    #[test]
+    fn extracted_scrollbar_theme_contains_every_component_and_state() {
+        for dark in [false, true] {
+            for state in [
+                AdvancedScrollbarState::Normal,
+                AdvancedScrollbarState::Hot,
+                AdvancedScrollbarState::Pressed,
+                AdvancedScrollbarState::Disabled,
+                AdvancedScrollbarState::Hover,
+            ] {
+                let thumb = embedded_scrollbar_thumb_glyph(dark, 144, state);
+                let track = embedded_scrollbar_track_glyph(dark, 144, state);
+                let top = embedded_scrollbar_arrow_glyph(dark, 144, false, state);
+                let bottom = embedded_scrollbar_arrow_glyph(dark, 144, true, state);
+                assert_eq!((thumb.width, thumb.height), (26, 16));
+                assert_eq!((track.width, track.height), (26, 1));
+                assert_eq!((top.width, top.height), (26, 26));
+                assert_eq!((bottom.width, bottom.height), (26, 26));
+                for glyph in [thumb, track, top, bottom] {
+                    assert_eq!(glyph.bgra.len(), (glyph.width * glyph.height * 4) as usize);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scrollbar_interaction_expands_siblings_and_marks_only_the_active_part_hot() {
+        let hovered = AdvancedScrollbarInteraction::Hovered(AdvancedScrollbarPart::Thumb);
+        assert_eq!(
+            hovered.state_for(AdvancedScrollbarPart::Thumb),
+            AdvancedScrollbarState::Hot
+        );
+        for part in [
+            AdvancedScrollbarPart::TopArrow,
+            AdvancedScrollbarPart::UpperTrack,
+            AdvancedScrollbarPart::LowerTrack,
+            AdvancedScrollbarPart::BottomArrow,
+        ] {
+            assert_eq!(hovered.state_for(part), AdvancedScrollbarState::Hover);
+        }
+
+        let pressed = AdvancedScrollbarInteraction::Pressed(AdvancedScrollbarPart::TopArrow);
+        assert_eq!(
+            pressed.state_for(AdvancedScrollbarPart::TopArrow),
+            AdvancedScrollbarState::Pressed
+        );
+        assert_eq!(
+            pressed.state_for(AdvancedScrollbarPart::Thumb),
+            AdvancedScrollbarState::Hover
+        );
+        for part in ADVANCED_SCROLLBAR_PARTS {
+            assert_eq!(
+                AdvancedScrollbarInteraction::Disabled.state_for(part),
+                AdvancedScrollbarState::Disabled
+            );
+            assert_eq!(
+                AdvancedScrollbarInteraction::Normal.state_for(part),
+                AdvancedScrollbarState::Normal
+            );
+        }
+        assert!(!AdvancedScrollbarInteraction::Normal.shows_expanded_parts());
+        assert!(!AdvancedScrollbarInteraction::Disabled.shows_expanded_parts());
+        assert!(hovered.shows_expanded_parts());
+        assert!(pressed.shows_expanded_parts());
+    }
+
+    #[test]
+    fn system_scrollbar_geometry_partitions_the_exact_reported_rectangle() {
+        let info = SCROLLBARINFO {
+            cbSize: size_of::<SCROLLBARINFO>() as u32,
+            rcScrollBar: RECT {
+                left: 100,
+                top: 200,
+                right: 126,
+                bottom: 825,
+            },
+            dxyLineButton: 26,
+            xyThumbTop: 120,
+            xyThumbBottom: 320,
+            ..Default::default()
+        };
+        let geometry = AdvancedScrollbarGeometry::from_scrollbar_info(&info).unwrap();
+        assert_eq!(
+            (geometry.top_arrow.top, geometry.top_arrow.bottom),
+            (200, 226)
+        );
+        assert_eq!(
+            (geometry.upper_track.top, geometry.upper_track.bottom),
+            (226, 320)
+        );
+        assert_eq!((geometry.thumb.top, geometry.thumb.bottom), (320, 520));
+        assert_eq!(
+            (geometry.lower_track.top, geometry.lower_track.bottom),
+            (520, 799)
+        );
+        assert_eq!(
+            (geometry.bottom_arrow.top, geometry.bottom_arrow.bottom),
+            (799, 825)
+        );
+        assert_eq!(
+            geometry.hit_test(POINT { x: 112, y: 400 }),
+            Some(AdvancedScrollbarPart::Thumb)
+        );
+        assert_eq!(geometry.hit_test(POINT { x: 99, y: 400 }), None);
+    }
+
+    #[test]
+    fn scrollbar_theme_mode_comes_from_the_actual_page_background() {
+        assert!(colorref_is_dark(0x0020_2020));
+        assert!(!colorref_is_dark(0x00f5_f5f5));
+    }
+
+    #[test]
     fn shortest_column_balances_sections_without_reordering_inside_them() {
         assert_eq!(shortest_column(&[280, 130]), 1);
         assert_eq!(shortest_column(&[280, 350]), 0);
@@ -1371,5 +3439,24 @@ mod tests {
         };
         assert_eq!(model.maximum(), 0);
         assert_eq!(model.clamped_offset(100), 0);
+    }
+
+    #[test]
+    fn smooth_scroll_step_is_monotonic_and_reaches_both_targets() {
+        for target in [480_i32, -480_i32] {
+            let mut current = 0;
+            let direction = target.signum();
+            for _ in 0..64 {
+                let next = smooth_scroll_step(current, target);
+                assert_eq!((next - current).signum(), direction);
+                assert!((target - next).unsigned_abs() < (target - current).unsigned_abs());
+                current = next;
+                if current == target {
+                    break;
+                }
+            }
+            assert_eq!(current, target);
+        }
+        assert_eq!(smooth_scroll_step(240, 240), 240);
     }
 }

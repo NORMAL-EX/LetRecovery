@@ -76,8 +76,9 @@ impl Palette {
         text_disabled: rgb(120, 120, 120),
         border: rgb(67, 67, 67),
         separator: rgb(81, 81, 81),
-        accent_fill: rgb(49, 72, 83),
-        accent_border: rgb(66, 149, 192),
+        // Match the normal endpoint's audited Windows 11 primary-button blue.
+        accent_fill: rgb(76, 194, 255),
+        accent_border: rgb(76, 194, 255),
         progress: rgb(113, 199, 132),
         error: rgb(232, 87, 74),
         warning: rgb(247, 153, 52),
@@ -197,5 +198,13 @@ mod tests {
         assert_ne!(Palette::LIGHT.window, Palette::DARK.window);
         assert_ne!(Palette::LIGHT.text, Palette::DARK.text);
         assert_eq!(Palette::LIGHT.progress, Palette::DARK.progress);
+    }
+
+    #[test]
+    fn theme_accents_match_normal_endpoint_primary_buttons() {
+        assert_eq!(Palette::LIGHT.accent_fill, rgb(0, 95, 184));
+        assert_eq!(Palette::LIGHT.accent_border, rgb(0, 96, 184));
+        assert_eq!(Palette::DARK.accent_fill, rgb(76, 194, 255));
+        assert_eq!(Palette::DARK.accent_border, rgb(76, 194, 255));
     }
 }

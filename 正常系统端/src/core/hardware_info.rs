@@ -1226,6 +1226,15 @@ impl HardwareInfo {
         lines.join("\n")
     }
 
+    /// Returns a support-oriented physical/virtual machine classification.
+    ///
+    /// Manufacturer/model strings are the most widely available signal on the
+    /// supported desktop systems. Unknown fingerprints are reported as
+    /// inconclusive instead of being asserted to be physical hardware.
+    pub fn machine_environment_summary(&self) -> String {
+        machine_environment_summary(&self.computer_manufacturer, &self.computer_model)
+    }
+
     fn format_disk_info(disk: &DiskInfo) -> String {
         let size_gb = disk.size as f64 / (1024.0 * 1024.0 * 1024.0);
         let ssd_str = if disk.is_ssd { "固态" } else { "机械" };
@@ -1695,6 +1704,48 @@ impl HardwareInfo {
 
             Some(battery)
         }
+    }
+}
+
+fn machine_environment_summary(manufacturer: &str, model: &str) -> String {
+    let fingerprint = format!("{manufacturer} {model}").to_ascii_lowercase();
+    let provider = if fingerprint.contains("vmware") {
+        Some("VMware")
+    } else if fingerprint.contains("virtualbox") || fingerprint.contains("innotek") {
+        Some("VirtualBox")
+    } else if fingerprint.contains("qemu") || fingerprint.contains("kvm") {
+        Some("QEMU/KVM")
+    } else if fingerprint.contains("parallels") {
+        Some("Parallels")
+    } else if fingerprint.contains("xen") {
+        Some("Xen")
+    } else if fingerprint.contains("microsoft corporation")
+        && fingerprint.contains("virtual machine")
+    {
+        Some("Hyper-V")
+    } else {
+        None
+    };
+
+    match provider {
+        Some(provider) => format!(
+            "虚拟机 ({provider}; manufacturer={}; model={})",
+            diagnostic_value(manufacturer),
+            diagnostic_value(model)
+        ),
+        None => format!(
+            "未检测到已知虚拟机特征（可能为实体机；manufacturer={}; model={}）",
+            diagnostic_value(manufacturer),
+            diagnostic_value(model)
+        ),
+    }
+}
+
+fn diagnostic_value(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "未知"
+    } else {
+        value.trim()
     }
 }
 
@@ -2724,5 +2775,30 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} Bytes", bytes)
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::machine_environment_summary;
+
+    #[test]
+    fn identifies_common_virtual_machine_vendors() {
+        assert!(
+            machine_environment_summary("VMware, Inc.", "VMware Virtual Platform")
+                .starts_with("虚拟机 (VMware;")
+        );
+        assert!(
+            machine_environment_summary("Microsoft Corporation", "Virtual Machine")
+                .starts_with("虚拟机 (Hyper-V;")
+        );
+        assert!(machine_environment_summary("innotek GmbH", "VirtualBox")
+            .starts_with("虚拟机 (VirtualBox;"));
+    }
+
+    #[test]
+    fn unknown_fingerprint_is_not_asserted_to_be_physical_hardware() {
+        let summary = machine_environment_summary("Example Vendor", "Example Model");
+        assert!(summary.starts_with("未检测到已知虚拟机特征（可能为实体机；"));
     }
 }

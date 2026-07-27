@@ -10,8 +10,8 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
     GetMonitorInfoW, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, RedrawWindow,
     SelectObject, SetBkColor, SetBkMode, SetTextColor, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PEN_STYLE,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
+    DT_VCENTER, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OPAQUE, PAINTSTRUCT,
+    PEN_STYLE, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -30,14 +30,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled}
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetClientRect, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, IsWindowVisible, KillTimer,
-    LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE,
-    CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE,
-    EN_KILLFOCUS, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL,
-    IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG, SM_CXICON,
-    SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED,
+    GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, IsWindowVisible,
+    KillTimer, LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW,
+    CBN_SELCHANGE, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    EN_CHANGE, EN_KILLFOCUS, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG,
+    ICON_SMALL, IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG,
+    SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
     WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE,
@@ -119,7 +119,7 @@ use crate::core::native_expand_c_executor::{
 };
 use crate::core::native_install_backend::ProductionInstallBackend;
 use crate::core::native_install_controller::{
-    InstallTarget, NativeInstallState, SelectedImageMetadata,
+    InstallMode, InstallTarget, NativeInstallState, SelectedImageMetadata, StartInstallIntent,
 };
 use crate::core::native_install_executor::{
     BitLockerRequirement, InstallExecutionContext, InstallExecutionEvent, NativeInstallExecutor,
@@ -167,9 +167,11 @@ const CATALOGUE_TIMER_ID: usize = 5;
 const HARDWARE_COPY_TIMER_ID: usize = 6;
 const INSTALL_VOLUME_LAYOUT_TIMER_ID: usize = 7;
 const PARTITION_REFRESH_TIMER_ID: usize = 8;
+const ADVANCED_SCROLL_TIMER_ID: usize = 9;
 const INSTALL_VOLUME_LAYOUT_TICK_MS: u32 = 40;
 const INSTALL_VOLUME_LAYOUT_FRAMES: u8 = 3;
 const PARTITION_REFRESH_DEBOUNCE_MS: u32 = 350;
+const ADVANCED_SCROLL_TICK_MS: u32 = 16;
 
 const DBT_DEVNODES_CHANGED: usize = 0x0007;
 const DBT_CONFIGCHANGED: usize = 0x0018;
@@ -508,8 +510,8 @@ enum ToolWorkerMessage {
 
 #[derive(Clone)]
 enum PendingBitLockerIntent {
-    Install(crate::core::native_install_controller::StartInstallIntent),
-    Backup(BackupLaunchIntent),
+    Install(Box<crate::core::native_install_controller::StartInstallIntent>),
+    Backup(Box<BackupLaunchIntent>),
 }
 
 impl PendingBitLockerIntent {
@@ -526,7 +528,7 @@ impl PendingBitLockerIntent {
                 plan_install_locked_volumes(&intent.target_partition, &volumes)
             }
             Self::Backup(intent) => {
-                let source = match intent {
+                let source = match &**intent {
                     BackupLaunchIntent::Direct(intent) => &intent.config.source_partition,
                     BackupLaunchIntent::ViaPe(intent) => &intent.config.source_partition,
                 };
@@ -591,6 +593,16 @@ fn minimum_window_size(dpi: i32, work_width: i32, work_height: i32) -> (i32, i32
 
 fn localized_bitlocker_status(status: &crate::core::bitlocker::VolumeStatus) -> String {
     crate::tr!(status.as_str())
+}
+
+fn image_architecture_label(architecture: Option<u16>) -> &'static str {
+    match architecture {
+        Some(0) => "x86",
+        Some(9) => "x64",
+        Some(12) => "ARM64",
+        Some(_) => "不支持的架构",
+        None => "未知",
+    }
 }
 
 fn download_failure_message(error: &DownloadWorkerError) -> String {
@@ -660,6 +672,31 @@ fn centered_command_button_x(content_left: i32, content_width: i32, button_width
     content_left + (content_width - button_width).max(0) / 2
 }
 
+fn command_status_right_edge(
+    advanced_visible: bool,
+    advanced_x: i32,
+    packed_left_edge: i32,
+) -> i32 {
+    if advanced_visible {
+        advanced_x
+    } else {
+        packed_left_edge
+    }
+}
+
+fn shared_install_mode_label_width(
+    boot_label_text_width: i32,
+    pca_label_text_width: i32,
+    padding: i32,
+    minimum: i32,
+    maximum: i32,
+) -> i32 {
+    boot_label_text_width
+        .max(pca_label_text_width)
+        .saturating_add(padding.max(0))
+        .clamp(minimum.max(0), maximum.max(minimum.max(0)))
+}
+
 fn preserved_pe_selection(
     preferred_filename: Option<&str>,
     available: &[OnlinePE],
@@ -716,18 +753,18 @@ impl InstallVolumeLayoutTransition {
 mod layout_tests {
     use super::{
         bitlocker_gate_completion, catalogue_status_message, centered_command_button_x,
-        command_bar_layout, command_bar_visibility, command_button_role,
+        command_bar_layout, command_bar_visibility, command_button_role, command_status_right_edge,
         confirmed_tool_backend_request, device_change_requests_partition_refresh,
         download_failure_message, effective_easy_mode_enabled, initial_mutating_tool_state,
         install_partition_heading_y, list_view_selection_state_changed, may_publish_install_chrome,
         minimum_window_size, page_switch_requires_full_layout, pca_pending_status,
         pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
         pca_target_uses_uefi, preferred_window_size, preserved_pe_selection,
-        primary_state_refresh_for_page, tool_backend_result_succeeded,
-        unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
-        Page, PcaPendingStatus, PcaTargetContext, PcaTargetKey, PcaTargetMessage,
-        PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
-        DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
+        primary_state_refresh_for_page, shared_install_mode_label_width,
+        tool_backend_result_succeeded, unattended_checked_for_source_preference,
+        BitLockerGateCompletion, InstallControlSnapshot, Page, PcaPendingStatus, PcaTargetContext,
+        PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
+        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_controller::CatalogueState;
@@ -832,6 +869,13 @@ mod layout_tests {
     }
 
     #[test]
+    fn boot_mode_and_signature_labels_share_the_widest_measured_column() {
+        assert_eq!(shared_install_mode_label_width(56, 56, 2, 60, 132), 60);
+        assert_eq!(shared_install_mode_label_width(72, 94, 2, 60, 132), 96);
+        assert_eq!(shared_install_mode_label_width(72, 180, 2, 60, 132), 132);
+    }
+
+    #[test]
     fn command_visibility_matches_every_install_shell_state() {
         assert_eq!(
             command_bar_visibility(Page::Install, false, false, false),
@@ -915,6 +959,21 @@ mod layout_tests {
 
         let normal = command_bar_layout(1_232, 8, 136, [true, true, true]);
         assert_eq!(normal.x, [Some(808), Some(952), Some(1_096)]);
+    }
+
+    #[test]
+    fn advanced_status_slot_stops_before_the_centered_save_button() {
+        let advanced_x = centered_command_button_x(272, 960, 136);
+        let packed = command_bar_layout(1_232, 8, 136, [true, false, false]);
+        assert_eq!(packed.left_edge, 1_096);
+        assert_eq!(
+            command_status_right_edge(true, advanced_x, packed.left_edge),
+            advanced_x
+        );
+        assert_eq!(
+            command_status_right_edge(false, advanced_x, packed.left_edge),
+            packed.left_edge
+        );
     }
 
     #[test]
@@ -3235,18 +3294,24 @@ impl NativeWindow {
             self.scale(24),
             true,
         );
-        let boot_label_width = self.scale(if compact_chinese { 60 } else { 76 });
+        let install_mode_label_width = shared_install_mode_label_width(
+            measure_text(hwnd, self.font, &crate::tr!("引导模式:"), None).width,
+            measure_text(hwnd, self.font, &crate::tr!("启动签名:"), None).width,
+            self.scale(2),
+            self.scale(60),
+            self.scale(132),
+        );
         let boot_mode_closed_height = theme::combo_closed_height(h.boot_mode, metrics.field_height);
         let second_row_height = boot_mode_closed_height.max(self.scale(24));
         let _ = MoveWindow(
             h.boot_label,
             content_left,
             centered_control_y_ceil(second_y, second_row_height, metrics.label_height),
-            boot_label_width,
+            install_mode_label_width,
             metrics.label_height,
             true,
         );
-        let boot_mode_x = content_left + boot_label_width + self.scale(4);
+        let boot_mode_x = content_left + install_mode_label_width + self.scale(4);
         let boot_mode_width = self.scale(124);
         let _ = MoveWindow(
             h.boot_mode,
@@ -3423,18 +3488,17 @@ impl NativeWindow {
         } else {
             content_left
         };
-        let pca_label_width = self.scale(if compact_chinese { 72 } else { 98 });
         let pca_closed_height = theme::combo_closed_height(h.pca_mode, metrics.field_height);
         let pca_row_height = pca_closed_height.max(metrics.label_height);
         let _ = MoveWindow(
             h.pca_label,
             pca_x,
             centered_control_y_ceil(pca_row_y, pca_row_height, metrics.label_height),
-            pca_label_width.min((content_right - pca_x).max(0)),
+            install_mode_label_width.min((content_right - pca_x).max(0)),
             metrics.label_height,
             true,
         );
-        let pca_combo_x = pca_x + pca_label_width + self.scale(4);
+        let pca_combo_x = pca_x + install_mode_label_width + self.scale(4);
         let _ = MoveWindow(
             h.pca_mode,
             pca_combo_x,
@@ -3470,6 +3534,8 @@ impl NativeWindow {
         };
         let refresh_x = command_layout.x[1].unwrap_or(content_right);
         let primary_x = command_layout.x[2].unwrap_or(content_right);
+        let status_right_edge =
+            command_status_right_edge(self.advanced_visible, advanced_x, command_layout.left_edge);
         let _ = MoveWindow(
             h.advanced,
             advanced_x,
@@ -3498,7 +3564,7 @@ impl NativeWindow {
             h.status,
             self.scale(16),
             footer_y + self.scale(18),
-            (command_layout.left_edge - self.scale(24)).max(0),
+            (status_right_edge - self.scale(24)).max(0),
             self.scale(20),
             true,
         );
@@ -3591,6 +3657,8 @@ impl NativeWindow {
         } else {
             command_layout.x[0].unwrap_or(content_right)
         };
+        let status_right_edge =
+            command_status_right_edge(self.advanced_visible, advanced_x, command_layout.left_edge);
         for (control, x) in [
             (h.advanced, advanced_x),
             (h.refresh, command_layout.x[1].unwrap_or(content_right)),
@@ -3609,7 +3677,7 @@ impl NativeWindow {
             h.status,
             self.scale(16),
             footer_y + self.scale(18),
-            (command_layout.left_edge - self.scale(24)).max(0),
+            (status_right_edge - self.scale(24)).max(0),
             self.scale(20),
             false,
         );
@@ -4030,7 +4098,13 @@ impl NativeWindow {
         let Some(h) = &self.handles else { return };
         if self.advanced_visible {
             if let Some(advanced) = &self.advanced_page {
-                advanced.read_into(&mut self.app_config.install_prefs.advanced_options);
+                let data = &mut self.app_config.install_prefs.advanced_options;
+                advanced.read_into(data);
+                data.apply_runtime_defaults();
+                // Re-publish the normalized session values before hiding the page. This makes an
+                // automatically restored username/Administrator name visible on the next open
+                // without persisting the current login name to config.json.
+                advanced.apply(data);
             }
             if let Err(error) = self.app_config.save() {
                 log::warn!("保存高级选项失败: {error}");
@@ -4397,9 +4471,20 @@ impl NativeWindow {
         let target_uefi = self.selected_target_uses_uefi();
         let unattended_enabled =
             SendMessageW(handles.unattend, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
+        let source_is_gho = self.effective_image_path.as_deref().is_some_and(|path| {
+            let extension = std::path::Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            extension.eq_ignore_ascii_case("gho") || extension.eq_ignore_ascii_case("ghs")
+        });
         if let Some(page) = &mut self.advanced_page {
             page.set_context(AdvancedPageContext {
                 unattended_enabled,
+                builtin_administrator_available: unattended_enabled
+                    && self.custom_unattend_path.trim().is_empty()
+                    && !show_xp
+                    && !source_is_gho,
                 wifi_available: self
                     .app_config
                     .install_prefs
@@ -6972,7 +7057,7 @@ impl NativeWindow {
         intent: PendingBitLockerIntent,
     ) {
         match intent {
-            PendingBitLockerIntent::Install(intent) => self.start_install_execution(hwnd, intent),
+            PendingBitLockerIntent::Install(intent) => self.start_install_execution(hwnd, *intent),
             PendingBitLockerIntent::Backup(_) => self.prepare_backup_from_page(hwnd),
         }
     }
@@ -7036,14 +7121,14 @@ impl NativeWindow {
             "原生备份意图已生成: route={route}, source={}",
             config.source_partition
         );
-        let pending = PendingBitLockerIntent::Backup(plan.intent);
+        let pending = PendingBitLockerIntent::Backup(Box::new(plan.intent));
         match pending.locked_volumes(&self.partitions) {
             Ok(locked) if !locked.is_empty() => self.begin_bitlocker_gate(hwnd, pending, locked),
             Ok(_) => {
                 let PendingBitLockerIntent::Backup(intent) = pending else {
                     unreachable!()
                 };
-                self.start_backup_execution(hwnd, intent);
+                self.start_backup_execution(hwnd, *intent);
             }
             Err(error) => set_text(warning, &crate::tr!("无法检查 BitLocker 锁定卷：{}", error)),
         }
@@ -8312,6 +8397,143 @@ impl NativeWindow {
         .start_intent()
     }
 
+    fn log_install_diagnostic_environment(&self, intent: &StartInstallIntent) {
+        use std::collections::BTreeSet;
+
+        log::info!("========== 安装诊断环境 ==========");
+        let image_path = std::path::Path::new(&intent.image_path);
+        let image_name = image_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<未知文件名>");
+        let image_format = image_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_else(|| "未知".to_owned());
+        let image_size = std::fs::metadata(image_path)
+            .map(|metadata| metadata.len())
+            .ok()
+            .or_else(|| {
+                self.image_volumes
+                    .iter()
+                    .find(|volume| volume.index == intent.volume_index)
+                    .map(|volume| volume.size_bytes)
+            });
+        log::info!(
+            "[诊断环境] 镜像: file={} | format={} | size_bytes={}",
+            image_name,
+            image_format,
+            image_size
+                .map(|size| size.to_string())
+                .unwrap_or_else(|| "未知".to_owned())
+        );
+
+        if let Some(volume) = self
+            .image_volumes
+            .iter()
+            .find(|volume| volume.index == intent.volume_index)
+        {
+            log::info!(
+                "[诊断环境] 目标系统: name={} | index={} | version={}.{} | build={} | arch={}",
+                volume.name,
+                volume.index,
+                volume
+                    .major_version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "未知".to_owned()),
+                volume
+                    .minor_version
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "未知".to_owned()),
+                volume
+                    .build
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "未知".to_owned()),
+                image_architecture_label(volume.architecture)
+            );
+        } else if intent.options.is_xp_i386 {
+            log::info!(
+                "[诊断环境] 目标系统: Windows XP/2003 文本模式源 | index={}",
+                intent.volume_index
+            );
+        } else if intent.is_gho {
+            log::info!(
+                "[诊断环境] 目标系统: GHO/GHS 不透明镜像，无法可靠自动识别版本 | index={}",
+                intent.volume_index
+            );
+        } else {
+            log::warn!(
+                "[诊断环境] 目标系统: 镜像卷元数据不可用 | index={}",
+                intent.volume_index
+            );
+        }
+
+        let target = self.partitions.iter().find(|partition| {
+            partition.disk_number == Some(intent.target_disk_number)
+                && partition.partition_number == Some(intent.target_partition_number)
+        });
+        log::info!(
+            "[诊断环境] 安装目标: volume={} | disk={} | partition={} | style={} | BitLocker={}",
+            intent.target_partition,
+            intent.target_disk_number,
+            intent.target_partition_number,
+            target
+                .map(|partition| partition.partition_style.to_string())
+                .unwrap_or_else(|| "未知".to_owned()),
+            target
+                .map(|partition| partition.bitlocker_status.as_str())
+                .unwrap_or("未知")
+        );
+
+        let disk_numbers = self
+            .partitions
+            .iter()
+            .filter_map(|partition| partition.disk_number)
+            .collect::<BTreeSet<_>>();
+        let encrypted_data_volumes = self
+            .partitions
+            .iter()
+            .filter(|partition| {
+                partition.disk_number != Some(intent.target_disk_number)
+                    || partition.partition_number != Some(intent.target_partition_number)
+            })
+            .filter(|partition| partition.bitlocker_status.is_encrypted())
+            .map(|partition| partition.letter.as_str())
+            .collect::<Vec<_>>();
+        log::info!(
+            "[诊断环境] 磁盘结构: mapped_disks={} | visible_volumes={} | encrypted_non_target_volumes={}",
+            disk_numbers.len(),
+            self.partitions.len(),
+            if encrypted_data_volumes.is_empty() {
+                "无".to_owned()
+            } else {
+                encrypted_data_volumes.join(",")
+            }
+        );
+
+        match intent.mode {
+            InstallMode::Direct => {
+                log::info!("[诊断环境] 使用 PE: 不使用（当前环境直接安装）");
+            }
+            InstallMode::ViaPe => {
+                if let Some(pe) = intent
+                    .selected_pe
+                    .and_then(|index| self.pe_catalogue.get(index))
+                {
+                    log::info!(
+                        "[诊断环境] 使用 PE: {} | file={}",
+                        pe.display_name,
+                        pe.filename
+                    );
+                } else {
+                    log::warn!("[诊断环境] 使用 PE: 已选择 ViaPE，但目录项不可用");
+                }
+            }
+        }
+        log::info!("==================================");
+    }
+
     unsafe fn enter_progress(&mut self, hwnd: HWND, initial: LongTaskProgress, timer_id: usize) {
         let Some(handles) = &self.handles else { return };
         let redraw = redraw::suspend(hwnd);
@@ -8396,7 +8618,7 @@ impl NativeWindow {
                 overall: ProgressValue::new(0, 100),
                 step: ProgressValue::new(0, 100),
                 status: ProgressStatus::Running,
-                status_text: crate::tr!("准备中"),
+                status_text: String::new(),
                 cancellable: true,
             },
             BACKUP_TIMER_ID,
@@ -8460,7 +8682,8 @@ impl NativeWindow {
             }
             return;
         }
-        let pending = PendingBitLockerIntent::Install(intent.clone());
+        self.log_install_diagnostic_environment(&intent);
+        let pending = PendingBitLockerIntent::Install(Box::new(intent.clone()));
         match pending.locked_volumes(&self.partitions) {
             Ok(locked) if !locked.is_empty() => {
                 self.begin_bitlocker_gate(hwnd, pending, locked);
@@ -8660,7 +8883,7 @@ impl NativeWindow {
                     }) => {
                         state.overall = ProgressValue::new(0, total_phases as u64);
                         state.current_step = crate::tr!("安装任务已启动");
-                        state.status_text = crate::tr!("正在安装");
+                        state.status_text.clear();
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::PhaseStarted {
                         phase,
@@ -9942,9 +10165,17 @@ pub(super) unsafe fn load_application_icons(
     Ok((HICON(large.0), HICON(small.0)))
 }
 
-pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
+pub(crate) fn enable_process_dpi_awareness() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
+    unsafe {
+        // Keep this idempotent call for embedders, while `main` establishes the same context before
+        // any startup validation can display an early MessageBox.
+        enable_process_dpi_awareness();
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
             // The v6 manifest selects visual styles; initializing standard classes before any
@@ -10597,7 +10828,7 @@ unsafe extern "system" fn window_proc(
                     let control = HWND(lparam.0 as *mut _);
                     if let Some(page) = &state.advanced_page {
                         if page.owns_dependency_toggle(control) {
-                            page.update_dependencies();
+                            page.handle_dependency_toggle(control);
                         }
                     }
                 }
@@ -10824,6 +11055,12 @@ unsafe extern "system" fn window_proc(
                     if let Some(page) = &state.advanced_page {
                         let delta = ((wparam.0 >> 16) as u16) as i16;
                         if page.scroll_wheel(delta) {
+                            let _ = SetTimer(
+                                hwnd,
+                                ADVANCED_SCROLL_TIMER_ID,
+                                ADVANCED_SCROLL_TICK_MS,
+                                None,
+                            );
                             return LRESULT(0);
                         }
                     }
@@ -10880,6 +11117,15 @@ unsafe extern "system" fn window_proc(
                     state.advance_install_volume_layout(hwnd);
                 } else if wparam.0 == PARTITION_REFRESH_TIMER_ID {
                     state.start_scheduled_partition_refresh(hwnd);
+                } else if wparam.0 == ADVANCED_SCROLL_TIMER_ID {
+                    let keep_scrolling = state.advanced_visible
+                        && state
+                            .advanced_page
+                            .as_ref()
+                            .is_some_and(|page| page.advance_smooth_scroll());
+                    if !keep_scrolling {
+                        let _ = KillTimer(hwnd, ADVANCED_SCROLL_TIMER_ID);
+                    }
                 }
                 if state.close_after_task && !state.has_active_long_task() {
                     let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -10996,11 +11242,15 @@ unsafe extern "system" fn window_proc(
         WM_DRAWITEM => {
             if let Some(state) = state {
                 let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
-                if state
-                    .progress_page
+                let handled = state
+                    .advanced_page
                     .as_ref()
                     .is_some_and(|page| page.draw_item(item, state.control_palette()))
-                {
+                    || state
+                        .progress_page
+                        .as_ref()
+                        .is_some_and(|page| page.draw_item(item, state.control_palette()));
+                if handled {
                     return LRESULT(1);
                 } else if item.CtlType.0 == ODT_HEADER {
                     state.draw_list_header(item);
@@ -11066,9 +11316,17 @@ unsafe extern "system" fn window_proc(
                     };
                     return LRESULT(brush.0 as isize);
                 }
-                let _ = SetTextColor(dc, state.control_palette().text);
+                let advanced_static = state.advanced_page.as_ref().is_some_and(|page| {
+                    GetParent(control).is_ok_and(|parent| parent == page.viewport())
+                });
+                let palette = state.control_palette();
+                let _ = SetTextColor(dc, palette.text);
                 let _ = SetBkColor(dc, state.palette.window);
-                let _ = SetBkMode(dc, TRANSPARENT);
+                // ScrollWindowEx moves the existing pixels and the child HWND in one transaction.
+                // Advanced-page STATIC labels must therefore erase with the page brush when they
+                // repaint; transparent text would blend over the copied glyphs and create a
+                // persistent one-frame-offset shadow after scrolling.
+                let _ = SetBkMode(dc, if advanced_static { OPAQUE } else { TRANSPARENT });
                 return LRESULT(state.brushes.window.0 as isize);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
@@ -11815,7 +12073,7 @@ unsafe fn draw_line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF
 
 #[cfg(test)]
 mod tests {
-    use super::HardwareCopyFeedback;
+    use super::{image_architecture_label, HardwareCopyFeedback};
 
     #[test]
     fn hardware_copy_feedback_expires_back_to_the_normal_caption() {
@@ -11825,5 +12083,13 @@ mod tests {
         assert_eq!(feedback.caption_key(), "已复制");
         feedback.expire();
         assert_eq!(feedback.caption_key(), "复制信息");
+    }
+
+    #[test]
+    fn diagnostic_architecture_labels_match_wim_codes() {
+        assert_eq!(image_architecture_label(Some(0)), "x86");
+        assert_eq!(image_architecture_label(Some(9)), "x64");
+        assert_eq!(image_architecture_label(Some(12)), "ARM64");
+        assert_eq!(image_architecture_label(None), "未知");
     }
 }

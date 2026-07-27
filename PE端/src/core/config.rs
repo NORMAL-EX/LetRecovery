@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use lr_core::boot_pca::BootPcaMode;
+use lr_core::unattend_account::BuiltInAdministratorOptions;
 use std::path::{Path, PathBuf};
 
 /// 驱动操作模式
@@ -84,6 +85,8 @@ pub struct InstallConfig {
     pub import_storage_controller_drivers: bool,
     /// 自定义用户名
     pub custom_username: String,
+    /// 内置 RID-500 Administrator 的无人值守配置。
+    pub builtin_administrator: BuiltInAdministratorOptions,
     /// 自定义系统盘卷标
     pub volume_label: String,
     /// 自定义无人值守文件（数据目录下的相对文件名，空=使用内置生成）
@@ -752,6 +755,18 @@ impl ConfigFileManager {
                         config.import_storage_controller_drivers = value.parse().unwrap_or(false)
                     }
                     "CustomUsername" => config.custom_username = value.to_string(),
+                    "BuiltinAdministrator" => {
+                        config.builtin_administrator.enabled = value.parse().unwrap_or(false)
+                    }
+                    "BuiltinAdministratorName" => {
+                        config.builtin_administrator.account_name = value.to_string()
+                    }
+                    "BuiltinAdministratorPassword" => {
+                        config.builtin_administrator.password = value.into()
+                    }
+                    "BuiltinAdministratorAutoLogon" => {
+                        config.builtin_administrator.auto_logon = value.parse().unwrap_or(false)
+                    }
                     "VolumeLabel" => config.volume_label = value.to_string(),
                     "CustomUnattendFile" => config.custom_unattend_file = value.to_string(),
                     "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
@@ -869,6 +884,26 @@ mod tests {
         assert_eq!(config.pca_compat_image_index, 1);
         assert_eq!(config.pca_compat_target_build, 19045);
         assert_eq!(config.pca_compat_target_architecture, 9);
+    }
+
+    #[test]
+    fn reads_builtin_administrator_session_settings_from_normal_endpoint() {
+        let config = ConfigFileManager::deserialize_install_config(concat!(
+            "[Install]\r\n",
+            "BuiltinAdministrator=true\r\n",
+            "BuiltinAdministratorName=LocalAdmin\r\n",
+            "BuiltinAdministratorPassword=temporary-secret\r\n",
+            "BuiltinAdministratorAutoLogon=true\r\n"
+        ))
+        .unwrap();
+
+        assert!(config.builtin_administrator.enabled);
+        assert_eq!(config.builtin_administrator.account_name, "LocalAdmin");
+        assert_eq!(
+            config.builtin_administrator.password.expose_secret(),
+            "temporary-secret"
+        );
+        assert!(config.builtin_administrator.auto_logon);
     }
 
     #[test]

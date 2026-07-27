@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::tr;
 use lr_core::boot_pca::BootPcaMode;
+use lr_core::unattend_account::BuiltInAdministratorOptions;
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -196,6 +197,8 @@ pub struct InstallConfig {
     pub import_storage_controller_drivers: bool,
     /// 自定义用户名
     pub custom_username: String,
+    /// 内置 RID-500 Administrator 的无人值守配置；密码只写入短期 PE 交接文件。
+    pub builtin_administrator: BuiltInAdministratorOptions,
     /// 自定义系统盘卷标
     pub volume_label: String,
     /// 自定义无人值守文件：UI 选择时为源文件绝对路径；
@@ -365,6 +368,14 @@ impl ConfigFileManager {
             ("PcaCompatPackage", config.pca_compat_package.as_str()),
             ("PcaCompatSha256", config.pca_compat_sha256.as_str()),
             ("CustomUsername", config.custom_username.as_str()),
+            (
+                "BuiltinAdministratorName",
+                config.builtin_administrator.account_name.as_str(),
+            ),
+            (
+                "BuiltinAdministratorPassword",
+                config.builtin_administrator.password.expose_secret(),
+            ),
             ("VolumeLabel", config.volume_label.as_str()),
             ("CustomUnattendFile", config.custom_unattend_path.as_str()),
         ] {
@@ -871,6 +882,10 @@ DisableDeviceEncryption={}
 RemoveUWPApps={}
 ImportStorageControllerDrivers={}
 CustomUsername={}
+BuiltinAdministrator={}
+BuiltinAdministratorName={}
+BuiltinAdministratorPassword={}
+BuiltinAdministratorAutoLogon={}
 VolumeLabel={}
 CustomUnattendFile={}
 
@@ -919,6 +934,10 @@ XpInjectNvmeDriver={}
             config.remove_uwp_apps,
             config.import_storage_controller_drivers,
             config.custom_username,
+            config.builtin_administrator.enabled,
+            config.builtin_administrator.account_name,
+            config.builtin_administrator.password.expose_secret(),
+            config.builtin_administrator.auto_logon,
             config.volume_label,
             config.custom_unattend_path,
             config.win7_uefi_patch,
@@ -1027,6 +1046,18 @@ Language={}
                         config.import_storage_controller_drivers = value.parse().unwrap_or(false)
                     }
                     "CustomUsername" => config.custom_username = value.to_string(),
+                    "BuiltinAdministrator" => {
+                        config.builtin_administrator.enabled = value.parse().unwrap_or(false)
+                    }
+                    "BuiltinAdministratorName" => {
+                        config.builtin_administrator.account_name = value.to_string()
+                    }
+                    "BuiltinAdministratorPassword" => {
+                        config.builtin_administrator.password = value.into()
+                    }
+                    "BuiltinAdministratorAutoLogon" => {
+                        config.builtin_administrator.auto_logon = value.parse().unwrap_or(false)
+                    }
                     "VolumeLabel" => config.volume_label = value.to_string(),
                     "CustomUnattendFile" => config.custom_unattend_path = value.to_string(),
                     "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
@@ -1205,6 +1236,30 @@ mod tests {
         assert_eq!(parsed.pca_compat_target_architecture, 9);
         assert!(parsed.is_xp_i386);
         assert_eq!(parsed.xp_source_arch, "I386");
+    }
+
+    #[test]
+    fn install_session_round_trips_builtin_administrator_credentials() {
+        let source = InstallConfig {
+            builtin_administrator: BuiltInAdministratorOptions {
+                enabled: true,
+                account_name: "LocalAdmin".to_string(),
+                password: "temporary-secret".into(),
+                auto_logon: true,
+            },
+            ..InstallConfig::default()
+        };
+
+        let serialized = ConfigFileManager::serialize_install_config(&source);
+        let parsed = ConfigFileManager::deserialize_install_config(&serialized).unwrap();
+
+        assert!(parsed.builtin_administrator.enabled);
+        assert_eq!(parsed.builtin_administrator.account_name, "LocalAdmin");
+        assert_eq!(
+            parsed.builtin_administrator.password.expose_secret(),
+            "temporary-secret"
+        );
+        assert!(parsed.builtin_administrator.auto_logon);
     }
 
     #[test]

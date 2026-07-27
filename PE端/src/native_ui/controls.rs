@@ -321,7 +321,7 @@ pub unsafe fn draw_indeterminate_ring(dc: HDC, rect: RECT, elapsed_seconds: f64,
         end_cap,
     };
     let background = colorref_rgb(palette.window);
-    let foreground = colorref_rgb(palette.accent_border);
+    let foreground = colorref_rgb(palette.accent_fill);
     let mut pixels = vec![0_u8; width as usize * height as usize * 4];
     let sample_count = (SAMPLE_GRID * SAMPLE_GRID) as u32;
     for y in 0..height as usize {
@@ -468,7 +468,7 @@ pub unsafe fn draw_step_status_icon(dc: HDC, rect: RECT, status: StepStatusIcon,
     );
     let background = match status {
         StepStatusIcon::Pending => palette.text_disabled,
-        StepStatusIcon::Current => palette.accent_border,
+        StepStatusIcon::Current => palette.accent_fill,
         StepStatusIcon::Success => palette.progress,
         StepStatusIcon::Error => palette.error,
     };
@@ -858,13 +858,13 @@ pub const fn button_visual(palette: Palette, state: ButtonState) -> ButtonVisual
         return ButtonVisual {
             fill: if state.pressed {
                 if palette.dark {
-                    rgb(39, 61, 71)
+                    rgb(57, 171, 230)
                 } else {
                     rgb(0, 83, 160)
                 }
             } else if state.hot {
                 if palette.dark {
-                    rgb(54, 79, 91)
+                    rgb(96, 201, 255)
                 } else {
                     rgb(0, 103, 192)
                 }
@@ -873,7 +873,7 @@ pub const fn button_visual(palette: Palette, state: ButtonState) -> ButtonVisual
             },
             border: palette.accent_border,
             text: if palette.dark {
-                palette.text
+                rgb(0, 0, 0)
             } else {
                 rgb(255, 255, 255)
             },

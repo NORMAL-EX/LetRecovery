@@ -24,6 +24,11 @@ pub struct PreloadedConfig {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Startup validation and elevation failures can display MessageBoxW before the main window
+    // exists. Establish PMv2 awareness first so those dialogs are rendered at the monitor's native
+    // DPI instead of being bitmap-scaled and blurred by USER32.
+    native_ui::enable_process_dpi_awareness();
+
     // 加载应用配置（用于获取日志设置）
     let app_config = core::app_config::AppConfig::load();
 
@@ -47,9 +52,36 @@ fn main() -> anyhow::Result<()> {
     app_config.apply_wim_engine();
 
     log::info!("LetRecovery 启动中...");
+    log::info!(
+        "[诊断环境] 软件版本: build={} | package={} | channel={} | arch={}",
+        env!("BUILD_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        if crate::build_info::DEV {
+            "dev-build"
+        } else {
+            "production"
+        },
+        std::env::consts::ARCH
+    );
 
     // 检查命令行参数，处理PE环境下的自动安装/备份
     let args: Vec<String> = std::env::args().collect();
+
+    #[cfg(feature = "non-elevated-tests")]
+    if args.iter().any(|arg| arg == "--ui-error-preview") {
+        show_error_message(
+            "程序文件不完整，无法正常运行。\n\n\
+             缺少以下文件：\n\
+             bin/bcdedit.exe\n\
+             bin/bcdboot.exe\n\
+             bin/bootsect.exe\n\
+             bin/format.com\n\
+             bin/aria2c.exe\n\
+             bin/ghost/ghost64.exe\n\n\
+             请重新下载完整安装包或修复程序文件。",
+        );
+        return Ok(());
+    }
 
     // 该 feature 只用于无副作用的 UI/单元测试。即使调用者传入正式操作参数，
     // 也不能在非管理员开发构建中进入安装、备份或 PE 工作流。
@@ -216,6 +248,9 @@ fn main() -> anyhow::Result<()> {
         }
     };
     let preloaded_config = Arc::new(preloaded_config);
+    if app_config.log_enabled {
+        log_partition_environment(&preloaded_config.partitions);
+    }
 
     log::info!("预加载完成，初始化 GUI...");
 
@@ -330,6 +365,35 @@ fn log_machine_info() {
     let sys_info = core::system_info::SystemInfo::collect().ok();
     match core::hardware_info::HardwareInfo::collect() {
         Ok(hw) => {
+            log::info!(
+                "[诊断环境] 源系统: {} | version={} | build={} | arch={}",
+                hw.os.name,
+                hw.os.version,
+                hw.os.build_number,
+                hw.os.architecture
+            );
+            log::info!("[诊断环境] 运行平台: {}", hw.machine_environment_summary());
+            log::info!(
+                "[诊断环境] 磁盘结构: 物理磁盘={} | 物理分区总数={}",
+                hw.disks.len(),
+                hw.disks
+                    .iter()
+                    .map(|disk| u64::from(disk.partitions))
+                    .fold(0u64, u64::saturating_add)
+            );
+            log::info!(
+                "[诊断环境] 系统卷 BitLocker: {:?}",
+                hw.system_bitlocker_status
+            );
+            if let Some(si) = &sys_info {
+                log::info!(
+                    "[诊断环境] 固件: {} | Secure Boot: {}",
+                    si.boot_mode,
+                    if si.secure_boot { "开" } else { "关" }
+                );
+            } else {
+                log::warn!("[诊断环境] 固件: 未知 | Secure Boot: 未知（系统信息采集失败）");
+            }
             let text = hw.to_formatted_text(sys_info.as_ref());
             for line in text.lines() {
                 if !line.trim().is_empty() {
@@ -351,6 +415,45 @@ fn log_machine_info() {
         }
     }
     log::info!("==================================");
+}
+
+fn log_partition_environment(partitions: &[core::disk::Partition]) {
+    use std::collections::BTreeSet;
+
+    let disk_numbers = partitions
+        .iter()
+        .filter_map(|partition| partition.disk_number)
+        .collect::<BTreeSet<_>>();
+    let unresolved = partitions
+        .iter()
+        .filter(|partition| partition.disk_number.is_none())
+        .count();
+    log::info!(
+        "[诊断环境] 固定卷库存: 已映射物理磁盘={} | 可见固定卷={} | 磁盘号未知卷={}",
+        disk_numbers.len(),
+        partitions.len(),
+        unresolved
+    );
+    for partition in partitions {
+        log::info!(
+            "[诊断环境] 卷 {}: disk={} | partition={} | style={} | size={}MB | free={}MB | system={} | windows={} | BitLocker={}",
+            partition.letter,
+            partition
+                .disk_number
+                .map(|number| number.to_string())
+                .unwrap_or_else(|| "未知".to_owned()),
+            partition
+                .partition_number
+                .map(|number| number.to_string())
+                .unwrap_or_else(|| "未知".to_owned()),
+            partition.partition_style,
+            partition.total_size_mb,
+            partition.free_size_mb,
+            partition.is_system_partition,
+            partition.has_windows,
+            partition.bitlocker_status.as_str()
+        );
+    }
 }
 
 /// 检查系统核心组件完整性（用于检测极限精简系统）
@@ -683,6 +786,7 @@ fn execute_pe_install(
         import_storage_controller_drivers: config.import_storage_controller_drivers,
         custom_username: !config.custom_username.is_empty(),
         username: config.custom_username.clone(),
+        builtin_administrator: config.builtin_administrator.clone(),
         xp_inject_usb3_driver: config.xp_inject_usb3_driver,
         xp_inject_nvme_driver: config.xp_inject_nvme_driver,
         ..core::advanced_options::AdvancedOptions::default()
@@ -697,7 +801,7 @@ fn execute_pe_install(
 
     // 生成无人值守配置
     if config.unattended {
-        generate_unattend_xml_pe(target_partition, &config.custom_username)
+        generate_unattend_xml_pe(target_partition, config)
             .context("[PE INSTALL] 生成无人值守配置失败")?;
     }
 
@@ -835,17 +939,55 @@ fn detect_uefi_mode() -> bool {
 }
 
 /// 生成无人值守XML (PE版本)
-fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::Result<()> {
+fn generate_unattend_xml_pe(
+    target_partition: &str,
+    config: &core::install_config::InstallConfig,
+) -> anyhow::Result<()> {
     use crate::core::system_utils::{get_file_version, get_system_architecture};
     use anyhow::Context;
     use std::path::Path;
 
-    let username = if username.is_empty() {
+    let username = if config.custom_username.is_empty() {
         "User"
     } else {
-        username
+        &config.custom_username
     };
     let username = escape_xml_text(username);
+    let builtin = lr_core::unattend_account::render_builtin_administrator_unattend(
+        &config.builtin_administrator,
+        1,
+    )
+    .map_err(|error| anyhow::anyhow!("内置 Administrator 配置无效: {error}"))?;
+    let (specialize_settings, user_accounts, auto_logon) = if let Some(builtin) = builtin {
+        let specialize_settings = if builtin.specialize_command.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"    <settings pass="specialize">
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="{{arch}}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <RunSynchronous>{}</RunSynchronous>
+        </component>
+    </settings>
+"#,
+                builtin.specialize_command
+            )
+        };
+        (
+            specialize_settings,
+            builtin.user_accounts,
+            builtin.auto_logon,
+        )
+    } else {
+        (
+            String::new(),
+            format!(
+                r#"<UserAccounts><LocalAccounts><LocalAccount wcm:action="add"><Password><Value></Value><PlainText>true</PlainText></Password><Description>Local User</Description><DisplayName>{username}</DisplayName><Group>Administrators</Group><Name>{username}</Name></LocalAccount></LocalAccounts></UserAccounts>"#
+            ),
+            format!(
+                r#"<AutoLogon><Password><Value></Value><PlainText>true</PlainText></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>{username}</Username></AutoLogon>"#
+            ),
+        )
+    };
 
     // 检测目标系统架构
     let arch = get_system_architecture(target_partition);
@@ -934,33 +1076,14 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
             </UserData>
         </component>
     </settings>
+{specialize_settings}
     <settings pass="oobeSystem">
 {international_component}
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 {time_zone}
             {oobe}
-            <UserAccounts>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value></Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local User</Description>
-                        <DisplayName>{user}</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>{user}</Name>
-                    </LocalAccount>
-                </LocalAccounts>
-            </UserAccounts>
-            <AutoLogon>
-                <Password>
-                    <Value></Value>
-                    <PlainText>true</PlainText>
-                </Password>
-                <Enabled>true</Enabled>
-                <Username>{user}</Username>
-            </AutoLogon>
+            {user_accounts}
+            {auto_logon}
         </component>
     </settings>
 </unattend>"#,
@@ -968,7 +1091,9 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
         international_component = international_component,
         time_zone = time_zone,
         oobe = oobe_section,
-        user = username
+        specialize_settings = specialize_settings.replace("{arch}", arch_str),
+        user_accounts = user_accounts,
+        auto_logon = auto_logon
     );
 
     let panther_dir = format!("{}\\Windows\\Panther", target_partition);

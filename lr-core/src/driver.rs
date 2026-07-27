@@ -17,7 +17,10 @@ use anyhow::{bail, Context, Result};
 use libloading::Library;
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{GetLastError, BOOL, HWND};
+use windows::{
+    core::GUID,
+    Win32::Foundation::{GetLastError, BOOL, HWND},
+};
 
 // ============================================================================
 // 常量定义
@@ -27,7 +30,6 @@ use windows::Win32::Foundation::{GetLastError, BOOL, HWND};
 const DIGCF_PRESENT: u32 = 0x0000_0002;
 const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
 
-const SPDRP_INF_PATH: u32 = 0x0000_0010;
 const SPDRP_HARDWAREID: u32 = 0x0000_0001;
 const SPDRP_DEVICEDESC: u32 = 0x0000_0000;
 const SPDRP_MFG: u32 = 0x0000_000B;
@@ -40,6 +42,19 @@ const INSTALLFLAG_NONINTERACTIVE: u32 = 0x0000_0004;
 
 const REG_SZ: u32 = 1;
 const REG_MULTI_SZ: u32 = 7;
+const DEVPROP_TYPE_STRING: u32 = 0x0000_0012;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DevPropKey {
+    fmtid: GUID,
+    pid: u32,
+}
+
+const DEVPKEY_DEVICE_DRIVER_INF_PATH: DevPropKey = DevPropKey {
+    fmtid: GUID::from_u128(0xa8b865dd_2e3d_4094_ad97_e593a70c75d6),
+    pid: 5,
+};
 
 // ============================================================================
 // 类型定义
@@ -93,6 +108,17 @@ type FnSetupDiGetDeviceRegistryPropertyW = unsafe extern "system" fn(
     property_buffer: *mut u8,
     property_buffer_size: u32,
     required_size: *mut u32,
+) -> BOOL;
+
+type FnSetupDiGetDevicePropertyW = unsafe extern "system" fn(
+    dev_info: HDevInfo,
+    device_info_data: *const SpDevInfoData,
+    property_key: *const DevPropKey,
+    property_type: *mut u32,
+    property_buffer: *mut u8,
+    property_buffer_size: u32,
+    required_size: *mut u32,
+    flags: u32,
 ) -> BOOL;
 
 type FnSetupDiDestroyDeviceInfoList = unsafe extern "system" fn(dev_info: HDevInfo) -> BOOL;
@@ -191,6 +217,7 @@ struct SetupApi {
     get_class_devs: FnSetupDiGetClassDevsW,
     enum_device_info: FnSetupDiEnumDeviceInfo,
     get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW,
+    get_device_property: Option<FnSetupDiGetDevicePropertyW>,
     destroy_device_info_list: FnSetupDiDestroyDeviceInfoList,
     copy_oem_inf: FnSetupCopyOEMInfW,
     get_inf_driver_store_location: Option<FnSetupGetInfDriverStoreLocationW>,
@@ -205,6 +232,10 @@ impl SetupApi {
             let enum_device_info: FnSetupDiEnumDeviceInfo = *lib.get(b"SetupDiEnumDeviceInfo")?;
             let get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW =
                 *lib.get(b"SetupDiGetDeviceRegistryPropertyW")?;
+            let get_device_property = lib
+                .get::<FnSetupDiGetDevicePropertyW>(b"SetupDiGetDevicePropertyW")
+                .ok()
+                .map(|function| *function);
             let destroy_device_info_list: FnSetupDiDestroyDeviceInfoList =
                 *lib.get(b"SetupDiDestroyDeviceInfoList")?;
             let copy_oem_inf: FnSetupCopyOEMInfW = *lib.get(b"SetupCopyOEMInfW")?;
@@ -220,6 +251,7 @@ impl SetupApi {
                 get_class_devs,
                 enum_device_info,
                 get_device_registry_property,
+                get_device_property,
                 destroy_device_info_list,
                 copy_oem_inf,
                 get_inf_driver_store_location,
@@ -268,6 +300,46 @@ impl SetupApi {
         }
     }
 
+    /// Returns the published INF name (for example `oem42.inf`) that installed a device.
+    ///
+    /// `SetupDiGetDeviceRegistryPropertyW` has no `SPDRP_INF_PATH` selector. In particular,
+    /// selector `0x10` is `SPDRP_UI_NUMBER` (a DWORD), which made the old fallback silently
+    /// enumerate zero OEM drivers. Vista and newer expose the actual value through
+    /// `DEVPKEY_Device_DriverInfPath`.
+    fn get_device_driver_inf_path(
+        &self,
+        dev_info: HDevInfo,
+        dev_info_data: &SpDevInfoData,
+    ) -> Option<String> {
+        let get_device_property = self.get_device_property?;
+        let mut buffer = vec![0u8; 4096];
+        let mut required_size = 0u32;
+        let mut property_type = 0u32;
+        let result = unsafe {
+            get_device_property(
+                dev_info,
+                dev_info_data,
+                &DEVPKEY_DEVICE_DRIVER_INF_PATH,
+                &mut property_type,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                &mut required_size,
+                0,
+            )
+        };
+        if result.0 == 0 || property_type != DEVPROP_TYPE_STRING || required_size < 2 {
+            return None;
+        }
+        let wide_slice = unsafe {
+            std::slice::from_raw_parts(
+                buffer.as_ptr() as *const u16,
+                (required_size as usize / 2).min(buffer.len() / 2),
+            )
+        };
+        let value = wide_to_string(wide_slice);
+        (!value.trim().is_empty()).then_some(value)
+    }
+
     /// 枚举所有设备的驱动信息
     fn enumerate_drivers(&self) -> Result<Vec<DriverInfo>> {
         let mut drivers = Vec::new();
@@ -302,10 +374,8 @@ impl SetupApi {
                 continue;
             }
 
-            // 获取 INF 路径
-            if let Some(inf_path) =
-                self.get_device_property_string(dev_info, &dev_info_data, SPDRP_INF_PATH)
-            {
+            // 获取安装该设备的已发布 INF 名称。
+            if let Some(inf_path) = self.get_device_driver_inf_path(dev_info, &dev_info_data) {
                 // 检查是否为 OEM 驱动
                 let is_oem = inf_path.to_lowercase().starts_with("oem");
 

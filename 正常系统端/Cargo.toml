@@ -42,6 +42,7 @@ windows = { version = "0.58", features = [
     "Win32_Storage_Nvme",
     "Win32_Storage_Vhd",
     "Win32_System_SystemInformation",
+    "Win32_System_WindowsProgramming",
     "Win32_System_Registry",
     "Win32_Security",
     "Win32_System_Threading",
@@ -55,6 +56,11 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Media_Multimedia",
@@ -66,6 +72,7 @@ windows = { version = "0.58", features = [
     # Windows Runtime - APPX包管理
     "Foundation",
     "Foundation_Collections",
+    "Foundation_Numerics",
     "Management_Deployment",
     "ApplicationModel",
     # 系统时间设置

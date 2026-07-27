@@ -1,47 +1,38 @@
 name: 🐛 问题反馈 (Bug Report)
-description: 报告一个故障 / Bug。请尽量完整填写，缺少日志、版本或环境信息将难以定位。
+description: 报告故障。请描述现象并上传日志，版本和安装环境由日志自动提供。
 title: "[Bug] 一句话描述问题"
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        感谢反馈！请**完整**填写下列内容。
-        ⚠️ **缺少日志 / 版本 / 截图的反馈可能无法定位，会被要求补充或直接关闭。**
-        🔒 **隐私提醒**：日志和截图里如含 BitLocker 恢复密钥、序列号、账号等敏感信息，请先打码再上传。
+        请准备好 **问题描述、复现步骤、日志和截图**。软件版本、源系统、目标镜像、固件、Secure Boot、BitLocker、磁盘结构、所用 PE 以及实体机/虚拟机线索会由新版日志自动记录，不需要手工抄写。
+
+        - 正常系统端日志：`{程序目录}\log\LetRecovery.<日期>.log`
+        - PE 端日志：PE 程序同目录的 `LetRecoveryPE.log`
+        - 如果问题发生在 PE 阶段，请同时上传正常系统端日志和 PE 端日志。
+
+        ⚠️ 没有日志通常无法定位；如确实无法取得，请在日志栏说明原因。
+        🔒 上传前请检查并遮盖 BitLocker 恢复密钥、序列号、账号和其他敏感信息。
 
   - type: checkboxes
     id: preflight
     attributes:
       label: 提交前确认
       options:
-        - label: 我已搜索过现有 issue / Discussions，确认没有重复
+        - label: 我已搜索现有 issue / Discussions，确认没有重复
           required: true
-        - label: 我用的是最新版本，或已在下方注明所用版本
+        - label: 我已上传对应阶段的日志；无法取得时已在日志栏说明原因
           required: true
-        - label: 我已阅读并按模板填写了日志、版本、环境、截图
-          required: true
-
-  - type: input
-    id: version
-    attributes:
-      label: 软件版本（三项都填）
-      description: |
-        1. `LetRecovery.exe` 右键属性 → 详细信息 → **文件版本**（形如 `2026.6.18.0`）
-        2. 日志开头那行 **「版本: …」**（形如 `2026.2.6`）
-        3. **来源**：从哪个 Release / 包拿的（如 `cli-install-test` 预发布 / 正式版 / 文件名）
-      placeholder: "文件版本 2026.6.18.0 ｜ 日志版本 2026.2.6 ｜ 来源 cli-install-test"
-    validations:
-      required: true
 
   - type: dropdown
     id: stage
     attributes:
       label: 出问题的阶段
       options:
-        - 正常系统端（进 PE 之前）
-        - PE 端（重启进 PE 之后）
-        - 装完进入新系统后
+        - 正常系统端（重启进入 PE 之前）
+        - PE 端（重启进入 PE 之后）
+        - 安装完成、进入新系统之后
         - 不确定
     validations:
       required: true
@@ -49,15 +40,16 @@ body:
   - type: textarea
     id: summary
     attributes:
-      label: 问题描述
-      description: 清晰描述发生了什么、在哪一步出的问题。
+      label: 问题现象
+      description: 说明在哪一步、看到什么提示、卡在多少进度，以及最后发生了什么。
+      placeholder: "例如：点击开始安装后，在“校验镜像”阶段停在 27%，随后提示 IMG_VERIFY_FAILED。"
     validations:
       required: true
 
   - type: textarea
     id: steps
     attributes:
-      label: 复现步骤
+      label: 如何复现
       value: |
         1.
         2.
@@ -66,78 +58,42 @@ body:
       required: true
 
   - type: textarea
-    id: expected_actual
+    id: logs
     attributes:
-      label: 预期结果 / 实际结果
-      placeholder: |
-        预期：……
-        实际：……
+      label: 日志文件（必须）
+      description: |
+        把日志文件直接拖到这里上传，不要只说“没有日志”。
+        正常系统端问题上传 `LetRecovery.<日期>.log`；PE 阶段问题同时上传正常系统端日志和 `LetRecoveryPE.log`。
+        如果日志确实无法取得，请写明具体原因和已经尝试过的查找位置。
+      placeholder: "将日志文件拖到这里，或说明无法取得日志的具体原因。"
     validations:
       required: true
-
-  - type: textarea
-    id: env
-    attributes:
-      label: 运行环境（逐项填写）
-      value: |
-        - 源系统（当前被重装的系统）: 例如 Windows 10 22H2 x64
-        - 目标系统（要安装的镜像）: 例如 Windows 11 24H2
-        - 固件: UEFI / Legacy BIOS
-        - Secure Boot: 开 / 关
-        - BitLocker: 目标盘是否加密 / 数据盘是否加密
-        - 磁盘结构: 单盘单分区 / 多分区 / 多块硬盘
-        - 使用的 PE: 例如 电脑病毒爱好者 优化版PE
-        - 实体机 / 虚拟机: （虚拟机请注明软件，如 VMware / Hyper-V）
-    validations:
-      required: true
-
-  - type: textarea
-    id: log_system
-    attributes:
-      label: 正常系统端日志
-      description: |
-        路径：`{程序目录}\log\LetRecovery.<日期>.log`（如 `LetRecovery.2026-06-18.log`）。
-        请**粘贴相关片段**或把整个文件**拖拽上传**。问题若发生在进 PE 之前，此项必填。
-      render: text
-    validations:
-      required: false
-
-  - type: textarea
-    id: log_pe
-    attributes:
-      label: PE 端日志
-      description: |
-        路径：PE 端 exe **同目录**下的 `LetRecoveryPE.log`
-        （如 `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`）。
-        请**粘贴相关片段**或**拖拽上传**整个文件。问题若发生在 PE 阶段（解锁/校验/格式化/释放镜像等），此项必填。
-      render: text
-    validations:
-      required: false
 
   - type: textarea
     id: screenshots
     attributes:
       label: 截图
-      description: 出错界面、报错弹窗、卡住的进度条等截图，可直接拖拽到此处上传（多张请都附上）。
+      description: 上传完整报错界面、卡住的进度和可见诊断代码；请勿只截局部文字。
     validations:
       required: true
 
-  - type: textarea
-    id: image_info
+  - type: dropdown
+    id: image_origin
     attributes:
-      label: 镜像信息（重装 / 释放镜像 / 校验类问题必填）
-      value: |
-        - 格式: WIM / ESD / GHO / SWM
-        - 来源: 官方原版 / 第三方修改版 / 自制备份
-        - 文件名 / 大小:
-        - 是否做过镜像校验（工具箱 → 镜像校验）及结果:
+      label: 镜像来源（仅安装/镜像问题）
+      options:
+        - 不涉及系统镜像
+        - Microsoft 官方原版
+        - 第三方修改版
+        - 自制备份
+        - 不清楚
     validations:
-      required: false
+      required: true
 
   - type: textarea
     id: extra
     attributes:
       label: 其他补充
-      description: 任何有助于定位的信息（如最近改动、是否偶发、能否稳定复现等）。
+      description: 可补充是否偶发、能否稳定复现、换过哪些镜像或磁盘，以及最近做过什么改动。
     validations:
       required: false
