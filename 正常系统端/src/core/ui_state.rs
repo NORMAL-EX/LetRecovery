@@ -1,4 +1,5 @@
 use lr_core::boot_pca::BootPcaMode;
+use lr_core::unattend_account::BuiltInAdministratorOptions;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -62,6 +63,7 @@ pub struct AdvancedOptionsData {
     pub custom_files_path: String,
     pub custom_username: bool,
     pub username: String,
+    pub builtin_administrator: BuiltInAdministratorOptions,
     pub custom_volume_label: bool,
     pub volume_label: String,
     pub win7_inject_usb3_driver: bool,
@@ -106,6 +108,7 @@ impl From<&AdvancedOptionsData> for super::advanced_options::AdvancedOptions {
             custom_files_path: value.custom_files_path.clone(),
             custom_username: value.custom_username,
             username: value.username.clone(),
+            builtin_administrator: value.builtin_administrator.clone(),
             custom_volume_label: value.custom_volume_label,
             volume_label: value.volume_label.clone(),
             win7_inject_usb3_driver: value.win7_inject_usb3_driver,

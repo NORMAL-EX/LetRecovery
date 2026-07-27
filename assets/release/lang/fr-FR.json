@@ -1,4 +1,14 @@
 {
+    "Administrator 账户名": "Nom du compte Administrateur",
+    "Administrator 密码": "Mot de passe Administrateur",
+    "“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。": "« Nom d’utilisateur personnalisé » et « Activer le compte Administrateur intégré » ne peuvent pas être activés simultanément.",
+    "内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。": "Le nom du compte Administrateur intégré n’est pas valide. Il ne peut pas être vide, dépasser 20 caractères ni contenir des caractères interdits par Windows.",
+    "内置 Administrator 账户选项仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。": "L’option du compte Administrateur intégré prend uniquement en charge les images WIM, ESD et SWM de Windows 7 ou version ultérieure.",
+    "启用内置 Administrator 账户": "Activer le compte Administrateur intégré",
+    "启用内置 Administrator 账户需要同时启用无人值守安装。": "L’activation du compte Administrateur intégré nécessite également l’installation sans assistance.",
+    "启用内置 Administrator 账户时不能同时使用自定义无人值守文件。": "Un fichier de réponses personnalisé ne peut pas être utilisé lorsque l’option du compte Administrateur intégré est activée.",
+    "自动登录内置 Administrator": "Se connecter automatiquement avec l’Administrateur intégré",
+    "请为内置 Administrator 账户设置有效密码（最长 127 个字符，不能包含换行）。": "Définissez un mot de passe valide pour le compte Administrateur intégré (127 caractères maximum, sans saut de ligne).",
   "language": "Français (France)",
   "author": "LetRecovery (révision française)",
   "data": {

@@ -1569,6 +1569,10 @@ impl ProductionInstallBackend {
             username: advanced
                 .custom_username
                 .then_some(advanced.username.as_str()),
+            builtin_administrator: advanced
+                .builtin_administrator
+                .enabled
+                .then_some(&advanced.builtin_administrator),
             remove_uwp_apps: advanced.remove_uwp_apps,
             international: international.as_ref(),
         })

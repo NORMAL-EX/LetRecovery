@@ -1,4 +1,14 @@
 {
+    "Administrator 账户名": "Administrator account name",
+    "Administrator 密码": "Administrator password",
+    "“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。": "\"Custom Username\" and \"Enable built-in Administrator account\" cannot be enabled at the same time.",
+    "内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。": "The built-in Administrator account name is invalid. It cannot be empty, exceed 20 characters, or contain characters prohibited by Windows.",
+    "内置 Administrator 账户选项仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。": "The built-in Administrator account option supports only Windows 7 or later WIM, ESD, and SWM images.",
+    "启用内置 Administrator 账户": "Enable built-in Administrator account",
+    "启用内置 Administrator 账户需要同时启用无人值守安装。": "Enabling the built-in Administrator account also requires unattended installation.",
+    "启用内置 Administrator 账户时不能同时使用自定义无人值守文件。": "A custom unattended answer file cannot be used while the built-in Administrator account option is enabled.",
+    "自动登录内置 Administrator": "Automatically sign in to built-in Administrator",
+    "请为内置 Administrator 账户设置有效密码（最长 127 个字符，不能包含换行）。": "Set a valid password for the built-in Administrator account (up to 127 characters, without line breaks).",
   "language": "English (United States)",
   "author": "LetRecovery",
   "data": {

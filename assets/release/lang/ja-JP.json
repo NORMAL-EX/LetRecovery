@@ -1,4 +1,14 @@
 {
+    "Administrator 账户名": "Administrator アカウント名",
+    "Administrator 密码": "Administrator パスワード",
+    "“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。": "「カスタムユーザー名」と「組み込み Administrator アカウントを有効にする」は同時に有効にできません。",
+    "内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。": "組み込み Administrator アカウント名が無効です。空、20 文字超、または Windows で禁止されている文字を含む名前は使用できません。",
+    "内置 Administrator 账户选项仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。": "組み込み Administrator アカウントのオプションは、Windows 7 以降の WIM、ESD、SWM イメージのみをサポートします。",
+    "启用内置 Administrator 账户": "組み込み Administrator アカウントを有効にする",
+    "启用内置 Administrator 账户需要同时启用无人值守安装。": "組み込み Administrator アカウントを有効にするには、無人セットアップも有効にする必要があります。",
+    "启用内置 Administrator 账户时不能同时使用自定义无人值守文件。": "組み込み Administrator アカウントのオプションが有効な場合、カスタム応答ファイルは使用できません。",
+    "自动登录内置 Administrator": "組み込み Administrator に自動サインインする",
+    "请为内置 Administrator 账户设置有效密码（最长 127 个字符，不能包含换行）。": "組み込み Administrator アカウントに有効なパスワードを設定してください（最大 127 文字、改行は使用不可）。",
   "language": "日本語",
   "author": "LetRecovery / 日本語校訂",
   "data": {

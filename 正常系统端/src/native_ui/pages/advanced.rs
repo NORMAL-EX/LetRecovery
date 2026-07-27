@@ -14,12 +14,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, GetScrollInfo, GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW,
-    ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_OWNERDRAW, ES_AUTOHSCROLL, HMENU,
-    SB_BOTTOM, SB_ENDSCROLL, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION,
-    SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE, SIF_TRACKPOS,
-    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_MOUSEWHEEL, WM_NCDESTROY, WM_SETFONT,
-    WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VSCROLL,
+    ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_OWNERDRAW, ES_AUTOHSCROLL,
+    ES_PASSWORD, HMENU, SB_BOTTOM, SB_ENDSCROLL, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
+    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE,
+    SIF_TRACKPOS, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_MOUSEWHEEL, WM_NCDESTROY,
+    WM_SETFONT, WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VSCROLL,
 };
 
 use super::super::controls::{center_single_line_edit_in_row, child, wide, InnoMetrics};
@@ -97,6 +97,7 @@ impl ScrollModel {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdvancedPageContext {
     pub unattended_enabled: bool,
+    pub builtin_administrator_available: bool,
     pub wifi_available: bool,
     pub show_windows_7: bool,
     pub show_windows_7_uefi: bool,
@@ -107,6 +108,7 @@ impl Default for AdvancedPageContext {
     fn default() -> Self {
         Self {
             unattended_enabled: true,
+            builtin_administrator_available: true,
             wifi_available: false,
             show_windows_7: false,
             show_windows_7_uefi: false,
@@ -173,6 +175,12 @@ pub struct AdvancedPageHandles {
     custom_files: CheckEdit,
     pub identity_header: HWND,
     username: CheckEdit,
+    builtin_administrator: HWND,
+    builtin_administrator_name_label: HWND,
+    builtin_administrator_name: HWND,
+    builtin_administrator_password_label: HWND,
+    builtin_administrator_password: HWND,
+    builtin_administrator_auto_logon: HWND,
     volume_label: CheckEdit,
     pub windows_7_header: HWND,
     windows_7_usb3: CheckEdit,
@@ -298,6 +306,27 @@ impl AdvancedPage {
             next_id(),
             None,
         )?;
+        let builtin_administrator = checkbox(
+            parent,
+            &crate::tr!("启用内置 Administrator 账户"),
+            next_id(),
+        )?;
+        let builtin_administrator_name_label =
+            label(parent, &crate::tr!("Administrator 账户名"), next_id())?;
+        let builtin_administrator_name = edit(
+            parent,
+            &initial.builtin_administrator.account_name,
+            next_id(),
+        )?;
+        let builtin_administrator_password_label =
+            label(parent, &crate::tr!("Administrator 密码"), next_id())?;
+        let builtin_administrator_password = password_edit(
+            parent,
+            initial.builtin_administrator.password.expose_secret(),
+            next_id(),
+        )?;
+        let builtin_administrator_auto_logon =
+            checkbox(parent, &crate::tr!("自动登录内置 Administrator"), next_id())?;
         let volume_label = check_edit(
             parent,
             &crate::tr!("自定义系统盘卷标"),
@@ -347,6 +376,12 @@ impl AdvancedPage {
                 custom_files,
                 identity_header,
                 username,
+                builtin_administrator,
+                builtin_administrator_name_label,
+                builtin_administrator_name,
+                builtin_administrator_password_label,
+                builtin_administrator_password,
+                builtin_administrator_auto_logon,
                 volume_label,
                 windows_7_header,
                 windows_7_usb3,
@@ -405,6 +440,22 @@ impl AdvancedPage {
         relocalize_check_edit(h.custom_files, &crate::tr!("复制自定义文件目录"));
         set_text(h.identity_header, &crate::tr!("用户与系统盘"));
         relocalize_check_edit(h.username, &crate::tr!("自定义用户名"));
+        set_text(
+            h.builtin_administrator,
+            &crate::tr!("启用内置 Administrator 账户"),
+        );
+        set_text(
+            h.builtin_administrator_name_label,
+            &crate::tr!("Administrator 账户名"),
+        );
+        set_text(
+            h.builtin_administrator_password_label,
+            &crate::tr!("Administrator 密码"),
+        );
+        set_text(
+            h.builtin_administrator_auto_logon,
+            &crate::tr!("自动登录内置 Administrator"),
+        );
         relocalize_check_edit(h.volume_label, &crate::tr!("自定义系统盘卷标"));
 
         set_text(h.windows_7_header, &crate::tr!("Windows 7 兼容选项"));
@@ -492,6 +543,19 @@ impl AdvancedPage {
             &data.custom_files_path,
         );
         apply_check_edit(h.username, data.custom_username, &data.username);
+        set_checked(h.builtin_administrator, data.builtin_administrator.enabled);
+        set_text(
+            h.builtin_administrator_name,
+            &data.builtin_administrator.account_name,
+        );
+        set_text(
+            h.builtin_administrator_password,
+            data.builtin_administrator.password.expose_secret(),
+        );
+        set_checked(
+            h.builtin_administrator_auto_logon,
+            data.builtin_administrator.auto_logon,
+        );
         apply_check_edit(h.volume_label, data.custom_volume_label, &data.volume_label);
         apply_check_edit(
             h.windows_7_usb3,
@@ -541,6 +605,14 @@ impl AdvancedPage {
         (data.import_registry_file, data.registry_file_path) = read_required_pair(h.registry_file);
         (data.import_custom_files, data.custom_files_path) = read_required_pair(h.custom_files);
         (data.custom_username, data.username) = read_required_pair(h.username);
+        data.builtin_administrator.enabled = is_checked(h.builtin_administrator);
+        data.builtin_administrator.account_name =
+            read_text(h.builtin_administrator_name).trim().to_string();
+        data.builtin_administrator.password = read_text(h.builtin_administrator_password).into();
+        data.builtin_administrator.auto_logon = is_checked(h.builtin_administrator_auto_logon);
+        if data.builtin_administrator.enabled {
+            data.custom_username = false;
+        }
         (data.custom_volume_label, data.volume_label) = read_required_pair(h.volume_label);
         (data.win7_inject_usb3_driver, data.win7_usb3_driver_path) =
             read_required_pair(h.windows_7_usb3);
@@ -566,7 +638,6 @@ impl AdvancedPage {
             h.custom_drivers,
             h.registry_file,
             h.custom_files,
-            h.username,
             h.volume_label,
             h.windows_7_usb3,
             h.windows_7_nvme,
@@ -577,6 +648,37 @@ impl AdvancedPage {
                 let _ = EnableWindow(browse.button, enabled);
             }
         }
+
+        let builtin_enabled = self.context.unattended_enabled
+            && self.context.builtin_administrator_available
+            && is_checked(h.builtin_administrator);
+        if builtin_enabled {
+            set_checked(h.username.check, false);
+        }
+        let _ = EnableWindow(h.username.check, !builtin_enabled);
+        let _ = EnableWindow(
+            h.username.edit,
+            !builtin_enabled && is_checked(h.username.check),
+        );
+        for control in [
+            h.builtin_administrator_name_label,
+            h.builtin_administrator_name,
+            h.builtin_administrator_password_label,
+            h.builtin_administrator_password,
+            h.builtin_administrator_auto_logon,
+        ] {
+            let _ = EnableWindow(control, builtin_enabled);
+        }
+    }
+
+    pub unsafe fn handle_dependency_toggle(&self, control: HWND) {
+        let h = &self.handles;
+        if control == h.builtin_administrator && is_checked(control) {
+            set_checked(h.username.check, false);
+        } else if control == h.username.check && is_checked(control) {
+            set_checked(h.builtin_administrator, false);
+        }
+        self.update_dependencies();
     }
 
     pub unsafe fn show(&self, visible: bool) {
@@ -600,6 +702,12 @@ impl AdvancedPage {
         for pair in self.check_edits() {
             apply_control_theme(pair.edit, palette, NativeControlKind::Field);
         }
+        for control in [
+            self.handles.builtin_administrator_name,
+            self.handles.builtin_administrator_password,
+        ] {
+            apply_control_theme(control, palette, NativeControlKind::Field);
+        }
     }
 
     /// Returns whether `control` toggles one of the conditional Edit/Browse rows.
@@ -608,9 +716,11 @@ impl AdvancedPage {
     /// forwarded to the top-level window.  Keeping ownership testing here avoids coupling the
     /// controller to the page's generated control IDs.
     pub fn owns_dependency_toggle(&self, control: HWND) -> bool {
-        self.check_edits()
-            .into_iter()
-            .any(|pair| pair.check == control)
+        control == self.handles.builtin_administrator
+            || self
+                .check_edits()
+                .into_iter()
+                .any(|pair| pair.check == control)
     }
 
     pub unsafe fn apply_font(&self, font: HFONT, heading_font: HFONT) {
@@ -747,6 +857,36 @@ impl AdvancedPage {
             dpi,
         );
         layout_pair(h.username, x, &mut bottoms[column], grid.column_width, dpi);
+        layout_check(
+            h.builtin_administrator,
+            x,
+            &mut bottoms[column],
+            grid.column_width,
+            dpi,
+        );
+        layout_labeled_edit(
+            h.builtin_administrator_name_label,
+            h.builtin_administrator_name,
+            x,
+            &mut bottoms[column],
+            grid.column_width,
+            dpi,
+        );
+        layout_labeled_edit(
+            h.builtin_administrator_password_label,
+            h.builtin_administrator_password,
+            x,
+            &mut bottoms[column],
+            grid.column_width,
+            dpi,
+        );
+        layout_check(
+            h.builtin_administrator_auto_logon,
+            x + s(20),
+            &mut bottoms[column],
+            (grid.column_width - s(20)).max(0),
+            dpi,
+        );
         layout_pair(
             h.volume_label,
             x,
@@ -912,6 +1052,11 @@ impl AdvancedPage {
                 set_checked(control, false);
             }
         }
+        let builtin_available = unattended && self.context.builtin_administrator_available;
+        let _ = EnableWindow(h.builtin_administrator, builtin_available);
+        if !builtin_available {
+            set_checked(h.builtin_administrator, false);
+        }
 
         for control in self.windows_7_controls() {
             let _ = ShowWindow(
@@ -983,6 +1128,8 @@ impl AdvancedPage {
         controls.extend(self.check_edits().into_iter().map(|pair| pair.check));
         controls.extend([
             h.storage_drivers,
+            h.builtin_administrator,
+            h.builtin_administrator_auto_logon,
             h.windows_7_acpi,
             h.windows_7_storage,
             h.windows_7_uefi,
@@ -1023,6 +1170,12 @@ impl AdvancedPage {
                 .into_iter()
                 .filter_map(|pair| pair.browse.map(|browse| browse.button)),
         );
+        controls.extend([
+            self.handles.builtin_administrator_name_label,
+            self.handles.builtin_administrator_name,
+            self.handles.builtin_administrator_password_label,
+            self.handles.builtin_administrator_password,
+        ]);
         controls
     }
 }
@@ -1064,12 +1217,25 @@ unsafe fn checkbox(parent: HWND, text: &str, id: u16) -> windows::core::Result<H
 }
 
 unsafe fn edit(parent: HWND, text: &str, id: u16) -> windows::core::Result<HWND> {
+    edit_with_style(parent, text, id, 0)
+}
+
+unsafe fn password_edit(parent: HWND, text: &str, id: u16) -> windows::core::Result<HWND> {
+    edit_with_style(parent, text, id, ES_PASSWORD as u32)
+}
+
+unsafe fn edit_with_style(
+    parent: HWND,
+    text: &str,
+    id: u16,
+    extra_style: u32,
+) -> windows::core::Result<HWND> {
     let text = wide(text);
     let hwnd = CreateWindowExW(
         WINDOW_EX_STYLE(WS_EX_CLIENTEDGE.0 | 0x0000_0004),
         w!("EDIT"),
         PCWSTR(text.as_ptr()),
-        WINDOW_STYLE((WS_CHILD | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32),
+        WINDOW_STYLE((WS_CHILD | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32 | extra_style),
         0,
         0,
         0,
@@ -1200,6 +1366,22 @@ unsafe fn layout_pair(pair: CheckEdit, x: i32, y: &mut i32, width: i32, dpi: u32
     *y += s(30);
 }
 
+unsafe fn layout_labeled_edit(label: HWND, edit: HWND, x: i32, y: &mut i32, width: i32, dpi: u32) {
+    let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
+    let field_height = InnoMetrics::for_dpi(dpi).field_height;
+    let _ = MoveWindow(label, x + s(20), *y, (width - s(20)).max(0), s(24), true);
+    *y += s(24);
+    let _ = MoveWindow(
+        edit,
+        x + s(20),
+        *y,
+        (width - s(20)).max(0),
+        field_height,
+        true,
+    );
+    *y += s(30);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,6 +1390,7 @@ mod tests {
     fn context_defaults_do_not_expose_version_specific_options() {
         let context = AdvancedPageContext::default();
         assert!(context.unattended_enabled);
+        assert!(context.builtin_administrator_available);
         assert!(!context.wifi_available);
         assert!(!context.show_windows_7);
         assert!(!context.show_xp);

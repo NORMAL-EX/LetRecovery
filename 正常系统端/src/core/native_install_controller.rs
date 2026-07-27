@@ -69,6 +69,12 @@ pub enum InstallValidationError {
     PeUnavailable,
     MissingPeSelection,
     InvalidCustomUnattend,
+    BuiltInAdministratorRequiresUnattended,
+    BuiltInAdministratorUnsupportedSource,
+    BuiltInAdministratorConflictsWithCustomUnattend,
+    ConflictingAdministratorOptions,
+    InvalidBuiltInAdministratorName,
+    InvalidBuiltInAdministratorPassword,
     PartitionRefreshPending,
     PartitionRefreshFailed,
     PcaDetectionPending,
@@ -90,6 +96,28 @@ impl std::fmt::Display for InstallValidationError {
             Self::PeUnavailable => crate::tr!("安装到当前系统分区需要可用的 PE 环境。"),
             Self::MissingPeSelection => crate::tr!("请选择用于安装的 PE 环境。"),
             Self::InvalidCustomUnattend => crate::tr!("自定义无人值守文件无效。"),
+            Self::BuiltInAdministratorRequiresUnattended => {
+                crate::tr!("启用内置 Administrator 账户需要同时启用无人值守安装。")
+            }
+            Self::BuiltInAdministratorUnsupportedSource => {
+                crate::tr!(
+                    "内置 Administrator 账户选项仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。"
+                )
+            }
+            Self::BuiltInAdministratorConflictsWithCustomUnattend => {
+                crate::tr!("启用内置 Administrator 账户时不能同时使用自定义无人值守文件。")
+            }
+            Self::ConflictingAdministratorOptions => {
+                crate::tr!("“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。")
+            }
+            Self::InvalidBuiltInAdministratorName => {
+                crate::tr!("内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。")
+            }
+            Self::InvalidBuiltInAdministratorPassword => {
+                crate::tr!(
+                    "请为内置 Administrator 账户设置有效密码（最长 127 个字符，不能包含换行）。"
+                )
+            }
             Self::PartitionRefreshPending => crate::tr!("正在刷新分区信息，请稍候。"),
             Self::PartitionRefreshFailed => crate::tr!("刷新分区信息失败，请手动刷新后重试。"),
             Self::PcaDetectionPending => crate::tr!("正在检测 PCA 兼容性，请稍候。"),
@@ -167,6 +195,42 @@ impl NativeInstallState {
             .ok_or(InstallValidationError::UnstableTargetIdentity)?;
         let is_xp_i386 = self.xp_i386_source.is_some();
         let is_gho = has_extension(&self.image_path, &["gho", "ghs"]);
+        let builtin = &self.prefs.advanced_options.builtin_administrator;
+        if builtin.enabled {
+            if !self.prefs.unattended_install {
+                return Err(InstallValidationError::BuiltInAdministratorRequiresUnattended);
+            }
+            if is_xp_i386
+                || is_gho
+                || self
+                    .selected_image
+                    .is_some_and(|image| image.major_version == Some(5))
+            {
+                return Err(InstallValidationError::BuiltInAdministratorUnsupportedSource);
+            }
+            if !self.custom_unattend_path.trim().is_empty() {
+                return Err(
+                    InstallValidationError::BuiltInAdministratorConflictsWithCustomUnattend,
+                );
+            }
+            if self.prefs.advanced_options.custom_username {
+                return Err(InstallValidationError::ConflictingAdministratorOptions);
+            }
+            if let Err(error) = builtin.validate() {
+                use lr_core::unattend_account::BuiltInAdministratorValidationError as Error;
+                return Err(match error {
+                    Error::MissingAccountName
+                    | Error::AccountNameTooLong
+                    | Error::InvalidAccountName
+                    | Error::ReservedAccountName => {
+                        InstallValidationError::InvalidBuiltInAdministratorName
+                    }
+                    Error::MissingPassword | Error::PasswordTooLong | Error::InvalidPassword => {
+                        InstallValidationError::InvalidBuiltInAdministratorPassword
+                    }
+                });
+            }
+        }
         if !is_xp_i386 && !is_gho && self.selected_image.is_none() {
             return Err(InstallValidationError::MissingImageVolume);
         }
@@ -349,6 +413,7 @@ impl StartInstallIntent {
             } else {
                 String::new()
             },
+            builtin_administrator: advanced.builtin_administrator.clone(),
             volume_label: if advanced.custom_volume_label {
                 advanced.volume_label.clone()
             } else {
@@ -614,5 +679,66 @@ mod tests {
         assert!(!config.is_xp_i386);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
         assert_eq!(config.pca_compat_target_build, 26_100);
+    }
+
+    #[test]
+    fn builtin_administrator_requires_safe_unattended_wim_flow() {
+        let mut state = base_state();
+        state.prefs.advanced_options.builtin_administrator.enabled = true;
+        state.prefs.advanced_options.builtin_administrator.password = "test-password".into();
+        state.prefs.unattended_install = false;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::BuiltInAdministratorRequiresUnattended
+        );
+
+        state.prefs.unattended_install = true;
+        state.custom_unattend_path = "D:\\autounattend.xml".to_string();
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::BuiltInAdministratorConflictsWithCustomUnattend
+        );
+
+        state.custom_unattend_path.clear();
+        state.prefs.advanced_options.custom_username = true;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::ConflictingAdministratorOptions
+        );
+
+        state.prefs.advanced_options.custom_username = false;
+        state.image_path = "D:\\backup.gho".to_string();
+        state.selected_image = None;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::BuiltInAdministratorUnsupportedSource
+        );
+    }
+
+    #[test]
+    fn builtin_administrator_secret_reaches_only_the_install_session_config() {
+        let mut state = base_state();
+        state.prefs.advanced_options.builtin_administrator.enabled = true;
+        state
+            .prefs
+            .advanced_options
+            .builtin_administrator
+            .account_name = "LocalAdmin".to_string();
+        state.prefs.advanced_options.builtin_administrator.password = "one-time-secret".into();
+        state
+            .prefs
+            .advanced_options
+            .builtin_administrator
+            .auto_logon = true;
+
+        let intent = state.start_intent().unwrap();
+        let config = intent.to_install_config("images\\install.wim", 1, None);
+        assert!(config.builtin_administrator.enabled);
+        assert_eq!(config.builtin_administrator.account_name, "LocalAdmin");
+        assert_eq!(
+            config.builtin_administrator.password.expose_secret(),
+            "one-time-secret"
+        );
+        assert!(config.builtin_administrator.auto_logon);
     }
 }

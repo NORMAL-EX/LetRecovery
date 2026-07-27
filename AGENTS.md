@@ -84,6 +84,7 @@ LetRecovery 是具有管理员权限的 Windows 系统安装、备份和磁盘�
 - 联网下载和受管 PE 缓存声明校验值后，计算失败或不匹配必须失败关闭。“未声明校验值”和“计算出错”必须是不同状态。服务端提供 MD5 或 SHA-256 时必须随目录项一起传递到 UI、下载器和缓存校验边界；服务端未声明哈希时 UI 不得显示“已校验/已验证”。随发布包提供的 `bin/pe` 是明确的用户管理边界，允许用户替换或修改 WIM，因此不强制匹配远端哈希，但仍必须限制为安全文件名和普通文件；联网文件不得下载到该目录来绕过校验。
 - 自动下载默认只允许 HTTPS。若确需 HTTP，必须通过明确兼容选项启用并显示警告。
 - 正常系统端和 PE 端已有配置格式需要向后兼容；新字段应有安全默认值，并为旧配置增加解析测试。
+- 内置 Administrator 高级选项只允许在 Windows 7 及以上 WIM/ESD/SWM 的内置无人值守路径启用；不得与自定义无人值守文件、普通“自定义用户名”、GHO/GHS 或 XP/2003 路径并用。账户改名必须按 RID-500 身份定位，不能依赖本地化账户显示名；密码只允许存在于当前安装会话配置和 Windows Setup 无人值守文件中，持久化用户偏好、调试输出和日志必须脱敏，安装清理仍需删除会话文件。
 - 历史配置字段 `disable_windows_defender` 的用户语义固定为“仅深度移除 Microsoft Defender Antivirus 杀毒引擎”。实现只能处理 `WinDefend`、`WdBoot`、`WdFilter`、`WdNisDrv`、`WdNisSvc` 及同目录下随引擎演进的 `WdAiNisDrv`、`WdDevFlt`、`KslD`，以及 Defender 引擎目录、驱动目录和 Defender 自身计划任务；必须保留 `SecurityHealthService`、`wscsvc`、`mpssvc`、UAC、VBS、SmartScreen、System Guard、Web Threat Defense、Pluton 和 Microsoft Defender for Endpoint (`Sense`)。两端必须复用 `lr-core::defender_removal`，仅允许对完整离线 Windows 目标执行；目标盘、控制集、任务 GUID、重解析点、ACL 修改和删除后状态都要严格验证，所选操作任何一步失败时安装流程必须失败关闭，不能再把旧策略键写入或删除失败伪装成成功。
 - 随包存储控制器驱动只允许来自已记录 SHA-256 和 Microsoft Windows Hardware Compatibility Publisher 签名的 Microsoft Update Catalog 包；正常端、PE 端和存储驱动工具必须先通过 SetupAPI 获取当前机器 PCI 硬件 ID，再由 `lr-core::storage_driver_match` 选择唯一匹配目录，禁止对 `bin/drivers/storage_controller` 做整目录递归注入。PE 启动后必须在 BitLocker、标记和分区扫描之前用微软支持的 `drvload.exe <匹配 INF>` 把同一包只加载到当前 WinPE 会话，使 VMD 后的磁盘可见；不得把驱动持久注入 PE WIM。当前 `9A0B/09AB` 使用 20.2.4.1019 兼容包，`467F/A77F/7D0B/AD0B` 使用 20.2.12.1036；AMD、Apple、VirtIO、仅凭机型名称或无法唯一确认时必须跳过或拒绝。旧通用目录和 Windows 7 UefiSeven/USB3/NVMe 发布资源不得恢复；XP/2003 专用驱动边界保持独立。
 - PCA2011/PCA2023、BIOS/UEFI、MBR/GPT、BitLocker 和 XP/2003 路径都是兼容性边界，不得根据单一新系统环境简化掉旧路径。
@@ -229,6 +230,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 ### `lr-core` 共享核心
 
 - `lr-core/src/lib.rs`：共享库根模块，声明并导出两端共用能力。
+- `lr-core/src/unattend_account.rs`：内置 RID-500 Administrator 高级选项、敏感字符串脱敏与非持久化边界、账户名/密码验证，以及两端复用的 AdministratorPassword、AutoLogon 和安全编码改名无人值守片段生成。
 - `lr-core/src/bl_passthrough.rs`：序列化和解析 BitLocker 恢复密钥透传文件；负责去重、注释和空项兼容。
 - `lr-core/src/boot.rs`：共享 XP 引导写入及可编辑修复引导脚本执行。
 - `lr-core/src/boot_pca.rs`：PCA2011/PCA2023 签名与 EFI 架构识别、固件信任评估、ESP 临时挂载、模式决策、BCDBoot 调用和完整 BootEx 兼容回退。
@@ -310,7 +312,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - 共享原生控件回归约束：Inno 自动单选标记按约 13px 的 96-DPI 逻辑基线缩放，保留 USER32 分组、键盘、通知和无障碍语义；所有自绘导航及命令按钮稳定使用原生箭头光标，跨越抗锯齿圆角不得在手形与箭头之间闪烁；固定只读多行报告保留原生文本、选择和 `WS_VSCROLL`，但移除 Edit 方形非客户区并由列表式明暗圆角外框收口；ListView、ListBox 和只读滚动报告的非客户区滚动条继续由 USER32/comctl32 原生绘制，悬停动画、滚轮、拖动和滚动消息必须先完成默认处理，再在最外层最后覆盖确定性明暗圆角边框，禁止接管滚动条或让右侧圆角退化为方角、黑块和颗粒；无损扩大 C 盘的普通滑块 tick 只更新字段、滑块和命令状态，仅在跨越移动分区警告阈值时重新布局；密码重置账户选择不得重新填充库存或重新测量窗口，一键分区“调整大小”按钮的启禁变化只局部无擦除重绘并保持四边同帧闭合。
 - 所有 report ListView 必须启用 `LVS_EX_DOUBLEBUFFER`、`WS_CLIPCHILDREN` 与 `WS_CLIPSIBLINGS`；Header 禁用库存主题动画并由单一确定性入口绘制，Header 绘制不得反向失效整表。固定圆角外框必须由真实 ListView 上方的同父 STATIC 独占，以空心 HRGN 只覆盖外框像素，并返回 `HTTRANSPARENT` 把命中测试交还给真实列表；覆盖层必须持续同步真实列表的可见性、启用、位置、尺寸与 DPI，并在列表窗口位置变化后重新升到其上方。真实 ListView 保持原父级、控件 ID、通知、选择、键盘、滚动和无障碍语义，只缩入 DPI 缩放的外框宽度。`WM_HSCROLL`、`WM_VSCROLL`、滚轮和 `SB_THUMBTRACK` 必须交由 comctl32 默认处理，高频分支不得逐消息失效整表、调用 `UpdateWindow`、同步补画 Header/外框或直接竞争重定向表面，避免原生像素位移把固定外框复制进项目行。UxTheme 滚动条定时器仍只调用默认过程；深色滚动条保留 comctl32 v6 原生语义并使用 `DarkMode_Explorer`，不得使用只支持旧 comctl32 的 FlatSB 颜色覆盖。
 - `正常系统端/src/native_ui/pages/mod.rs`：正常端原生页面模块声明。
-- `正常系统端/src/native_ui/pages/advanced.rs`：安装高级选项的原生分组控件、条件显示、运行期完整本地化、依赖启用、Wi-Fi SSID 状态和 `AdvancedOptionsData` 双向映射；复选框和单选框必须接入 `theme.rs` 的确定性明暗绘制器，使用与主安装页一致的 24px HWND 高度，并在页面最终显示后重申当前主题，运行期主题切换后不得保留旧的黑色标题或形成不同的图元对齐；条件 Edit/Browse 的复选框点击由窗口控制器转发后立即更新启用态，Edit 和浏览按钮必须使用共享 `InnoMetrics` 的 23px 字段高度，使原生单行 Edit 文本与其他页面相同地上下居中，禁用 Edit 仍保持与普通字段一致的底色和边框；为脚本、驱动和自定义内容路径生成明确的浏览意图并接收窗口控制器回填，返回时对“已勾选但必填文本为空”的配对选项同步取消并持久化关闭，不自行打开文件对话框或执行离线系统写入。
+- `正常系统端/src/native_ui/pages/advanced.rs`：安装高级选项的原生分组控件、条件显示、运行期完整本地化、依赖启用、Wi-Fi SSID 状态和 `AdvancedOptionsData` 双向映射；内置 Administrator 账户名、掩码密码和自动登录控件只在兼容的内置无人值守路径可用，并与普通自定义用户名互斥；复选框和单选框必须接入 `theme.rs` 的确定性明暗绘制器，使用与主安装页一致的 24px HWND 高度，并在页面最终显示后重申当前主题，运行期主题切换后不得保留旧的黑色标题或形成不同的图元对齐；条件 Edit/Browse 的复选框点击由窗口控制器转发后立即更新启用态，Edit 和浏览按钮必须使用共享 `InnoMetrics` 的 23px 字段高度，使原生单行 Edit 文本与其他页面相同地上下居中，禁用 Edit 仍保持与普通字段一致的底色和边框；为脚本、驱动和自定义内容路径生成明确的浏览意图并接收窗口控制器回填，返回时对“已勾选但必填文本为空”的配对选项同步取消并持久化关闭，不自行打开文件对话框或执行离线系统写入。
 - `正常系统端/src/native_ui/pages/backup.rs`：系统备份原生输入页、可刷新且保留稳定选择的分区库存、运行期列头、动态行与控件本地化，表格列按 DPI 最低可读宽度和可用剩余空间响应式分配，避免数值被挤成省略号而右侧闲置；默认名称和描述使用同一稳定时间戳按当前语言生成，切换语言时只更新仍等于旧默认值的字段，逐字段保留用户输入；负责格式/路径/多 PE 状态读取、明确校验及到既有 `BackupConfig` 的无副作用转换；保留桌面端默认当前系统分区、PE 中仅有一个 Windows 分区时才默认选择且隐藏无意义下拉框的规则，并公开所选非 Windows 源警告刷新入口，不显示对用户无决策价值的“将通过 PE 环境备份”路由提示。
 - `正常系统端/src/native_ui/pages/download.rs`：在线下载原生分类、资源列表和保存位置控件，按分类隐藏空白或重复的类型/大小列并响应式分配剩余列宽，支持运行期完整本地化，只产生下载/安装意图。
 - `正常系统端/src/native_ui/pages/easy_mode.rs`：简易模式的原生系统/卷选择、可选 Logo、说明和主操作控件，支持明暗主题、DPI 与运行期本地化；组合框仅在目录实际变化时重建内容且选择路由只响应 `CBN_SELCHANGE`，程序化选择后完整重绘闭合字段，避免展开期间重建或暗色箭头区域造成旧项残影；异步快照更新必须服从页面可见状态，不能把提示或 Logo 重新显示到普通安装页；启用状态只在关于设置页修改，系统安装页不显示关闭开关，只产生页面命令。
@@ -320,7 +322,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `正常系统端/src/native_ui/pages/progress.rs`：原生长任务标题、说明、双层进度、运行/取消/成功/失败状态和稳定命令栏；只更新实际变化的文本、整数百分比、命令状态和进度区域，运行与完成保持同一 Inno 绿色；长任务使用完整客户区且不得透出普通页面的导航分隔线，下载无后续动作时显示本地化返回按钮而不暴露内部枚举，终态只生成重启、打开下载文件或返回等显式后续意图，不自行执行系统操作。
 - `正常系统端/src/core/mod.rs`：正常端核心模块声明。
 - `正常系统端/src/core/app_config.rs`：`config.json` 用户偏好、语言、日志、外观和默认选项的读取保存；小白模式与高级选项保持互斥并归一旧配置冲突；下载线程字段向后兼容旧配置并在加载与保存入口归一到 8/16/32 三档，旧配置保持原有 16 连接默认值。
-- `正常系统端/src/core/advanced_options.rs`：安装高级选项的序列化兼容、离线系统应用、脚本/文件暂存、Wi-Fi 瞬态配置和历史 XP/Win7 兼容业务边界；不再包含 egui 或其他渲染代码，原生界面映射由 `native_ui/pages/advanced.rs` 负责。
+- `正常系统端/src/core/advanced_options.rs`：安装高级选项的序列化兼容、离线系统应用、脚本/文件暂存、Wi-Fi 瞬态配置、内置 Administrator 非持久化密码选项和历史 XP/Win7 兼容业务边界；不再包含 egui 或其他渲染代码，原生界面映射由 `native_ui/pages/advanced.rs` 负责。
 - `正常系统端/src/core/appx_legacy_impl.rs`：历史在线/离线 APPX 库存、关键包判断和移除实现，仅由受限兼容桥调用；新的执行入口必须优先经过 `native_appx.rs` 的 fresh 库存与关键包复核。
 - `正常系统端/src/core/bcdedit.rs`：定位和挂载 ESP、BCD/BCDBoot 修复、活动分区处理及 PCA 引导源选择。
 - `正常系统端/src/core/bitlocker.rs`：BitLocker 卷枚举、状态解析、解锁、暂停/恢复保护、解密及恢复密钥处理。
@@ -336,7 +338,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `正常系统端/src/core/hardware_info/names.rs`：硬件厂商和 GPU 名称的纯规范化及占位符识别。
 - `正常系统端/src/core/hardware_inspector.rs`：详细硬件检测的只读快照边界，组合既有硬件摘要、CPUID intrinsic、严格边界检查的 `RSMB` 固件表解析、按 LUID 去重的 DXGI 适配器，以及标准 NVMe Identify/SMART 健康日志查询；解析 128 位寿命计数器并显示累计读写、健康度、温度、通电和错误统计，不加载驱动、不访问硬件端口、不执行磁盘写入。
 - `正常系统端/src/core/image_verify.rs`：识别 WIM/ESD/SWM/GHO 等镜像并执行校验、进度和结果汇总；支持调用方持有且不会被内部复位的取消标记，并把它传入 WIM/ESD/SWM 的 libwim 校验回调。
-- `正常系统端/src/core/install_config.rs`：正常端到 PE 的安装、备份、扩容配置，安装标记、资源暂存和无人值守文件验证；XP 文本模式交接显式记录目录型源标记和 I386/AMD64 安全子目录；扫描覆盖 A-Z 并用 `SessionId` 唯一绑定安装标记与配置，旧空会话配置仅在单一无歧义任务时兼容，所有写入 INI 的值在落盘前拒绝 CR/LF/NUL 注入；备份与扩容交接配置使用同目录原子替换并返回可精确恢复旧文件或仅删除本次新文件的事务凭据，不删除数据目录中的其他用户文件；回滚会独立尝试恢复配置与标记并合并错误，避免单项失败阻断另一项恢复。
+- `正常系统端/src/core/install_config.rs`：正常端到 PE 的安装、备份、扩容配置，安装标记、资源暂存和无人值守文件验证；当前安装会话可暂存内置 Administrator 账户名、密码与自动登录选择，但密码不得进入持久化应用配置或日志；XP 文本模式交接显式记录目录型源标记和 I386/AMD64 安全子目录；扫描覆盖 A-Z 并用 `SessionId` 唯一绑定安装标记与配置，旧空会话配置仅在单一无歧义任务时兼容，所有写入 INI 的值在落盘前拒绝 CR/LF/NUL 注入；备份与扩容交接配置使用同目录原子替换并返回可精确恢复旧文件或仅删除本次新文件的事务凭据，不删除数据目录中的其他用户文件；回滚会独立尝试恢复配置与标记并合并错误，避免单项失败阻断另一项恢复。
 - `正常系统端/src/core/iso.rs`：通过 Windows Virtual Disk/COM 能力挂载、查找和卸载 ISO。
 - `正常系统端/src/core/nvidia_driver.rs`：GPU 枚举、厂商识别、NVIDIA 驱动设备和软件清理支持。
 - `正常系统端/src/core/pe.rs`：区分用户可定制的随包 PE 与严格校验的受管下载缓存，协调 PE 文件准备、启动项安装和进入 PE。
@@ -356,7 +358,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `正常系统端/src/core/native_wifi.rs`：使用 `netsh` 只读检测当前已连接 Wi-Fi，并在碰撞安全临时目录导出一次性明文 profile XML；XML 只在内存中传递且所有退出路径清理临时目录，开发测试构建禁止宿主探测和导出。
 - `正常系统端/src/core/native_expand_c_controller.rs`：复用旧逻辑只读分析 C 盘、相邻未分配空间及后方可收缩分区，区分直接扩展与需要搬移数据的容量上限；不执行缩小、移动、PE 准备或重启，开发测试构建在读取宿主磁盘前拒绝。
 - `正常系统端/src/core/native_expand_c_executor.rs`：无损扩大 C 盘的强类型 PE 交接 worker；执行前重新分析并比对容量快照，复验受管 PE，保持最大容量编码为零的旧配置语义并安装既有 PE 启动项；PE/BCD 启动项安装失败时精确回滚本次扩容 marker/INI，开发测试构建在建线程和任何宿主 I/O 前拒绝。
-- `正常系统端/src/core/native_install_controller.rs`：原生安装页输入快照的校验、Direct/ViaPE 路由，以及保持 XP/GHO/PCA/驱动/无人值守字段兼容的安装意图与配置转换；原版 XP I386/AMD64 选择当前系统盘时走标准 ViaPE 路由而不是桌面原地写盘；PCA 检测只在镜像支持、启用引导修复且目标可能使用 UEFI 时阻断，不能让持久化选择误拦 GHO、XP 或 Legacy 安装。
+- `正常系统端/src/core/native_install_controller.rs`：原生安装页输入快照的校验、Direct/ViaPE 路由，以及保持 XP/GHO/PCA/驱动/无人值守字段兼容的安装意图与配置转换；内置 Administrator 在写盘前校验无人值守、镜像族、外部应答文件、普通自定义用户名、账户名与密码的兼容边界；原版 XP I386/AMD64 选择当前系统盘时走标准 ViaPE 路由而不是桌面原地写盘；PCA 检测只在镜像支持、启用引导修复且目标可能使用 UEFI 时阻断，不能让持久化选择误拦 GHO、XP 或 Legacy 安装。
 - `正常系统端/src/core/native_install_executor.rs`：原生安装意图的 Direct/ViaPE 有序阶段计划、BitLocker/PCA/稳定目标安全门、Direct 驱动导出先于目标 DiskPart/格式化的保护顺序、按实际耗时把镜像应用和源复制置于主要区间的加权总进度、进度取消消息和可注入副作用后端；`InstallExecutionError::user_message` 按失败类别和阶段提供不泄露底层诊断细节的本地化用户摘要，源镜像校验失败还必须展示不含路径的常见原因与固定诊断代码，使单张截图可供支持判断，完整 code/detail 继续保留在 `Display` 日志边界，开发测试构建强制拒绝执行。
 - `正常系统端/src/core/native_partition_copy.rs`：原生分区对拷的只读展示库存，以及严格盘符、fresh 卷库存、目标空间、断点来源验证、受限日志和可注入执行边界；展示库存不授予执行权限，确认后仍须 fresh 复核，执行时可向原生窗口流式回报进度，并把完成、部分失败和断点续传结果显式区分；开发测试构建在宿主 I/O 前拒绝。
 - `正常系统端/src/core/native_nvidia_removal.rs`：恢复迁移前英伟达驱动清理语义的强类型当前/离线 Windows 目标、仅含真实 NVIDIA GPU 型号的启动硬件摘要和既有后端请求适配；执行范围固定为原业务支持的全部 NVIDIA 驱动，不虚构单设备或 NVIDIA 软件卸载能力，开发测试构建在宿主硬件读取前拒绝。
@@ -365,7 +367,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `正常系统端/src/core/native_quick_partition_dialog.rs`：一键分区专属原生对话框的纯编辑状态，恢复旧版磁盘自动选择、分区表默认值、数据分区拆分、500 MB ESP、盘符选择、删除和调整范围语义；生成 `QuickPartitionRequest` 或带磁盘指纹的已有分区调整请求，并为后者提供 fresh 库存、磁盘/分区身份、当前大小、已用空间和相邻范围复核后才调用旧调整实现的可注入生产边界，开发测试构建在宿主 I/O 前拒绝。
 - `正常系统端/src/core/native_storage_driver.rs`：原生存储控制器驱动工具的固定随包 `bin/drivers/storage_controller` 来源、离线 Windows 目标及 fresh 库存复核计划；只读检查可注入且开发测试构建在宿主 I/O 前拒绝，本模块不调用 DISM 或写入驱动。
 - `正常系统端/src/core/native_install_backend.rs`：原生安装执行器的生产后端阶段实现；复用既有镜像、格式化、驱动、引导和高级选项边界，原版 XP/2003 当前系统盘重装会递归拒绝链接和特殊项、统计空间、把 I386/AMD64 及 x64 同级 I386 复制到会话唯一临时目录、复验后原子提交给 PE；ViaPE 安装源若与目标数据区路径相同必须按已存在源复核而非删除或复制自己，其他路径必须复制到会话唯一暂存文件，在复制、落盘、可取消复读哈希和镜像结构校验期间连续汇报进度，验证完成后再原子发布且不做无价值的第三次发布后哈希。Direct 安装的 Windows 10/11 默认无人值守在写入前必须通过 `lr-core::offline_international` 读取已释放目标的国际化设置，不能从当前正常系统或 WinPE 宿主继承；显式保留 Wi-Fi 瞬态 profile，恢复后台 fresh BitLocker 门禁、无恢复密钥时的完全解密等待、DiskPart 后按稳定分区身份重定位/分配盘符，以及 WIM/GHO/校验长任务的实时进度与安全取消反馈；WIM/ESD/SWM 应用和校验贯穿调用方原子取消标记，libwim 可中止当前操作，取消后禁止引擎回退和后续安装阶段；用户请求的主机驱动导出和后续导入必须验证非零结果并失败关闭，导入或保存失败时保留暂存备份，开发测试构建仍保持无副作用。
-- `正常系统端/src/core/native_install_compat.rs`：Direct 安装的默认无人值守 XML、版本化用户驱动目录、MBR 零签名/XP active 清理及 DiskPart→format.com 回退的无副作用兼容计划和解析；Windows 10/11 渲染必须显式接收已验证国际化设置并完整写入 `Microsoft-Windows-International-Core` 与时区，缺失时失败关闭，不得恢复只对 Server 生效的 `HideLocalAccountScreen`。
+- `正常系统端/src/core/native_install_compat.rs`：Direct 安装的默认无人值守 XML、版本化用户驱动目录、MBR 零签名/XP active 清理及 DiskPart→format.com 回退的无副作用兼容计划和解析；内置 Administrator 无人值守片段必须复用 `lr-core::unattend_account`；Windows 10/11 渲染必须显式接收已验证国际化设置并完整写入 `Microsoft-Windows-International-Core` 与时区，缺失时失败关闭，不得恢复只对 Server 生效的 `HideLocalAccountScreen`。
 - `正常系统端/src/core/native_image_source.rs`：原生安装页的 WIM/ESD/SWM/GHO/ISO 分类、镜像卷读取、只读 ISO 挂载与 XP/2003 文本模式源识别，并只读探测介质根、i386 及 WIM 卷内自带无人值守应答；开发测试构建拒绝 ISO 挂载。
 - `正常系统端/src/core/native_backup_controller.rs`：原生备份输入的 Direct/ViaPE 路由、WIM/ESD/SWM/GHO 任务规划及 PE 交接意图，兼容盘符和 UNC 绝对备份文件路径并校验所选格式扩展名，不执行备份或重启。
 - `正常系统端/src/core/native_backup_executor.rs`：执行已验证备份意图的后台 worker、WIM/ESD/SWM/GHO 分发、PE 缓存复验和交接、强类型进度/取消/真实失败消息；Ghost 使用既有取消标志并把取消引起的后端错误归类为“已取消”而不是“失败”，WIM 系列在没有安全中断 API 时明确提示仍可能运行；Direct 后端成功后通过可注入元数据边界复验输出为非空普通文件，SWM 明确复验首卷；PE 提交前要求安全数据分区、原子暂存配置并在启动项失败时精确回滚，开发测试构建在建线程前拒绝。
@@ -411,7 +413,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 
 - `PE端/build.rs`：生成 PE 程序资源、清单、图标和可复现构建版本；日期版本随 PE 源码、清单和 `SOURCE_DATE_EPOCH` 重新求值，避免新二进制复用旧关于页版本；release 禁止测试权限 feature。
 - `PE端/src/main.rs`：PE 进程入口、文件日志、panic 记录、语言检测、BitLocker 密钥透传解锁、CLI、工作流模块声明和原生 Win32 窗口启动；PE 日志开头必须同时记录构建日期版本、Cargo 包版本、架构，以及只读固件探测得到的 Secure Boot/PCA 状态或明确的未知与探测错误；在任何卷、BitLocker 或任务标记扫描前枚举包括未绑定 INF 设备在内的当前 PCI 硬件 ID，只对匹配 Intel VMD 包调用一次受控 `drvload.exe`，失败保留诊断且不得尝试其它控制器包；CLI 与 GUI 共用安全暂存路径解析、XML 转义无人值守生成、配置卷标和受控 DiskPart 脚本语义，原版 XP 目录源在格式化前复验并调用共享文本模式引擎；安装临时分区必须先成功删除并把空间扩展回目标卷，才能删除 marker/配置并报告完成或重启，禁止把清理失败降级为警告；安装、备份、扩容 GUI 只路由到原生进度页，不再编译或接受 egui/eframe/OpenGL 兼容回退参数，窗口启动或消息循环失败时必须记录并停止，禁止重复启动 worker；`non-elevated-tests` 独有的 `--ui-progress-preview` 必须在驱动加载、BitLocker、任务发现和 worker 之前进入无副作用预览，release 不得包含该分支。
-- `PE端/src/app.rs`：PE 安装主工作流、对用户名等动态值执行 XML 转义的共享无人值守生成和共享 `WorkflowSession`；读取安装配置后必须在写盘前记录目标卷、镜像安全文件名、分卷索引、格式、引导模式、启动签名及可用的目标 build/架构，不得记录密码、恢复密钥或其他敏感配置；Windows 10/11 内置无人值守必须读取已释放镜像的 UI 语言、系统/用户区域、键盘和时区并完整写入 `oobeSystem`，不得使用只对 Server 生效的 `HideLocalAccountScreen` 或已弃用的 SkipOOBE 项；镜像与自定义无人值守文件只能由配置数据目录和经安全文件名校验的相对文件名解析，XP 目录型源必须额外校验会话根和 I386/AMD64 子目录并在格式化前复验关键文件，禁止绝对路径或目录穿越；XP 文本模式部署完成后跳过不适用的 WIM 驱动、PCA、BCDBoot 和 Vista+ 无人值守阶段；内置/自定义无人值守生成和安装临时分区回收失败必须进入失败终态，不得继续报告完成或重启；该会话集中持有单一 worker 启动门、消息接收器、进度状态、只读恢复摘要、可查询完成状态并仅在完成后回收的 worker 句柄及持久化工作流观察器，只由原生 Win32 进度页消费且不得由渲染层另行启动工作流；UI 线程的单次消息轮询必须同时受消息数和短时间片约束，持续镜像进度洪峰不得无限清空队列而饿死 16ms 动画时钟；收到完成/失败消息只代表展示终态，不能在清理、延迟或重启等 worker 尾部退出前关闭进程；消息通道在未收到终态时断开必须合成本地化失败并记录 journal，避免把 worker 崩溃伪装成成功。
+- `PE端/src/app.rs`：PE 安装主工作流、对用户名等动态值执行 XML 转义的共享无人值守生成和共享 `WorkflowSession`；内置 Administrator 的启用、RID-500 改名、密码与可选自动登录片段复用 `lr-core::unattend_account`，日志只能记录“密码已设置”而不能记录值；读取安装配置后必须在写盘前记录目标卷、镜像安全文件名、分卷索引、格式、引导模式、启动签名及可用的目标 build/架构，不得记录密码、恢复密钥或其他敏感配置；Windows 10/11 内置无人值守必须读取已释放镜像的 UI 语言、系统/用户区域、键盘和时区并完整写入 `oobeSystem`，不得使用只对 Server 生效的 `HideLocalAccountScreen` 或已弃用的 SkipOOBE 项；镜像与自定义无人值守文件只能由配置数据目录和经安全文件名校验的相对文件名解析，XP 目录型源必须额外校验会话根和 I386/AMD64 子目录并在格式化前复验关键文件，禁止绝对路径或目录穿越；XP 文本模式部署完成后跳过不适用的 WIM 驱动、PCA、BCDBoot 和 Vista+ 无人值守阶段；内置/自定义无人值守生成和安装临时分区回收失败必须进入失败终态，不得继续报告完成或重启；该会话集中持有单一 worker 启动门、消息接收器、进度状态、只读恢复摘要、可查询完成状态并仅在完成后回收的 worker 句柄及持久化工作流观察器，只由原生 Win32 进度页消费且不得由渲染层另行启动工作流；UI 线程的单次消息轮询必须同时受消息数和短时间片约束，持续镜像进度洪峰不得无限清空队列而饿死 16ms 动画时钟；收到完成/失败消息只代表展示终态，不能在清理、延迟或重启等 worker 尾部退出前关闭进程；消息通道在未收到终态时断开必须合成本地化失败并记录 journal，避免把 worker 崩溃伪装成成功。
 - `PE端/src/workflow_journal.rs`：把 PE 安装/备份/扩容消息映射到原子检查点，识别上次中断，并在失败时生成脱敏支持包；向原生恢复页只暴露状态、步骤、修订号、中断标记和支持摘要可用性，不暴露保存路径或业务敏感值；记录失败不阻断原流程。
 - `PE端/src/workflows/mod.rs`：PE worker 工作流模块边界和受限再导出。
 - `PE端/src/workflows/backup.rs`：PE 备份配置读取、WIM/ESD/SWM/GHO 分发、进度转发、产物验证、引导清理和重启协调。
@@ -420,7 +422,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `PE端/src/core/account_fix.rs`：为完整备份、GHO 和 XP/2003 修复离线系统登录账户相关注册表/SAM 状态；安装镜像处于 reseal-to-OOBE 或状态未知时必须跳过 Winlogon 自动登录兜底，避免与 unattend 账户创建竞争。
 - `PE端/src/core/bcdedit.rs`：PE 中 ESP 定位挂载、BCD/BCDBoot 修复、活动分区和 PCA 引导选择。
 - `PE端/src/core/cabinet.rs`：PE 中通过 SetupAPI 解压和发现 CAB 文件；回调必须拒绝绝对路径、UNC、`..`、重解析父目录和目标根外写入，`SetupIterateCabinet` 启动失败、回调文件错误、部分文件失败或请求/解压数量不一致都必须失败关闭。
-- `PE端/src/core/config.rs`：读取正常端写入的安装、备份、扩容配置和操作标记，提供旧配置默认值；配置扫描覆盖 A-Z 并排除当前 PE 系统盘，暂存文件统一通过安全文件名校验后在数据目录内解析，XP 目录型源仅允许会话根与 I386/AMD64 两级安全分量且拒绝链接或非目录目标。
+- `PE端/src/core/config.rs`：读取正常端写入的安装、备份、扩容配置和操作标记，提供旧配置默认值；内置 Administrator 凭据只作为当前安装会话数据读取，日志和调试输出不得泄露密码；配置扫描覆盖 A-Z 并排除当前 PE 系统盘，暂存文件统一通过安全文件名校验后在数据目录内解析，XP 目录型源仅允许会话根与 I386/AMD64 两级安全分量且拒绝链接或非目录目标。
 - `PE端/src/core/disk.rs`：PE 分区枚举、样式判断、格式化 fallback、删除、扩容、清理和 DiskPart 安全执行；分区身份与物理相邻关系必须由卷句柄 IOCTL 的磁盘号、起始偏移和长度确认，不能依赖本地化 `detail volume` 文本或只比较分区号；格式化脚本只使用 ASCII 临时卷标，最终 Unicode 卷标通过 `SetVolumeLabelW` 写入并回读校验。
 - `PE端/src/core/dism.rs`：PE 高层镜像信息、释放、捕获和统一 WIM 引擎进度；非增量 WIM/ESD 备份必须捕获到同目录会话唯一暂存文件、完成 libwim 校验和元数据复核后原子替换目标，SWM 必须使用会话唯一暂存目录先捕获并验证临时 WIM 后再分卷，禁止固定 `.tmp.wim`。
 - `PE端/src/core/dism_exe.rs`：DISM.exe 参数、子进程输出、进度和错误解析，并通过只读 `/Get-Intl` 查询已释放镜像的国际化默认值；当旧 WinPE 无法加载目标镜像的国际化 provider 时，使用碰撞安全的临时 hive 名只读加载目标 SYSTEM/DEFAULT 注册表，严格验证安装语言、系统/用户区域、键盘和时区后供无人值守生成，DISM 与注册表两条路径都失败时必须保留双重错误并失败关闭；离线驱动边界拒绝 `/ForceUnsigned`，不能让不可信启动驱动绕过目录签名检查。

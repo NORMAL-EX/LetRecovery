@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use lr_core::command::CommandRequest;
 use lr_core::format_command::{system_format_executable, FormatCommandError, FormatCommandSpec};
 use lr_core::offline_international::OfflineInternationalSettings;
+use lr_core::unattend_account::{
+    render_builtin_administrator_unattend, BuiltInAdministratorOptions,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowsFamily {
@@ -71,6 +74,7 @@ pub struct DefaultUnattendOptions<'a> {
     pub architecture: UnattendArchitecture,
     pub family: WindowsFamily,
     pub username: Option<&'a str>,
+    pub builtin_administrator: Option<&'a BuiltInAdministratorOptions>,
     pub remove_uwp_apps: bool,
     pub international: Option<&'a OfflineInternationalSettings>,
 }
@@ -79,9 +83,7 @@ pub struct DefaultUnattendOptions<'a> {
 ///
 /// The caller writes the returned text to Panther/Sysprep only after image
 /// application succeeds. User text is XML-escaped before interpolation.
-pub fn render_default_unattend(
-    options: &DefaultUnattendOptions<'_>,
-) -> Result<String, &'static str> {
+pub fn render_default_unattend(options: &DefaultUnattendOptions<'_>) -> Result<String, String> {
     let username = xml_escape(
         options
             .username
@@ -153,9 +155,9 @@ pub fn render_default_unattend(
         options.family,
         WindowsFamily::Windows10 | WindowsFamily::Windows11
     ) {
-        let international = options
-            .international
-            .ok_or("Windows 10/11 default unattend requires offline international settings")?;
+        let international = options.international.ok_or_else(|| {
+            "Windows 10/11 default unattend requires offline international settings".to_string()
+        })?;
         let input_locale = xml_escape(&international.input_locale);
         let system_locale = xml_escape(&international.system_locale);
         let ui_language = xml_escape(&international.ui_language);
@@ -177,6 +179,30 @@ pub fn render_default_unattend(
         (String::new(), String::new())
     };
 
+    let builtin = options
+        .builtin_administrator
+        .map(|administrator| render_builtin_administrator_unattend(administrator, 2))
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .flatten();
+    let (specialize_account_command, user_accounts, auto_logon) = if let Some(builtin) = builtin {
+        (
+            builtin.specialize_command,
+            builtin.user_accounts,
+            builtin.auto_logon,
+        )
+    } else {
+        (
+            String::new(),
+            format!(
+                r#"<UserAccounts><LocalAccounts><LocalAccount wcm:action="add"><Password><Value></Value><PlainText>true</PlainText></Password><Description>Local User</Description><DisplayName>{username}</DisplayName><Group>Administrators</Group><Name>{username}</Name></LocalAccount></LocalAccounts></UserAccounts>"#
+            ),
+            format!(
+                r#"<AutoLogon><Password><Value></Value><PlainText>true</PlainText></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>{username}</Username></AutoLogon>"#
+            ),
+        )
+    };
+
     Ok(format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -188,7 +214,7 @@ pub fn render_default_unattend(
     <settings pass="specialize">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{architecture}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><ComputerName>*</ComputerName></component>
         <component name="Microsoft-Windows-Deployment" processorArchitecture="{architecture}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-            <RunSynchronous><RunSynchronousCommand wcm:action="add"><Order>1</Order><Path>cmd /c if exist %SystemDrive%\LetRecovery_Scripts\deploy.bat call %SystemDrive%\LetRecovery_Scripts\deploy.bat</Path><Description>Run custom deploy script</Description></RunSynchronousCommand></RunSynchronous>
+            <RunSynchronous><RunSynchronousCommand wcm:action="add"><Order>1</Order><Path>cmd /c if exist %SystemDrive%\LetRecovery_Scripts\deploy.bat call %SystemDrive%\LetRecovery_Scripts\deploy.bat</Path><Description>Run custom deploy script</Description></RunSynchronousCommand>{specialize_account_command}</RunSynchronous>
         </component>
     </settings>
     <settings pass="oobeSystem">
@@ -196,8 +222,8 @@ pub fn render_default_unattend(
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{architecture}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
 {time_zone}
             {oobe}
-            <UserAccounts><LocalAccounts><LocalAccount wcm:action="add"><Password><Value></Value><PlainText>true</PlainText></Password><Description>Local User</Description><DisplayName>{username}</DisplayName><Group>Administrators</Group><Name>{username}</Name></LocalAccount></LocalAccounts></UserAccounts>
-            <AutoLogon><Password><Value></Value><PlainText>true</PlainText></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>{username}</Username></AutoLogon>
+            {user_accounts}
+            {auto_logon}
             <FirstLogonCommands>{first_logon_commands}
             </FirstLogonCommands>
         </component>
@@ -392,6 +418,7 @@ mod tests {
             architecture: UnattendArchitecture::Amd64,
             family: WindowsFamily::Windows7,
             username: Some("A&B<User>"),
+            builtin_administrator: None,
             remove_uwp_apps: true,
             international: None,
         })
@@ -412,6 +439,7 @@ mod tests {
             architecture: UnattendArchitecture::X86,
             family: WindowsFamily::Windows11,
             username: None,
+            builtin_administrator: None,
             remove_uwp_apps: true,
             international: Some(&international),
         })
@@ -431,11 +459,45 @@ mod tests {
             architecture: UnattendArchitecture::Amd64,
             family: WindowsFamily::Windows11,
             username: None,
+            builtin_administrator: None,
             remove_uwp_apps: false,
             international: None,
         })
         .unwrap_err();
         assert!(error.contains("requires offline international settings"));
+    }
+
+    #[test]
+    fn builtin_administrator_replaces_local_account_and_can_rename_rid_500() {
+        let international = OfflineInternationalSettings {
+            ui_language: "en-US".to_string(),
+            system_locale: "en-US".to_string(),
+            user_locale: "en-US".to_string(),
+            input_locale: "0409:00000409".to_string(),
+            time_zone: "Pacific Standard Time".to_string(),
+        };
+        let builtin = BuiltInAdministratorOptions {
+            enabled: true,
+            account_name: "RecoveryAdmin".to_string(),
+            password: "temporary-secret".into(),
+            auto_logon: true,
+        };
+        let xml = render_default_unattend(&DefaultUnattendOptions {
+            architecture: UnattendArchitecture::Amd64,
+            family: WindowsFamily::Windows11,
+            username: None,
+            builtin_administrator: Some(&builtin),
+            remove_uwp_apps: false,
+            international: Some(&international),
+        })
+        .unwrap();
+
+        assert!(xml.contains("<AdministratorPassword>"));
+        assert!(xml.contains("<Value>temporary-secret</Value>"));
+        assert!(xml.contains("<Username>RecoveryAdmin</Username>"));
+        assert!(xml.contains("powershell.exe"));
+        assert!(xml.contains("-EncodedCommand"));
+        assert!(!xml.contains("<LocalAccount"));
     }
 
     #[test]

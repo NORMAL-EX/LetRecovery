@@ -1,4 +1,14 @@
 {
+    "Administrator 账户名": "Administrator 계정 이름",
+    "Administrator 密码": "Administrator 암호",
+    "“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。": "\"사용자 지정 사용자 이름\"과 \"기본 제공 Administrator 계정 활성화\"는 동시에 활성화할 수 없습니다.",
+    "内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。": "기본 제공 Administrator 계정 이름이 잘못되었습니다. 비워 둘 수 없으며 20자를 초과하거나 Windows에서 금지된 문자를 포함할 수 없습니다.",
+    "内置 Administrator 账户选项仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。": "기본 제공 Administrator 계정 옵션은 Windows 7 이상 WIM, ESD 및 SWM 이미지만 지원합니다.",
+    "启用内置 Administrator 账户": "기본 제공 Administrator 계정 활성화",
+    "启用内置 Administrator 账户需要同时启用无人值守安装。": "기본 제공 Administrator 계정을 활성화하려면 무인 설치도 활성화해야 합니다.",
+    "启用内置 Administrator 账户时不能同时使用自定义无人值守文件。": "기본 제공 Administrator 계정 옵션이 활성화된 동안에는 사용자 지정 응답 파일을 사용할 수 없습니다.",
+    "自动登录内置 Administrator": "기본 제공 Administrator로 자동 로그인",
+    "请为内置 Administrator 账户设置有效密码（最长 127 个字符，不能包含换行）。": "기본 제공 Administrator 계정에 유효한 암호를 설정하십시오(최대 127자, 줄 바꿈 제외).",
   "language": "한국어",
   "author": "LetRecovery / 한국어 교정",
   "data": {

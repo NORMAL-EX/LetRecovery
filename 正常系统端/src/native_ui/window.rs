@@ -4432,9 +4432,20 @@ impl NativeWindow {
         let target_uefi = self.selected_target_uses_uefi();
         let unattended_enabled =
             SendMessageW(handles.unattend, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
+        let source_is_gho = self.effective_image_path.as_deref().is_some_and(|path| {
+            let extension = std::path::Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            extension.eq_ignore_ascii_case("gho") || extension.eq_ignore_ascii_case("ghs")
+        });
         if let Some(page) = &mut self.advanced_page {
             page.set_context(AdvancedPageContext {
                 unattended_enabled,
+                builtin_administrator_available: unattended_enabled
+                    && self.custom_unattend_path.trim().is_empty()
+                    && !show_xp
+                    && !source_is_gho,
                 wifi_available: self
                     .app_config
                     .install_prefs
@@ -10770,7 +10781,7 @@ unsafe extern "system" fn window_proc(
                     let control = HWND(lparam.0 as *mut _);
                     if let Some(page) = &state.advanced_page {
                         if page.owns_dependency_toggle(control) {
-                            page.update_dependencies();
+                            page.handle_dependency_toggle(control);
                         }
                     }
                 }

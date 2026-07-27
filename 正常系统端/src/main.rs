@@ -765,6 +765,7 @@ fn execute_pe_install(
         import_storage_controller_drivers: config.import_storage_controller_drivers,
         custom_username: !config.custom_username.is_empty(),
         username: config.custom_username.clone(),
+        builtin_administrator: config.builtin_administrator.clone(),
         xp_inject_usb3_driver: config.xp_inject_usb3_driver,
         xp_inject_nvme_driver: config.xp_inject_nvme_driver,
         ..core::advanced_options::AdvancedOptions::default()
@@ -779,7 +780,7 @@ fn execute_pe_install(
 
     // 生成无人值守配置
     if config.unattended {
-        generate_unattend_xml_pe(target_partition, &config.custom_username)
+        generate_unattend_xml_pe(target_partition, config)
             .context("[PE INSTALL] 生成无人值守配置失败")?;
     }
 
@@ -917,17 +918,55 @@ fn detect_uefi_mode() -> bool {
 }
 
 /// 生成无人值守XML (PE版本)
-fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::Result<()> {
+fn generate_unattend_xml_pe(
+    target_partition: &str,
+    config: &core::install_config::InstallConfig,
+) -> anyhow::Result<()> {
     use crate::core::system_utils::{get_file_version, get_system_architecture};
     use anyhow::Context;
     use std::path::Path;
 
-    let username = if username.is_empty() {
+    let username = if config.custom_username.is_empty() {
         "User"
     } else {
-        username
+        &config.custom_username
     };
     let username = escape_xml_text(username);
+    let builtin = lr_core::unattend_account::render_builtin_administrator_unattend(
+        &config.builtin_administrator,
+        1,
+    )
+    .map_err(|error| anyhow::anyhow!("内置 Administrator 配置无效: {error}"))?;
+    let (specialize_settings, user_accounts, auto_logon) = if let Some(builtin) = builtin {
+        let specialize_settings = if builtin.specialize_command.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"    <settings pass="specialize">
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="{{arch}}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <RunSynchronous>{}</RunSynchronous>
+        </component>
+    </settings>
+"#,
+                builtin.specialize_command
+            )
+        };
+        (
+            specialize_settings,
+            builtin.user_accounts,
+            builtin.auto_logon,
+        )
+    } else {
+        (
+            String::new(),
+            format!(
+                r#"<UserAccounts><LocalAccounts><LocalAccount wcm:action="add"><Password><Value></Value><PlainText>true</PlainText></Password><Description>Local User</Description><DisplayName>{username}</DisplayName><Group>Administrators</Group><Name>{username}</Name></LocalAccount></LocalAccounts></UserAccounts>"#
+            ),
+            format!(
+                r#"<AutoLogon><Password><Value></Value><PlainText>true</PlainText></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>{username}</Username></AutoLogon>"#
+            ),
+        )
+    };
 
     // 检测目标系统架构
     let arch = get_system_architecture(target_partition);
@@ -1016,33 +1055,14 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
             </UserData>
         </component>
     </settings>
+{specialize_settings}
     <settings pass="oobeSystem">
 {international_component}
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 {time_zone}
             {oobe}
-            <UserAccounts>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value></Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local User</Description>
-                        <DisplayName>{user}</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>{user}</Name>
-                    </LocalAccount>
-                </LocalAccounts>
-            </UserAccounts>
-            <AutoLogon>
-                <Password>
-                    <Value></Value>
-                    <PlainText>true</PlainText>
-                </Password>
-                <Enabled>true</Enabled>
-                <Username>{user}</Username>
-            </AutoLogon>
+            {user_accounts}
+            {auto_logon}
         </component>
     </settings>
 </unattend>"#,
@@ -1050,7 +1070,9 @@ fn generate_unattend_xml_pe(target_partition: &str, username: &str) -> anyhow::R
         international_component = international_component,
         time_zone = time_zone,
         oobe = oobe_section,
-        user = username
+        specialize_settings = specialize_settings.replace("{arch}", arch_str),
+        user_accounts = user_accounts,
+        auto_logon = auto_logon
     );
 
     let panther_dir = format!("{}\\Windows\\Panther", target_partition);

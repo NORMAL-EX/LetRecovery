@@ -209,6 +209,7 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         } else {
             String::new()
         },
+        builtin_administrator: advanced.builtin_administrator.clone(),
         volume_label: if advanced.custom_volume_label {
             advanced.volume_label.clone()
         } else {

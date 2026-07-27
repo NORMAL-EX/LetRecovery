@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::core::registry::OfflineRegistry;
+use lr_core::unattend_account::BuiltInAdministratorOptions;
 use std::path::PathBuf;
 
 /// 系统安装高级选项
@@ -53,6 +54,8 @@ pub struct AdvancedOptions {
     // 用户设置
     pub custom_username: bool,
     pub username: String,
+    /// 使用内置 RID-500 Administrator，而不是新建普通本地管理员。
+    pub builtin_administrator: BuiltInAdministratorOptions,
 
     // 系统盘设置
     pub custom_volume_label: bool,
@@ -129,6 +132,9 @@ impl AdvancedOptions {
         if self.custom_username && self.username.trim().is_empty() {
             self.custom_username = false;
             self.username.clear();
+        }
+        if self.builtin_administrator.enabled {
+            self.custom_username = false;
         }
 
         if self.custom_volume_label && self.volume_label.trim().is_empty() {
