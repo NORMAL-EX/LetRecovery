@@ -1,8 +1,8 @@
 # Third-Party Binary Provenance
 
-LetRecovery ships the following prebuilt binary. Update it only after reviewing
-the upstream release notes, licenses, and hashes. Hashes in this file are for
-the exact bytes committed to this repository.
+LetRecovery ships the following third-party binary. Update it only after
+reviewing the upstream release notes, licenses, local patches, and hashes.
+Hashes in this file are for the exact bytes committed to this repository.
 
 ## wimlib
 
@@ -10,27 +10,55 @@ the exact bytes committed to this repository.
 | --- | --- |
 | Repository path | `lr-core/vendor/libwim-15.dll` |
 | Upstream project | [wimlib](https://wimlib.net/) |
-| Upstream release | 1.14.4, Windows x86_64 binary distribution |
-| Source archive | `wimlib-1.14.4-windows-x86_64-bin.zip` |
-| Source URL | `https://wimlib.net/downloads/wimlib-1.14.4-windows-x86_64-bin.zip` |
-| Source archive SHA-256 | `6D99E242BFBC6D36FC987D433D63772180551B7F2D8DE43E9561535A3E2C16D8` |
-| Committed DLL SHA-256 | `6480B53D4ECD4423AF9E100FE15E3D2C3D114EFF33FBA07977E46C1AB124342E` |
-| License used for `libwim` | GNU Lesser General Public License v3.0 or later |
-| Additional bundled notice | `libdivsufsort-lite` license from the upstream binary distribution |
+| Upstream release | 1.14.5 |
+| Upstream Git URL | `https://wimlib.net/git/wimlib` |
+| Pinned upstream commit | `cd5e231c348c255ae5088873b5a66ee0eb96fa07` |
+| LetRecovery patch | `docs/third-party/wimlib-1.14.5/letrecovery-parallel-decompression.patch` |
+| Patch SHA-256 | `149788349D1C3317FBDEF63DF578DCCB5044D93FE3BA65C13B869C24A6659240` |
+| Reproducible build script | `.github/scripts/build-wimlib-parallel.ps1` |
+| Committed DLL size | `493056` bytes |
+| Committed DLL SHA-256 | `E7AA66972B27701A5991108396AD32CE11B60147ECD1D98B70013BC816A61099` |
+| License used for `libwim` and the LetRecovery patch | GNU Lesser General Public License v3.0 or later |
+| Additional bundled notice | `libdivsufsort-lite` license from upstream |
 
-The DLL hash matches the `libwim-15.dll` contained in the official 1.14.4
-Windows x86_64 archive. The Windows build does not link to `libntfs-3g`, so the
-upstream license notice permits use of the LGPLv3-or-later option for `libwim`.
-The original notices are retained under
-`docs/third-party/wimlib-1.14.4/`.
+The committed DLL is built from the pinned official source plus the tracked
+LetRecovery patch. The extension adds bounded ordered parallel decompression,
+parallel verification of independent non-solid resources, and bounded
+prefetch for application. Windows workers use independent read handles because
+wimlib's Windows `pread` compatibility path changes a handle's shared file
+position. Progress and extraction callbacks remain serialized on the caller
+thread, and SHA-1 verification is unchanged.
+
+The Windows build uses `--without-fuse --without-ntfs-3g`. Upstream 1.14.5
+permits LGPLv2.1-or-later; this repository continues to distribute both libwim
+and the LetRecovery additions under the already-recorded LGPLv3-or-later
+option. The corresponding LGPLv3 and `libdivsufsort-lite` notices are retained
+under `docs/third-party/wimlib-1.14.4/`; the locally maintained patch and the
+exact 1.14.5 source pin are retained under
+`docs/third-party/wimlib-1.14.5/`.
+
+The recorded build used WSL with MinGW-w64 GCC 13-win32, Autoconf 2.71,
+Automake 1.16.5, GNU Libtool 2.4.7, and GNU Make 4.3. The script exports the
+pinned source commit without Git metadata before bootstrapping, so the DLL
+reports upstream version 1.14.5 instead of inheriting the enclosing LetRecovery
+worktree version.
 
 ### Update procedure
 
-1. Download a specific upstream Windows x86_64 release over HTTPS.
-2. Verify the archive SHA-256 against the checksum published by wimlib.
-3. Extract `libwim-15.dll`, record its SHA-256, and replace the repository copy.
-4. Copy the release's license notices without modification.
-5. Update this document and run the Rust workspace tests before release.
+1. Review the pinned upstream commit and the tracked patch.
+2. Install the WSL build dependencies: `autoconf`, `automake`, `libtool`,
+   `pkg-config`, `make`, and `mingw-w64`.
+3. Run `.github/scripts/build-wimlib-parallel.ps1`. The script verifies the
+   exact upstream commit, checks that the patch applies cleanly, builds x86_64,
+   verifies the PE machine and the
+   `wimlib_set_parallel_decompression` export, then stages and replaces the
+   requested output.
+4. Record the patch, DLL size, and DLL SHA-256 above. Retain the upstream
+   notices without modification.
+5. Run read-only serial/parallel verification against a known WIM, repeat the
+   parallel stress test, and confirm that a deliberately corrupted ordinary
+   test copy still fails SHA-1 verification.
+6. Run the Rust workspace checks before release.
 
 ## Intel Rapid Storage Technology VMD drivers
 

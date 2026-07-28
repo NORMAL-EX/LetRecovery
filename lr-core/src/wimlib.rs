@@ -156,6 +156,8 @@ type FnWrite = unsafe extern "C" fn(
 ) -> c_int;
 type FnOverwrite =
     unsafe extern "C" fn(wim: WIMStruct, write_flags: c_int, num_threads: c_uint) -> c_int;
+type FnSetParallelDecompression =
+    unsafe extern "C" fn(wim: WIMStruct, num_threads: c_uint, max_memory: u64) -> c_int;
 type FnSetOutputCompression = unsafe extern "C" fn(wim: WIMStruct, ctype: c_int) -> c_int;
 type FnSetImageProperty = unsafe extern "C" fn(
     wim: WIMStruct,
@@ -290,8 +292,8 @@ unsafe fn read_u64(base: *const c_void, off: usize) -> u64 {
     ((base as *const u8).add(off) as *const u64).read_unaligned()
 }
 
-/// wimlib 压缩用的最优线程数 = 逻辑 CPU 数；探测失败回退 0（由 wimlib 自动按在线处理器数选择）。
-/// 显式传入核数以确保压缩阶段吃满全部核心。
+/// wimlib 压缩、解压和校验用的最优线程数 = 逻辑 CPU 数；探测失败回退 0
+/// （由 LetRecovery 的 wimlib 扩展按在线处理器数选择）。
 fn optimal_threads() -> c_uint {
     std::thread::available_parallelism()
         .map(|n| n.get() as c_uint)
@@ -507,6 +509,10 @@ macro_rules! load_sym {
     }};
 }
 
+fn load_optional_sym<T: Copy>(lib: &Library, name: &[u8]) -> Option<T> {
+    unsafe { lib.get::<T>(name).ok().map(|symbol| *symbol) }
+}
+
 // ============================================================================
 // 只读封装：Wimlib / WimHandle（供 image_verify 使用，保持原 API）
 // ============================================================================
@@ -522,6 +528,7 @@ pub struct Wimlib {
     get_image_name: FnGetImageName,
     get_image_description: FnGetImageDescription,
     reference_resource_files: FnReferenceResourceFiles,
+    set_parallel_decompression: Option<FnSetParallelDecompression>,
 }
 
 impl Wimlib {
@@ -549,6 +556,10 @@ impl Wimlib {
             b"wimlib_reference_resource_files\0",
             FnReferenceResourceFiles
         );
+        let set_parallel_decompression = load_optional_sym::<FnSetParallelDecompression>(
+            &lib,
+            b"wimlib_set_parallel_decompression\0",
+        );
 
         if !ensure_global_init(global_init) {
             return Err("wimlib 全局初始化失败".to_string());
@@ -565,6 +576,7 @@ impl Wimlib {
             get_image_name,
             get_image_description,
             reference_resource_files,
+            set_parallel_decompression,
         })
     }
 
@@ -609,6 +621,13 @@ impl Wimlib {
         }
         if wim.is_null() {
             return Err("打开 WIM 失败：返回空句柄".to_string());
+        }
+        if let Some(configure) = self.set_parallel_decompression {
+            let rc = unsafe { configure(wim, optimal_threads(), 0) };
+            if rc != WIMLIB_ERR_SUCCESS {
+                unsafe { (self.free_wim)(wim) };
+                return Err(self.error_message(rc));
+            }
         }
         Ok(WimHandle {
             wim,
@@ -726,6 +745,7 @@ pub struct WimlibManager {
     iterate_dir_tree: FnIterateDirTree,
     get_xml_data: FnGetXmlData,
     update_image: FnUpdateImage,
+    set_parallel_decompression: Option<FnSetParallelDecompression>,
 }
 
 impl WimlibManager {
@@ -767,6 +787,10 @@ impl WimlibManager {
         let iterate_dir_tree = load_sym!(lib, b"wimlib_iterate_dir_tree\0", FnIterateDirTree);
         let get_xml_data = load_sym!(lib, b"wimlib_get_xml_data\0", FnGetXmlData);
         let update_image = load_sym!(lib, b"wimlib_update_image\0", FnUpdateImage);
+        let set_parallel_decompression = load_optional_sym::<FnSetParallelDecompression>(
+            &lib,
+            b"wimlib_set_parallel_decompression\0",
+        );
 
         if !ensure_global_init(global_init) {
             return Err("wimlib 全局初始化失败".to_string());
@@ -793,6 +817,7 @@ impl WimlibManager {
             iterate_dir_tree,
             get_xml_data,
             update_image,
+            set_parallel_decompression,
         })
     }
 
@@ -816,6 +841,13 @@ impl WimlibManager {
         }
         if wim.is_null() {
             return Err("打开 WIM 失败：空句柄".to_string());
+        }
+        if let Some(configure) = self.set_parallel_decompression {
+            let rc = unsafe { configure(wim, optimal_threads(), 0) };
+            if rc != WIMLIB_ERR_SUCCESS {
+                unsafe { (self.free_wim)(wim) };
+                return Err(self.error_message(rc));
+            }
         }
         Ok(wim)
     }

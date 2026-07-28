@@ -1,0 +1,1703 @@
+diff --git a/Makefile.am b/Makefile.am
+index 4d6576a..c675798 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -44,6 +44,8 @@ libwim_la_SOURCES =		\
+ 	src/cpu_features.c	\
+ 	src/decompress.c	\
+ 	src/decompress_common.c	\
++	src/decompress_parallel.c	\
++	src/prefetch.c			\
+ 	src/delete_image.c	\
+ 	src/dentry.c		\
+ 	src/divsufsort.c	\
+@@ -111,6 +113,8 @@ libwim_la_SOURCES =		\
+ 	include/wimlib/cpu_features.h	\
+ 	include/wimlib/decompressor_ops.h	\
+ 	include/wimlib/decompress_common.h	\
++	include/wimlib/decompress_parallel.h	\
++	include/wimlib/prefetch.h		\
+ 	include/wimlib/dentry.h		\
+ 	include/wimlib/divsufsort.h	\
+ 	include/wimlib/encoding.h	\
+diff --git a/include/wimlib.h b/include/wimlib.h
+index 84f1e2e..26ff2a6 100644
+--- a/include/wimlib.h
++++ b/include/wimlib.h
+@@ -4196,6 +4196,28 @@ wimlib_set_memory_allocator(void *(*malloc_func)(size_t),
+ 			    void (*free_func)(void *),
+ 			    void *(*realloc_func)(void *, size_t));
+ 
++/**
++ * @ingroup G_general
++ *
++ * LetRecovery extension: configure ordered parallel decompression for reads
++ * from this ::WIMStruct.  This accelerates verification and extraction while
++ * preserving the existing callback order and checksum behavior.
++ *
++ * @param wim
++ *	The ::WIMStruct to configure.
++ * @param num_threads
++ *	Number of decompression workers.  0 selects the online processor count;
++ *	1 selects the upstream serial path.
++ * @param max_memory
++ *	Maximum bytes to use for parallel compressed and uncompressed chunk
++ *	buffers.  0 selects a conservative automatic limit.
++ *
++ * @return 0 on success, or ::WIMLIB_ERR_INVALID_PARAM.
++ */
++WIMLIBAPI int
++wimlib_set_parallel_decompression(WIMStruct *wim, uint32_t num_threads,
++				  uint64_t max_memory);
++
+ /**
+  * @ingroup G_writing_and_overwriting_wims
+  *
+diff --git a/include/wimlib/decompress_parallel.h b/include/wimlib/decompress_parallel.h
+new file mode 100644
+index 0000000..c1585db
+--- /dev/null
++++ b/include/wimlib/decompress_parallel.h
+@@ -0,0 +1,37 @@
++#ifndef _WIMLIB_DECOMPRESS_PARALLEL_H
++#define _WIMLIB_DECOMPRESS_PARALLEL_H
++
++#include "wimlib/types.h"
++
++/*
++ * A seekable compressed-resource chunk that can be read independently with
++ * pread().  Jobs must be supplied in their original uncompressed order.
++ */
++struct parallel_decompression_job {
++	u64 file_offset;
++	u64 uncompressed_offset;
++	u32 compressed_size;
++	u32 uncompressed_size;
++};
++
++typedef int (*parallel_decompression_consumer_t)(
++			const void *chunk, u32 size, u64 uncompressed_offset,
++			void *ctx);
++
++/*
++ * Read and decompress @jobs with a bounded worker set, then invoke @consumer
++ * on the caller thread in the original job order.
++ *
++ * Returns -1 when parallel execution is not useful, so the caller can use its
++ * existing serial path.  Otherwise returns a wimlib status code.
++ */
++int
++decompress_jobs_parallel(const tchar *filename,
++			 const struct parallel_decompression_job *jobs,
++			 size_t num_jobs, int ctype, u32 chunk_size,
++			 unsigned num_threads, u64 max_memory,
++			 bool recover_data,
++			 parallel_decompression_consumer_t consumer,
++			 void *consumer_ctx);
++
++#endif /* _WIMLIB_DECOMPRESS_PARALLEL_H */
+diff --git a/include/wimlib/file_io.h b/include/wimlib/file_io.h
+index 8dbdb12..ad50f08 100644
+--- a/include/wimlib/file_io.h
++++ b/include/wimlib/file_io.h
+@@ -5,6 +5,8 @@
+ #include <stddef.h>
+ #include <sys/types.h>
+ 
++#include "wimlib_tchar.h"
++
+ /* Wrapper around a file descriptor that keeps track of offset (including in
+  * pipes, which don't support lseek()) and a cached flag that tells whether the
+  * file descriptor is a pipe or not.  */
+@@ -26,6 +28,9 @@ full_write(struct filedes *fd, const void *buf, size_t n);
+ int
+ full_pwrite(struct filedes *fd, const void *buf, size_t count, off_t offset);
+ 
++int
++open_parallel_read_filedes(const tchar *filename, struct filedes *fd);
++
+ #ifndef _WIN32
+ #  define O_BINARY 0
+ #endif
+diff --git a/include/wimlib/prefetch.h b/include/wimlib/prefetch.h
+new file mode 100644
+index 0000000..33b552a
+--- /dev/null
++++ b/include/wimlib/prefetch.h
+@@ -0,0 +1,18 @@
++#ifndef _WIMLIB_PREFETCH_H
++#define _WIMLIB_PREFETCH_H
++
++#include "wimlib/list.h"
++#include "wimlib/resource.h"
++
++/*
++ * Read independent non-solid blobs through a bounded ordered prefetch
++ * pipeline.  Returns -1 when the list is not eligible and the caller should
++ * use the normal read_blob_list() implementation.
++ */
++int
++read_blob_list_with_prefetch(struct list_head *blob_list,
++			     size_t list_head_offset,
++			     const struct read_blob_callbacks *cbs,
++			     int flags);
++
++#endif /* _WIMLIB_PREFETCH_H */
+diff --git a/include/wimlib/resource.h b/include/wimlib/resource.h
+index 8924b80..62be800 100644
+--- a/include/wimlib/resource.h
++++ b/include/wimlib/resource.h
+@@ -274,6 +274,7 @@ call_end_blob(struct blob_descriptor *blob, int status,
+ #define COMPUTE_MISSING_BLOB_HASHES	0x2
+ #define BLOB_LIST_ALREADY_SORTED	0x4
+ #define RECOVER_DATA			0x8
++#define PARALLEL_BLOB_PREFETCH		0x10
+ 
+ int
+ read_blob_list(struct list_head *blob_list, size_t list_head_offset,
+@@ -287,6 +288,21 @@ int
+ read_blob_with_sha1(struct blob_descriptor *blob,
+ 		    const struct read_blob_callbacks *cbs, bool recover_data);
+ 
++/*
++ * Verify one blob while forcing its decompressor state to remain local to the
++ * calling thread.  Used by wimlib's internal parallel verifier.
++ */
++int
++read_blob_with_sha1_isolated(struct blob_descriptor *blob,
++			     const struct read_blob_callbacks *cbs,
++			     bool recover_data);
++
++int
++read_blob_with_sha1_isolated_from(struct blob_descriptor *blob,
++				  const struct read_blob_callbacks *cbs,
++				  bool recover_data,
++				  struct filedes *in_fd);
++
+ int
+ extract_blob_prefix_to_fd(struct blob_descriptor *blob, u64 size,
+ 			  struct filedes *fd);
+diff --git a/include/wimlib/wim.h b/include/wimlib/wim.h
+index 666f4b0..314961e 100644
+--- a/include/wimlib/wim.h
++++ b/include/wimlib/wim.h
+@@ -113,6 +113,14 @@ struct WIMStruct {
+ 	u8 decompressor_ctype;
+ 	u32 decompressor_max_block_size;
+ 
++	/*
++	 * LetRecovery extension: number of workers and memory ceiling for
++	 * ordered parallel resource decompression.  One worker preserves the
++	 * upstream serial path; zero selects the online processor count.
++	 */
++	u32 decompression_num_threads;
++	u64 decompression_max_memory;
++
+ 	/* Temporary field; use sparingly  */
+ 	void *private;
+ 
+diff --git a/src/decompress_parallel.c b/src/decompress_parallel.c
+new file mode 100644
+index 0000000..1fd3e4e
+--- /dev/null
++++ b/src/decompress_parallel.c
+@@ -0,0 +1,342 @@
++/*
++ * decompress_parallel.c
++ *
++ * Bounded, ordered parallel decompression for seekable WIM resources.
++ */
++
++/*
++ * Copyright (C) 2026 LetRecovery contributors
++ *
++ * This file is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU Lesser General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option) any
++ * later version.
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include "config.h"
++#endif
++
++#include <errno.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "wimlib/assert.h"
++#include "wimlib/decompress_parallel.h"
++#include "wimlib/error.h"
++#include "wimlib/file_io.h"
++#include "wimlib/threads.h"
++#include "wimlib/util.h"
++#include "wimlib.h"
++
++enum worker_state {
++	WORKER_IDLE,
++	WORKER_ASSIGNED,
++	WORKER_COMPLETE,
++	WORKER_TERMINATING,
++};
++
++struct decompressor_worker {
++	struct thread thread;
++	struct mutex lock;
++	struct condvar state_changed;
++	enum worker_state state;
++	bool thread_started;
++	bool lock_initialized;
++	bool condvar_initialized;
++	bool recover_data;
++
++	struct filedes in_fd;
++	bool in_fd_open;
++	struct wimlib_decompressor *decompressor;
++	struct parallel_decompression_job job;
++	void *compressed_buf;
++	u8 *uncompressed_buf;
++	int result;
++};
++
++static int
++worker_process_job(struct decompressor_worker *worker)
++{
++	const struct parallel_decompression_job *job = &worker->job;
++	void *read_buf;
++	int ret;
++
++	if (job->compressed_size == job->uncompressed_size)
++		read_buf = worker->uncompressed_buf;
++	else
++		read_buf = worker->compressed_buf;
++
++	ret = full_pread(&worker->in_fd, read_buf, job->compressed_size,
++			 job->file_offset);
++	if (ret)
++		return ret;
++
++	if (read_buf == worker->uncompressed_buf)
++		return 0;
++
++	ret = wimlib_decompress(worker->compressed_buf, job->compressed_size,
++				worker->uncompressed_buf,
++				job->uncompressed_size,
++				worker->decompressor);
++	if (likely(ret == 0))
++		return 0;
++
++	if (!worker->recover_data)
++		return WIMLIB_ERR_DECOMPRESSION;
++
++	/*
++	 * Match resource.c's recovery behavior: make the unread portion
++	 * deterministic, then retry so a codec that can recover a prefix gets a
++	 * chance to do so.
++	 */
++	memset(worker->uncompressed_buf, 0, job->uncompressed_size);
++	(void)wimlib_decompress(worker->compressed_buf, job->compressed_size,
++			       worker->uncompressed_buf,
++			       job->uncompressed_size,
++			       worker->decompressor);
++	return 0;
++}
++
++static void *
++decompressor_worker_proc(void *arg)
++{
++	struct decompressor_worker *worker = arg;
++
++	mutex_lock(&worker->lock);
++	for (;;) {
++		while (worker->state == WORKER_IDLE)
++			condvar_wait(&worker->state_changed, &worker->lock);
++
++		if (worker->state == WORKER_TERMINATING)
++			break;
++
++		wimlib_assert(worker->state == WORKER_ASSIGNED);
++		mutex_unlock(&worker->lock);
++		worker->result = worker_process_job(worker);
++		mutex_lock(&worker->lock);
++
++		if (worker->state == WORKER_TERMINATING)
++			break;
++		worker->state = WORKER_COMPLETE;
++		condvar_broadcast(&worker->state_changed);
++
++		while (worker->state == WORKER_COMPLETE)
++			condvar_wait(&worker->state_changed, &worker->lock);
++		if (worker->state == WORKER_TERMINATING)
++			break;
++	}
++	mutex_unlock(&worker->lock);
++	return NULL;
++}
++
++static void
++terminate_worker(struct decompressor_worker *worker)
++{
++	mutex_lock(&worker->lock);
++	worker->state = WORKER_TERMINATING;
++	condvar_broadcast(&worker->state_changed);
++	mutex_unlock(&worker->lock);
++}
++
++static int
++assign_job(struct decompressor_worker *worker,
++	   const struct parallel_decompression_job *job)
++{
++	mutex_lock(&worker->lock);
++	if (unlikely(worker->state != WORKER_IDLE)) {
++		mutex_unlock(&worker->lock);
++		return WIMLIB_ERR_INVALID_PARAM;
++	}
++	worker->job = *job;
++	worker->state = WORKER_ASSIGNED;
++	condvar_broadcast(&worker->state_changed);
++	mutex_unlock(&worker->lock);
++	return 0;
++}
++
++static int
++consume_worker_result(struct decompressor_worker *worker,
++		      parallel_decompression_consumer_t consumer,
++		      void *consumer_ctx)
++{
++	int ret;
++
++	mutex_lock(&worker->lock);
++	while (worker->state == WORKER_ASSIGNED)
++		condvar_wait(&worker->state_changed, &worker->lock);
++
++	wimlib_assert(worker->state == WORKER_COMPLETE);
++	ret = worker->result;
++	if (!ret) {
++		ret = consumer(worker->uncompressed_buf,
++			       worker->job.uncompressed_size,
++			       worker->job.uncompressed_offset,
++			       consumer_ctx);
++	}
++	worker->state = WORKER_IDLE;
++	condvar_broadcast(&worker->state_changed);
++	mutex_unlock(&worker->lock);
++	return ret;
++}
++
++static void
++destroy_workers(struct decompressor_worker *workers, unsigned num_workers)
++{
++	if (!workers)
++		return;
++
++	for (unsigned i = 0; i < num_workers; i++) {
++		struct decompressor_worker *worker = &workers[i];
++
++		if (worker->thread_started)
++			terminate_worker(worker);
++	}
++	for (unsigned i = 0; i < num_workers; i++) {
++		struct decompressor_worker *worker = &workers[i];
++
++		if (worker->thread_started)
++			thread_join(&worker->thread);
++		if (worker->in_fd_open)
++			filedes_close(&worker->in_fd);
++		wimlib_free_decompressor(worker->decompressor);
++		FREE(worker->compressed_buf);
++		FREE(worker->uncompressed_buf);
++		if (worker->condvar_initialized)
++			condvar_destroy(&worker->state_changed);
++		if (worker->lock_initialized)
++			mutex_destroy(&worker->lock);
++	}
++	FREE(workers);
++}
++
++static unsigned
++limit_worker_count(unsigned requested, size_t num_jobs, u32 chunk_size,
++		   u32 max_compressed_size, u64 max_memory)
++{
++	u64 bytes_per_worker;
++	unsigned num_workers;
++
++	if (requested == 0)
++		requested = get_available_cpus();
++	num_workers = requested;
++	if ((size_t)num_workers > num_jobs)
++		num_workers = num_jobs;
++	if (num_workers < 2)
++		return num_workers;
++
++	if (max_memory == 0) {
++		/*
++		 * Leave most memory to WinPE, the filesystem cache, and the caller.
++		 * The absolute cap prevents large solid chunks from consuming all
++		 * otherwise available RAM on high-core-count machines.
++		 */
++		max_memory = min(get_available_memory() / 4,
++				 (u64)2 * 1024 * 1024 * 1024);
++	}
++
++	bytes_per_worker = (u64)chunk_size + max_compressed_size;
++	if (bytes_per_worker == 0)
++		return 1;
++	while (num_workers > 1 &&
++	       (u64)num_workers * bytes_per_worker > max_memory)
++		num_workers--;
++	return num_workers;
++}
++
++int
++decompress_jobs_parallel(const tchar *filename,
++			 const struct parallel_decompression_job *jobs,
++			 size_t num_jobs, int ctype, u32 chunk_size,
++			 unsigned num_threads, u64 max_memory,
++			 bool recover_data,
++			 parallel_decompression_consumer_t consumer,
++			 void *consumer_ctx)
++{
++	struct decompressor_worker *workers = NULL;
++	u32 max_compressed_size = 0;
++	unsigned num_workers;
++	size_t next_job;
++	int ret = WIMLIB_ERR_NOMEM;
++
++	if (num_jobs < 2 || num_threads == 1)
++		return -1;
++
++	for (size_t i = 0; i < num_jobs; i++)
++		max_compressed_size = max(max_compressed_size,
++					  jobs[i].compressed_size);
++
++	num_workers = limit_worker_count(num_threads, num_jobs, chunk_size,
++					 max_compressed_size, max_memory);
++	if (num_workers < 2)
++		return -1;
++
++	workers = CALLOC(num_workers, sizeof(workers[0]));
++	if (!workers)
++		goto out;
++
++	for (unsigned i = 0; i < num_workers; i++) {
++		struct decompressor_worker *worker = &workers[i];
++
++		ret = open_parallel_read_filedes(filename, &worker->in_fd);
++		if (ret)
++			goto out;
++		worker->in_fd_open = true;
++		if (!mutex_init(&worker->lock))
++			goto out;
++		worker->lock_initialized = true;
++		if (!condvar_init(&worker->state_changed))
++			goto out;
++		worker->condvar_initialized = true;
++		worker->recover_data = recover_data;
++		worker->compressed_buf = MALLOC(max_compressed_size);
++		worker->uncompressed_buf = MALLOC(chunk_size);
++		if (!worker->compressed_buf || !worker->uncompressed_buf)
++			goto out;
++		ret = wimlib_create_decompressor(ctype, chunk_size,
++						 &worker->decompressor);
++		if (ret)
++			goto out;
++	}
++
++	for (unsigned i = 0; i < num_workers; i++) {
++		if (!thread_create(&workers[i].thread,
++				   decompressor_worker_proc, &workers[i])) {
++			ret = WIMLIB_ERR_NOMEM;
++			goto out;
++		}
++		workers[i].thread_started = true;
++	}
++
++	for (next_job = 0; next_job < num_workers; next_job++) {
++		ret = assign_job(&workers[next_job], &jobs[next_job]);
++		if (ret)
++			goto out;
++	}
++
++	for (size_t completed = 0; completed < num_jobs; completed++) {
++		struct decompressor_worker *worker =
++			&workers[completed % num_workers];
++
++		ret = consume_worker_result(worker, consumer, consumer_ctx);
++		if (ret)
++			goto out;
++
++		if (next_job < num_jobs) {
++			ret = assign_job(worker, &jobs[next_job++]);
++			if (ret)
++				goto out;
++		}
++	}
++	ret = 0;
++
++out:
++	if (ret == WIMLIB_ERR_DECOMPRESSION)
++		ERROR("Failed to decompress data in parallel worker!");
++	else if (ret == WIMLIB_ERR_READ)
++		ERROR_WITH_ERRNO("Error reading data from WIM file");
++	else if (ret == WIMLIB_ERR_OPEN)
++		ERROR_WITH_ERRNO("Error opening WIM file for parallel reading");
++	destroy_workers(workers, workers ? num_workers : 0);
++	return ret;
++}
+diff --git a/src/extract.c b/src/extract.c
+index 24b53cb..fca97ab 100644
+--- a/src/extract.c
++++ b/src/extract.c
+@@ -584,7 +584,7 @@ extract_blob_list(struct apply_ctx *ctx, const struct read_blob_callbacks *cbs)
+ 	if (ctx->extract_flags & WIMLIB_EXTRACT_FLAG_FROM_PIPE) {
+ 		return read_blobs_from_pipe(ctx, &wrapper_cbs);
+ 	} else {
+-		int flags = VERIFY_BLOB_HASHES;
++		int flags = VERIFY_BLOB_HASHES | PARALLEL_BLOB_PREFETCH;
+ 
+ 		if (ctx->extract_flags & WIMLIB_EXTRACT_FLAG_RECOVER_DATA)
+ 			flags |= RECOVER_DATA;
+diff --git a/src/file_io.c b/src/file_io.c
+index 4cd71ec..efe0bd9 100644
+--- a/src/file_io.c
++++ b/src/file_io.c
+@@ -24,6 +24,7 @@
+ #endif
+ 
+ #include <errno.h>
++#include <fcntl.h>
+ #include <unistd.h>
+ 
+ #include "wimlib/error.h"
+@@ -38,6 +39,29 @@
+ #  define pwrite win32_pwrite
+ #endif
+ 
++/*
++ * Open an independent read handle for a parallel worker.  On Windows wimlib's
++ * pread() replacement temporarily manipulates the handle's file position, so
++ * sharing the WIM's primary descriptor across workers is neither safe nor
++ * fully concurrent.
++ */
++int
++open_parallel_read_filedes(const tchar *filename, struct filedes *fd)
++{
++	int raw_fd;
++
++	if (!filename)
++		return WIMLIB_ERR_INVALID_PARAM;
++	raw_fd = topen(filename, O_RDONLY | O_BINARY);
++	if (raw_fd < 0) {
++		ERROR_WITH_ERRNO("Can't open \"%"TS"\" for parallel reading",
++				 filename);
++		return WIMLIB_ERR_OPEN;
++	}
++	filedes_init(fd, raw_fd);
++	return 0;
++}
++
+ /*
+  * Wrapper around read() that checks for errors and keeps retrying until all
+  * requested bytes have been read or until end-of file has occurred.
+diff --git a/src/prefetch.c b/src/prefetch.c
+new file mode 100644
+index 0000000..f6eefd4
+--- /dev/null
++++ b/src/prefetch.c
+@@ -0,0 +1,416 @@
++/*
++ * prefetch.c
++ *
++ * Bounded, ordered blob prefetch for WIM image application.
++ */
++
++/*
++ * Copyright (C) 2026 LetRecovery contributors
++ *
++ * This file is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU Lesser General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option) any
++ * later version.
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include "config.h"
++#endif
++
++#include <string.h>
++#include <unistd.h>
++
++#include "wimlib/assert.h"
++#include "wimlib/blob_table.h"
++#include "wimlib/error.h"
++#include "wimlib/prefetch.h"
++#include "wimlib/threads.h"
++#include "wimlib/util.h"
++#include "wimlib/wim.h"
++
++#define PREFETCH_MAX_BLOB_SIZE	((u64)32 * 1024 * 1024)
++#define PREFETCH_DELIVERY_CHUNK	((size_t)1024 * 1024)
++#define PREFETCH_WORKER_RESERVE	((u64)2 * 1024 * 1024)
++
++enum prefetch_worker_state {
++	PREFETCH_IDLE,
++	PREFETCH_ASSIGNED,
++	PREFETCH_COMPLETE,
++	PREFETCH_TERMINATING,
++};
++
++struct prefetch_buffer_ctx {
++	u8 *buffer;
++	size_t capacity;
++	size_t offset;
++};
++
++struct prefetch_worker {
++	struct thread thread;
++	struct mutex lock;
++	struct condvar state_changed;
++	enum prefetch_worker_state state;
++	bool thread_started;
++	bool lock_initialized;
++	bool condvar_initialized;
++	bool recover_data;
++	struct blob_descriptor *blob;
++	WIMStruct *fd_wim;
++	struct filedes in_fd;
++	bool in_fd_open;
++	u8 *buffer;
++	size_t buffer_capacity;
++	int result;
++};
++
++static int
++buffer_blob_chunk(const struct blob_descriptor *blob, u64 offset,
++		  const void *chunk, size_t size, void *_ctx)
++{
++	struct prefetch_buffer_ctx *ctx = _ctx;
++
++	(void)blob;
++	if (offset != ctx->offset || size > ctx->capacity - ctx->offset)
++		return WIMLIB_ERR_INVALID_PARAM;
++	memcpy(ctx->buffer + ctx->offset, chunk, size);
++	ctx->offset += size;
++	return 0;
++}
++
++static int
++prefetch_blob(struct prefetch_worker *worker)
++{
++	struct prefetch_buffer_ctx buffer_ctx;
++	struct read_blob_callbacks cbs = {
++		.continue_blob = buffer_blob_chunk,
++		.ctx = &buffer_ctx,
++	};
++	size_t size = worker->blob->size;
++	WIMStruct *wim = worker->blob->rdesc->wim;
++
++	if (worker->fd_wim != wim) {
++		if (worker->in_fd_open) {
++			filedes_close(&worker->in_fd);
++			worker->in_fd_open = false;
++		}
++		int ret = open_parallel_read_filedes(wim->filename,
++						    &worker->in_fd);
++		if (ret)
++			return ret;
++		worker->in_fd_open = true;
++		worker->fd_wim = wim;
++	}
++
++	if (worker->buffer_capacity < size) {
++		void *new_buffer = REALLOC(worker->buffer, size);
++
++		if (!new_buffer)
++			return WIMLIB_ERR_NOMEM;
++		worker->buffer = new_buffer;
++		worker->buffer_capacity = size;
++	}
++
++	buffer_ctx = (struct prefetch_buffer_ctx) {
++		.buffer = worker->buffer,
++		.capacity = size,
++	};
++	return read_blob_with_sha1_isolated_from(worker->blob, &cbs,
++						 worker->recover_data,
++						 &worker->in_fd);
++}
++
++static void *
++prefetch_worker_proc(void *_worker)
++{
++	struct prefetch_worker *worker = _worker;
++
++	mutex_lock(&worker->lock);
++	for (;;) {
++		while (worker->state == PREFETCH_IDLE)
++			condvar_wait(&worker->state_changed, &worker->lock);
++		if (worker->state == PREFETCH_TERMINATING)
++			break;
++
++		wimlib_assert(worker->state == PREFETCH_ASSIGNED);
++		mutex_unlock(&worker->lock);
++		worker->result = prefetch_blob(worker);
++		mutex_lock(&worker->lock);
++
++		if (worker->state == PREFETCH_TERMINATING)
++			break;
++		worker->state = PREFETCH_COMPLETE;
++		condvar_broadcast(&worker->state_changed);
++		while (worker->state == PREFETCH_COMPLETE)
++			condvar_wait(&worker->state_changed, &worker->lock);
++		if (worker->state == PREFETCH_TERMINATING)
++			break;
++	}
++	mutex_unlock(&worker->lock);
++	return NULL;
++}
++
++static int
++assign_prefetch(struct prefetch_worker *worker,
++		struct blob_descriptor *blob)
++{
++	mutex_lock(&worker->lock);
++	if (worker->state != PREFETCH_IDLE) {
++		mutex_unlock(&worker->lock);
++		return WIMLIB_ERR_INVALID_PARAM;
++	}
++	worker->blob = blob;
++	worker->state = PREFETCH_ASSIGNED;
++	condvar_broadcast(&worker->state_changed);
++	mutex_unlock(&worker->lock);
++	return 0;
++}
++
++static int
++deliver_prefetched_blob(struct prefetch_worker *worker,
++			const struct read_blob_callbacks *cbs)
++{
++	struct blob_descriptor *blob;
++	int ret;
++
++	mutex_lock(&worker->lock);
++	while (worker->state == PREFETCH_ASSIGNED)
++		condvar_wait(&worker->state_changed, &worker->lock);
++	wimlib_assert(worker->state == PREFETCH_COMPLETE);
++
++	ret = worker->result;
++	blob = worker->blob;
++	mutex_unlock(&worker->lock);
++
++	if (!ret) {
++		ret = call_begin_blob(blob, cbs);
++		if (ret == BEGIN_BLOB_STATUS_SKIP_BLOB) {
++			ret = 0;
++		} else if (!ret) {
++			for (size_t offset = 0; offset < blob->size; ) {
++				size_t size = min(PREFETCH_DELIVERY_CHUNK,
++						  (size_t)blob->size - offset);
++
++				ret = call_continue_blob(blob, offset,
++							 worker->buffer + offset,
++							 size, cbs);
++				if (ret)
++					break;
++				offset += size;
++			}
++			ret = call_end_blob(blob, ret, cbs);
++		}
++	}
++
++	mutex_lock(&worker->lock);
++	worker->state = PREFETCH_IDLE;
++	condvar_broadcast(&worker->state_changed);
++	mutex_unlock(&worker->lock);
++	return ret;
++}
++
++static void
++destroy_prefetch_workers(struct prefetch_worker *workers,
++			 unsigned num_workers)
++{
++	if (!workers)
++		return;
++
++	for (unsigned i = 0; i < num_workers; i++) {
++		if (!workers[i].thread_started)
++			continue;
++		mutex_lock(&workers[i].lock);
++		workers[i].state = PREFETCH_TERMINATING;
++		condvar_broadcast(&workers[i].state_changed);
++		mutex_unlock(&workers[i].lock);
++	}
++	for (unsigned i = 0; i < num_workers; i++) {
++		if (workers[i].thread_started)
++			thread_join(&workers[i].thread);
++		if (workers[i].in_fd_open)
++			filedes_close(&workers[i].in_fd);
++		FREE(workers[i].buffer);
++		if (workers[i].condvar_initialized)
++			condvar_destroy(&workers[i].state_changed);
++		if (workers[i].lock_initialized)
++			mutex_destroy(&workers[i].lock);
++	}
++	FREE(workers);
++}
++
++static bool
++blob_list_supports_prefetch(struct blob_descriptor **blobs, size_t num_blobs,
++			    WIMStruct **wim_ret)
++{
++	WIMStruct *wim = NULL;
++
++	for (size_t i = 0; i < num_blobs; i++) {
++		struct blob_descriptor *blob = blobs[i];
++
++		if (blob->blob_location != BLOB_IN_WIM ||
++		    blob->unhashed ||
++		    blob->size != blob->rdesc->uncompressed_size ||
++		    blob->rdesc->is_pipable ||
++		    (blob->rdesc->flags & WIM_RESHDR_FLAG_SOLID))
++			return false;
++		if (!wim)
++			wim = blob->rdesc->wim;
++	}
++	*wim_ret = wim;
++	return wim != NULL;
++}
++
++static unsigned
++get_prefetch_worker_count(const WIMStruct *wim, size_t num_blobs,
++			  u64 *max_blob_size_ret)
++{
++	u64 max_memory = wim->decompression_max_memory;
++	u64 worker_reserve;
++	unsigned num_workers = wim->decompression_num_threads;
++	u64 max_blob_size;
++
++	if (num_workers == 0)
++		num_workers = get_available_cpus();
++	if ((size_t)num_workers > num_blobs)
++		num_workers = num_blobs;
++	if (max_memory == 0)
++		max_memory = min(get_available_memory() / 4,
++				 (u64)2 * 1024 * 1024 * 1024);
++	worker_reserve = max(PREFETCH_WORKER_RESERVE,
++			     (u64)2 * wim->chunk_size);
++
++	while (num_workers > 1 &&
++	       max_memory / num_workers <= worker_reserve)
++		num_workers--;
++	if (num_workers < 2)
++		return num_workers;
++
++	max_blob_size = max_memory / num_workers - worker_reserve;
++	*max_blob_size_ret = min(max_blob_size, PREFETCH_MAX_BLOB_SIZE);
++	return num_workers;
++}
++
++static int
++prefetch_blob_run(struct prefetch_worker *workers, unsigned num_workers,
++		  struct blob_descriptor **blobs, size_t num_blobs,
++		  const struct read_blob_callbacks *cbs)
++{
++	unsigned active_workers = min((size_t)num_workers, num_blobs);
++	size_t next_blob = 0;
++	int ret;
++
++	for (unsigned i = 0; i < active_workers; i++) {
++		ret = assign_prefetch(&workers[i], blobs[next_blob++]);
++		if (ret)
++			return ret;
++	}
++
++	for (size_t completed = 0; completed < num_blobs; completed++) {
++		struct prefetch_worker *worker =
++			&workers[completed % active_workers];
++
++		ret = deliver_prefetched_blob(worker, cbs);
++		if (ret)
++			return ret;
++		if (next_blob < num_blobs) {
++			ret = assign_prefetch(worker, blobs[next_blob++]);
++			if (ret)
++				return ret;
++		}
++	}
++	return 0;
++}
++
++int
++read_blob_list_with_prefetch(struct list_head *blob_list,
++			     size_t list_head_offset,
++			     const struct read_blob_callbacks *cbs,
++			     int flags)
++{
++	struct prefetch_worker *workers = NULL;
++	struct blob_descriptor **blobs = NULL;
++	struct list_head *cur;
++	WIMStruct *wim;
++	size_t num_blobs = 0;
++	unsigned num_workers;
++	u64 max_blob_size = 0;
++	int ret = WIMLIB_ERR_NOMEM;
++
++	if (!(flags & PARALLEL_BLOB_PREFETCH) ||
++	    !(flags & VERIFY_BLOB_HASHES) ||
++	    (flags & COMPUTE_MISSING_BLOB_HASHES))
++		return -1;
++
++	for (cur = blob_list->next; cur != blob_list; cur = cur->next)
++		num_blobs++;
++	if (num_blobs < 2)
++		return -1;
++
++	blobs = MALLOC(num_blobs * sizeof(blobs[0]));
++	if (!blobs)
++		goto out;
++	size_t i = 0;
++	for (cur = blob_list->next; cur != blob_list; cur = cur->next)
++		blobs[i++] =
++			(struct blob_descriptor *)((u8 *)cur - list_head_offset);
++
++	if (!blob_list_supports_prefetch(blobs, num_blobs, &wim) ||
++	    wim->decompression_num_threads == 1) {
++		ret = -1;
++		goto out;
++	}
++
++	num_workers = get_prefetch_worker_count(wim, num_blobs,
++						&max_blob_size);
++	if (num_workers < 2 || max_blob_size == 0) {
++		ret = -1;
++		goto out;
++	}
++
++	workers = CALLOC(num_workers, sizeof(workers[0]));
++	if (!workers)
++		goto out;
++	for (unsigned i = 0; i < num_workers; i++) {
++		struct prefetch_worker *worker = &workers[i];
++
++		if (!mutex_init(&worker->lock))
++			goto out;
++		worker->lock_initialized = true;
++		if (!condvar_init(&worker->state_changed))
++			goto out;
++		worker->condvar_initialized = true;
++		worker->recover_data = flags & RECOVER_DATA;
++		if (!thread_create(&worker->thread,
++				   prefetch_worker_proc, worker))
++			goto out;
++		worker->thread_started = true;
++	}
++
++	ret = 0;
++	for (size_t run_start = 0; run_start < num_blobs; ) {
++		size_t run_end = run_start;
++
++		while (run_end < num_blobs &&
++		       blobs[run_end]->size <= max_blob_size)
++			run_end++;
++		if (run_end - run_start >= 2) {
++			ret = prefetch_blob_run(workers, num_workers,
++					       &blobs[run_start],
++					       run_end - run_start, cbs);
++			if (ret)
++				goto out;
++			run_start = run_end;
++		} else {
++			ret = read_blob_with_sha1(blobs[run_start], cbs,
++						 flags & RECOVER_DATA);
++			if (ret != 0 && ret != BEGIN_BLOB_STATUS_SKIP_BLOB)
++				goto out;
++			ret = 0;
++			run_start++;
++		}
++	}
++
++out:
++	destroy_prefetch_workers(workers, workers ? num_workers : 0);
++	FREE(blobs);
++	return ret;
++}
+diff --git a/src/reference.c b/src/reference.c
+index b7248f6..49ad726 100644
+--- a/src/reference.c
++++ b/src/reference.c
+@@ -116,6 +116,10 @@ wimlib_reference_resources(WIMStruct *wim, WIMStruct **resource_wims,
+ 	init_reference_info(&info, wim, ref_flags);
+ 
+ 	for (i = 0; i < num_resource_wims; i++) {
++		resource_wims[i]->decompression_num_threads =
++			wim->decompression_num_threads;
++		resource_wims[i]->decompression_max_memory =
++			wim->decompression_max_memory;
+ 		ret = for_blob_in_table(resource_wims[i]->blob_table,
+ 					blob_clone_if_new, &info);
+ 		if (ret)
+@@ -153,6 +157,10 @@ reference_resource_path(struct reference_info *info, const tchar *path,
+ 	if (ret)
+ 		return ret;
+ 
++	src_wim->decompression_num_threads =
++		info->dest_wim->decompression_num_threads;
++	src_wim->decompression_max_memory =
++		info->dest_wim->decompression_max_memory;
+ 	info->src_table = src_wim->blob_table;
+ 	for_blob_in_table(src_wim->blob_table, blob_gift, info);
+ 	wimlib_free(src_wim);
+diff --git a/src/resource.c b/src/resource.c
+index a2aee42..2919458 100644
+--- a/src/resource.c
++++ b/src/resource.c
+@@ -33,15 +33,34 @@
+ #include "wimlib/assert.h"
+ #include "wimlib/bitops.h"
+ #include "wimlib/blob_table.h"
++#include "wimlib/decompress_parallel.h"
+ #include "wimlib/endianness.h"
+ #include "wimlib/error.h"
+ #include "wimlib/file_io.h"
+ #include "wimlib/ntfs_3g.h"
++#include "wimlib/prefetch.h"
+ #include "wimlib/resource.h"
+ #include "wimlib/sha1.h"
+ #include "wimlib/wim.h"
+ #include "wimlib/win32.h"
+ 
++/*
++ * The parallel verifier reads independent non-solid resources concurrently.
++ * Keep decompressor caches and nested chunk parallelism local to each worker.
++ */
++static __thread bool isolated_decompression;
++static __thread WIMStruct *isolated_wim;
++static __thread struct filedes *isolated_in_fd;
++
++static struct filedes *
++resource_in_fd(const struct wim_resource_descriptor *rdesc)
++{
++	if (isolated_decompression && isolated_wim == rdesc->wim &&
++	    isolated_in_fd)
++		return isolated_in_fd;
++	return &rdesc->wim->in_fd;
++}
++
+ /*
+  *                         Compressed WIM resources
+  *
+@@ -111,6 +130,48 @@ decompress_chunk(const void *cbuf, u32 chunk_csize, u8 *ubuf, u32 chunk_usize,
+ 	return WIMLIB_ERR_DECOMPRESSION;
+ }
+ 
++struct parallel_range_consumer_ctx {
++	const struct data_range *cur_range;
++	const struct data_range *end_range;
++	const struct consume_chunk_callback *cb;
++};
++
++static int
++consume_parallel_resource_chunk(const void *chunk, u32 size,
++				u64 uncompressed_offset, void *_ctx)
++{
++	struct parallel_range_consumer_ctx *ctx = _ctx;
++	const u64 chunk_end = uncompressed_offset + size;
++
++	while (ctx->cur_range != ctx->end_range &&
++	       ctx->cur_range->offset + ctx->cur_range->size <=
++							uncompressed_offset)
++		ctx->cur_range++;
++
++	while (ctx->cur_range != ctx->end_range &&
++	       ctx->cur_range->offset < chunk_end)
++	{
++		const u64 range_end =
++			ctx->cur_range->offset + ctx->cur_range->size;
++		const u64 start = max(ctx->cur_range->offset,
++				      uncompressed_offset);
++		const u64 end = min(range_end, chunk_end);
++		int ret;
++
++		ret = consume_chunk(ctx->cb,
++				    (const u8 *)chunk +
++					(start - uncompressed_offset),
++				    end - start);
++		if (ret)
++			return ret;
++		if (end == range_end)
++			ctx->cur_range++;
++		else
++			break;
++	}
++	return 0;
++}
++
+ /*
+  * Read data from a compressed WIM resource.
+  *
+@@ -156,6 +217,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 	bool ubuf_malloced = false;
+ 	bool cbuf_malloced = false;
+ 	struct wimlib_decompressor *decompressor = NULL;
++	struct parallel_decompression_job *parallel_jobs = NULL;
+ 
+ 	/* Sanity checks  */
+ 	wimlib_assert(num_ranges != 0);
+@@ -171,7 +233,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 	const u64 last_offset = ranges[num_ranges - 1].offset + ranges[num_ranges - 1].size - 1;
+ 
+ 	/* Get the file descriptor for the WIM.  */
+-	struct filedes * const in_fd = &rdesc->wim->in_fd;
++	struct filedes * const in_fd = resource_in_fd(rdesc);
+ 
+ 	/* Determine if we're reading a pipable resource from a pipe or not.  */
+ 	const bool is_pipe_read = (rdesc->is_pipable && !filedes_is_seekable(in_fd));
+@@ -203,7 +265,8 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 	}
+ 
+ 	/* Get valid decompressor.  */
+-	if (likely(ctype == rdesc->wim->decompressor_ctype &&
++	if (!isolated_decompression &&
++	    likely(ctype == rdesc->wim->decompressor_ctype &&
+ 		   chunk_size == rdesc->wim->decompressor_max_block_size))
+ 	{
+ 		/* Cached decompressor.  */
+@@ -372,6 +435,118 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 			cur_read_offset += chunk_table_size;
+ 	}
+ 
++	/*
++	 * Seekable resources can be read and decompressed out of order.  Build a
++	 * compact list containing only chunks that intersect requested ranges,
++	 * then deliver their results to the existing callback in original order.
++	 */
++	if (!isolated_decompression && !is_pipe_read &&
++	    rdesc->wim->decompression_num_threads != 1) {
++		const u64 max_num_jobs =
++			last_needed_chunk - read_start_chunk + 1;
++		const struct data_range *scan_range = ranges;
++		const struct data_range * const scan_end = &ranges[num_ranges];
++		u64 parallel_read_offset = cur_read_offset;
++		size_t num_jobs = 0;
++
++		if (unlikely(max_num_jobs > SIZE_MAX /
++					 sizeof(parallel_jobs[0])))
++			goto oom;
++		parallel_jobs = MALLOC(max_num_jobs *
++				      sizeof(parallel_jobs[0]));
++		if (!parallel_jobs)
++			goto oom;
++
++		for (u64 i = read_start_chunk; i <= last_needed_chunk; i++) {
++			u32 chunk_usize;
++			u32 chunk_csize;
++			u64 chunk_start_offset;
++			u64 chunk_end_offset;
++
++			if ((i == num_chunks - 1) &&
++			    (rdesc->uncompressed_size & (chunk_size - 1)))
++				chunk_usize = rdesc->uncompressed_size &
++					      (chunk_size - 1);
++			else
++				chunk_usize = chunk_size;
++
++			if (rdesc->is_pipable) {
++				struct pwm_chunk_hdr chunk_hdr;
++
++				ret = full_pread(in_fd, &chunk_hdr,
++						 sizeof(chunk_hdr),
++						 parallel_read_offset);
++				if (unlikely(ret))
++					goto read_error;
++				chunk_csize =
++					le32_to_cpu(chunk_hdr.compressed_size);
++				parallel_read_offset += sizeof(chunk_hdr);
++			} else if (i == num_chunks - 1) {
++				chunk_csize = rdesc->size_in_wim -
++					      chunk_table_full_size -
++					      chunk_offsets[i -
++							    read_start_chunk];
++			} else {
++				chunk_csize =
++					chunk_offsets[i + 1 -
++						      read_start_chunk] -
++					chunk_offsets[i -
++						      read_start_chunk];
++			}
++			if (unlikely(chunk_csize == 0 ||
++				     chunk_csize > chunk_usize)) {
++				ERROR("Invalid chunk size in compressed resource!");
++				errno = EINVAL;
++				ret = WIMLIB_ERR_DECOMPRESSION;
++				goto out_cleanup;
++			}
++
++			chunk_start_offset = i << chunk_order;
++			chunk_end_offset = chunk_start_offset + chunk_usize;
++			while (scan_range != scan_end &&
++			       scan_range->offset + scan_range->size <=
++							chunk_start_offset)
++				scan_range++;
++
++			if (scan_range != scan_end &&
++			    scan_range->offset < chunk_end_offset) {
++				parallel_jobs[num_jobs++] =
++					(struct parallel_decompression_job) {
++						.file_offset =
++							parallel_read_offset,
++						.uncompressed_offset =
++							chunk_start_offset,
++						.compressed_size =
++							chunk_csize,
++						.uncompressed_size =
++							chunk_usize,
++					};
++			}
++			parallel_read_offset += chunk_csize;
++		}
++
++		if (num_jobs >= 2) {
++			struct parallel_range_consumer_ctx range_ctx = {
++				.cur_range = ranges,
++				.end_range = &ranges[num_ranges],
++				.cb = cb,
++			};
++
++			ret = decompress_jobs_parallel(
++				rdesc->wim->filename, parallel_jobs, num_jobs, ctype,
++				chunk_size,
++				rdesc->wim->decompression_num_threads,
++				rdesc->wim->decompression_max_memory,
++				recover_data,
++				consume_parallel_resource_chunk,
++				&range_ctx);
++			if (ret != -1)
++				goto out_cleanup;
++		}
++		FREE(parallel_jobs);
++		parallel_jobs = NULL;
++	}
++
+ 	/* Allocate buffer for holding the uncompressed data of each chunk.  */
+ 	if (chunk_size <= STACK_MAX) {
+ 		ubuf = alloca(chunk_size);
+@@ -536,10 +711,14 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 
+ out_cleanup:
+ 	if (decompressor) {
+-		wimlib_free_decompressor(rdesc->wim->decompressor);
+-		rdesc->wim->decompressor = decompressor;
+-		rdesc->wim->decompressor_ctype = ctype;
+-		rdesc->wim->decompressor_max_block_size = chunk_size;
++		if (isolated_decompression) {
++			wimlib_free_decompressor(decompressor);
++		} else {
++			wimlib_free_decompressor(rdesc->wim->decompressor);
++			rdesc->wim->decompressor = decompressor;
++			rdesc->wim->decompressor_ctype = ctype;
++			rdesc->wim->decompressor_max_block_size = chunk_size;
++		}
+ 	}
+ 	if (chunk_offsets_malloced)
+ 		FREE(chunk_offsets);
+@@ -547,6 +726,7 @@ out_cleanup:
+ 		FREE(ubuf);
+ 	if (cbuf_malloced)
+ 		FREE(cbuf);
++	FREE(parallel_jobs);
+ 	return ret;
+ 
+ oom:
+@@ -637,7 +817,7 @@ read_partial_wim_resource(const struct wim_resource_descriptor *rdesc,
+ 	}
+ 
+ 	/* Uncompressed resource  */
+-	return read_raw_file_data(&rdesc->wim->in_fd,
++	return read_raw_file_data(resource_in_fd(rdesc),
+ 				  rdesc->offset_in_wim + offset,
+ 				  size, cb, NULL);
+ }
+@@ -1129,6 +1309,36 @@ read_blob_with_sha1(struct blob_descriptor *blob,
+ 	return read_blob_with_cbs(blob, &hasher_cbs, recover_data);
+ }
+ 
++int
++read_blob_with_sha1_isolated(struct blob_descriptor *blob,
++			     const struct read_blob_callbacks *cbs,
++			     bool recover_data)
++{
++	return read_blob_with_sha1_isolated_from(blob, cbs, recover_data, NULL);
++}
++
++int
++read_blob_with_sha1_isolated_from(struct blob_descriptor *blob,
++				  const struct read_blob_callbacks *cbs,
++				  bool recover_data,
++				  struct filedes *in_fd)
++{
++	const bool previous = isolated_decompression;
++	WIMStruct * const previous_wim = isolated_wim;
++	struct filedes * const previous_in_fd = isolated_in_fd;
++	int ret;
++
++	isolated_decompression = true;
++	isolated_wim =
++		blob->blob_location == BLOB_IN_WIM ? blob->rdesc->wim : NULL;
++	isolated_in_fd = in_fd;
++	ret = read_blob_with_sha1(blob, cbs, recover_data);
++	isolated_in_fd = previous_in_fd;
++	isolated_wim = previous_wim;
++	isolated_decompression = previous;
++	return ret;
++}
++
+ static int
+ read_blobs_in_solid_resource(struct blob_descriptor *first_blob,
+ 			     struct blob_descriptor *last_blob,
+@@ -1260,6 +1470,13 @@ read_blob_list(struct list_head *blob_list, size_t list_head_offset,
+ 			return ret;
+ 	}
+ 
++	if (flags & PARALLEL_BLOB_PREFETCH) {
++		ret = read_blob_list_with_prefetch(blob_list, list_head_offset,
++						  cbs, flags);
++		if (ret != -1)
++			return ret;
++	}
++
+ 	if (flags & (VERIFY_BLOB_HASHES | COMPUTE_MISSING_BLOB_HASHES)) {
+ 		hasher_ctx = alloca(sizeof(*hasher_ctx));
+ 		*hasher_ctx = (struct hasher_context) {
+diff --git a/src/verify.c b/src/verify.c
+index 00da397..1a5e47c 100644
+--- a/src/verify.c
++++ b/src/verify.c
+@@ -25,12 +25,17 @@
+ #  include "config.h"
+ #endif
+ 
++#include <unistd.h>
++
+ #include "wimlib/blob_table.h"
+ #include "wimlib/dentry.h"
+ #include "wimlib/error.h"
+ #include "wimlib/metadata.h"
+ #include "wimlib/progress.h"
+ #include "wimlib/security.h"
++#include "wimlib/threads.h"
++#include "wimlib/util.h"
++#include "wimlib/wim.h"
+ 
+ static int
+ append_blob_to_list(struct blob_descriptor *blob, void *_list)
+@@ -46,6 +51,28 @@ struct verify_blob_list_ctx {
+ 	u64 next_progress;
+ };
+ 
++struct parallel_verify_ctx {
++	struct blob_descriptor **blobs;
++	size_t num_blobs;
++	size_t next_blob;
++	size_t *completed_blobs;
++	int *results;
++	size_t num_completed;
++	size_t num_consumed;
++	unsigned active_workers;
++	bool stop;
++	struct mutex lock;
++	struct condvar state_changed;
++};
++
++struct parallel_verify_worker {
++	struct thread thread;
++	struct parallel_verify_ctx *ctx;
++	WIMStruct *fd_wim;
++	struct filedes in_fd;
++	bool in_fd_open;
++};
++
+ static int
+ verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
+ 		     const void *chunk, size_t size, void *_ctx)
+@@ -73,6 +100,213 @@ verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
+ 	return 0;
+ }
+ 
++static int
++verify_completed_blob(const struct blob_descriptor *blob,
++		      struct verify_blob_list_ctx *ctx)
++{
++	union wimlib_progress_info *progress = ctx->progress;
++
++	progress->verify_streams.completed_streams++;
++	progress->verify_streams.completed_bytes += blob->size;
++
++	if (progress->verify_streams.completed_bytes >= ctx->next_progress) {
++		int ret = call_progress(ctx->progfunc,
++					WIMLIB_PROGRESS_MSG_VERIFY_STREAMS,
++					progress, ctx->progctx);
++		if (ret)
++			return ret;
++
++		set_next_progress(progress->verify_streams.completed_bytes,
++				  progress->verify_streams.total_bytes,
++				  &ctx->next_progress);
++	}
++	return 0;
++}
++
++static void *
++parallel_verify_worker(void *_ctx)
++{
++	struct parallel_verify_worker *worker = _ctx;
++	struct parallel_verify_ctx *ctx = worker->ctx;
++	const struct read_blob_callbacks cbs = { 0 };
++
++	for (;;) {
++		struct blob_descriptor *blob;
++		size_t blob_index;
++		int ret;
++
++		mutex_lock(&ctx->lock);
++		if (ctx->stop || ctx->next_blob == ctx->num_blobs) {
++			ctx->active_workers--;
++			condvar_broadcast(&ctx->state_changed);
++			mutex_unlock(&ctx->lock);
++			return NULL;
++		}
++		blob_index = ctx->next_blob++;
++		blob = ctx->blobs[blob_index];
++		mutex_unlock(&ctx->lock);
++
++		if (worker->fd_wim != blob->rdesc->wim) {
++			if (worker->in_fd_open) {
++				filedes_close(&worker->in_fd);
++				worker->in_fd_open = false;
++			}
++			ret = open_parallel_read_filedes(
++					blob->rdesc->wim->filename,
++					&worker->in_fd);
++			if (ret)
++				goto complete;
++			worker->in_fd_open = true;
++			worker->fd_wim = blob->rdesc->wim;
++		}
++		ret = read_blob_with_sha1_isolated_from(blob, &cbs, false,
++						       &worker->in_fd);
++
++complete:
++		mutex_lock(&ctx->lock);
++		ctx->results[blob_index] = ret;
++		ctx->completed_blobs[ctx->num_completed++] = blob_index;
++		if (ret)
++			ctx->stop = true;
++		condvar_broadcast(&ctx->state_changed);
++		mutex_unlock(&ctx->lock);
++	}
++}
++
++static unsigned
++parallel_verify_worker_count(const WIMStruct *wim, size_t num_blobs)
++{
++	u64 max_memory = wim->decompression_max_memory;
++	u64 bytes_per_worker;
++	unsigned num_workers = wim->decompression_num_threads;
++
++	if (num_workers == 0)
++		num_workers = get_available_cpus();
++	if ((size_t)num_workers > num_blobs)
++		num_workers = num_blobs;
++
++	if (max_memory == 0)
++		max_memory = min(get_available_memory() / 4,
++				 (u64)2 * 1024 * 1024 * 1024);
++
++	/*
++	 * Each isolated worker owns a decompressor plus its compressed and
++	 * uncompressed chunk buffers.  Keep a conservative floor for codec
++	 * state so verification remains safe in memory-constrained WinPE.
++	 */
++	bytes_per_worker = max((u64)2 * wim->chunk_size,
++			       (u64)1024 * 1024);
++	while (num_workers > 1 &&
++	       (u64)num_workers * bytes_per_worker > max_memory)
++		num_workers--;
++	return num_workers;
++}
++
++static int
++verify_blob_list_parallel(WIMStruct *wim, struct list_head *blob_list,
++			  size_t num_blobs,
++			  struct verify_blob_list_ctx *progress_ctx)
++{
++	struct parallel_verify_ctx ctx = {
++		.num_blobs = num_blobs,
++	};
++	struct parallel_verify_worker *workers = NULL;
++	struct blob_descriptor *blob;
++	unsigned num_workers;
++	unsigned num_started = 0;
++	size_t i = 0;
++	int ret = WIMLIB_ERR_NOMEM;
++	bool lock_initialized = false;
++	bool condvar_initialized = false;
++
++	num_workers = parallel_verify_worker_count(wim, num_blobs);
++	if (num_workers < 2)
++		return -1;
++
++	ctx.blobs = MALLOC(num_blobs * sizeof(ctx.blobs[0]));
++	ctx.completed_blobs =
++		MALLOC(num_blobs * sizeof(ctx.completed_blobs[0]));
++	ctx.results = MALLOC(num_blobs * sizeof(ctx.results[0]));
++	workers = CALLOC(num_workers, sizeof(workers[0]));
++	if (!ctx.blobs || !ctx.completed_blobs || !ctx.results || !workers)
++		goto out;
++
++	list_for_each_entry(blob, blob_list, extraction_list)
++		ctx.blobs[i++] = blob;
++
++	if (!mutex_init(&ctx.lock))
++		goto out;
++	lock_initialized = true;
++	if (!condvar_init(&ctx.state_changed))
++		goto out;
++	condvar_initialized = true;
++
++	for (; num_started < num_workers; num_started++) {
++		workers[num_started].ctx = &ctx;
++		mutex_lock(&ctx.lock);
++		ctx.active_workers++;
++		mutex_unlock(&ctx.lock);
++		if (!thread_create(&workers[num_started].thread,
++				   parallel_verify_worker,
++				   &workers[num_started])) {
++			mutex_lock(&ctx.lock);
++			ctx.active_workers--;
++			ctx.stop = true;
++			condvar_broadcast(&ctx.state_changed);
++			mutex_unlock(&ctx.lock);
++			goto join;
++		}
++	}
++
++	ret = 0;
++	mutex_lock(&ctx.lock);
++	while (ctx.num_consumed < ctx.num_blobs) {
++		size_t blob_index;
++
++		while (ctx.num_consumed == ctx.num_completed &&
++		       ctx.active_workers != 0)
++			condvar_wait(&ctx.state_changed, &ctx.lock);
++
++		if (ctx.num_consumed == ctx.num_completed)
++			break;
++
++		blob_index = ctx.completed_blobs[ctx.num_consumed++];
++		ret = ctx.results[blob_index];
++		if (ret) {
++			ctx.stop = true;
++			condvar_broadcast(&ctx.state_changed);
++			break;
++		}
++		mutex_unlock(&ctx.lock);
++		ret = verify_completed_blob(ctx.blobs[blob_index], progress_ctx);
++		mutex_lock(&ctx.lock);
++		if (ret) {
++			ctx.stop = true;
++			condvar_broadcast(&ctx.state_changed);
++			break;
++		}
++	}
++	mutex_unlock(&ctx.lock);
++
++join:
++	for (unsigned j = 0; j < num_started; j++) {
++		thread_join(&workers[j].thread);
++		if (workers[j].in_fd_open)
++			filedes_close(&workers[j].in_fd);
++	}
++
++out:
++	if (condvar_initialized)
++		condvar_destroy(&ctx.state_changed);
++	if (lock_initialized)
++		mutex_destroy(&ctx.lock);
++	FREE(workers);
++	FREE(ctx.results);
++	FREE(ctx.completed_blobs);
++	FREE(ctx.blobs);
++	return ret;
++}
++
+ static int
+ verify_file_data_present(struct wim_image_metadata *imd,
+ 			 struct blob_table *blob_table)
+@@ -101,6 +335,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+ 		.continue_blob	= verify_continue_blob,
+ 		.ctx		= &ctx,
+ 	};
++	size_t num_blobs = 0;
+ 
+ 	/* Check parameters  */
+ 
+@@ -154,6 +389,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+ 
+ 	progress.verify_streams.wimfile = wim->filename;
+ 	list_for_each_entry(blob, &blob_list, extraction_list) {
++		num_blobs++;
+ 		progress.verify_streams.total_streams++;
+ 		progress.verify_streams.total_bytes += blob->size;
+ 	}
+@@ -168,6 +404,19 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Non-solid WIM resources are independent, so verify them concurrently.
++	 * Solid resources stay on the existing one-pass path, which now uses
++	 * ordered parallel chunk decompression and avoids re-reading the solid
++	 * stream once per blob.
++	 */
++	if (!wim_has_solid_resources(wim) &&
++	    wim->decompression_num_threads != 1) {
++		ret = verify_blob_list_parallel(wim, &blob_list, num_blobs, &ctx);
++		if (ret != -1)
++			return ret;
++	}
++
+ 	return read_blob_list(&blob_list,
+ 			      offsetof(struct blob_descriptor, extraction_list),
+ 			      &cbs, VERIFY_BLOB_HASHES);
+diff --git a/src/wim.c b/src/wim.c
+index 3a2a216..84d8633 100644
+--- a/src/wim.c
++++ b/src/wim.c
+@@ -147,6 +147,7 @@ new_wim_struct(void)
+ 	wim->refcnt = 1;
+ 	filedes_invalidate(&wim->in_fd);
+ 	filedes_invalidate(&wim->out_fd);
++	wim->decompression_num_threads = 1;
+ 	wim->out_solid_compression_type = wim_default_solid_compression_type();
+ 	wim->out_solid_chunk_size = wim_default_solid_chunk_size(
+ 					wim->out_solid_compression_type);
+@@ -597,6 +598,19 @@ wimlib_set_output_pack_chunk_size(WIMStruct *wim, u32 chunk_size)
+ 	return 0;
+ }
+ 
++/* API function documented in wimlib.h  */
++WIMLIBAPI int
++wimlib_set_parallel_decompression(WIMStruct *wim, u32 num_threads,
++				  u64 max_memory)
++{
++	if (!wim)
++		return WIMLIB_ERR_INVALID_PARAM;
++
++	wim->decompression_num_threads = num_threads;
++	wim->decompression_max_memory = max_memory;
++	return 0;
++}
++
+ /* API function documented in wimlib.h  */
+ WIMLIBAPI const tchar *
+ wimlib_get_compression_type_string(enum wimlib_compression_type ctype)

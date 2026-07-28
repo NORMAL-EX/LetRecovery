@@ -5,6 +5,7 @@
 //! implementations. Desktop-to-PE staging includes both regular image files
 //! and session-isolated XP/2003 text-mode source directories.
 
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -71,6 +72,31 @@ impl ProductionInstallBackend {
 
     fn error(code: &'static str, error: impl std::fmt::Display) -> InstallBackendError {
         InstallBackendError::new(code, error.to_string())
+    }
+
+    fn supports_fused_verify_copy(path: &Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("wim") || extension.eq_ignore_ascii_case("esd")
+            })
+    }
+
+    /// Opens a single-file WIM/ESD for the complete verify-and-copy transaction.
+    ///
+    /// Allowing only additional readers prevents both writes and path replacement until
+    /// verification and source hashing have consumed the same immutable byte stream.
+    #[cfg(windows)]
+    fn open_locked_source(path: &Path) -> std::io::Result<File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_READ};
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN.0);
+        options.open(path)
     }
 
     const fn supports_direct_phase(phase: InstallExecutionPhase) -> bool {
@@ -486,6 +512,19 @@ impl ProductionInstallBackend {
             return Ok(());
         }
 
+        if Self::supports_fused_verify_copy(Path::new(&intent.image_path)) {
+            Self::report(
+                reporter,
+                InstallExecutionPhase::VerifySourceImage,
+                100,
+                Path::new(&intent.image_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default(),
+            );
+            return Ok(());
+        }
+
         let (progress_tx, progress_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         let image = intent.image_path.clone();
@@ -563,6 +602,7 @@ impl ProductionInstallBackend {
             .to_string();
         let destination = Path::new(&self.data_dir()?).join(&file_name);
         let source_path = Path::new(&intent.image_path);
+        let fused_verify_copy = Self::supports_fused_verify_copy(source_path);
         let source_identity = std::fs::canonicalize(source_path)
             .map_err(|error| Self::error("canonicalize_source_image", error))?;
         if destination.exists() {
@@ -580,8 +620,12 @@ impl ProductionInstallBackend {
                 return Ok(());
             }
         }
-        let source = std::fs::File::open(&intent.image_path)
-            .map_err(|error| Self::error("open_source_image", error))?;
+        let source = if fused_verify_copy {
+            Self::open_locked_source(&source_identity)
+                .map_err(|error| Self::error("lock_source_image", error))?
+        } else {
+            File::open(&source_identity).map_err(|error| Self::error("open_source_image", error))?
+        };
         let source_metadata = source
             .metadata()
             .map_err(|error| Self::error("inspect_source_image", error))?;
@@ -616,34 +660,123 @@ impl ProductionInstallBackend {
             .map_err(|error| Self::error("create_staged_image", error))?;
         let mut reader = BufReader::with_capacity(1024 * 1024, source);
         let mut writer = BufWriter::with_capacity(1024 * 1024, destination_file);
-        let (copied, copied_sha256) =
-            lr_core::hash::copy_and_sha256(&mut reader, &mut writer, |copied| {
+
+        let verify_cancel = Arc::new(AtomicBool::new(false));
+        let mut verify_progress_rx = None;
+        let mut verify_result_rx = None;
+        if fused_verify_copy {
+            use super::image_verify::ImageVerifier;
+
+            let (progress_tx, progress_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            let verify_cancel_for_worker = Arc::clone(&verify_cancel);
+            let image = source_identity.to_string_lossy().into_owned();
+            std::thread::spawn(move || {
+                let result = ImageVerifier::with_cancel_flag(verify_cancel_for_worker)
+                    .verify(&image, Some(progress_tx));
+                let _ = result_tx.send(result);
+            });
+            verify_progress_rx = Some(progress_rx);
+            verify_result_rx = Some(result_rx);
+        }
+
+        let mut copy_progress = 0_u8;
+        let mut verify_progress = 0_u8;
+        let copy_result = lr_core::hash::copy_and_sha256(&mut reader, &mut writer, |copied| {
+            if cancellation.is_cancelled() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "image copy was cancelled",
+                ));
+            }
+            copy_progress = if total == 0 {
+                100
+            } else {
+                ((copied.saturating_mul(100) / total).min(100)) as u8
+            };
+            if let Some(progress_rx) = verify_progress_rx.as_ref() {
+                while let Ok(progress) = progress_rx.try_recv() {
+                    verify_progress = progress.percentage;
+                }
+            }
+            let percentage = if fused_verify_copy {
+                ((u16::from(copy_progress) + u16::from(verify_progress)) * 65 / 200) as u8
+            } else {
+                (u16::from(copy_progress) * 65 / 100) as u8
+            };
+            Self::report(
+                reporter,
+                InstallExecutionPhase::CopySourceImage,
+                percentage,
+                file_name.clone(),
+            );
+            Ok(())
+        });
+        if copy_result.is_err() {
+            verify_cancel.store(true, Ordering::SeqCst);
+        }
+
+        let source_verification = if let Some(result_rx) = verify_result_rx.as_ref() {
+            let result = loop {
+                if let Some(progress_rx) = verify_progress_rx.as_ref() {
+                    while let Ok(progress) = progress_rx.try_recv() {
+                        verify_progress = progress.percentage;
+                        let percentage = ((u16::from(copy_progress) + u16::from(verify_progress))
+                            * 65
+                            / 200) as u8;
+                        Self::report(
+                            reporter,
+                            InstallExecutionPhase::CopySourceImage,
+                            percentage,
+                            progress.status,
+                        );
+                    }
+                }
+                match result_rx.try_recv() {
+                    Ok(result) => break result,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err(InstallBackendError::new(
+                            "source_verify_worker_disconnected",
+                            "the fused source verification worker ended without a result",
+                        ));
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
                 if cancellation.is_cancelled() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "image copy was cancelled",
-                    ));
+                    verify_cancel.store(true, Ordering::SeqCst);
                 }
-                let percentage = if total == 0 {
-                    65
-                } else {
-                    ((copied.saturating_mul(65) / total).min(65)) as u8
-                };
-                Self::report(
-                    reporter,
-                    InstallExecutionPhase::CopySourceImage,
-                    percentage,
-                    file_name.clone(),
-                );
-                Ok(())
-            })
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::Interrupted && cancellation.is_cancelled() {
-                    InstallBackendError::new("cancelled", "image copy was cancelled")
-                } else {
-                    Self::error("copy_staged_image", error)
-                }
-            })?;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            };
+            Some(result)
+        } else {
+            None
+        };
+
+        let (copied, copied_sha256) = copy_result.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::Interrupted && cancellation.is_cancelled() {
+                InstallBackendError::new("cancelled", "image copy was cancelled")
+            } else {
+                Self::error("copy_staged_image", error)
+            }
+        })?;
+
+        if let Some(result) = source_verification {
+            use super::image_verify::VerifyStatus;
+
+            if result.status == VerifyStatus::Cancelled || cancellation.is_cancelled() {
+                return Err(InstallBackendError::new(
+                    "cancelled",
+                    "fused source image verification was cancelled",
+                ));
+            }
+            if result.status != VerifyStatus::Valid {
+                return Err(InstallBackendError::new(
+                    "source_image_verification_failed",
+                    format!("{}: {}", result.status, result.message),
+                ));
+            }
+        }
+        drop(reader);
         if cancellation.is_cancelled() {
             return Err(InstallBackendError::new(
                 "cancelled",
@@ -675,6 +808,7 @@ impl ProductionInstallBackend {
                 ),
             ));
         }
+        let staged_hash_span = if fused_verify_copy { 33_u64 } else { 16_u64 };
         let staged_sha256 = lr_core::hash::sha256_file_cancellable(temporary.path(), |hashed| {
             if cancellation.is_cancelled() {
                 return Err(std::io::Error::new(
@@ -683,9 +817,9 @@ impl ProductionInstallBackend {
                 ));
             }
             let percentage = if total == 0 {
-                82
+                66_u8.saturating_add(staged_hash_span as u8)
             } else {
-                66 + ((hashed.saturating_mul(16) / total).min(16)) as u8
+                66 + ((hashed.saturating_mul(staged_hash_span) / total).min(staged_hash_span)) as u8
             };
             Self::report(
                 reporter,
@@ -708,7 +842,9 @@ impl ProductionInstallBackend {
                 "staged image differs from the source byte stream",
             ));
         }
-        self.verify_staged_image(temporary.path(), reporter, cancellation, 82, 17)?;
+        if !fused_verify_copy {
+            self.verify_staged_image(temporary.path(), reporter, cancellation, 82, 17)?;
+        }
         temporary
             .persist_replace(&destination)
             .map_err(|error| Self::error("commit_staged_image", error))?;
@@ -1824,6 +1960,119 @@ mod tests {
     use crate::core::native_install_controller::{InstallOptions, StartInstallIntent};
     use crate::core::ui_state::AdvancedOptionsData;
     use lr_core::boot_pca::BootPcaMode;
+
+    #[test]
+    fn fused_verification_is_limited_to_single_file_wim_formats() {
+        assert!(ProductionInstallBackend::supports_fused_verify_copy(
+            Path::new("install.wim")
+        ));
+        assert!(ProductionInstallBackend::supports_fused_verify_copy(
+            Path::new("INSTALL.ESD")
+        ));
+        assert!(!ProductionInstallBackend::supports_fused_verify_copy(
+            Path::new("install.swm")
+        ));
+        assert!(!ProductionInstallBackend::supports_fused_verify_copy(
+            Path::new("system.gho")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fused_source_lock_denies_writers_until_released() {
+        let temp = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-fused-source-lock-test",
+        )
+        .expect("create temp directory");
+        let image = temp.path().join("install.wim");
+        std::fs::write(&image, b"test image bytes").expect("write test image");
+
+        let locked =
+            ProductionInstallBackend::open_locked_source(&image).expect("lock source image");
+        let write_while_locked = OpenOptions::new().write(true).open(&image);
+        assert!(
+            write_while_locked.is_err(),
+            "a writer must not open while verification and copying share the source"
+        );
+
+        drop(locked);
+        OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .expect("writer should open after the source lock is released");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fused_copy_publishes_only_an_exact_fully_verified_wim() {
+        let temp = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-fused-copy-test",
+        )
+        .expect("create temp directory");
+        let capture_source = temp.path().join("capture-source");
+        std::fs::create_dir_all(&capture_source).expect("create capture source");
+        std::fs::write(
+            capture_source.join("payload.bin"),
+            vec![0x5a_u8; 2 * 1024 * 1024],
+        )
+        .expect("write capture payload");
+        let source_wim = temp.path().join("source.wim");
+        let manager = lr_core::wimlib::WimlibManager::new().expect("load embedded wimlib");
+        manager
+            .capture_image(
+                &capture_source.to_string_lossy(),
+                &source_wim.to_string_lossy(),
+                "test",
+                "fused verification test",
+                0,
+                None,
+            )
+            .expect("capture test WIM");
+
+        let data_dir = Path::new(
+            &super::super::install_config::ConfigFileManager::get_data_dir(
+                &temp.path().to_string_lossy(),
+            ),
+        )
+        .to_path_buf();
+        std::fs::create_dir_all(&data_dir).expect("create staged data directory");
+        let destination = data_dir.join("source.wim");
+        let mut install_intent = intent(InstallMode::ViaPe);
+        install_intent.image_path = source_wim.to_string_lossy().into_owned();
+        let mut backend = ProductionInstallBackend::new(&install_intent);
+        backend.data_partition = Some(temp.path().to_string_lossy().into_owned());
+        let mut reporter = |_event: InstallExecutionEvent| {};
+        let cancellation = || false;
+
+        backend
+            .verify_source_image(&install_intent, &mut reporter, &cancellation)
+            .expect("defer full verification into copy phase");
+        backend
+            .copy_source_image(&install_intent, &mut reporter, &cancellation)
+            .expect("copy and verify valid WIM");
+        assert_eq!(
+            std::fs::read(&source_wim).expect("read source WIM"),
+            std::fs::read(&destination).expect("read staged WIM")
+        );
+
+        std::fs::remove_file(&destination).expect("remove first staged result");
+        let original_len = std::fs::metadata(&source_wim)
+            .expect("inspect source WIM")
+            .len();
+        OpenOptions::new()
+            .write(true)
+            .open(&source_wim)
+            .expect("open source WIM for corruption")
+            .set_len(original_len / 2)
+            .expect("truncate source WIM");
+        let error = backend
+            .copy_source_image(&install_intent, &mut reporter, &cancellation)
+            .expect_err("a truncated WIM must not be published");
+        assert_eq!(error.code, "source_image_verification_failed");
+        assert!(!destination.exists());
+    }
 
     fn intent(mode: InstallMode) -> StartInstallIntent {
         StartInstallIntent {

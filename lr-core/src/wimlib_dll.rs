@@ -2,23 +2,68 @@
 //!
 //! 背景：迁移到 wimlib 后，镜像操作依赖 `libwim-15.dll`。PE 环境默认**不含**该 DLL
 //! （旧版用的 wimgapi.dll 才是 PE 自带的）。若 PE 打包未带上该 DLL，会导致备份/安装
-//! 等所有镜像操作在加载阶段失败。这里把 DLL 编译进二进制，加载前自动释放到 exe 目录，
-//! 从根本上消除"PE 缺 DLL"的故障。
+//! 等所有镜像操作在加载阶段失败。这里把 DLL 编译进二进制，加载前把同目录副本原子同步
+//! 为本次构建内嵌的版本，从根本上消除“PE 缺 DLL”或旧 DLL 遮蔽新功能的故障。
+
+use crate::scoped_temp_file::ScopedTempFile;
+use std::path::Path;
 
 /// 编译期嵌入的 libwim-15.dll
 static EMBEDDED_WIMLIB_DLL: &[u8] = include_bytes!("../vendor/libwim-15.dll");
 
-/// 确保 libwim-15.dll 在可执行文件同目录存在；不存在则从嵌入数据释放。幂等。
+fn installed_dll_matches(path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| bytes == EMBEDDED_WIMLIB_DLL)
+}
+
+/// 确保 exe 同目录的 libwim-15.dll 与本次构建的内嵌版本逐字节一致。幂等。
+///
+/// 临时文件与目标位于同一目录，完整写入并回读后才通过原子替换发布，避免程序崩溃时
+/// 留下半个 DLL。该函数在 DLL 首次加载前调用，因此不会替换已载入的模块。
 pub fn ensure_dll_available() {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let dst = dir.join("libwim-15.dll");
-            if !dst.exists() {
-                match std::fs::write(&dst, EMBEDDED_WIMLIB_DLL) {
-                    Ok(_) => log::info!("已释放内置 libwim-15.dll 到 {}", dst.display()),
-                    Err(e) => log::warn!("释放内置 libwim-15.dll 失败 {}: {}", dst.display(), e),
+            if installed_dll_matches(&dst) {
+                return;
+            }
+
+            let result = (|| -> std::io::Result<()> {
+                let staged =
+                    ScopedTempFile::create_in(dir, "libwim-15", "dll.tmp", EMBEDDED_WIMLIB_DLL)?;
+                if !installed_dll_matches(staged.path()) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "staged wimlib DLL differs from the embedded bytes",
+                    ));
+                }
+                staged.persist_replace(&dst)
+            })();
+
+            match result {
+                Ok(()) => log::info!("已同步内置 libwim-15.dll 到 {}", dst.display()),
+                Err(error) => {
+                    log::warn!("同步内置 libwim-15.dll 失败 {}: {}", dst.display(), error)
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scoped_temp_file::ScopedTempDir;
+
+    #[test]
+    fn installed_copy_must_match_every_embedded_byte() {
+        let temp = ScopedTempDir::create_in(&std::env::temp_dir(), "lr-wimlib-dll-test")
+            .expect("create temp directory");
+        let dll = temp.path().join("libwim-15.dll");
+
+        assert!(!installed_dll_matches(&dll));
+        std::fs::write(&dll, b"stale DLL").expect("write stale DLL");
+        assert!(!installed_dll_matches(&dll));
+        std::fs::write(&dll, EMBEDDED_WIMLIB_DLL).expect("write embedded DLL");
+        assert!(installed_dll_matches(&dll));
     }
 }
