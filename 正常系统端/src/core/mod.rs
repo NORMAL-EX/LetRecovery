@@ -13,6 +13,7 @@ pub mod gho_password;
 pub mod ghost;
 pub mod hardware_info;
 pub mod hardware_inspector;
+mod image_verification_cache;
 pub mod image_verify;
 pub mod install_config;
 pub mod iso;

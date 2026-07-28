@@ -1,5 +1,5 @@
 diff --git a/Makefile.am b/Makefile.am
-index 4d6576a..c675798 100644
+index 2eccf6b4..af387d92 100644
 --- a/Makefile.am
 +++ b/Makefile.am
 @@ -44,6 +44,8 @@ libwim_la_SOURCES =		\
@@ -21,7 +21,7 @@ index 4d6576a..c675798 100644
  	include/wimlib/divsufsort.h	\
  	include/wimlib/encoding.h	\
 diff --git a/include/wimlib.h b/include/wimlib.h
-index 84f1e2e..26ff2a6 100644
+index e00d77c4..301a5b82 100644
 --- a/include/wimlib.h
 +++ b/include/wimlib.h
 @@ -4196,6 +4196,28 @@ wimlib_set_memory_allocator(void *(*malloc_func)(size_t),
@@ -55,7 +55,7 @@ index 84f1e2e..26ff2a6 100644
   *
 diff --git a/include/wimlib/decompress_parallel.h b/include/wimlib/decompress_parallel.h
 new file mode 100644
-index 0000000..c1585db
+index 00000000..c1585db6
 --- /dev/null
 +++ b/include/wimlib/decompress_parallel.h
 @@ -0,0 +1,37 @@
@@ -97,7 +97,7 @@ index 0000000..c1585db
 +
 +#endif /* _WIMLIB_DECOMPRESS_PARALLEL_H */
 diff --git a/include/wimlib/file_io.h b/include/wimlib/file_io.h
-index 8dbdb12..ad50f08 100644
+index 8dbdb120..ad50f08c 100644
 --- a/include/wimlib/file_io.h
 +++ b/include/wimlib/file_io.h
 @@ -5,6 +5,8 @@
@@ -121,7 +121,7 @@ index 8dbdb12..ad50f08 100644
  #endif
 diff --git a/include/wimlib/prefetch.h b/include/wimlib/prefetch.h
 new file mode 100644
-index 0000000..33b552a
+index 00000000..33b552a3
 --- /dev/null
 +++ b/include/wimlib/prefetch.h
 @@ -0,0 +1,18 @@
@@ -144,7 +144,7 @@ index 0000000..33b552a
 +
 +#endif /* _WIMLIB_PREFETCH_H */
 diff --git a/include/wimlib/resource.h b/include/wimlib/resource.h
-index 8924b80..62be800 100644
+index 8924b807..62be800a 100644
 --- a/include/wimlib/resource.h
 +++ b/include/wimlib/resource.h
 @@ -274,6 +274,7 @@ call_end_blob(struct blob_descriptor *blob, int status,
@@ -178,7 +178,7 @@ index 8924b80..62be800 100644
  extract_blob_prefix_to_fd(struct blob_descriptor *blob, u64 size,
  			  struct filedes *fd);
 diff --git a/include/wimlib/wim.h b/include/wimlib/wim.h
-index 666f4b0..314961e 100644
+index 666f4b02..314961e8 100644
 --- a/include/wimlib/wim.h
 +++ b/include/wimlib/wim.h
 @@ -113,6 +113,14 @@ struct WIMStruct {
@@ -198,7 +198,7 @@ index 666f4b0..314961e 100644
  
 diff --git a/src/decompress_parallel.c b/src/decompress_parallel.c
 new file mode 100644
-index 0000000..1fd3e4e
+index 00000000..1fd3e4e5
 --- /dev/null
 +++ b/src/decompress_parallel.c
 @@ -0,0 +1,342 @@
@@ -545,7 +545,7 @@ index 0000000..1fd3e4e
 +	return ret;
 +}
 diff --git a/src/extract.c b/src/extract.c
-index 24b53cb..fca97ab 100644
+index fb1e0410..d967d148 100644
 --- a/src/extract.c
 +++ b/src/extract.c
 @@ -584,7 +584,7 @@ extract_blob_list(struct apply_ctx *ctx, const struct read_blob_callbacks *cbs)
@@ -558,7 +558,7 @@ index 24b53cb..fca97ab 100644
  		if (ctx->extract_flags & WIMLIB_EXTRACT_FLAG_RECOVER_DATA)
  			flags |= RECOVER_DATA;
 diff --git a/src/file_io.c b/src/file_io.c
-index 4cd71ec..efe0bd9 100644
+index e553662f..1274c09f 100644
 --- a/src/file_io.c
 +++ b/src/file_io.c
 @@ -24,6 +24,7 @@
@@ -601,7 +601,7 @@ index 4cd71ec..efe0bd9 100644
   * requested bytes have been read or until end-of file has occurred.
 diff --git a/src/prefetch.c b/src/prefetch.c
 new file mode 100644
-index 0000000..f6eefd4
+index 00000000..f6eefd4a
 --- /dev/null
 +++ b/src/prefetch.c
 @@ -0,0 +1,416 @@
@@ -1022,7 +1022,7 @@ index 0000000..f6eefd4
 +	return ret;
 +}
 diff --git a/src/reference.c b/src/reference.c
-index b7248f6..49ad726 100644
+index a562ddf5..162432e2 100644
 --- a/src/reference.c
 +++ b/src/reference.c
 @@ -116,6 +116,10 @@ wimlib_reference_resources(WIMStruct *wim, WIMStruct **resource_wims,
@@ -1048,7 +1048,7 @@ index b7248f6..49ad726 100644
  	for_blob_in_table(src_wim->blob_table, blob_gift, info);
  	wimlib_free(src_wim);
 diff --git a/src/resource.c b/src/resource.c
-index a2aee42..2919458 100644
+index b9c10fab..538c4d7b 100644
 --- a/src/resource.c
 +++ b/src/resource.c
 @@ -33,15 +33,34 @@
@@ -1369,13 +1369,14 @@ index a2aee42..2919458 100644
  		hasher_ctx = alloca(sizeof(*hasher_ctx));
  		*hasher_ctx = (struct hasher_context) {
 diff --git a/src/verify.c b/src/verify.c
-index 00da397..1a5e47c 100644
+index cbf20c0f..4efadb11 100644
 --- a/src/verify.c
 +++ b/src/verify.c
-@@ -25,12 +25,17 @@
+@@ -25,12 +25,18 @@
  #  include "config.h"
  #endif
  
++#include <stdlib.h>
 +#include <unistd.h>
 +
  #include "wimlib/blob_table.h"
@@ -1390,7 +1391,7 @@ index 00da397..1a5e47c 100644
  
  static int
  append_blob_to_list(struct blob_descriptor *blob, void *_list)
-@@ -46,6 +51,28 @@ struct verify_blob_list_ctx {
+@@ -46,6 +52,28 @@ struct verify_blob_list_ctx {
  	u64 next_progress;
  };
  
@@ -1419,7 +1420,7 @@ index 00da397..1a5e47c 100644
  static int
  verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
  		     const void *chunk, size_t size, void *_ctx)
-@@ -73,6 +100,213 @@ verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
+@@ -73,6 +101,235 @@ verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
  	return 0;
  }
  
@@ -1491,7 +1492,7 @@ index 00da397..1a5e47c 100644
 +		ctx->completed_blobs[ctx->num_completed++] = blob_index;
 +		if (ret)
 +			ctx->stop = true;
-+		condvar_broadcast(&ctx->state_changed);
++		condvar_signal(&ctx->state_changed);
 +		mutex_unlock(&ctx->lock);
 +	}
 +}
@@ -1525,6 +1526,26 @@ index 00da397..1a5e47c 100644
 +	return num_workers;
 +}
 +
++/*
++ * Longest-processing-time-first scheduling reduces the serial tail after most
++ * workers have drained the queue.  Uncompressed size is the best inexpensive
++ * estimate because both decompression output and SHA-1 cover every byte.
++ */
++static int
++compare_parallel_verify_blobs(const void *p1, const void *p2)
++{
++	const struct blob_descriptor *blob1 =
++		*(const struct blob_descriptor * const *)p1;
++	const struct blob_descriptor *blob2 =
++		*(const struct blob_descriptor * const *)p2;
++
++	if (blob1->size > blob2->size)
++		return -1;
++	if (blob1->size < blob2->size)
++		return 1;
++	return 0;
++}
++
 +static int
 +verify_blob_list_parallel(WIMStruct *wim, struct list_head *blob_list,
 +			  size_t num_blobs,
@@ -1556,6 +1577,8 @@ index 00da397..1a5e47c 100644
 +
 +	list_for_each_entry(blob, blob_list, extraction_list)
 +		ctx.blobs[i++] = blob;
++	qsort(ctx.blobs, num_blobs, sizeof(ctx.blobs[0]),
++	      compare_parallel_verify_blobs);
 +
 +	if (!mutex_init(&ctx.lock))
 +		goto out;
@@ -1633,7 +1656,7 @@ index 00da397..1a5e47c 100644
  static int
  verify_file_data_present(struct wim_image_metadata *imd,
  			 struct blob_table *blob_table)
-@@ -101,6 +335,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+@@ -101,6 +358,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
  		.continue_blob	= verify_continue_blob,
  		.ctx		= &ctx,
  	};
@@ -1641,7 +1664,7 @@ index 00da397..1a5e47c 100644
  
  	/* Check parameters  */
  
-@@ -154,6 +389,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+@@ -154,6 +412,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
  
  	progress.verify_streams.wimfile = wim->filename;
  	list_for_each_entry(blob, &blob_list, extraction_list) {
@@ -1649,7 +1672,7 @@ index 00da397..1a5e47c 100644
  		progress.verify_streams.total_streams++;
  		progress.verify_streams.total_bytes += blob->size;
  	}
-@@ -168,6 +404,19 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+@@ -168,6 +427,19 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
  	if (ret)
  		return ret;
  
@@ -1670,7 +1693,7 @@ index 00da397..1a5e47c 100644
  			      offsetof(struct blob_descriptor, extraction_list),
  			      &cbs, VERIFY_BLOB_HASHES);
 diff --git a/src/wim.c b/src/wim.c
-index 3a2a216..84d8633 100644
+index a954c4d3..d049cee3 100644
 --- a/src/wim.c
 +++ b/src/wim.c
 @@ -147,6 +147,7 @@ new_wim_struct(void)

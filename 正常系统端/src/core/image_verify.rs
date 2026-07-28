@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::core::image_verification_cache::{self, CacheProbe};
 use crate::core::iso::IsoMounter;
 use crate::tr;
 use lr_core::wimlib::Wimlib;
@@ -390,6 +391,46 @@ impl ImageVerifier {
     fn verify_wim_esd(&self, file_path: &str, reporter: &ProgressReporter) -> VerifyResult {
         reporter.report(0, tr!("正在加载 wimlib..."), file_path);
 
+        let mut prepared_fingerprint = None;
+        let mut fingerprint_worker = None;
+        let mut cached_source_lock = None;
+        match image_verification_cache::probe(
+            Path::new(file_path),
+            &self.cancel_flag,
+            |completed, total| {
+                let percentage = if total == 0 {
+                    99
+                } else {
+                    (5 + completed.saturating_mul(94) / total).min(99) as u8
+                };
+                reporter.report(percentage, tr!("正在校验完整性..."), file_path);
+            },
+        ) {
+            Ok(CacheProbe::Hit(cached)) => {
+                cached_source_lock = Some(cached);
+            }
+            Ok(CacheProbe::Uncached(source)) => {
+                let cancel = Arc::clone(&self.cancel_flag);
+                fingerprint_worker =
+                    Some(thread::spawn(move || source.calculate(&cancel, |_, _| {})));
+            }
+            Ok(CacheProbe::Changed(fingerprint)) => {
+                prepared_fingerprint = Some(fingerprint);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                return VerifyResult {
+                    file_path: file_path.to_string(),
+                    image_type: ImageType::from_extension(file_path),
+                    status: VerifyStatus::Cancelled,
+                    message: tr!("校验已取消"),
+                    ..VerifyResult::default()
+                };
+            }
+            Err(error) => {
+                log::warn!("镜像校验指纹缓存不可用，将执行完整校验: {}", error);
+            }
+        }
+
         // 加载 wimlib
         let wimlib = match Wimlib::new() {
             Ok(w) => w,
@@ -457,6 +498,12 @@ impl ImageVerifier {
             result.details.push(display);
         }
 
+        if cached_source_lock.is_some() {
+            result.status = VerifyStatus::Valid;
+            result.message = tr!("校验通过，共 {} 个镜像全部有效", image_count);
+            return result;
+        }
+
         reporter.report(5, tr!("正在校验完整性..."), file_path);
 
         // 启动进度监控线程
@@ -507,6 +554,21 @@ impl ImageVerifier {
         done.store(true, Ordering::SeqCst);
         let _ = monitor.join();
 
+        if prepared_fingerprint.is_none() {
+            if let Some(worker) = fingerprint_worker {
+                match worker.join() {
+                    Ok(Ok(fingerprint)) => prepared_fingerprint = Some(fingerprint),
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Ok(Err(error)) => {
+                        log::warn!("无法生成已校验镜像指纹，本次结果不会缓存: {}", error);
+                    }
+                    Err(_) => {
+                        log::warn!("镜像指纹工作线程异常退出，本次结果不会缓存");
+                    }
+                }
+            }
+        }
+
         // 检查取消状态
         if self.is_cancelled() {
             result.status = VerifyStatus::Cancelled;
@@ -519,6 +581,11 @@ impl ImageVerifier {
             Ok(_) => {
                 result.status = VerifyStatus::Valid;
                 result.message = tr!("校验通过，共 {} 个镜像全部有效", image_count);
+                if let Some(fingerprint) = prepared_fingerprint {
+                    if let Err(error) = fingerprint.store() {
+                        log::warn!("无法保存已校验镜像指纹缓存: {}", error);
+                    }
+                }
             }
             Err(e) => {
                 result.status = VerifyStatus::Corrupted;

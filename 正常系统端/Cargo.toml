@@ -30,6 +30,8 @@ reqwest = { version = "0.12", features = ["blocking", "json"] }
 # 序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+blake3 = { version = "1.8", features = ["rayon"] }
+memmap2 = "0.9"
 
 # XML 解析（无人值守文件语法校验）
 roxmltree = "0.20"

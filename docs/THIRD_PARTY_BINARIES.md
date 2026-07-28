@@ -14,20 +14,22 @@ Hashes in this file are for the exact bytes committed to this repository.
 | Upstream Git URL | `https://wimlib.net/git/wimlib` |
 | Pinned upstream commit | `cd5e231c348c255ae5088873b5a66ee0eb96fa07` |
 | LetRecovery patch | `docs/third-party/wimlib-1.14.5/letrecovery-parallel-decompression.patch` |
-| Patch SHA-256 | `149788349D1C3317FBDEF63DF578DCCB5044D93FE3BA65C13B869C24A6659240` |
+| Patch SHA-256 | `E4A5DD90D128BCC8C1A6950CE4105C06E88BFE6F8D3790DABAC69AB55BA05ABA` |
 | Reproducible build script | `.github/scripts/build-wimlib-parallel.ps1` |
 | Committed DLL size | `493056` bytes |
-| Committed DLL SHA-256 | `E7AA66972B27701A5991108396AD32CE11B60147ECD1D98B70013BC816A61099` |
+| Committed DLL SHA-256 | `CE949864C8E4ECE5C3A5F969CBBA830444AF8D4105464A18CF056E9FE478B421` |
 | License used for `libwim` and the LetRecovery patch | GNU Lesser General Public License v3.0 or later |
 | Additional bundled notice | `libdivsufsort-lite` license from upstream |
 
 The committed DLL is built from the pinned official source plus the tracked
 LetRecovery patch. The extension adds bounded ordered parallel decompression,
 parallel verification of independent non-solid resources, and bounded
-prefetch for application. Windows workers use independent read handles because
-wimlib's Windows `pread` compatibility path changes a handle's shared file
-position. Progress and extraction callbacks remain serialized on the caller
-thread, and SHA-1 verification is unchanged.
+prefetch for application. Parallel verification sorts resources by decreasing
+uncompressed size before workers claim them, reducing the long-resource tail,
+and wakes only the caller waiting for completion. Windows workers use
+independent read handles because wimlib's Windows `pread` compatibility path
+changes a handle's shared file position. Progress and extraction callbacks
+remain serialized on the caller thread, and SHA-1 verification is unchanged.
 
 The Windows build uses `--without-fuse --without-ntfs-3g`. Upstream 1.14.5
 permits LGPLv2.1-or-later; this repository continues to distribute both libwim
