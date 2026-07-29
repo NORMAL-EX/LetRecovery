@@ -89,9 +89,7 @@ pub fn select_staging_plan(
     let safe_shrink = shrink_target.filter(|target| shrink_has_room(*target, required_bytes));
     let prefer_shrink = match (best_existing, safe_shrink) {
         (None, Some(_)) => true,
-        (Some(existing), Some(target)) => {
-            should_prefer_large_image_ssd_shrink(image_bytes, existing, target)
-        }
+        (Some(existing), Some(target)) => should_prefer_fixed_shrink(image_bytes, existing, target),
         _ => false,
     };
 
@@ -186,16 +184,16 @@ fn candidate_rank(
     )
 }
 
-fn should_prefer_large_image_ssd_shrink(
+fn should_prefer_fixed_shrink(
     image_bytes: u64,
     existing: StagingCandidate,
     target: ShrinkCandidate,
 ) -> bool {
-    image_bytes >= LARGE_IMAGE_SHRINK_THRESHOLD
-        && target.media == StorageMedia::SolidState
-        && target.attachment != StorageAttachment::External
-        && (existing.media != StorageMedia::SolidState
-            || existing.attachment == StorageAttachment::External)
+    target.attachment != StorageAttachment::External
+        && (existing.attachment == StorageAttachment::External
+            || (image_bytes >= LARGE_IMAGE_SHRINK_THRESHOLD
+                && target.media == StorageMedia::SolidState
+                && existing.media != StorageMedia::SolidState))
 }
 
 #[cfg(test)]
@@ -366,6 +364,50 @@ mod tests {
         assert!(matches!(
             select_staging_plan(gib(6), Some(1), &candidates, None),
             StagingPlan::Existing { letter: 'E', .. }
+        ));
+    }
+
+    #[test]
+    fn external_ssd_is_used_when_fixed_storage_lacks_safe_room() {
+        let candidates = [
+            candidate(
+                'D',
+                0,
+                StorageMedia::Rotational,
+                StorageAttachment::Internal,
+                8,
+            ),
+            candidate(
+                'U',
+                3,
+                StorageMedia::SolidState,
+                StorageAttachment::External,
+                200,
+            ),
+        ];
+        assert!(matches!(
+            select_staging_plan(gib(10), Some(1), &candidates, None),
+            StagingPlan::Existing { letter: 'U', .. }
+        ));
+    }
+
+    #[test]
+    fn safe_fixed_shrink_wins_over_external_ssd_even_for_a_small_image() {
+        let external_ssd = candidate(
+            'U',
+            3,
+            StorageMedia::SolidState,
+            StorageAttachment::External,
+            200,
+        );
+        assert!(matches!(
+            select_staging_plan(
+                gib(4),
+                Some(1),
+                &[external_ssd],
+                Some(shrink_target(StorageMedia::Rotational, 20, 100))
+            ),
+            StagingPlan::ShrinkTarget { letter: 'C', .. }
         ));
     }
 

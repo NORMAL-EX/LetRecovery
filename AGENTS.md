@@ -231,7 +231,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 ### `lr-core` 共享核心
 
 - `lr-core/src/lib.rs`：共享库根模块，声明并导出两端共用能力。
-- `lr-core/src/data_staging.rs`：ViaPE 镜像暂存盘的纯选择策略；根据镜像大小、安全余量、SSD/HDD、内外置属性、物理磁盘关系及可缩卷上限返回现有卷、目标卷缩分区或不可用计划，不探测磁盘也不执行写操作。
+- `lr-core/src/data_staging.rs`：ViaPE 镜像暂存盘的纯选择策略；根据镜像大小、安全余量、SSD/HDD、内外置属性、物理磁盘关系及可缩卷上限返回现有卷、目标卷缩分区或不可用计划，固定存储有安全空间时必须优先于外置存储，不探测磁盘也不执行写操作。
 - `lr-core/src/unattend_account.rs`：内置 RID-500 Administrator 高级选项、敏感字符串脱敏与非持久化边界、账户名/密码验证，以及两端复用的 AdministratorPassword、一次性 AutoLogon 跳过 OOBE 账户创建和安全编码改名无人值守片段生成。
 - `lr-core/src/bl_passthrough.rs`：序列化和解析 BitLocker 恢复密钥透传文件；负责去重、注释和空项兼容。
 - `lr-core/src/boot.rs`：共享 XP 引导写入及可编辑修复引导脚本执行。
@@ -331,7 +331,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `正常系统端/src/core/bitlocker.rs`：BitLocker 卷枚举、状态解析、解锁、暂停/恢复保护、解密及恢复密钥处理。
 - `正常系统端/src/core/cabinet.rs`：通过 SetupAPI 解压 CAB、递归发现 CAB 文件。
 - `正常系统端/src/core/cli_install.rs`：解析命令行无人值守安装配置并启动与 GUI 相同的安装入口。
-- `正常系统端/src/core/disk.rs`：分区枚举、样式和磁盘关系查询、SSD/HDD 与内外置介质探测、ViaPE 暂存策略接入、缩小/创建/删除恢复分区及 DiskPart 安全调用；自动缩卷前必须复核当前启动会话内的物理磁盘和分区身份。
+- `正常系统端/src/core/disk.rs`：分区枚举、样式和磁盘关系查询、SSD/HDD 与内外置介质探测、ViaPE 暂存策略接入、缩小/创建/删除恢复分区及 DiskPart 安全调用；ViaPE 暂存可在固定存储不足时回退到可写外置存储，但必须在候选入口排除光驱、网络盘、RAM 盘和只读卷；自动缩卷前必须复核当前启动会话内的物理磁盘和分区身份。
 - `正常系统端/src/core/dism.rs`：正常端高层镜像查询、释放、捕获和进度模型，完整透传版本、Build、架构元数据并接入统一 WIM 引擎，同时把安装执行器持有的原子取消标记传递到可取消的镜像应用入口；在线/离线驱动导出统一走受支持的 DISM 命令边界并验证非零 INF，失败时才回退 SetupAPI/DriverStore。
 - `正常系统端/src/core/dism_cmd.rs`：DISM.exe 参数封装、进度解析、在线/离线驱动导出、离线驱动和更新包操作；优先使用当前 Windows/WinPE 自带 DISM，仅在不可用时回退随包兼容副本；离线驱动边界拒绝 `/ForceUnsigned`，避免把部署期签名错误推迟成 Secure Boot 启动失败。
 - `正常系统端/src/core/driver.rs`：共享驱动实现的兼容再导出，以及 DISM 优先的离线驱动导入策略。

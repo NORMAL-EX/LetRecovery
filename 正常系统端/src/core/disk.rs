@@ -36,6 +36,20 @@ const DRIVE_CDROM: u32 = 5;
 #[allow(dead_code)]
 const DRIVE_RAMDISK: u32 = 6;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StagingDriveKind {
+    Fixed,
+    Removable,
+}
+
+fn classify_staging_drive_type(drive_type: u32) -> Option<StagingDriveKind> {
+    match drive_type {
+        DRIVE_FIXED => Some(StagingDriveKind::Fixed),
+        DRIVE_REMOVABLE => Some(StagingDriveKind::Removable),
+        _ => None,
+    }
+}
+
 /// 获取 diskpart 可执行文件路径
 /// 优先使用内置的 diskpart，如果不存在则使用系统的
 fn get_diskpart_path() -> String {
@@ -196,17 +210,37 @@ impl DiskManager {
         is_pe: bool,
         bitlocker_manager: &BitLockerManager,
     ) -> Result<Partition> {
+        Self::get_partition_info_for_staging(drive, is_pe, bitlocker_manager, false)
+            .map(|(partition, _)| partition)
+    }
+
+    fn get_partition_info_for_staging(
+        drive: &str,
+        is_pe: bool,
+        bitlocker_manager: &BitLockerManager,
+        include_removable: bool,
+    ) -> Result<(Partition, StagingDriveKind)> {
         let path = format!("{}\\", drive);
         let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
 
-        #[cfg(windows)]
-        {
-            // 获取驱动器类型
-            let drive_type = unsafe { GetDriveTypeW(PCWSTR(wide_path.as_ptr())) };
-            if drive_type != DRIVE_FIXED {
-                anyhow::bail!("Not a fixed drive");
+        let drive_kind = {
+            #[cfg(windows)]
+            {
+                // 光驱、虚拟光驱、网络盘、RAM 盘和无法识别的卷不允许承载安装数据。
+                // USB 移动 SSD 可能被 Windows 报为 DRIVE_FIXED，后续还会结合总线类型降级。
+                let drive_type = unsafe { GetDriveTypeW(PCWSTR(wide_path.as_ptr())) };
+                let kind = classify_staging_drive_type(drive_type)
+                    .ok_or_else(|| anyhow::anyhow!("Unsupported staging drive type"))?;
+                if kind == StagingDriveKind::Removable && !include_removable {
+                    anyhow::bail!("Not a fixed drive");
+                }
+                kind
             }
-        }
+            #[cfg(not(windows))]
+            {
+                StagingDriveKind::Fixed
+            }
+        };
 
         // 获取磁盘空间
         let mut free_bytes_available: u64 = 0;
@@ -263,18 +297,21 @@ impl DiskManager {
         let letter_char = drive.chars().next().unwrap_or('C');
         let bitlocker_status = bitlocker_manager.get_status(letter_char);
 
-        Ok(Partition {
-            letter: drive.to_string(),
-            total_size_mb: total_bytes / 1024 / 1024,
-            free_size_mb: free_bytes_available / 1024 / 1024,
-            label,
-            is_system_partition,
-            has_windows,
-            partition_style: detail.style,
-            disk_number: detail.disk_number,
-            partition_number: detail.partition_number,
-            bitlocker_status,
-        })
+        Ok((
+            Partition {
+                letter: drive.to_string(),
+                total_size_mb: total_bytes / 1024 / 1024,
+                free_size_mb: free_bytes_available / 1024 / 1024,
+                label,
+                is_system_partition,
+                has_windows,
+                partition_style: detail.style,
+                disk_number: detail.disk_number,
+                partition_number: detail.partition_number,
+                bitlocker_status,
+            },
+            drive_kind,
+        ))
     }
 
     /// 使用 Windows API 获取分区表类型和分区号 (GPT/MBR)
@@ -474,6 +511,58 @@ impl DiskManager {
             .ok()
             .map(|_| (free_bytes_available, total_bytes))
         }
+    }
+
+    #[cfg(windows)]
+    fn volume_is_writable(letter: char) -> bool {
+        const FILE_READ_ONLY_VOLUME_FLAG: u32 = 0x0008_0000;
+
+        let path = format!("{}:\\", letter.to_ascii_uppercase());
+        let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut file_system_flags = 0u32;
+        unsafe {
+            GetVolumeInformationW(
+                PCWSTR(wide_path.as_ptr()),
+                None,
+                None,
+                None,
+                Some(&mut file_system_flags),
+                None,
+            )
+            .is_ok()
+                && file_system_flags & FILE_READ_ONLY_VOLUME_FLAG == 0
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn volume_is_writable(_letter: char) -> bool {
+        true
+    }
+
+    fn get_staging_partitions() -> Result<Vec<(Partition, StagingDriveKind)>> {
+        let mut partitions = Vec::new();
+        let is_pe = Self::is_pe_environment();
+        let bitlocker_manager = BitLockerManager::new();
+
+        for letter in b'A'..=b'Z' {
+            let letter = letter as char;
+            let drive = format!("{letter}:");
+            let Ok((partition, drive_kind)) =
+                Self::get_partition_info_for_staging(&drive, is_pe, &bitlocker_manager, true)
+            else {
+                continue;
+            };
+            if !Self::volume_is_writable(letter) {
+                log::warn!(
+                    "[DISK] 跳过 {}:：卷只读或无法确认可写，不能承载 ViaPE 安装数据",
+                    letter
+                );
+                continue;
+            }
+            partitions.push((partition, drive_kind));
+        }
+
+        Ok(partitions)
     }
 
     #[cfg(not(windows))]
@@ -1227,8 +1316,8 @@ impl DiskManager {
             image_size_bytes as f64 / 1024.0 / 1024.0 / 1024.0
         );
 
-        let partitions = Self::get_partitions()?;
-        let target = partitions
+        let fixed_partitions = Self::get_partitions()?;
+        let target = fixed_partitions
             .iter()
             .find(|partition| {
                 partition
@@ -1239,10 +1328,11 @@ impl DiskManager {
             })
             .cloned();
         let target_disk_number = target.as_ref().and_then(|partition| partition.disk_number);
+        let staging_partitions = Self::get_staging_partitions()?;
 
         let mut profiles = std::collections::HashMap::new();
         let mut candidates = Vec::new();
-        for partition in &partitions {
+        for (partition, drive_kind) in &staging_partitions {
             let Some(letter) = partition
                 .letter
                 .chars()
@@ -1262,7 +1352,7 @@ impl DiskManager {
                 );
                 continue;
             }
-            let (media, attachment) = partition
+            let (media, detected_attachment) = partition
                 .disk_number
                 .map(|disk_number| {
                     *profiles
@@ -1270,6 +1360,11 @@ impl DiskManager {
                         .or_insert_with(|| Self::get_storage_profile(disk_number))
                 })
                 .unwrap_or((StorageMedia::Unknown, StorageAttachment::Unknown));
+            let attachment = if *drive_kind == StagingDriveKind::Removable {
+                StorageAttachment::External
+            } else {
+                detected_attachment
+            };
             let candidate = StagingCandidate {
                 letter,
                 disk_number: partition.disk_number,
@@ -1292,7 +1387,15 @@ impl DiskManager {
 
         let initial_plan =
             select_staging_plan(image_size_bytes, target_disk_number, &candidates, None);
+        let initial_plan_uses_external = match initial_plan {
+            StagingPlan::Existing { letter, .. } => candidates
+                .iter()
+                .find(|candidate| candidate.letter.eq_ignore_ascii_case(&letter))
+                .is_some_and(|candidate| candidate.attachment == StorageAttachment::External),
+            _ => false,
+        };
         let should_probe_shrink = matches!(initial_plan, StagingPlan::Unavailable { .. })
+            || initial_plan_uses_external
             || (image_size_bytes >= 8 * 1024 * 1024 * 1024
                 && target_disk_number
                     .map(|disk_number| {
@@ -1433,7 +1536,25 @@ impl DiskManager {
 
 #[cfg(test)]
 mod tests {
-    use super::build_staging_shrink_script;
+    use super::{
+        build_staging_shrink_script, classify_staging_drive_type, StagingDriveKind, DRIVE_CDROM,
+        DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOTE, DRIVE_REMOVABLE,
+    };
+
+    #[test]
+    fn staging_drive_types_exclude_optical_remote_and_ram_disks() {
+        assert_eq!(
+            classify_staging_drive_type(DRIVE_FIXED),
+            Some(StagingDriveKind::Fixed)
+        );
+        assert_eq!(
+            classify_staging_drive_type(DRIVE_REMOVABLE),
+            Some(StagingDriveKind::Removable)
+        );
+        assert_eq!(classify_staging_drive_type(DRIVE_CDROM), None);
+        assert_eq!(classify_staging_drive_type(DRIVE_REMOTE), None);
+        assert_eq!(classify_staging_drive_type(DRIVE_RAMDISK), None);
+    }
 
     #[test]
     fn staging_shrink_script_pins_disk_partition_and_exact_size() {
