@@ -97,7 +97,7 @@ index 00000000..c1585db6
 +
 +#endif /* _WIMLIB_DECOMPRESS_PARALLEL_H */
 diff --git a/include/wimlib/file_io.h b/include/wimlib/file_io.h
-index 8dbdb120..ad50f08c 100644
+index 8dbdb120..cc20c919 100644
 --- a/include/wimlib/file_io.h
 +++ b/include/wimlib/file_io.h
 @@ -5,6 +5,8 @@
@@ -109,7 +109,16 @@ index 8dbdb120..ad50f08c 100644
  /* Wrapper around a file descriptor that keeps track of offset (including in
   * pipes, which don't support lseek()) and a cached flag that tells whether the
   * file descriptor is a pipe or not.  */
-@@ -26,6 +28,9 @@ full_write(struct filedes *fd, const void *buf, size_t n);
+@@ -20,12 +22,18 @@ full_read(struct filedes *fd, void *buf, size_t n);
+ int
+ full_pread(struct filedes *fd, void *buf, size_t nbyte, off_t offset);
+ 
++int
++full_pread_unshared(struct filedes *fd, void *buf, size_t nbyte, off_t offset);
++
+ int
+ full_write(struct filedes *fd, const void *buf, size_t n);
+ 
  int
  full_pwrite(struct filedes *fd, const void *buf, size_t count, off_t offset);
  
@@ -144,7 +153,7 @@ index 00000000..33b552a3
 +
 +#endif /* _WIMLIB_PREFETCH_H */
 diff --git a/include/wimlib/resource.h b/include/wimlib/resource.h
-index 8924b807..62be800a 100644
+index 8924b807..c0d694e5 100644
 --- a/include/wimlib/resource.h
 +++ b/include/wimlib/resource.h
 @@ -274,6 +274,7 @@ call_end_blob(struct blob_descriptor *blob, int status,
@@ -155,7 +164,7 @@ index 8924b807..62be800a 100644
  
  int
  read_blob_list(struct list_head *blob_list, size_t list_head_offset,
-@@ -287,6 +288,21 @@ int
+@@ -287,6 +288,32 @@ int
  read_blob_with_sha1(struct blob_descriptor *blob,
  		    const struct read_blob_callbacks *cbs, bool recover_data);
  
@@ -173,6 +182,17 @@ index 8924b807..62be800a 100644
 +				  const struct read_blob_callbacks *cbs,
 +				  bool recover_data,
 +				  struct filedes *in_fd);
++
++int
++read_blob_with_sha1_isolated_windowed_from(
++				  struct blob_descriptor *blob,
++				  const struct read_blob_callbacks *cbs,
++				  bool recover_data,
++				  struct filedes *in_fd,
++				  size_t read_window_size);
++
++void
++free_isolated_decompressor(void);
 +
  int
  extract_blob_prefix_to_fd(struct blob_descriptor *blob, u64 size,
@@ -195,6 +215,20 @@ index 666f4b02..314961e8 100644
 +
  	/* Temporary field; use sparingly  */
  	void *private;
+ 
+diff --git a/include/wimlib/win32.h b/include/wimlib/win32.h
+index ed54e6f5..b6153a33 100644
+--- a/include/wimlib/win32.h
++++ b/include/wimlib/win32.h
+@@ -61,6 +61,9 @@ win32_write(int fd, const void *buf, size_t count);
+ ssize_t
+ win32_pread(int fd, void *buf, size_t count, off_t offset);
+ 
++ssize_t
++win32_pread_unshared(int fd, void *buf, size_t count, off_t offset);
++
+ ssize_t
+ win32_pwrite(int fd, const void *buf, size_t count, off_t offset);
  
 diff --git a/src/decompress_parallel.c b/src/decompress_parallel.c
 new file mode 100644
@@ -558,7 +592,7 @@ index fb1e0410..d967d148 100644
  		if (ctx->extract_flags & WIMLIB_EXTRACT_FLAG_RECOVER_DATA)
  			flags |= RECOVER_DATA;
 diff --git a/src/file_io.c b/src/file_io.c
-index e553662f..1274c09f 100644
+index e553662f..0c90703d 100644
 --- a/src/file_io.c
 +++ b/src/file_io.c
 @@ -24,6 +24,7 @@
@@ -599,6 +633,41 @@ index e553662f..1274c09f 100644
  /*
   * Wrapper around read() that checks for errors and keeps retrying until all
   * requested bytes have been read or until end-of file has occurred.
+@@ -141,6 +165,34 @@ is_pipe:
+ 	return pipe_read(fd, buf, count, offset);
+ }
+ 
++int
++full_pread_unshared(struct filedes *fd, void *buf, size_t count, off_t offset)
++{
++	if (fd->is_pipe)
++		return full_pread(fd, buf, count, offset);
++
++	while (count) {
++#ifdef _WIN32
++		ssize_t ret = win32_pread_unshared(fd->fd, buf, count, offset);
++#else
++		ssize_t ret = pread(fd->fd, buf, count, offset);
++#endif
++		if (unlikely(ret <= 0)) {
++			if (ret == 0) {
++				errno = EINVAL;
++				return WIMLIB_ERR_UNEXPECTED_END_OF_FILE;
++			}
++			if (errno == EINTR)
++				continue;
++			return WIMLIB_ERR_READ;
++		}
++		buf += ret;
++		count -= ret;
++		offset += ret;
++	}
++	return 0;
++}
++
+ /*
+  * Wrapper around write() that checks for errors and keeps retrying until all
+  * requested bytes have been written.
 diff --git a/src/prefetch.c b/src/prefetch.c
 new file mode 100644
 index 00000000..f6eefd4a
@@ -1048,10 +1117,10 @@ index a562ddf5..162432e2 100644
  	for_blob_in_table(src_wim->blob_table, blob_gift, info);
  	wimlib_free(src_wim);
 diff --git a/src/resource.c b/src/resource.c
-index b9c10fab..538c4d7b 100644
+index b9c10fab..b49b6a68 100644
 --- a/src/resource.c
 +++ b/src/resource.c
-@@ -33,15 +33,34 @@
+@@ -33,15 +33,108 @@
  #include "wimlib/assert.h"
  #include "wimlib/bitops.h"
  #include "wimlib/blob_table.h"
@@ -1073,6 +1142,17 @@ index b9c10fab..538c4d7b 100644
 +static __thread bool isolated_decompression;
 +static __thread WIMStruct *isolated_wim;
 +static __thread struct filedes *isolated_in_fd;
++static __thread u8 *isolated_read_window;
++static __thread size_t isolated_read_window_alloc_size;
++static __thread size_t isolated_read_window_capacity;
++static __thread struct filedes *isolated_read_window_fd;
++static __thread u64 isolated_read_window_resource_start;
++static __thread u64 isolated_read_window_resource_end;
++static __thread u64 isolated_read_window_start;
++static __thread size_t isolated_read_window_valid;
++static __thread struct wimlib_decompressor *isolated_decompressor;
++static __thread int isolated_decompressor_ctype = WIMLIB_COMPRESSION_TYPE_NONE;
++static __thread u32 isolated_decompressor_max_block_size;
 +
 +static struct filedes *
 +resource_in_fd(const struct wim_resource_descriptor *rdesc)
@@ -1083,10 +1163,73 @@ index b9c10fab..538c4d7b 100644
 +	return &rdesc->wim->in_fd;
 +}
 +
++static int
++resource_full_pread(struct filedes *fd, void *buf, size_t count, off_t offset)
++{
++	if (isolated_decompression && isolated_read_window_capacity &&
++	    fd == isolated_read_window_fd && likely(offset >= 0)) {
++		const u64 uoffset = offset;
++
++		if (uoffset >= isolated_read_window_resource_start &&
++		    uoffset <= isolated_read_window_resource_end &&
++		    count <= isolated_read_window_resource_end - uoffset &&
++		    uoffset >= isolated_read_window_start &&
++		    uoffset - isolated_read_window_start <=
++						isolated_read_window_valid &&
++		    count <= isolated_read_window_valid -
++				(uoffset - isolated_read_window_start)) {
++			memcpy(buf, isolated_read_window +
++				    (uoffset - isolated_read_window_start), count);
++			return 0;
++		}
++
++		if (count <= isolated_read_window_capacity &&
++		    uoffset >= isolated_read_window_resource_start &&
++		    uoffset <= isolated_read_window_resource_end &&
++		    count <= isolated_read_window_resource_end - uoffset) {
++			size_t bytes_to_read;
++			int ret;
++
++			if (isolated_read_window_alloc_size <
++					isolated_read_window_capacity) {
++				u8 *new_window =
++					MALLOC(isolated_read_window_capacity);
++
++				if (!new_window) {
++					isolated_read_window_capacity = 0;
++					goto direct_read;
++				}
++				FREE(isolated_read_window);
++				isolated_read_window = new_window;
++				isolated_read_window_alloc_size =
++					isolated_read_window_capacity;
++			}
++			bytes_to_read =
++				min((u64)isolated_read_window_capacity,
++				    isolated_read_window_resource_end - uoffset);
++			if (bytes_to_read < count)
++				goto direct_read;
++			ret = full_pread_unshared(fd, isolated_read_window,
++						 bytes_to_read, offset);
++			if (unlikely(ret))
++				return ret;
++			isolated_read_window_start = uoffset;
++			isolated_read_window_valid = bytes_to_read;
++			memcpy(buf, isolated_read_window, count);
++			return 0;
++		}
++	}
++
++direct_read:
++	if (isolated_decompression)
++		return full_pread_unshared(fd, buf, count, offset);
++	return full_pread(fd, buf, count, offset);
++}
++
  /*
   *                         Compressed WIM resources
   *
-@@ -111,6 +130,48 @@ decompress_chunk(const void *cbuf, u32 chunk_csize, u8 *ubuf, u32 chunk_usize,
+@@ -111,6 +204,48 @@ decompress_chunk(const void *cbuf, u32 chunk_csize, u8 *ubuf, u32 chunk_usize,
  	return WIMLIB_ERR_DECOMPRESSION;
  }
  
@@ -1135,7 +1278,7 @@ index b9c10fab..538c4d7b 100644
  /*
   * Read data from a compressed WIM resource.
   *
-@@ -156,6 +217,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+@@ -156,6 +291,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
  	bool ubuf_malloced = false;
  	bool cbuf_malloced = false;
  	struct wimlib_decompressor *decompressor = NULL;
@@ -1143,7 +1286,7 @@ index b9c10fab..538c4d7b 100644
  
  	/* Sanity checks  */
  	wimlib_assert(num_ranges != 0);
-@@ -171,7 +233,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+@@ -171,7 +307,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
  	const u64 last_offset = ranges[num_ranges - 1].offset + ranges[num_ranges - 1].size - 1;
  
  	/* Get the file descriptor for the WIM.  */
@@ -1152,17 +1295,33 @@ index b9c10fab..538c4d7b 100644
  
  	/* Determine if we're reading a pipable resource from a pipe or not.  */
  	const bool is_pipe_read = (rdesc->is_pipable && !filedes_is_seekable(in_fd));
-@@ -203,7 +265,8 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+@@ -203,7 +339,15 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
  	}
  
  	/* Get valid decompressor.  */
 -	if (likely(ctype == rdesc->wim->decompressor_ctype &&
-+	if (!isolated_decompression &&
++	if (isolated_decompression &&
++	    likely(ctype == isolated_decompressor_ctype &&
++		   chunk_size == isolated_decompressor_max_block_size))
++	{
++		decompressor = isolated_decompressor;
++		isolated_decompressor = NULL;
++		isolated_decompressor_ctype = WIMLIB_COMPRESSION_TYPE_NONE;
++	} else if (!isolated_decompression &&
 +	    likely(ctype == rdesc->wim->decompressor_ctype &&
  		   chunk_size == rdesc->wim->decompressor_max_block_size))
  	{
  		/* Cached decompressor.  */
-@@ -372,6 +435,118 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+@@ -325,7 +469,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 			chunk_offsets_alloc_size -
+ 			chunk_table_size_to_read;
+ 
+-		ret = full_pread(in_fd, chunk_table_data, chunk_table_size_to_read,
++		ret = resource_full_pread(in_fd, chunk_table_data, chunk_table_size_to_read,
+ 				 file_offset_of_needed_chunk_entries);
+ 		if (unlikely(ret))
+ 			goto read_error;
+@@ -372,6 +516,118 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
  			cur_read_offset += chunk_table_size;
  	}
  
@@ -1204,7 +1363,7 @@ index b9c10fab..538c4d7b 100644
 +			if (rdesc->is_pipable) {
 +				struct pwm_chunk_hdr chunk_hdr;
 +
-+				ret = full_pread(in_fd, &chunk_hdr,
++				ret = resource_full_pread(in_fd, &chunk_hdr,
 +						 sizeof(chunk_hdr),
 +						 parallel_read_offset);
 +				if (unlikely(ret))
@@ -1281,7 +1440,43 @@ index b9c10fab..538c4d7b 100644
  	/* Allocate buffer for holding the uncompressed data of each chunk.  */
  	if (chunk_size <= STACK_MAX) {
  		ubuf = alloca(chunk_size);
-@@ -536,10 +711,14 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+@@ -416,7 +672,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 		if (is_pipe_read) {
+ 			struct pwm_chunk_hdr chunk_hdr;
+ 
+-			ret = full_pread(in_fd, &chunk_hdr,
++			ret = resource_full_pread(in_fd, &chunk_hdr,
+ 					 sizeof(chunk_hdr), cur_read_offset);
+ 			if (unlikely(ret))
+ 				goto read_error;
+@@ -455,7 +711,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 			if (is_pipe_read) {
+ 				u8 dummy;
+ 
+-				ret = full_pread(in_fd, &dummy, 1, cur_read_offset - 1);
++				ret = resource_full_pread(in_fd, &dummy, 1, cur_read_offset - 1);
+ 				if (unlikely(ret))
+ 					goto read_error;
+ 			}
+@@ -470,7 +726,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 			else
+ 				read_buf = cbuf;
+ 
+-			ret = full_pread(in_fd,
++			ret = resource_full_pread(in_fd,
+ 					 read_buf,
+ 					 chunk_csize,
+ 					 cur_read_offset);
+@@ -528,7 +784,7 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
+ 		 * file descriptor is fully clear of the resource after this
+ 		 * returns.  */
+ 		cur_read_offset += chunk_table_size;
+-		ret = full_pread(in_fd, &dummy, 1, cur_read_offset - 1);
++		ret = resource_full_pread(in_fd, &dummy, 1, cur_read_offset - 1);
+ 		if (unlikely(ret))
+ 			goto read_error;
+ 	}
+@@ -536,10 +792,17 @@ read_compressed_wim_resource(const struct wim_resource_descriptor * const rdesc,
  
  out_cleanup:
  	if (decompressor) {
@@ -1290,7 +1485,10 @@ index b9c10fab..538c4d7b 100644
 -		rdesc->wim->decompressor_ctype = ctype;
 -		rdesc->wim->decompressor_max_block_size = chunk_size;
 +		if (isolated_decompression) {
-+			wimlib_free_decompressor(decompressor);
++			wimlib_free_decompressor(isolated_decompressor);
++			isolated_decompressor = decompressor;
++			isolated_decompressor_ctype = ctype;
++			isolated_decompressor_max_block_size = chunk_size;
 +		} else {
 +			wimlib_free_decompressor(rdesc->wim->decompressor);
 +			rdesc->wim->decompressor = decompressor;
@@ -1300,7 +1498,7 @@ index b9c10fab..538c4d7b 100644
  	}
  	if (chunk_offsets_malloced)
  		FREE(chunk_offsets);
-@@ -547,6 +726,7 @@ out_cleanup:
+@@ -547,6 +810,7 @@ out_cleanup:
  		FREE(ubuf);
  	if (cbuf_malloced)
  		FREE(cbuf);
@@ -1308,7 +1506,41 @@ index b9c10fab..538c4d7b 100644
  	return ret;
  
  oom:
-@@ -637,7 +817,7 @@ read_partial_wim_resource(const struct wim_resource_descriptor *rdesc,
+@@ -559,6 +823,24 @@ read_error:
+ 	goto out_cleanup;
+ }
+ 
++void
++free_isolated_decompressor(void)
++{
++	wimlib_free_decompressor(isolated_decompressor);
++	isolated_decompressor = NULL;
++	isolated_decompressor_ctype = WIMLIB_COMPRESSION_TYPE_NONE;
++	isolated_decompressor_max_block_size = 0;
++	FREE(isolated_read_window);
++	isolated_read_window = NULL;
++	isolated_read_window_alloc_size = 0;
++	isolated_read_window_capacity = 0;
++	isolated_read_window_fd = NULL;
++	isolated_read_window_resource_start = 0;
++	isolated_read_window_resource_end = 0;
++	isolated_read_window_start = 0;
++	isolated_read_window_valid = 0;
++}
++
+ /* Read raw data from a file descriptor at the specified offset, feeding the
+  * data in nonempty chunks into the specified callback function.  */
+ static int
+@@ -572,7 +854,7 @@ read_raw_file_data(struct filedes *in_fd, u64 offset, u64 size,
+ 
+ 	while (size) {
+ 		bytes_to_read = min(sizeof(buf), size);
+-		ret = full_pread(in_fd, buf, bytes_to_read, offset);
++		ret = resource_full_pread(in_fd, buf, bytes_to_read, offset);
+ 		if (unlikely(ret))
+ 			goto read_error;
+ 		ret = consume_chunk(cb, buf, bytes_to_read);
+@@ -637,7 +919,7 @@ read_partial_wim_resource(const struct wim_resource_descriptor *rdesc,
  	}
  
  	/* Uncompressed resource  */
@@ -1317,7 +1549,7 @@ index b9c10fab..538c4d7b 100644
  				  rdesc->offset_in_wim + offset,
  				  size, cb, NULL);
  }
-@@ -1129,6 +1309,36 @@ read_blob_with_sha1(struct blob_descriptor *blob,
+@@ -1129,6 +1411,78 @@ read_blob_with_sha1(struct blob_descriptor *blob,
  	return read_blob_with_cbs(blob, &hasher_cbs, recover_data);
  }
  
@@ -1335,16 +1567,58 @@ index b9c10fab..538c4d7b 100644
 +				  bool recover_data,
 +				  struct filedes *in_fd)
 +{
++	return read_blob_with_sha1_isolated_windowed_from(
++			blob, cbs, recover_data, in_fd, 0);
++}
++
++int
++read_blob_with_sha1_isolated_windowed_from(
++				  struct blob_descriptor *blob,
++				  const struct read_blob_callbacks *cbs,
++				  bool recover_data,
++				  struct filedes *in_fd,
++				  size_t read_window_size)
++{
 +	const bool previous = isolated_decompression;
 +	WIMStruct * const previous_wim = isolated_wim;
 +	struct filedes * const previous_in_fd = isolated_in_fd;
++	const size_t previous_window_capacity =
++		isolated_read_window_capacity;
++	struct filedes * const previous_window_fd =
++		isolated_read_window_fd;
++	const u64 previous_resource_start =
++		isolated_read_window_resource_start;
++	const u64 previous_resource_end =
++		isolated_read_window_resource_end;
 +	int ret;
 +
 +	isolated_decompression = true;
 +	isolated_wim =
 +		blob->blob_location == BLOB_IN_WIM ? blob->rdesc->wim : NULL;
 +	isolated_in_fd = in_fd;
++	isolated_read_window_capacity = 0;
++	isolated_read_window_fd = NULL;
++	isolated_read_window_resource_start = 0;
++	isolated_read_window_resource_end = 0;
++	isolated_read_window_valid = 0;
++	if (read_window_size && isolated_wim && in_fd &&
++	    blob->rdesc->size_in_wim &&
++	    blob->rdesc->offset_in_wim <=
++			UINT64_MAX - blob->rdesc->size_in_wim) {
++		isolated_read_window_capacity = read_window_size;
++		isolated_read_window_fd = in_fd;
++		isolated_read_window_resource_start =
++			blob->rdesc->offset_in_wim;
++		isolated_read_window_resource_end =
++			blob->rdesc->offset_in_wim +
++			blob->rdesc->size_in_wim;
++	}
 +	ret = read_blob_with_sha1(blob, cbs, recover_data);
++	isolated_read_window_valid = 0;
++	isolated_read_window_resource_end = previous_resource_end;
++	isolated_read_window_resource_start = previous_resource_start;
++	isolated_read_window_fd = previous_window_fd;
++	isolated_read_window_capacity = previous_window_capacity;
 +	isolated_in_fd = previous_in_fd;
 +	isolated_wim = previous_wim;
 +	isolated_decompression = previous;
@@ -1354,7 +1628,7 @@ index b9c10fab..538c4d7b 100644
  static int
  read_blobs_in_solid_resource(struct blob_descriptor *first_blob,
  			     struct blob_descriptor *last_blob,
-@@ -1260,6 +1470,13 @@ read_blob_list(struct list_head *blob_list, size_t list_head_offset,
+@@ -1260,6 +1614,13 @@ read_blob_list(struct list_head *blob_list, size_t list_head_offset,
  			return ret;
  	}
  
@@ -1368,8 +1642,100 @@ index b9c10fab..538c4d7b 100644
  	if (flags & (VERIFY_BLOB_HASHES | COMPUTE_MISSING_BLOB_HASHES)) {
  		hasher_ctx = alloca(sizeof(*hasher_ctx));
  		*hasher_ctx = (struct hasher_context) {
+diff --git a/src/threads.c b/src/threads.c
+index 873ccb3f..8ffe6e82 100644
+--- a/src/threads.c
++++ b/src/threads.c
+@@ -65,8 +65,13 @@ bool thread_create(struct thread *t, void *(*thrproc)(void *), void *arg)
+ void thread_join(struct thread *t)
+ {
+ 	DWORD res = WaitForSingleObject((HANDLE)t->win32_thread, INFINITE);
++	BOOL closed;
+ 
+ 	wimlib_assert(res == WAIT_OBJECT_0);
++	closed = CloseHandle((HANDLE)t->win32_thread);
++	wimlib_assert(closed);
++	(void)closed;
++	t->win32_thread = NULL;
+ }
+ 
+ bool mutex_init(struct mutex *m)
+diff --git a/src/util.c b/src/util.c
+index 94a7da78..00487511 100644
+--- a/src/util.c
++++ b/src/util.c
+@@ -29,6 +29,9 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifdef __linux__
++#  include <sched.h>
++#endif
+ #ifdef HAVE_SYS_SYSCTL_H
+ #  include <sys/types.h>
+ #  include <sys/sysctl.h>
+@@ -275,6 +278,38 @@ get_random_alnum_chars(tchar *p, size_t n)
+ unsigned
+ get_available_cpus(void)
+ {
++#ifdef __linux__
++	long num_configured = sysconf(_SC_NPROCESSORS_CONF);
++	size_t num_bits = num_configured > 0 ? (size_t)num_configured : 128;
++
++	for (;;) {
++		cpu_set_t *set;
++		size_t set_size;
++		int saved_errno;
++		int count;
++
++		if (num_bits > INT_MAX)
++			break;
++		set_size = CPU_ALLOC_SIZE(num_bits);
++		set = CPU_ALLOC(num_bits);
++		if (!set)
++			break;
++		CPU_ZERO_S(set_size, set);
++		if (sched_getaffinity(0, set_size, set) == 0) {
++			count = CPU_COUNT_S(set_size, set);
++			CPU_FREE(set);
++			if (count > 0)
++				return count;
++			break;
++		}
++		saved_errno = errno;
++		CPU_FREE(set);
++		if (saved_errno != EINVAL || num_bits > INT_MAX / 2)
++			break;
++		num_bits *= 2;
++	}
++#endif /* __linux__ */
++
+ 	long n = sysconf(_SC_NPROCESSORS_ONLN);
+ 	if (n < 1 || n >= UINT_MAX) {
+ 		WARNING("Failed to determine number of processors; assuming 1.");
+@@ -288,11 +323,20 @@ get_available_cpus(void)
+ u64
+ get_available_memory(void)
+ {
++#if defined(_SC_PAGESIZE) && defined(_SC_AVPHYS_PAGES)
++	long available_page_size = sysconf(_SC_PAGESIZE);
++	long available_pages = sysconf(_SC_AVPHYS_PAGES);
++	if (available_page_size > 0 && available_pages > 0 &&
++	    (u64)available_pages <= UINT64_MAX / (u64)available_page_size)
++		return (u64)available_page_size * (u64)available_pages;
++#endif
+ #if defined(_SC_PAGESIZE) && defined(_SC_PHYS_PAGES)
+ 	long page_size = sysconf(_SC_PAGESIZE);
+ 	long num_pages = sysconf(_SC_PHYS_PAGES);
+ 	if (page_size <= 0 || num_pages <= 0)
+ 		goto default_size;
++	if ((u64)num_pages > UINT64_MAX / (u64)page_size)
++		goto default_size;
+ 	return ((u64)page_size * (u64)num_pages);
+ #else
+ 	int mib[2] = {CTL_HW, HW_MEMSIZE};
 diff --git a/src/verify.c b/src/verify.c
-index cbf20c0f..4efadb11 100644
+index cbf20c0f..cbc37917 100644
 --- a/src/verify.c
 +++ b/src/verify.c
 @@ -25,12 +25,18 @@
@@ -1391,13 +1757,14 @@ index cbf20c0f..4efadb11 100644
  
  static int
  append_blob_to_list(struct blob_descriptor *blob, void *_list)
-@@ -46,6 +52,28 @@ struct verify_blob_list_ctx {
+@@ -46,6 +52,29 @@ struct verify_blob_list_ctx {
  	u64 next_progress;
  };
  
 +struct parallel_verify_ctx {
 +	struct blob_descriptor **blobs;
 +	size_t num_blobs;
++	size_t read_window_size;
 +	size_t next_blob;
 +	size_t *completed_blobs;
 +	int *results;
@@ -1420,7 +1787,7 @@ index cbf20c0f..4efadb11 100644
  static int
  verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
  		     const void *chunk, size_t size, void *_ctx)
-@@ -73,6 +101,235 @@ verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
+@@ -73,6 +102,254 @@ verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
  	return 0;
  }
  
@@ -1464,6 +1831,7 @@ index cbf20c0f..4efadb11 100644
 +			ctx->active_workers--;
 +			condvar_broadcast(&ctx->state_changed);
 +			mutex_unlock(&ctx->lock);
++			free_isolated_decompressor();
 +			return NULL;
 +		}
 +		blob_index = ctx->next_blob++;
@@ -1483,8 +1851,9 @@ index cbf20c0f..4efadb11 100644
 +			worker->in_fd_open = true;
 +			worker->fd_wim = blob->rdesc->wim;
 +		}
-+		ret = read_blob_with_sha1_isolated_from(blob, &cbs, false,
-+						       &worker->in_fd);
++		ret = read_blob_with_sha1_isolated_windowed_from(
++				blob, &cbs, false, &worker->in_fd,
++				ctx->read_window_size);
 +
 +complete:
 +		mutex_lock(&ctx->lock);
@@ -1498,12 +1867,14 @@ index cbf20c0f..4efadb11 100644
 +}
 +
 +static unsigned
-+parallel_verify_worker_count(const WIMStruct *wim, size_t num_blobs)
++parallel_verify_worker_count(const WIMStruct *wim, size_t num_blobs,
++			     size_t *read_window_size_ret)
 +{
 +	u64 max_memory = wim->decompression_max_memory;
 +	u64 bytes_per_worker;
 +	unsigned num_workers = wim->decompression_num_threads;
 +
++	*read_window_size_ret = 0;
 +	if (num_workers == 0)
 +		num_workers = get_available_cpus();
 +	if ((size_t)num_workers > num_blobs)
@@ -1523,6 +1894,20 @@ index cbf20c0f..4efadb11 100644
 +	while (num_workers > 1 &&
 +	       (u64)num_workers * bytes_per_worker > max_memory)
 +		num_workers--;
++
++	if (num_workers > 1) {
++		const u64 memory_per_worker = max_memory / num_workers;
++
++		if (memory_per_worker >= bytes_per_worker +
++						(u64)1024 * 1024) {
++			const u64 spare_memory =
++				memory_per_worker - bytes_per_worker;
++
++			*read_window_size_ret =
++				min(spare_memory,
++				    (u64)32 * 1024 * 1024);
++		}
++	}
 +	return num_workers;
 +}
 +
@@ -1563,7 +1948,8 @@ index cbf20c0f..4efadb11 100644
 +	bool lock_initialized = false;
 +	bool condvar_initialized = false;
 +
-+	num_workers = parallel_verify_worker_count(wim, num_blobs);
++	num_workers = parallel_verify_worker_count(
++				wim, num_blobs, &ctx.read_window_size);
 +	if (num_workers < 2)
 +		return -1;
 +
@@ -1656,7 +2042,7 @@ index cbf20c0f..4efadb11 100644
  static int
  verify_file_data_present(struct wim_image_metadata *imd,
  			 struct blob_table *blob_table)
-@@ -101,6 +358,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+@@ -101,6 +378,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
  		.continue_blob	= verify_continue_blob,
  		.ctx		= &ctx,
  	};
@@ -1664,7 +2050,7 @@ index cbf20c0f..4efadb11 100644
  
  	/* Check parameters  */
  
-@@ -154,6 +412,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+@@ -154,6 +432,7 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
  
  	progress.verify_streams.wimfile = wim->filename;
  	list_for_each_entry(blob, &blob_list, extraction_list) {
@@ -1672,7 +2058,7 @@ index cbf20c0f..4efadb11 100644
  		progress.verify_streams.total_streams++;
  		progress.verify_streams.total_bytes += blob->size;
  	}
-@@ -168,6 +427,19 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
+@@ -168,6 +447,19 @@ wimlib_verify_wim(WIMStruct *wim, int verify_flags)
  	if (ret)
  		return ret;
  
@@ -1724,3 +2110,170 @@ index a954c4d3..d049cee3 100644
  /* API function documented in wimlib.h  */
  WIMLIBAPI const tchar *
  wimlib_get_compression_type_string(enum wimlib_compression_type ctype)
+diff --git a/src/win32_replacements.c b/src/win32_replacements.c
+index 6bccbfd1..27b9f0bb 100644
+--- a/src/win32_replacements.c
++++ b/src/win32_replacements.c
+@@ -337,13 +337,108 @@ err:
+ 	return -1;
+ }
+ 
+-/* Use the Win32 API to get the number of processors.  */
++typedef WORD (WINAPI *get_active_processor_group_count_t)(void);
++typedef DWORD (WINAPI *get_active_processor_count_t)(WORD);
++typedef BOOL (WINAPI *get_process_group_affinity_t)(HANDLE, PUSHORT, PUSHORT);
++
++#ifndef ALL_PROCESSOR_GROUPS
++#  define ALL_PROCESSOR_GROUPS ((WORD)0xffff)
++#endif
++
++static unsigned
++count_set_affinity_bits(DWORD_PTR mask)
++{
++	unsigned count = 0;
++
++	while (mask) {
++		count += mask & 1;
++		mask >>= 1;
++	}
++	return count;
++}
++
++/*
++ * GetSystemInfo() only reports the current processor group.  Dynamically use
++ * the group-aware Windows 7 APIs when available so the binary keeps its older
++ * Windows load-time compatibility.
++ */
+ unsigned
+ get_available_cpus(void)
+ {
++	HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
++	get_active_processor_group_count_t get_group_count;
++	get_active_processor_count_t get_processor_count;
++	get_process_group_affinity_t get_process_groups;
++	DWORD_PTR process_mask;
++	DWORD_PTR system_mask;
+ 	SYSTEM_INFO sysinfo;
++
++	get_group_count = kernel32 ?
++		(get_active_processor_group_count_t)
++			GetProcAddress(kernel32, "GetActiveProcessorGroupCount") :
++		NULL;
++	get_processor_count = kernel32 ?
++		(get_active_processor_count_t)
++			GetProcAddress(kernel32, "GetActiveProcessorCount") :
++		NULL;
++	get_process_groups = kernel32 ?
++		(get_process_group_affinity_t)
++			GetProcAddress(kernel32, "GetProcessGroupAffinity") :
++		NULL;
++
++	if (get_group_count && get_processor_count) {
++		WORD num_groups = get_group_count();
++
++		if (num_groups == 1 &&
++		    GetProcessAffinityMask(GetCurrentProcess(), &process_mask,
++					   &system_mask)) {
++			unsigned count = count_set_affinity_bits(process_mask);
++
++			if (count)
++				return count;
++		}
++
++		if (num_groups > 1) {
++			unsigned total = 0;
++
++			if (get_process_groups) {
++				USHORT process_group_count = num_groups;
++				USHORT *groups =
++					MALLOC(process_group_count * sizeof(groups[0]));
++
++				if (groups &&
++				    get_process_groups(GetCurrentProcess(),
++						       &process_group_count,
++						       groups)) {
++					for (USHORT i = 0; i < process_group_count; i++) {
++						DWORD count = get_processor_count(groups[i]);
++
++						if (count > UINT_MAX - total) {
++							total = UINT_MAX;
++							break;
++						}
++						total += count;
++					}
++				}
++				FREE(groups);
++			}
++			if (!total)
++				total = get_processor_count(ALL_PROCESSOR_GROUPS);
++			if (total)
++				return total;
++		}
++	}
++
++	if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask,
++				   &system_mask)) {
++		unsigned count = count_set_affinity_bits(process_mask);
++
++		if (count)
++			return count;
++	}
++
+ 	GetSystemInfo(&sysinfo);
+-	return sysinfo.dwNumberOfProcessors;
++	return max((unsigned)sysinfo.dwNumberOfProcessors, 1);
+ }
+ 
+ /* Use the Win32 API to get the amount of available memory.  */
+@@ -353,8 +448,14 @@ get_available_memory(void)
+ 	MEMORYSTATUSEX status = {
+ 		.dwLength = sizeof(status),
+ 	};
+-	GlobalMemoryStatusEx(&status);
+-	return (u64)min(status.ullTotalPhys, status.ullTotalVirtual) * 85 / 100;
++
++	if (!GlobalMemoryStatusEx(&status)) {
++		WARNING("Failed to determine available memory; assuming 1 GiB");
++		return (u64)1 << 30;
++	}
++	return min((u64)status.ullAvailPhys,
++		   min((u64)status.ullAvailPageFile,
++		       (u64)status.ullAvailVirtual));
+ }
+ 
+ /* Replacement for POSIX-2008 realpath().  Warning: partial functionality only
+@@ -544,6 +645,34 @@ win32_pread(int fd, void *buf, size_t count, off_t offset)
+ 	return do_pread_or_pwrite(fd, buf, count, offset, false);
+ }
+ 
++ssize_t
++win32_pread_unshared(int fd, void *buf, size_t count, off_t offset)
++{
++	HANDLE h;
++	DWORD result = 0;
++	OVERLAPPED overlapped = { 0 };
++	DWORD err;
++
++	h = (HANDLE)_get_osfhandle(fd);
++	if (h == INVALID_HANDLE_VALUE)
++		return -1;
++	if (GetFileType(h) == FILE_TYPE_PIPE) {
++		errno = ESPIPE;
++		return -1;
++	}
++	overlapped.Offset = offset;
++	overlapped.OffsetHigh = offset >> 32;
++	count = min(count, MAX_IO_AMOUNT);
++	if (!ReadFile(h, buf, count, &result, &overlapped)) {
++		err = GetLastError();
++		win32_error(err, L"Failed to read %zu bytes at offset %"PRIu64,
++			    count, offset);
++		set_errno_from_win32_error(err);
++		return -1;
++	}
++	return result;
++}
++
+ /* Dumb Windows implementation of pwrite().  It temporarily changes the file
+  * offset, so it is not safe to use with readers/writers on the same file
+  * descriptor. */

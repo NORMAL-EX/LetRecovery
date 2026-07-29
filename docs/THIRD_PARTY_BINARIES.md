@@ -14,10 +14,10 @@ Hashes in this file are for the exact bytes committed to this repository.
 | Upstream Git URL | `https://wimlib.net/git/wimlib` |
 | Pinned upstream commit | `cd5e231c348c255ae5088873b5a66ee0eb96fa07` |
 | LetRecovery patch | `docs/third-party/wimlib-1.14.5/letrecovery-parallel-decompression.patch` |
-| Patch SHA-256 | `E4A5DD90D128BCC8C1A6950CE4105C06E88BFE6F8D3790DABAC69AB55BA05ABA` |
+| Patch SHA-256 | `6EEDE7B504B8ED905A7F86CEB681CA40256D642D2CDC17B65568D2E4FD0122BE` |
 | Reproducible build script | `.github/scripts/build-wimlib-parallel.ps1` |
-| Committed DLL size | `493056` bytes |
-| Committed DLL SHA-256 | `CE949864C8E4ECE5C3A5F969CBBA830444AF8D4105464A18CF056E9FE478B421` |
+| Committed DLL size | `496640` bytes |
+| Committed DLL SHA-256 | `3B84A599C19DAFF827DDF4095F5426C60F618AE498EE0E9C40D031F5AB1A3B82` |
 | License used for `libwim` and the LetRecovery patch | GNU Lesser General Public License v3.0 or later |
 | Additional bundled notice | `libdivsufsort-lite` license from upstream |
 
@@ -26,10 +26,20 @@ LetRecovery patch. The extension adds bounded ordered parallel decompression,
 parallel verification of independent non-solid resources, and bounded
 prefetch for application. Parallel verification sorts resources by decreasing
 uncompressed size before workers claim them, reducing the long-resource tail,
-and wakes only the caller waiting for completion. Windows workers use
-independent read handles because wimlib's Windows `pread` compatibility path
-changes a handle's shared file position. Progress and extraction callbacks
-remain serialized on the caller thread, and SHA-1 verification is unchanged.
+and wakes only the caller waiting for completion. Each verification worker can
+also reuse a bounded sliding read window, reducing fragmented reads without
+changing resource parsing, decompression, SHA-1 comparison, or progress
+callbacks. The window is charged to the same explicit memory budget and is
+disabled when less than 1 MiB per worker remains.
+
+Windows workers use independent read handles because wimlib's Windows `pread`
+compatibility path changes a handle's shared file position. Automatic worker
+selection respects the process affinity, including processor groups when the
+Windows 7 APIs are available, and uses currently available commit memory rather
+than installed physical memory. Linux uses the current process affinity and
+available physical pages. Joined Windows worker handles are always closed.
+Progress and extraction callbacks remain serialized on the caller thread, and
+SHA-1 verification is unchanged.
 
 The Windows build uses `--without-fuse --without-ntfs-3g`. Upstream 1.14.5
 permits LGPLv2.1-or-later; this repository continues to distribute both libwim
@@ -57,9 +67,11 @@ worktree version.
    requested output.
 4. Record the patch, DLL size, and DLL SHA-256 above. Retain the upstream
    notices without modification.
-5. Run read-only serial/parallel verification against a known WIM, repeat the
-   parallel stress test, and confirm that a deliberately corrupted ordinary
-   test copy still fails SHA-1 verification.
+5. Run serial/parallel verification against uncompressed, XPRESS, LZX and LZMS
+   WIMs, solid ESDs, pipable WIMs and split SWMs. Repeat the parallel stress
+   test, exercise an explicit low-memory budget, and confirm that payload,
+   chunk-table, offset, metadata, integrity-table, truncation, solid-resource
+   and split-part corruption remain rejected.
 6. Run the Rust workspace checks before release.
 
 ## Intel Rapid Storage Technology VMD drivers

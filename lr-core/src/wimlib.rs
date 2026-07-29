@@ -300,6 +300,40 @@ fn optimal_threads() -> c_uint {
         .unwrap_or(0)
 }
 
+const PARALLEL_MEMORY_FALLBACK: u64 = 256 * 1024 * 1024;
+const PARALLEL_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+
+fn parallel_memory_budget_from_available(available: u64) -> u64 {
+    (available / 4).clamp(1, PARALLEL_MEMORY_LIMIT)
+}
+
+/// 并行解压只使用当前可提交内存的四分之一，并设置 2 GiB 硬上限。
+///
+/// 不能把物理内存总量当作“可用内存”：低内存 WinPE 或宿主机已经有较大
+/// 内存占用时，这会让 wimlib 同时创建过多工作缓冲区并挤压文件系统缓存。
+fn parallel_memory_budget() -> u64 {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GlobalMemoryStatusEx(&mut status) }.is_ok() {
+        let available = status
+            .ullAvailPhys
+            .min(status.ullAvailPageFile)
+            .min(status.ullAvailVirtual);
+        if available != 0 {
+            return parallel_memory_budget_from_available(available);
+        }
+    }
+    PARALLEL_MEMORY_FALLBACK
+}
+
+fn parallel_decompression_policy() -> (c_uint, u64) {
+    (optimal_threads(), parallel_memory_budget())
+}
+
 /// 在 wimlib 重负载操作（apply/capture/split/verify）期间，临时把**进程**优先级提升到
 /// HIGH，结束后恢复原值。让 wimlib 内部的压缩/解压工作线程获得更激进的 CPU 调度，
 /// 在与其它进程争用时也能顶到更高占用，提升吞吐。RAII：drop 时自动恢复。
@@ -623,7 +657,8 @@ impl Wimlib {
             return Err("打开 WIM 失败：返回空句柄".to_string());
         }
         if let Some(configure) = self.set_parallel_decompression {
-            let rc = unsafe { configure(wim, optimal_threads(), 0) };
+            let (threads, max_memory) = parallel_decompression_policy();
+            let rc = unsafe { configure(wim, threads, max_memory) };
             if rc != WIMLIB_ERR_SUCCESS {
                 unsafe { (self.free_wim)(wim) };
                 return Err(self.error_message(rc));
@@ -843,7 +878,8 @@ impl WimlibManager {
             return Err("打开 WIM 失败：空句柄".to_string());
         }
         if let Some(configure) = self.set_parallel_decompression {
-            let rc = unsafe { configure(wim, optimal_threads(), 0) };
+            let (threads, max_memory) = parallel_decompression_policy();
+            let rc = unsafe { configure(wim, threads, max_memory) };
             if rc != WIMLIB_ERR_SUCCESS {
                 unsafe { (self.free_wim)(wim) };
                 return Err(self.error_message(rc));
@@ -1325,5 +1361,23 @@ mod cancellation_tests {
             )
         };
         assert_eq!(status, WIMLIB_PROGRESS_STATUS_ABORT);
+    }
+
+    #[test]
+    fn parallel_memory_budget_uses_quarter_of_current_availability() {
+        assert_eq!(parallel_memory_budget_from_available(4 * 1024), 1024);
+    }
+
+    #[test]
+    fn parallel_memory_budget_never_reenables_library_auto_mode() {
+        assert_eq!(parallel_memory_budget_from_available(0), 1);
+    }
+
+    #[test]
+    fn parallel_memory_budget_is_capped_at_two_gibibytes() {
+        assert_eq!(
+            parallel_memory_budget_from_available(128 * 1024 * 1024 * 1024),
+            PARALLEL_MEMORY_LIMIT
+        );
     }
 }

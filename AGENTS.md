@@ -209,7 +209,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 
 ### 新增镜像引擎或第三方二进制
 
-优先扩展 `lr-core/src/wim_engine.rs` 的统一入口，保留现有回退；记录来源、版本、许可证、SHA-256、可复现补丁、构建脚本和打包路径，不在调用方直接加载未验证 DLL。LetRecovery 自定义 wimlib 的并行读取必须保持有界内存、每个工作线程独立 Windows 文件句柄、按原顺序交付数据，并只在调用线程执行进度与安装回调；损坏镜像的 SHA-1 失败和取消语义不得因并行化弱化。
+优先扩展 `lr-core/src/wim_engine.rs` 的统一入口，保留现有回退；记录来源、版本、许可证、SHA-256、可复现补丁、构建脚本和打包路径，不在调用方直接加载未验证 DLL。LetRecovery 自定义 wimlib 的并行读取必须保持有界内存、每个工作线程独立 Windows 文件句柄、按原顺序交付数据，并只在调用线程执行进度与安装回调；校验读取窗口必须计入同一内存预算，低内存时缩小或关闭，不得通过嵌套 chunk 并行、镜像索引或 CPU 厂商硬编码绕开通用路径；自动线程数必须遵守 Windows 处理器组/进程 affinity 与 Linux affinity。损坏镜像的 SHA-1 失败和取消语义不得因并行化弱化。
 
 ### 新增多步骤操作、断点或自动重试
 
@@ -261,7 +261,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `lr-core/src/storage_driver_match.rs`：把 SetupAPI 当前 PCI 硬件 ID 纯函数映射到第 11 代或当前 Intel VMD 随包目录；严格匹配 `VEN/DEV` 边界，AMD、Apple、VirtIO、相似前缀和未知控制器返回空选择。
 - `lr-core/src/traditional_chinese.rs`：正常端与 PE 端共享的 Windows NLS 简体转繁体转换和繁體中文常用界面术语归一；保留 ASCII 占位符，NLS 失败时返回明确的繁体错误文案，不得回退显示简体源文案。
 - `lr-core/src/wimgapi.rs`：动态封装 Windows WIMGAPI 的镜像 apply、capture、元数据和进度回调；消息编号严格使用 `WM_APP + 0x1476` 契约，安装取消仅在官方规定的 `WIM_MSG_PROCESS` 回调中返回 `WIM_MSG_ABORT_IMAGE`，避免跨 FFI 展开或猜测非标准中止方式。
-- `lr-core/src/wimlib.rs`：动态封装 `libwim-15.dll` 的打开、校验、释放、捕获、拆分和进度回调；打开 WIM 后优先启用自定义 DLL 的有界并行解压与并行校验扩展，旧 DLL 缺少可选导出时保持串行兼容；镜像应用与校验接受调用方持有的原子取消标记，并由 libwim 进度回调返回中止状态以真正停止当前操作。
+- `lr-core/src/wimlib.rs`：动态封装 `libwim-15.dll` 的打开、校验、释放、捕获、拆分和进度回调；打开 WIM 后优先启用自定义 DLL 的有界并行解压与并行校验扩展，显式把当前可提交内存的四分之一（最高 2 GiB）作为并行工作预算，旧 DLL 缺少可选导出时保持串行兼容；镜像应用与校验接受调用方持有的原子取消标记，并由 libwim 进度回调返回中止状态以真正停止当前操作。
 - `lr-core/src/wimlib_dll.rs`：把内嵌 `libwim-15.dll` 与运行目录副本逐字节比较，在首次加载前通过同目录临时文件回读验证和原子替换同步新版本，避免旧 DLL 遮蔽并行扩展。
 - `lr-core/src/wim_engine.rs`：wimlib/WIMGAPI 运行时选择、统一调用和失败回退；可取消的应用流程在阶段边界检查取消，libwim 路径可中止进行中的操作，取消状态不得触发另一引擎回退；WIMGAPI 进行中的调用仅在有官方可验证的中止接口后才可扩展，禁止猜测回调常量。
 - `lr-core/src/xp.rs`：XP/2003 x64 的 GPT+UEFI 驱动注入、服务注册和引导文件准备；用户启用的 XP 驱动目录缺失、`.sys` 缺失、文件复制失败、必需服务或 CriticalDeviceDatabase 写入失败必须失败关闭，不能只记录日志后继续安装。
