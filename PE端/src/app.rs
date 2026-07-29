@@ -981,9 +981,8 @@ pub(crate) fn generate_unattend_xml(
     .map_err(|error| anyhow::anyhow!("内置 Administrator 配置无效: {error}"))?;
     let (specialize_account_command, user_accounts, auto_logon) = if let Some(builtin) = builtin {
         log::info!(
-            "[UNATTEND] 使用内置 RID-500 Administrator，账户名={}，自动登录={}，密码=已设置",
+            "[UNATTEND] 使用内置 RID-500 Administrator，账户名={}，首次自动登录=true（跳过 OOBE），密码=已设置",
             config.builtin_administrator.account_name,
-            config.builtin_administrator.auto_logon
         );
         (
             builtin.specialize_command,

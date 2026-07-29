@@ -554,7 +554,7 @@ impl AdvancedPage {
         );
         set_checked(
             h.builtin_administrator_auto_logon,
-            data.builtin_administrator.auto_logon,
+            data.builtin_administrator.enabled || data.builtin_administrator.auto_logon,
         );
         apply_check_edit(h.volume_label, data.custom_volume_label, &data.volume_label);
         apply_check_edit(
@@ -609,7 +609,8 @@ impl AdvancedPage {
         data.builtin_administrator.account_name =
             read_text(h.builtin_administrator_name).trim().to_string();
         data.builtin_administrator.password = read_text(h.builtin_administrator_password).into();
-        data.builtin_administrator.auto_logon = is_checked(h.builtin_administrator_auto_logon);
+        data.builtin_administrator.auto_logon =
+            data.builtin_administrator.enabled || is_checked(h.builtin_administrator_auto_logon);
         if data.builtin_administrator.enabled {
             data.custom_username = false;
         }
@@ -654,6 +655,9 @@ impl AdvancedPage {
             && is_checked(h.builtin_administrator);
         if builtin_enabled {
             set_checked(h.username.check, false);
+            // RID-500 already exists, so Windows 10/11 only skips OOBE account creation through
+            // a one-time AutoLogon. Keep the compatibility checkbox visible but deterministic.
+            set_checked(h.builtin_administrator_auto_logon, true);
         }
         let _ = EnableWindow(h.username.check, !builtin_enabled);
         let _ = EnableWindow(
@@ -665,10 +669,10 @@ impl AdvancedPage {
             h.builtin_administrator_name,
             h.builtin_administrator_password_label,
             h.builtin_administrator_password,
-            h.builtin_administrator_auto_logon,
         ] {
             let _ = EnableWindow(control, builtin_enabled);
         }
+        let _ = EnableWindow(h.builtin_administrator_auto_logon, false);
     }
 
     pub unsafe fn handle_dependency_toggle(&self, control: HWND) {

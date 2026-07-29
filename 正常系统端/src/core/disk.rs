@@ -4,6 +4,10 @@ use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
 use anyhow::Result;
 use lr_core::command::{CommandExecutor, SystemCommandExecutor};
+use lr_core::data_staging::{
+    select_staging_plan, ShrinkCandidate, StagingCandidate, StagingPlan, StorageAttachment,
+    StorageMedia,
+};
 use std::path::Path;
 
 #[cfg(windows)]
@@ -15,8 +19,9 @@ use windows::{
         FILE_SHARE_WRITE, OPEN_EXISTING,
     },
     Win32::System::Ioctl::{
-        IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER, PARTITION_STYLE_GPT,
-        PARTITION_STYLE_MBR,
+        PropertyStandardQuery, StorageDeviceProperty, IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+        IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_STYLE_GPT,
+        PARTITION_STYLE_MBR, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY,
     },
     Win32::System::IO::DeviceIoControl,
 };
@@ -115,7 +120,57 @@ struct DriveLayoutInformationEx {
     // union 部分我们不需要完整读取
 }
 
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+#[allow(non_snake_case)]
+struct DeviceSeekPenaltyDescriptor {
+    Version: u32,
+    Size: u32,
+    IncursSeekPenalty: u8,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+#[allow(non_snake_case)]
+struct StorageDeviceDescriptor {
+    Version: u32,
+    Size: u32,
+    DeviceType: u8,
+    DeviceTypeModifier: u8,
+    RemovableMedia: u8,
+    CommandQueueing: u8,
+    VendorIdOffset: u32,
+    ProductIdOffset: u32,
+    ProductRevisionOffset: u32,
+    SerialNumberOffset: u32,
+    BusType: u32,
+    RawPropertiesLength: u32,
+}
+
 pub struct DiskManager;
+
+fn build_staging_shrink_script(
+    disk_number: u32,
+    partition_number: u32,
+    size_mb: u64,
+    new_letter: char,
+) -> String {
+    format!(
+        "select disk {}\n\
+         select partition {}\n\
+         shrink desired={} minimum={}\n\
+         create partition primary\n\
+         format fs=ntfs quick label=\"LetRecovery\"\n\
+         assign letter={}",
+        disk_number,
+        partition_number,
+        size_mb,
+        size_mb,
+        new_letter.to_ascii_uppercase()
+    )
+}
 
 impl DiskManager {
     /// 获取所有固定磁盘分区列表
@@ -308,6 +363,150 @@ impl DiskManager {
                 (None, None)
             }
         }
+    }
+
+    #[cfg(windows)]
+    fn get_storage_profile(disk_number: u32) -> (StorageMedia, StorageAttachment) {
+        const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY: i32 = 7;
+        const BUS_TYPE_IEEE1394: u32 = 4;
+        const BUS_TYPE_USB: u32 = 7;
+        const BUS_TYPE_SD: u32 = 12;
+        const BUS_TYPE_MMC: u32 = 13;
+        const BUS_TYPE_VIRTUAL: u32 = 14;
+        const BUS_TYPE_FILE_BACKED_VIRTUAL: u32 = 15;
+        const BUS_TYPE_NVME: u32 = 17;
+        const BUS_TYPE_SCM: u32 = 18;
+
+        unsafe {
+            let disk_path = format!("\\\\.\\PhysicalDrive{disk_number}");
+            let wide_path: Vec<u16> = disk_path.encode_utf16().chain(std::iter::once(0)).collect();
+            let handle = match CreateFileW(
+                PCWSTR::from_raw(wide_path.as_ptr()),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                Default::default(),
+                None,
+            ) {
+                Ok(handle) if handle != INVALID_HANDLE_VALUE => handle,
+                _ => return (StorageMedia::Unknown, StorageAttachment::Unknown),
+            };
+
+            let mut query = STORAGE_PROPERTY_QUERY {
+                PropertyId: STORAGE_PROPERTY_ID(STORAGE_DEVICE_SEEK_PENALTY_PROPERTY),
+                QueryType: PropertyStandardQuery,
+                AdditionalParameters: [0],
+            };
+            let mut seek = DeviceSeekPenaltyDescriptor::default();
+            let mut bytes_returned = 0;
+            let seek_result = DeviceIoControl(
+                handle,
+                IOCTL_STORAGE_QUERY_PROPERTY,
+                Some(&query as *const _ as *const std::ffi::c_void),
+                std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+                Some(&mut seek as *mut _ as *mut std::ffi::c_void),
+                std::mem::size_of::<DeviceSeekPenaltyDescriptor>() as u32,
+                Some(&mut bytes_returned),
+                None,
+            );
+            let seek_penalty = (seek_result.is_ok()
+                && bytes_returned >= std::mem::size_of::<DeviceSeekPenaltyDescriptor>() as u32)
+                .then_some(seek.IncursSeekPenalty != 0);
+
+            query.PropertyId = StorageDeviceProperty;
+            let mut descriptor = StorageDeviceDescriptor::default();
+            bytes_returned = 0;
+            let descriptor_result = DeviceIoControl(
+                handle,
+                IOCTL_STORAGE_QUERY_PROPERTY,
+                Some(&query as *const _ as *const std::ffi::c_void),
+                std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+                Some(&mut descriptor as *mut _ as *mut std::ffi::c_void),
+                std::mem::size_of::<StorageDeviceDescriptor>() as u32,
+                Some(&mut bytes_returned),
+                None,
+            );
+            let _ = CloseHandle(handle);
+
+            let bus_type = (descriptor_result.is_ok()
+                && bytes_returned >= std::mem::size_of::<StorageDeviceDescriptor>() as u32)
+                .then_some(descriptor.BusType);
+            let attachment = match bus_type {
+                Some(BUS_TYPE_IEEE1394 | BUS_TYPE_USB | BUS_TYPE_SD | BUS_TYPE_MMC) => {
+                    StorageAttachment::External
+                }
+                Some(BUS_TYPE_VIRTUAL | BUS_TYPE_FILE_BACKED_VIRTUAL) | None => {
+                    StorageAttachment::Unknown
+                }
+                Some(_) => StorageAttachment::Internal,
+            };
+            let media = match seek_penalty {
+                Some(true) => StorageMedia::Rotational,
+                Some(false) => StorageMedia::SolidState,
+                None if matches!(bus_type, Some(BUS_TYPE_NVME | BUS_TYPE_SCM)) => {
+                    StorageMedia::SolidState
+                }
+                None => StorageMedia::Unknown,
+            };
+            (media, attachment)
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn get_storage_profile(_disk_number: u32) -> (StorageMedia, StorageAttachment) {
+        (StorageMedia::Unknown, StorageAttachment::Unknown)
+    }
+
+    #[cfg(windows)]
+    fn get_volume_space_bytes(letter: char) -> Option<(u64, u64)> {
+        let path = format!("{}:\\", letter.to_ascii_uppercase());
+        let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut free_bytes_available = 0;
+        let mut total_bytes = 0;
+        unsafe {
+            GetDiskFreeSpaceExW(
+                PCWSTR(wide_path.as_ptr()),
+                Some(&mut free_bytes_available),
+                Some(&mut total_bytes),
+                None,
+            )
+            .ok()
+            .map(|_| (free_bytes_available, total_bytes))
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn get_volume_space_bytes(_letter: char) -> Option<(u64, u64)> {
+        None
+    }
+
+    #[cfg(windows)]
+    fn get_volume_file_system(letter: char) -> Option<String> {
+        let path = format!("{}:\\", letter.to_ascii_uppercase());
+        let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut file_system_name = [0u16; 64];
+        unsafe {
+            GetVolumeInformationW(
+                PCWSTR(wide_path.as_ptr()),
+                None,
+                None,
+                None,
+                None,
+                Some(&mut file_system_name),
+            )
+            .ok()?;
+        }
+        Some(
+            String::from_utf16_lossy(&file_system_name)
+                .trim_end_matches('\0')
+                .to_string(),
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn get_volume_file_system(_letter: char) -> Option<String> {
+        None
     }
 
     /// 使用 IOCTL_DISK_GET_DRIVE_LAYOUT_EX 获取磁盘分区表类型
@@ -823,7 +1022,21 @@ impl DiskManager {
         source_letter: char,
         desired_size_mb: u64,
         pre_queried_max_mb: Option<u64>,
+        expected_disk_number: u32,
+        expected_partition_number: u32,
     ) -> Result<char> {
+        let source_letter = source_letter.to_ascii_uppercase();
+        let current_identity = Self::get_device_number(source_letter);
+        if current_identity != (Some(expected_disk_number), Some(expected_partition_number)) {
+            anyhow::bail!(
+                "分区身份已变化，拒绝缩小 {}:：预期磁盘 {} 分区 {}，当前为 {:?}",
+                source_letter,
+                expected_disk_number,
+                expected_partition_number,
+                current_identity
+            );
+        }
+
         // 使用预查询的值或者重新查询
         let max_shrink_mb = match pre_queried_max_mb {
             Some(mb) => mb,
@@ -878,14 +1091,14 @@ impl DiskManager {
         );
 
         // 使用 diskpart 执行操作
-        // 注意：shrink 之后的未分配空间会紧跟在当前卷之后
-        let script_content = format!(
-            "select volume {}\n\
-            shrink desired={}\n\
-            create partition primary\n\
-            format fs=ntfs quick label=\"LetRecovery\"\n\
-            assign letter={}",
-            source_letter, actual_size_mb, new_letter
+        // 用刚刚复核的磁盘号和分区号重新建立焦点，不能依赖可能在扫描后变化的盘符。
+        // `minimum=desired` 保证 DiskPart 要么完整缩出所需空间，要么失败，不留下尺寸不足
+        // 但仍继续格式化发布的半成品分区。
+        let script_content = build_staging_shrink_script(
+            expected_disk_number,
+            expected_partition_number,
+            actual_size_mb,
+            new_letter,
         );
 
         log::info!("[DISK] Diskpart 脚本内容:\n{}", script_content);
@@ -921,6 +1134,16 @@ impl DiskManager {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
 
+        let new_identity = Self::get_device_number(new_letter);
+        if new_identity.0 != Some(expected_disk_number) {
+            anyhow::bail!(
+                "新分区 {}: 出现在错误的物理磁盘上：预期磁盘 {}，当前为 {:?}",
+                new_letter,
+                expected_disk_number,
+                new_identity
+            );
+        }
+
         // 写入标志文件
         let marker_path = format!("{}:\\{}", new_letter, AUTO_CREATED_PARTITION_MARKER);
         std::fs::write(
@@ -929,10 +1152,14 @@ impl DiskManager {
                 "LetRecovery Auto Created Partition\n\
                 Created: {}\n\
                 Source: {}:\n\
+                SourceDisk: {}\n\
+                SourcePartition: {}\n\
                 Size: {} MB\n\
                 Note: This partition was automatically created and can be safely deleted after system installation.",
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                 source_letter,
+                expected_disk_number,
+                expected_partition_number,
                 actual_size_mb
             ),
         )
@@ -985,7 +1212,7 @@ impl DiskManager {
     /// * `Err` - 发生错误
     pub fn find_suitable_data_partition(
         exclude_partition: &str,
-        required_size_bytes: u64,
+        image_size_bytes: u64,
     ) -> Result<Option<(String, bool)>> {
         let exclude_letter = exclude_partition
             .chars()
@@ -994,220 +1221,232 @@ impl DiskManager {
             .to_ascii_uppercase();
 
         log::info!(
-            "[DISK] 查找数据分区，排除: {}, 需要空间: {} bytes ({:.2} GB)",
+            "[DISK] 查找数据分区，目标: {}, 镜像: {} bytes ({:.2} GB)",
             exclude_partition,
-            required_size_bytes,
-            required_size_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+            image_size_bytes,
+            image_size_bytes as f64 / 1024.0 / 1024.0 / 1024.0
         );
 
-        // 第一遍：查找所有可用的固定磁盘分区（排除光驱、排除目标分区）
-        let mut candidates: Vec<(char, u64)> = Vec::new();
+        let partitions = Self::get_partitions()?;
+        let target = partitions
+            .iter()
+            .find(|partition| {
+                partition
+                    .letter
+                    .chars()
+                    .next()
+                    .is_some_and(|letter| letter.eq_ignore_ascii_case(&exclude_letter))
+            })
+            .cloned();
+        let target_disk_number = target.as_ref().and_then(|partition| partition.disk_number);
 
-        for letter in b'A'..=b'Z' {
-            let c = letter as char;
-
-            // 跳过排除的分区
-            if c == exclude_letter {
+        let mut profiles = std::collections::HashMap::new();
+        let mut candidates = Vec::new();
+        for partition in &partitions {
+            let Some(letter) = partition
+                .letter
+                .chars()
+                .next()
+                .map(|c| c.to_ascii_uppercase())
+            else {
+                continue;
+            };
+            if letter == exclude_letter || letter == 'X' {
                 continue;
             }
-
-            // 跳过 X 盘（PE 系统盘）
-            if c == 'X' {
-                continue;
-            }
-
-            let partition_path = format!("{}:\\", c);
-            if !Path::new(&partition_path).exists() {
-                continue;
-            }
-
-            // 检查是否为光驱
-            if Self::is_cdrom(c) {
-                log::info!("[DISK] 跳过光驱: {}:", c);
-                continue;
-            }
-
-            // 检查是否为固定磁盘
-            if !Self::is_fixed_drive(c) {
-                log::info!("[DISK] 跳过非固定磁盘: {}:", c);
-                continue;
-            }
-
-            // 获取剩余空间
-            if let Some(free_space) = Self::get_free_space_bytes(&format!("{}:", c)) {
-                log::info!(
-                    "[DISK] 分区 {}:  剩余空间: {} bytes ({:.2} GB)",
-                    c,
-                    free_space,
-                    free_space as f64 / 1024.0 / 1024.0 / 1024.0
+            if partition.bitlocker_status != VolumeStatus::NotEncrypted {
+                log::warn!(
+                    "[DISK] 跳过 {}:：BitLocker 状态为 {}，重启到 PE 后不能保证可访问",
+                    letter,
+                    partition.bitlocker_status.as_str()
                 );
-
-                if free_space >= required_size_bytes {
-                    candidates.push((c, free_space));
-                }
+                continue;
             }
+            let (media, attachment) = partition
+                .disk_number
+                .map(|disk_number| {
+                    *profiles
+                        .entry(disk_number)
+                        .or_insert_with(|| Self::get_storage_profile(disk_number))
+                })
+                .unwrap_or((StorageMedia::Unknown, StorageAttachment::Unknown));
+            let candidate = StagingCandidate {
+                letter,
+                disk_number: partition.disk_number,
+                media,
+                attachment,
+                free_bytes: partition.free_size_mb.saturating_mul(1024 * 1024),
+                total_bytes: partition.total_size_mb.saturating_mul(1024 * 1024),
+                is_current_system: partition.is_system_partition,
+            };
+            log::info!(
+                "[DISK] 暂存候选 {}: 磁盘={:?} 介质={:?} 接口={:?} 剩余={:.2} GB",
+                letter,
+                candidate.disk_number,
+                candidate.media,
+                candidate.attachment,
+                candidate.free_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+            );
+            candidates.push(candidate);
         }
 
-        // 如果找到了满足条件的分区，优先选择非 C 盘，且空间最大的
-        if !candidates.is_empty() {
-            // 按优先级排序：非 C 盘优先，然后按空间从大到小
-            candidates.sort_by(|a, b| {
-                let a_is_c = a.0 == 'C';
-                let b_is_c = b.0 == 'C';
-                match (a_is_c, b_is_c) {
-                    (true, false) => std::cmp::Ordering::Greater, // C 盘排后面
-                    (false, true) => std::cmp::Ordering::Less,    // 非 C 盘排前面
-                    _ => b.1.cmp(&a.1),                           // 空间大的优先
+        let initial_plan =
+            select_staging_plan(image_size_bytes, target_disk_number, &candidates, None);
+        let should_probe_shrink = matches!(initial_plan, StagingPlan::Unavailable { .. })
+            || (image_size_bytes >= 8 * 1024 * 1024 * 1024
+                && target_disk_number
+                    .map(|disk_number| {
+                        *profiles
+                            .entry(disk_number)
+                            .or_insert_with(|| Self::get_storage_profile(disk_number))
+                    })
+                    .is_some_and(|profile| profile.0 == StorageMedia::SolidState));
+
+        let mut max_shrink_mb = None;
+        let shrink_candidate = if should_probe_shrink {
+            target.as_ref().and_then(|target| {
+                let disk_number = target.disk_number?;
+                let partition_number = target.partition_number?;
+                let (free_bytes, total_bytes) = Self::get_volume_space_bytes(exclude_letter)?;
+                let (media, attachment) = *profiles
+                    .entry(disk_number)
+                    .or_insert_with(|| Self::get_storage_profile(disk_number));
+                let file_system = Self::get_volume_file_system(exclude_letter);
+                let shrink_is_safe = target.bitlocker_status == VolumeStatus::NotEncrypted
+                    && file_system
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("NTFS"))
+                    && attachment != StorageAttachment::External;
+                if !shrink_is_safe {
+                    log::warn!(
+                        "[DISK] 不自动缩小 {}:：文件系统={:?} BitLocker={} 接口={:?}",
+                        exclude_letter,
+                        file_system,
+                        target.bitlocker_status.as_str(),
+                        attachment
+                    );
+                    return Some(ShrinkCandidate {
+                        letter: exclude_letter,
+                        disk_number: Some(disk_number),
+                        media,
+                        attachment,
+                        free_bytes,
+                        total_bytes,
+                        is_current_system: target.is_system_partition,
+                        max_shrink_bytes: 0,
+                        shrink_is_safe: false,
+                    });
                 }
-            });
 
-            let selected = candidates[0].0;
-            log::info!("[DISK] 选择数据分区: {}:", selected);
-            return Ok(Some((format!("{}:", selected), false)));
-        }
-
-        // ========================================================================
-        // 没有找到满足条件的现有分区，尝试从目标安装分区创建新分区
-        // ========================================================================
-        //
-        // 重要：这里【不能】检查 exclude_letter == 'C' 然后直接返回！
-        //
-        // 错误的写法（已删除）：
-        //   if exclude_letter == 'C' {
-        //       return Ok(None);  // ← 这是错的！
-        //   }
-        //
-        // 原因：当用户只有一个 C 盘时（比如虚拟机环境），需要从 C 盘分割出
-        // 一个临时分区来存放镜像文件。PE 安装流程如下：
-        //   1. 从 C 盘分割出临时分区（如 Y:）
-        //   2. 将镜像复制到 Y:\LetRecovery\
-        //   3. 重启进入 PE
-        //   4. PE 中格式化 C 盘并释放镜像
-        //   5. 安装完成后可删除 Y: 分区
-        //
-        // 因此，即使 exclude_letter == 'C'，也必须尝试分割 C 盘！
-        // ========================================================================
-        log::info!(
-            "[DISK] 没有找到满足条件的现有分区，尝试从 {} 盘创建新分区",
-            exclude_letter
-        );
-
-        // 使用 shrink querymax 查询目标分区实际可缩小的空间
-        let max_shrink_mb = match Self::query_shrink_max(exclude_letter) {
-            Ok(mb) => mb,
-            Err(e) => {
-                log::warn!("[DISK] 查询 {} 盘可缩小空间失败: {}", exclude_letter, e);
-                return Ok(None);
-            }
+                let queried_mb = match Self::query_shrink_max(exclude_letter) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        log::warn!(
+                            "[DISK] 查询 {}: 可缩小空间失败，不执行自动分区: {}",
+                            exclude_letter,
+                            error
+                        );
+                        0
+                    }
+                };
+                max_shrink_mb = Some(queried_mb);
+                log::info!(
+                    "[DISK] 缩卷候选 {}: 磁盘={} 分区={} 最大={} MB 当前空闲={:.2} GB",
+                    exclude_letter,
+                    disk_number,
+                    partition_number,
+                    queried_mb,
+                    free_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+                );
+                Some(ShrinkCandidate {
+                    letter: exclude_letter,
+                    disk_number: Some(disk_number),
+                    media,
+                    attachment,
+                    free_bytes,
+                    total_bytes,
+                    is_current_system: target.is_system_partition,
+                    max_shrink_bytes: queried_mb.saturating_mul(1024 * 1024),
+                    shrink_is_safe: true,
+                })
+            })
+        } else {
+            None
         };
 
-        let max_shrink_bytes = max_shrink_mb * 1024 * 1024;
-        log::info!(
-            "[DISK] {} 盘实际可缩小空间: {} MB ({:.2} GB)",
-            exclude_letter,
-            max_shrink_mb,
-            max_shrink_bytes as f64 / 1024.0 / 1024.0 / 1024.0
-        );
-
-        // 检查可缩小空间是否足够容纳镜像
-        if max_shrink_bytes < required_size_bytes {
-            log::error!("[DISK] {} 盘可缩小空间不足以容纳镜像文件", exclude_letter);
-            return Err(anyhow::anyhow!(
-                "{}",
-                tr!(
-                    "磁盘空间不足：{} 盘可缩小空间为 {} GB，但镜像需要 {} GB。\n\
-                建议：\n\
-                1. 清理 {} 盘空间\n\
-                2. 运行磁盘碎片整理\n\
-                3. 或手动创建一个数据分区",
-                    exclude_letter,
-                    format!("{:.2}", max_shrink_bytes as f64 / 1024.0 / 1024.0 / 1024.0),
-                    format!(
-                        "{:.2}",
-                        required_size_bytes as f64 / 1024.0 / 1024.0 / 1024.0
-                    ),
-                    exclude_letter
-                )
-            ));
-        }
-
-        // 计算新分区大小
-        // 理想大小 = 镜像大小 + 10GB，向上取整到整数 GB
-        let required_size_mb = required_size_bytes.div_ceil(1024 * 1024); // 向上取整到 MB
-        let ten_gb_mb: u64 = 10 * 1024; // 10GB in MB
-        let ideal_size_mb = required_size_mb + ten_gb_mb;
-
-        // 向上取整到整数 GB
-        let ideal_size_gb = ideal_size_mb.div_ceil(1024);
-        let ideal_size_mb_rounded = ideal_size_gb * 1024;
-
-        let actual_size_mb: u64;
-
-        if max_shrink_mb >= ideal_size_mb_rounded {
-            // 可缩小空间充足，使用理想大小（镜像 + 10GB 缓冲）
-            actual_size_mb = ideal_size_mb_rounded;
-            log::info!(
-                "[DISK] 使用理想分区大小: {} MB ({} GB)",
-                actual_size_mb,
-                ideal_size_gb
-            );
-        } else {
-            // 可缩小空间不足以达到理想大小
-            // 确保至少能容纳镜像文件，向上取整到整数 GB
-            let min_size_gb = required_size_mb.div_ceil(1024); // 向上取整
-            let available_size_gb = max_shrink_mb / 1024; // 可用的整数 GB
-
-            if available_size_gb >= min_size_gb {
-                // 使用可用的整数 GB
-                actual_size_mb = available_size_gb * 1024;
+        match select_staging_plan(
+            image_size_bytes,
+            target_disk_number,
+            &candidates,
+            shrink_candidate,
+        ) {
+            StagingPlan::Existing {
+                letter,
+                required_bytes,
+            } => {
                 log::info!(
-                    "[DISK] 可缩小空间有限，使用较小分区大小: {} MB ({} GB)",
-                    actual_size_mb,
-                    available_size_gb
+                    "[DISK] 选择现有数据分区 {}:，安全需求 {:.2} GB",
+                    letter,
+                    required_bytes as f64 / 1024.0 / 1024.0 / 1024.0
                 );
-            } else {
-                // 整数 GB 不够，直接使用全部可缩小空间（不取整）
-                actual_size_mb = max_shrink_mb;
+                Ok(Some((format!("{}:", letter), false)))
+            }
+            StagingPlan::ShrinkTarget {
+                letter,
+                size_mb,
+                required_bytes,
+            } => {
+                let target = target.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("无法取得目标分区 {}: 的稳定身份", exclude_letter)
+                })?;
+                let disk_number = target
+                    .disk_number
+                    .ok_or_else(|| anyhow::anyhow!("无法取得目标分区物理磁盘号"))?;
+                let partition_number = target
+                    .partition_number
+                    .ok_or_else(|| anyhow::anyhow!("无法取得目标分区号"))?;
                 log::info!(
-                    "[DISK] 空间紧张，使用全部可缩小空间: {} MB ({:.2} GB)",
-                    actual_size_mb,
-                    max_shrink_mb as f64 / 1024.0
+                    "[DISK] 将从 {}: 安全缩出 {} MB 临时分区，需求 {:.2} GB",
+                    letter,
+                    size_mb,
+                    required_bytes as f64 / 1024.0 / 1024.0 / 1024.0
                 );
+                let new_letter = Self::shrink_and_create_partition_with_marker(
+                    letter,
+                    size_mb,
+                    max_shrink_mb,
+                    disk_number,
+                    partition_number,
+                )?;
+                Ok(Some((format!("{}:", new_letter), true)))
+            }
+            StagingPlan::Unavailable { required_bytes } => {
+                log::error!(
+                    "[DISK] 没有满足安全余量的暂存位置，需要 {:.2} GB",
+                    required_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+                );
+                Ok(None)
             }
         }
+    }
+}
 
-        // 确保分区大小至少为 1GB 且能容纳镜像
-        if actual_size_mb < 1024 {
-            return Err(anyhow::anyhow!(
-                "{}",
-                tr!(
-                    "{} 盘可缩小空间太小（{} MB），需要至少 1 GB。\n\
-                建议运行磁盘碎片整理后重试。",
-                    exclude_letter,
-                    max_shrink_mb
-                )
-            ));
-        }
+#[cfg(test)]
+mod tests {
+    use super::build_staging_shrink_script;
 
-        if actual_size_mb * 1024 * 1024 < required_size_bytes {
-            return Err(anyhow::anyhow!(
-                "{}",
-                tr!(
-                    "{} 盘可缩小空间（{} MB）不足以容纳镜像（需要 {} MB）。",
-                    exclude_letter,
-                    actual_size_mb,
-                    required_size_mb
-                )
-            ));
-        }
-
-        // 创建新分区（传入预查询的 max_shrink_mb，避免重复查询）
-        let new_letter = Self::shrink_and_create_partition_with_marker(
-            exclude_letter,
-            actual_size_mb,
-            Some(max_shrink_mb),
-        )?;
-
-        Ok(Some((format!("{}:", new_letter), true)))
+    #[test]
+    fn staging_shrink_script_pins_disk_partition_and_exact_size() {
+        let script = build_staging_shrink_script(1, 4, 12_345, 'y');
+        assert_eq!(
+            script,
+            "select disk 1\n\
+             select partition 4\n\
+             shrink desired=12345 minimum=12345\n\
+             create partition primary\n\
+             format fs=ntfs quick label=\"LetRecovery\"\n\
+             assign letter=Y"
+        );
+        assert!(!script.contains("select volume"));
     }
 }

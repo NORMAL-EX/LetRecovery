@@ -61,6 +61,9 @@ pub struct BuiltInAdministratorOptions {
     pub account_name: String,
     #[serde(skip)]
     pub password: SensitiveString,
+    /// Retained for configuration compatibility. A built-in account must perform one first logon
+    /// so Windows 10/11 skips OOBE account creation; therefore enabled installations normalize
+    /// this to `true` at rendering and UI boundaries.
     pub auto_logon: bool,
 }
 
@@ -70,7 +73,7 @@ impl Default for BuiltInAdministratorOptions {
             enabled: false,
             account_name: DEFAULT_ADMINISTRATOR_NAME.to_string(),
             password: SensitiveString::default(),
-            auto_logon: false,
+            auto_logon: true,
         }
     }
 }
@@ -202,9 +205,11 @@ pub fn render_builtin_administrator_unattend(
                 </AdministratorPassword>
             </UserAccounts>"#
     );
-    let auto_logon = if options.auto_logon {
-        format!(
-            r#"<AutoLogon>
+    // Microsoft documents AutoLogon as the supported way to skip the Windows 10/11 OOBE account
+    // creation phase when the selected account already exists (RID 500) instead of being created
+    // by LocalAccounts. One logon is mandatory here; LogonCount=1 avoids persistent autologon.
+    let auto_logon = format!(
+        r#"<AutoLogon>
                 <Password>
                     <Value>{password}</Value>
                     <PlainText>true</PlainText>
@@ -213,10 +218,7 @@ pub fn render_builtin_administrator_unattend(
                 <LogonCount>1</LogonCount>
                 <Username>{account_name}</Username>
             </AutoLogon>"#
-        )
-    } else {
-        String::new()
-    };
+    );
 
     Ok(Some(BuiltInAdministratorUnattend {
         specialize_command,
@@ -301,7 +303,7 @@ mod tests {
         assert!(!options.enabled);
         assert_eq!(options.account_name, "Administrator");
         assert!(options.password.is_empty());
-        assert!(!options.auto_logon);
+        assert!(options.auto_logon);
 
         let serialized = serde_json::to_string(&enabled("Ops", "Secret!", true)).unwrap();
         assert!(!serialized.contains("Secret!"));
@@ -346,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_name_uses_only_encoded_data_in_specialize_command() {
+    fn custom_name_uses_only_encoded_data_and_forces_one_oobe_logon() {
         let rendered =
             render_builtin_administrator_unattend(&enabled("运维 Admin", "Secret!", false), 7)
                 .unwrap()
@@ -354,6 +356,9 @@ mod tests {
         assert!(rendered.specialize_command.contains("<Order>7</Order>"));
         assert!(rendered.specialize_command.contains("-EncodedCommand "));
         assert!(!rendered.specialize_command.contains("运维 Admin"));
-        assert!(rendered.auto_logon.is_empty());
+        assert!(rendered
+            .auto_logon
+            .contains("<Username>运维 Admin</Username>"));
+        assert!(rendered.auto_logon.contains("<LogonCount>1</LogonCount>"));
     }
 }

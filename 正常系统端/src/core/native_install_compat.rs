@@ -480,7 +480,9 @@ mod tests {
             enabled: true,
             account_name: "RecoveryAdmin".to_string(),
             password: "temporary-secret".into(),
-            auto_logon: true,
+            // Legacy preferences may still contain false. Rendering must force exactly one first
+            // logon so Windows 10/11 does not reopen OOBE account creation.
+            auto_logon: false,
         };
         let xml = render_default_unattend(&DefaultUnattendOptions {
             architecture: UnattendArchitecture::Amd64,
@@ -495,6 +497,7 @@ mod tests {
         assert!(xml.contains("<AdministratorPassword>"));
         assert!(xml.contains("<Value>temporary-secret</Value>"));
         assert!(xml.contains("<Username>RecoveryAdmin</Username>"));
+        assert!(xml.contains("<LogonCount>1</LogonCount>"));
         assert!(xml.contains("powershell.exe"));
         assert!(xml.contains("-EncodedCommand"));
         assert!(!xml.contains("<LocalAccount"));
