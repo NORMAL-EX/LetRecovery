@@ -718,6 +718,10 @@ mod tests {
     #[test]
     fn builtin_administrator_secret_reaches_only_the_install_session_config() {
         let mut state = base_state();
+        // Runtime defaults select the mutually exclusive ordinary-user mode. This fixture
+        // intentionally exercises the Administrator path, so switch modes exactly as the UI
+        // radio button does before enabling RID-500 configuration.
+        state.prefs.advanced_options.custom_username = false;
         state.prefs.advanced_options.builtin_administrator.enabled = true;
         state
             .prefs

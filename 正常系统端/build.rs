@@ -9,6 +9,7 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/icon.png");
     println!("cargo:rerun-if-changed=assets/easter_egg/dprk_wallpaper.jpg");
     println!("cargo:rerun-if-changed=assets/win11_button_theme");
+    println!("cargo:rerun-if-changed=assets/win11_scrollbar_theme");
 
     // 注：libwim-15.dll 已内置于共享库 lr-core，运行时自动释放到 exe 目录，
     // 这里不再需要从 vendor 复制。
@@ -24,6 +25,7 @@ fn main() {
     #[cfg(windows)]
     {
         generate_win11_button_theme();
+        generate_win11_scrollbar_theme();
         let non_elevated_tests = std::env::var_os("CARGO_FEATURE_NON_ELEVATED_TESTS").is_some();
         if non_elevated_tests && std::env::var("PROFILE").as_deref() == Ok("release") {
             panic!("non-elevated-tests must never be enabled for release builds");
@@ -145,6 +147,197 @@ fn generate_win11_button_theme() {
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"))
         .join("win11_button_theme.rs");
     std::fs::write(output, source).expect("write generated Win11 button theme table");
+}
+
+#[cfg(windows)]
+fn generate_win11_scrollbar_theme() {
+    const DPIS: [u32; 5] = [96, 120, 144, 192, 240];
+    const MODES: [&str; 2] = ["light", "dark"];
+    let mut source = String::from(
+        "// Generated from ScrollBar resources extracted from the fixed Windows 11\n\
+         // aero.msstyles (light) and Dark.msstyles (dark) references.\n",
+    );
+
+    fn append_table(
+        source: &mut String,
+        table_name: &str,
+        asset_name: &str,
+        source_state_count: u32,
+        selected_states: &[u32],
+        margins: [u32; 4],
+        transparent_color_key: bool,
+    ) {
+        use std::collections::VecDeque;
+        use std::fmt::Write as _;
+
+        fn channel_near(left: [u8; 4], right: [u8; 4]) -> bool {
+            left[..3]
+                .iter()
+                .zip(&right[..3])
+                .all(|(left, right)| left.abs_diff(*right) <= 2)
+        }
+
+        fn connected_host_surface_mask(
+            rgba: &image::RgbaImage,
+            frame_top: u32,
+            width: u32,
+            height: u32,
+            color_key: [u8; 4],
+        ) -> Vec<bool> {
+            let mut transparent = vec![false; (width * height) as usize];
+            let mut queue = VecDeque::new();
+            let enqueue =
+                |x: u32, y: u32, transparent: &mut [bool], queue: &mut VecDeque<(u32, u32)>| {
+                    let index = (y * width + x) as usize;
+                    if !transparent[index]
+                        && channel_near(rgba.get_pixel(x, frame_top + y).0, color_key)
+                    {
+                        transparent[index] = true;
+                        queue.push_back((x, y));
+                    }
+                };
+
+            for x in 0..width {
+                enqueue(x, 0, &mut transparent, &mut queue);
+                if height > 1 {
+                    enqueue(x, height - 1, &mut transparent, &mut queue);
+                }
+            }
+            for y in 0..height {
+                enqueue(0, y, &mut transparent, &mut queue);
+                if width > 1 {
+                    enqueue(width - 1, y, &mut transparent, &mut queue);
+                }
+            }
+            while let Some((x, y)) = queue.pop_front() {
+                if x > 0 {
+                    enqueue(x - 1, y, &mut transparent, &mut queue);
+                }
+                if x + 1 < width {
+                    enqueue(x + 1, y, &mut transparent, &mut queue);
+                }
+                if y > 0 {
+                    enqueue(x, y - 1, &mut transparent, &mut queue);
+                }
+                if y + 1 < height {
+                    enqueue(x, y + 1, &mut transparent, &mut queue);
+                }
+            }
+            transparent
+        }
+
+        let glyph_count = MODES.len() * DPIS.len() * selected_states.len();
+        writeln!(
+            source,
+            "static {table_name}: [EmbeddedScrollbarGlyph; {glyph_count}] = ["
+        )
+        .expect("write generated scrollbar table header");
+        for mode in MODES {
+            for dpi in DPIS {
+                let path =
+                    format!("assets/win11_scrollbar_theme/{mode}-{dpi}-{asset_name}-strip.png");
+                let rgba = image::open(&path)
+                    .unwrap_or_else(|error| panic!("failed to open {path}: {error}"))
+                    .into_rgba8();
+                let (width, strip_height) = rgba.dimensions();
+                assert_eq!(
+                    strip_height % source_state_count,
+                    0,
+                    "{path} must contain {source_state_count} equal-height states"
+                );
+                let height = strip_height / source_state_count;
+                for &state in selected_states {
+                    assert!(
+                        state < source_state_count,
+                        "{path} state {state} is invalid"
+                    );
+                    let mut bgra = Vec::with_capacity((width * height * 4) as usize);
+                    // The msstyles source marks thumb and arrow parts as TMT_TRANSPARENT.
+                    // The extractor preserves the source colour-key surface as opaque pixels,
+                    // so recover the per-state key from the frame corner before embedding it.
+                    // Resource scaling leaves a one-level (#202020 -> #212121, or white ->
+                    // #fefefe) fringe connected to that host surface. Remove that connected
+                    // fringe too, while leaving similarly coloured interior glyph pixels intact.
+                    let color_key = rgba.get_pixel(0, state * height).0;
+                    let transparent = transparent_color_key.then(|| {
+                        connected_host_surface_mask(&rgba, state * height, width, height, color_key)
+                    });
+                    for y in state * height..(state + 1) * height {
+                        for x in 0..width {
+                            let pixel = rgba.get_pixel(x, y).0;
+                            let frame_index = ((y - state * height) * width + x) as usize;
+                            if transparent
+                                .as_ref()
+                                .is_some_and(|transparent| transparent[frame_index])
+                            {
+                                bgra.extend_from_slice(&[0, 0, 0, 0]);
+                                continue;
+                            }
+                            let alpha = u16::from(pixel[3]);
+                            let premultiply =
+                                |channel: u8| ((u16::from(channel) * alpha + 127) / 255) as u8;
+                            bgra.extend_from_slice(&[
+                                premultiply(pixel[2]),
+                                premultiply(pixel[1]),
+                                premultiply(pixel[0]),
+                                pixel[3],
+                            ]);
+                        }
+                    }
+                    write!(
+                        source,
+                        "    EmbeddedScrollbarGlyph {{ width: {width}, height: {height}, sizing_left: {}, sizing_top: {}, sizing_right: {}, sizing_bottom: {}, bgra: &[",
+                        margins[0], margins[1], margins[2], margins[3],
+                    )
+                    .expect("write generated scrollbar glyph header");
+                    for byte in bgra {
+                        write!(source, "{byte},").expect("write generated scrollbar pixel");
+                    }
+                    source.push_str("] },\n");
+                }
+            }
+        }
+        source.push_str("];\n");
+    }
+
+    // SCRBS_NORMAL, HOT, PRESSED, DISABLED and HOVER.
+    append_table(
+        &mut source,
+        "WIN11_SCROLLBAR_THUMB_GLYPHS",
+        "scrollbar-thumb",
+        5,
+        &[0, 1, 2, 3, 4],
+        [1, 7, 1, 7],
+        true,
+    );
+    append_table(
+        &mut source,
+        "WIN11_SCROLLBAR_TRACK_GLYPHS",
+        "scrollbar-track",
+        5,
+        &[0, 1, 2, 3, 4],
+        [1, 0, 1, 0],
+        // Track resources are formally opaque, but their frame also contains the exact
+        // msstyles host surface (#202020 or white). The advanced page uses a different live
+        // surface, so remove that per-state corner colour while preserving the actual track
+        // pixels. Otherwise the source host becomes the unwanted full-height outer capsule.
+        true,
+    );
+    // The arrow strip contains 20 ABS_* states. Keep the five Up states followed by the five
+    // Down states in SCRBS-equivalent order, including the non-contiguous HOVER frames.
+    append_table(
+        &mut source,
+        "WIN11_SCROLLBAR_ARROW_GLYPHS",
+        "scrollbar-arrow",
+        20,
+        &[0, 1, 2, 3, 16, 4, 5, 6, 7, 17],
+        [1, 1, 1, 1],
+        true,
+    );
+
+    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"))
+        .join("win11_scrollbar_theme.rs");
+    std::fs::write(output, source).expect("write generated Win11 scrollbar theme table");
 }
 
 #[cfg(windows)]

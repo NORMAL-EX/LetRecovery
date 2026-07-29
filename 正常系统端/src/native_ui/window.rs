@@ -10,8 +10,8 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
     GetMonitorInfoW, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, RedrawWindow,
     SelectObject, SetBkColor, SetBkMode, SetTextColor, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PEN_STYLE,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
+    DT_VCENTER, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OPAQUE, PAINTSTRUCT,
+    PEN_STYLE, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -30,14 +30,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled}
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetClientRect, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, IsWindowVisible, KillTimer,
-    LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE,
-    CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE,
-    EN_KILLFOCUS, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL,
-    IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG, SM_CXICON,
-    SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED,
+    GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, IsWindowVisible,
+    KillTimer, LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW,
+    CBN_SELCHANGE, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    EN_CHANGE, EN_KILLFOCUS, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG,
+    ICON_SMALL, IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG,
+    SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
     WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE,
@@ -167,9 +167,11 @@ const CATALOGUE_TIMER_ID: usize = 5;
 const HARDWARE_COPY_TIMER_ID: usize = 6;
 const INSTALL_VOLUME_LAYOUT_TIMER_ID: usize = 7;
 const PARTITION_REFRESH_TIMER_ID: usize = 8;
+const ADVANCED_SCROLL_TIMER_ID: usize = 9;
 const INSTALL_VOLUME_LAYOUT_TICK_MS: u32 = 40;
 const INSTALL_VOLUME_LAYOUT_FRAMES: u8 = 3;
 const PARTITION_REFRESH_DEBOUNCE_MS: u32 = 350;
+const ADVANCED_SCROLL_TICK_MS: u32 = 16;
 
 const DBT_DEVNODES_CHANGED: usize = 0x0007;
 const DBT_CONFIGCHANGED: usize = 0x0018;
@@ -508,8 +510,8 @@ enum ToolWorkerMessage {
 
 #[derive(Clone)]
 enum PendingBitLockerIntent {
-    Install(crate::core::native_install_controller::StartInstallIntent),
-    Backup(BackupLaunchIntent),
+    Install(Box<crate::core::native_install_controller::StartInstallIntent>),
+    Backup(Box<BackupLaunchIntent>),
 }
 
 impl PendingBitLockerIntent {
@@ -526,7 +528,7 @@ impl PendingBitLockerIntent {
                 plan_install_locked_volumes(&intent.target_partition, &volumes)
             }
             Self::Backup(intent) => {
-                let source = match intent {
+                let source = match &**intent {
                     BackupLaunchIntent::Direct(intent) => &intent.config.source_partition,
                     BackupLaunchIntent::ViaPe(intent) => &intent.config.source_partition,
                 };
@@ -670,6 +672,18 @@ fn centered_command_button_x(content_left: i32, content_width: i32, button_width
     content_left + (content_width - button_width).max(0) / 2
 }
 
+fn command_status_right_edge(
+    advanced_visible: bool,
+    advanced_x: i32,
+    packed_left_edge: i32,
+) -> i32 {
+    if advanced_visible {
+        advanced_x
+    } else {
+        packed_left_edge
+    }
+}
+
 fn shared_install_mode_label_width(
     boot_label_text_width: i32,
     pca_label_text_width: i32,
@@ -739,7 +753,7 @@ impl InstallVolumeLayoutTransition {
 mod layout_tests {
     use super::{
         bitlocker_gate_completion, catalogue_status_message, centered_command_button_x,
-        command_bar_layout, command_bar_visibility, command_button_role,
+        command_bar_layout, command_bar_visibility, command_button_role, command_status_right_edge,
         confirmed_tool_backend_request, device_change_requests_partition_refresh,
         download_failure_message, effective_easy_mode_enabled, initial_mutating_tool_state,
         install_partition_heading_y, list_view_selection_state_changed, may_publish_install_chrome,
@@ -945,6 +959,21 @@ mod layout_tests {
 
         let normal = command_bar_layout(1_232, 8, 136, [true, true, true]);
         assert_eq!(normal.x, [Some(808), Some(952), Some(1_096)]);
+    }
+
+    #[test]
+    fn advanced_status_slot_stops_before_the_centered_save_button() {
+        let advanced_x = centered_command_button_x(272, 960, 136);
+        let packed = command_bar_layout(1_232, 8, 136, [true, false, false]);
+        assert_eq!(packed.left_edge, 1_096);
+        assert_eq!(
+            command_status_right_edge(true, advanced_x, packed.left_edge),
+            advanced_x
+        );
+        assert_eq!(
+            command_status_right_edge(false, advanced_x, packed.left_edge),
+            packed.left_edge
+        );
     }
 
     #[test]
@@ -3505,6 +3534,8 @@ impl NativeWindow {
         };
         let refresh_x = command_layout.x[1].unwrap_or(content_right);
         let primary_x = command_layout.x[2].unwrap_or(content_right);
+        let status_right_edge =
+            command_status_right_edge(self.advanced_visible, advanced_x, command_layout.left_edge);
         let _ = MoveWindow(
             h.advanced,
             advanced_x,
@@ -3533,7 +3564,7 @@ impl NativeWindow {
             h.status,
             self.scale(16),
             footer_y + self.scale(18),
-            (command_layout.left_edge - self.scale(24)).max(0),
+            (status_right_edge - self.scale(24)).max(0),
             self.scale(20),
             true,
         );
@@ -3626,6 +3657,8 @@ impl NativeWindow {
         } else {
             command_layout.x[0].unwrap_or(content_right)
         };
+        let status_right_edge =
+            command_status_right_edge(self.advanced_visible, advanced_x, command_layout.left_edge);
         for (control, x) in [
             (h.advanced, advanced_x),
             (h.refresh, command_layout.x[1].unwrap_or(content_right)),
@@ -3644,7 +3677,7 @@ impl NativeWindow {
             h.status,
             self.scale(16),
             footer_y + self.scale(18),
-            (command_layout.left_edge - self.scale(24)).max(0),
+            (status_right_edge - self.scale(24)).max(0),
             self.scale(20),
             false,
         );
@@ -4065,7 +4098,13 @@ impl NativeWindow {
         let Some(h) = &self.handles else { return };
         if self.advanced_visible {
             if let Some(advanced) = &self.advanced_page {
-                advanced.read_into(&mut self.app_config.install_prefs.advanced_options);
+                let data = &mut self.app_config.install_prefs.advanced_options;
+                advanced.read_into(data);
+                data.apply_runtime_defaults();
+                // Re-publish the normalized session values before hiding the page. This makes an
+                // automatically restored username/Administrator name visible on the next open
+                // without persisting the current login name to config.json.
+                advanced.apply(data);
             }
             if let Err(error) = self.app_config.save() {
                 log::warn!("保存高级选项失败: {error}");
@@ -7018,7 +7057,7 @@ impl NativeWindow {
         intent: PendingBitLockerIntent,
     ) {
         match intent {
-            PendingBitLockerIntent::Install(intent) => self.start_install_execution(hwnd, intent),
+            PendingBitLockerIntent::Install(intent) => self.start_install_execution(hwnd, *intent),
             PendingBitLockerIntent::Backup(_) => self.prepare_backup_from_page(hwnd),
         }
     }
@@ -7082,14 +7121,14 @@ impl NativeWindow {
             "原生备份意图已生成: route={route}, source={}",
             config.source_partition
         );
-        let pending = PendingBitLockerIntent::Backup(plan.intent);
+        let pending = PendingBitLockerIntent::Backup(Box::new(plan.intent));
         match pending.locked_volumes(&self.partitions) {
             Ok(locked) if !locked.is_empty() => self.begin_bitlocker_gate(hwnd, pending, locked),
             Ok(_) => {
                 let PendingBitLockerIntent::Backup(intent) = pending else {
                     unreachable!()
                 };
-                self.start_backup_execution(hwnd, intent);
+                self.start_backup_execution(hwnd, *intent);
             }
             Err(error) => set_text(warning, &crate::tr!("无法检查 BitLocker 锁定卷：{}", error)),
         }
@@ -8644,7 +8683,7 @@ impl NativeWindow {
             return;
         }
         self.log_install_diagnostic_environment(&intent);
-        let pending = PendingBitLockerIntent::Install(intent.clone());
+        let pending = PendingBitLockerIntent::Install(Box::new(intent.clone()));
         match pending.locked_volumes(&self.partitions) {
             Ok(locked) if !locked.is_empty() => {
                 self.begin_bitlocker_gate(hwnd, pending, locked);
@@ -10126,9 +10165,17 @@ pub(super) unsafe fn load_application_icons(
     Ok((HICON(large.0), HICON(small.0)))
 }
 
-pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
+pub(crate) fn enable_process_dpi_awareness() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
+    unsafe {
+        // Keep this idempotent call for embedders, while `main` establishes the same context before
+        // any startup validation can display an early MessageBox.
+        enable_process_dpi_awareness();
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
             // The v6 manifest selects visual styles; initializing standard classes before any
@@ -11008,6 +11055,12 @@ unsafe extern "system" fn window_proc(
                     if let Some(page) = &state.advanced_page {
                         let delta = ((wparam.0 >> 16) as u16) as i16;
                         if page.scroll_wheel(delta) {
+                            let _ = SetTimer(
+                                hwnd,
+                                ADVANCED_SCROLL_TIMER_ID,
+                                ADVANCED_SCROLL_TICK_MS,
+                                None,
+                            );
                             return LRESULT(0);
                         }
                     }
@@ -11064,6 +11117,15 @@ unsafe extern "system" fn window_proc(
                     state.advance_install_volume_layout(hwnd);
                 } else if wparam.0 == PARTITION_REFRESH_TIMER_ID {
                     state.start_scheduled_partition_refresh(hwnd);
+                } else if wparam.0 == ADVANCED_SCROLL_TIMER_ID {
+                    let keep_scrolling = state.advanced_visible
+                        && state
+                            .advanced_page
+                            .as_ref()
+                            .is_some_and(|page| page.advance_smooth_scroll());
+                    if !keep_scrolling {
+                        let _ = KillTimer(hwnd, ADVANCED_SCROLL_TIMER_ID);
+                    }
                 }
                 if state.close_after_task && !state.has_active_long_task() {
                     let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -11180,11 +11242,15 @@ unsafe extern "system" fn window_proc(
         WM_DRAWITEM => {
             if let Some(state) = state {
                 let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
-                if state
-                    .progress_page
+                let handled = state
+                    .advanced_page
                     .as_ref()
                     .is_some_and(|page| page.draw_item(item, state.control_palette()))
-                {
+                    || state
+                        .progress_page
+                        .as_ref()
+                        .is_some_and(|page| page.draw_item(item, state.control_palette()));
+                if handled {
                     return LRESULT(1);
                 } else if item.CtlType.0 == ODT_HEADER {
                     state.draw_list_header(item);
@@ -11250,9 +11316,17 @@ unsafe extern "system" fn window_proc(
                     };
                     return LRESULT(brush.0 as isize);
                 }
-                let _ = SetTextColor(dc, state.control_palette().text);
+                let advanced_static = state.advanced_page.as_ref().is_some_and(|page| {
+                    GetParent(control).is_ok_and(|parent| parent == page.viewport())
+                });
+                let palette = state.control_palette();
+                let _ = SetTextColor(dc, palette.text);
                 let _ = SetBkColor(dc, state.palette.window);
-                let _ = SetBkMode(dc, TRANSPARENT);
+                // ScrollWindowEx moves the existing pixels and the child HWND in one transaction.
+                // Advanced-page STATIC labels must therefore erase with the page brush when they
+                // repaint; transparent text would blend over the copied glyphs and create a
+                // persistent one-frame-offset shadow after scrolling.
+                let _ = SetBkMode(dc, if advanced_static { OPAQUE } else { TRANSPARENT });
                 return LRESULT(state.brushes.window.0 as isize);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)

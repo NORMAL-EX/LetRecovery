@@ -24,6 +24,11 @@ pub struct PreloadedConfig {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Startup validation and elevation failures can display MessageBoxW before the main window
+    // exists. Establish PMv2 awareness first so those dialogs are rendered at the monitor's native
+    // DPI instead of being bitmap-scaled and blurred by USER32.
+    native_ui::enable_process_dpi_awareness();
+
     // 加载应用配置（用于获取日志设置）
     let app_config = core::app_config::AppConfig::load();
 
@@ -61,6 +66,22 @@ fn main() -> anyhow::Result<()> {
 
     // 检查命令行参数，处理PE环境下的自动安装/备份
     let args: Vec<String> = std::env::args().collect();
+
+    #[cfg(feature = "non-elevated-tests")]
+    if args.iter().any(|arg| arg == "--ui-error-preview") {
+        show_error_message(
+            "程序文件不完整，无法正常运行。\n\n\
+             缺少以下文件：\n\
+             bin/bcdedit.exe\n\
+             bin/bcdboot.exe\n\
+             bin/bootsect.exe\n\
+             bin/format.com\n\
+             bin/aria2c.exe\n\
+             bin/ghost/ghost64.exe\n\n\
+             请重新下载完整安装包或修复程序文件。",
+        );
+        return Ok(());
+    }
 
     // 该 feature 只用于无副作用的 UI/单元测试。即使调用者传入正式操作参数，
     // 也不能在非管理员开发构建中进入安装、备份或 PE 工作流。
