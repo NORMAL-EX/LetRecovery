@@ -2277,3 +2277,136 @@ index 6bccbfd1..27b9f0bb 100644
  /* Dumb Windows implementation of pwrite().  It temporarily changes the file
   * offset, so it is not safe to use with readers/writers on the same file
   * descriptor. */
+diff --git a/src/win32_apply.c b/src/win32_apply.c
+--- a/src/win32_apply.c
++++ b/src/win32_apply.c
+@@ -268,6 +268,12 @@ check_apply_error(const struct wim_dentry *dentry,
+ 	return ret;
+ }
+ 
++static bool
++inode_is_excluded_from_metadata_dedup(const struct wim_inode *inode)
++{
++	return inode_first_extraction_dentry(inode)->d_tmp_flag;
++}
++
+ static int
+ win32_get_supported_features(const wchar_t *target,
+ 			     struct wim_features *supported_features)
+@@ -1959,6 +1965,8 @@ create_nondirectories(struct list_head *dentry_list, struct win32_apply_ctx *ctx
+ 		/* Call create_nondirectory() only once per inode  */
+ 		if (dentry == inode_first_extraction_dentry(inode)) {
+ 			ret = create_nondirectory(inode, ctx);
++			if (ret && ctx->common.supported_features.hard_links)
++				inode_first_extraction_dentry(inode)->d_tmp_flag = 1;
+ 			ret = check_apply_error(dentry, ctx, ret);
+ 			if (ret)
+ 				return ret;
+@@ -3198,17 +3206,66 @@ apply_metadata(struct list_head *dentry_list, struct win32_apply_ctx *ctx)
+ 	/* We go in reverse so that metadata is set on all a directory's
+ 	 * children before the directory itself.  This avoids any potential
+ 	 * problems with attributes, timestamps, or security descriptors.  */
++	list_for_each_entry(dentry, dentry_list, d_extraction_list_node)
++		dentry->d_inode->i_visited = 0;
++
+ 	list_for_each_entry_reverse(dentry, dentry_list, d_extraction_list_node)
+ 	{
+-		ret = apply_metadata_to_file(dentry, ctx);
+-		ret = check_apply_error(dentry, ctx, ret);
+-		if (ret)
+-			return ret;
++		struct wim_inode *inode = dentry->d_inode;
++		int apply_ret = 0;
++		unsigned long object_id_failures_before;
++		unsigned long xattr_failures_before;
++		unsigned long partial_security_descriptors_before;
++		unsigned long no_security_descriptors_before;
++		bool metadata_was_fully_applied = false;
++
++		if (!(ctx->common.supported_features.hard_links &&
++		      !inode_is_excluded_from_metadata_dedup(inode) &&
++		      inode->i_visited))
++		{
++			object_id_failures_before = ctx->num_object_id_failures;
++			xattr_failures_before = ctx->num_xattr_failures;
++			partial_security_descriptors_before =
++				ctx->partial_security_descriptors;
++			no_security_descriptors_before =
++				ctx->no_security_descriptors;
++			apply_ret = apply_metadata_to_file(dentry, ctx);
++			metadata_was_fully_applied =
++				apply_ret == 0 &&
++				ctx->num_object_id_failures ==
++					object_id_failures_before &&
++				ctx->num_xattr_failures ==
++					xattr_failures_before &&
++				ctx->partial_security_descriptors ==
++					partial_security_descriptors_before &&
++				ctx->no_security_descriptors ==
++					no_security_descriptors_before;
++			ret = check_apply_error(dentry, ctx, apply_ret);
++			if (ret)
++				goto out_clear_visited;
++
++			/*
++			 * Some compatibility paths return success after recording
++			 * object-ID, EA, or partial ACL failures.  Do not suppress a
++			 * later alias unless every requested metadata operation
++			 * completed.  An ignored HANDLE_ERROR also leaves the inode
++			 * unmarked, so the next alias retries.
++			 */
++			if (ctx->common.supported_features.hard_links &&
++			    !inode_is_excluded_from_metadata_dedup(inode) &&
++			    metadata_was_fully_applied)
++				inode->i_visited = 1;
++		}
+ 		ret = report_file_metadata_applied(&ctx->common);
+ 		if (ret)
+-			return ret;
++			goto out_clear_visited;
+ 	}
+-	return 0;
++	ret = 0;
++
++out_clear_visited:
++	list_for_each_entry(dentry, dentry_list, d_extraction_list_node)
++		dentry->d_inode->i_visited = 0;
++	return ret;
+ }
+ 
+ /* Issue warnings about problems during the extraction for which warnings were
+@@ -3267,6 +3324,17 @@ count_dentries(const struct list_head *dentry_list)
+ 	return count;
+ }
+ 
++static void
++reset_metadata_dedup_state(struct list_head *dentry_list)
++{
++	struct wim_dentry *dentry;
++
++	list_for_each_entry(dentry, dentry_list, d_extraction_list_node) {
++		dentry->d_tmp_flag = 0;
++		dentry->d_inode->i_visited = 0;
++	}
++}
++
+ /* Extract files from a WIM image to a directory on Windows  */
+ static int
+ win32_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
+@@ -3275,6 +3343,8 @@ win32_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
+ 	struct win32_apply_ctx *ctx = (struct win32_apply_ctx *)_ctx;
+ 	u64 dentry_count;
+ 
++	reset_metadata_dedup_state(dentry_list);
++
+ 	ret = prepare_target(dentry_list, ctx);
+ 	if (ret)
+ 		goto out;
+@@ -3336,6 +3406,7 @@ win32_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
+ 
+ 	do_warnings(ctx);
+ out:
++	reset_metadata_dedup_state(dentry_list);
+ 	close_target_directory(ctx);
+ 	if (ctx->target_ntpath.Buffer)
+ 		HeapFree(GetProcessHeap(), 0, ctx->target_ntpath.Buffer);
