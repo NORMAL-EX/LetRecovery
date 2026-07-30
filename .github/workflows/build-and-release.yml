@@ -286,6 +286,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $languageDestination | Out-Null
           Copy-Item -Path (Join-Path $languageSource "*.json") -Destination $languageDestination -Force
           Write-Host "Injected release language catalogs: $languageDestination"
+          # DISM falls back to the current user's %TEMP% when /ScratchDir is omitted.
+          # The base PE image declares X:\Users\Default\AppData\Local\Temp but may not
+          # contain that directory, which makes Apply-Image fail immediately with error 3.
+          $defaultTemp = Join-Path $mount "Users\Default\AppData\Local\Temp"
+          New-Item -ItemType Directory -Force -Path $defaultTemp | Out-Null
+          if (-not (Test-Path -LiteralPath $defaultTemp -PathType Container)) {
+            throw "Failed to create the default WinPE temporary directory: $defaultTemp"
+          }
+          Write-Host "Ensured default WinPE temporary directory: $defaultTemp"
           dism /Unmount-Image /MountDir:"$mount" /Commit
           if ($LASTEXITCODE -ne 0) { throw "DISM unmount/commit failed" }
 
