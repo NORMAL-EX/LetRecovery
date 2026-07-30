@@ -155,9 +155,8 @@ fn main() -> anyhow::Result<()> {
         // Deterministic visual-regression entry: bypass single-instance state and vendor
         // WMI/SetupAPI providers, but retain the real config, native controls and message loop.
         // This branch is absent from release builds and the dangerous CLI guard has already run.
-        if let Err(error) = utils::dprk_easter_egg::sync_for_language(&app_config.language) {
-            log::warn!("同步朝鲜文彩蛋失败: {error:#}");
-        }
+        // Visual/non-elevated runs must not change the host wallpaper or start packaged audio.
+        // The production path below still synchronizes the easter egg for the selected language.
         let run_result = native_ui::run(Arc::new(PreloadedConfig {
             app_config: app_config.clone(),
             remote_config: None,
@@ -468,10 +467,7 @@ fn check_system_components() -> Result<(), Vec<String>> {
 
     // 必需的系统组件列表
     // 注：WIM 处理已改用内置的 libwim-15.dll，不再依赖系统 wimgapi.dll
-    let required_components = [
-        ("diskpart.exe", "磁盘分区工具"),
-        ("advapi32.dll", "高级 Windows API 库"),
-    ];
+    let required_components = [("advapi32.dll", "高级 Windows API 库")];
 
     let mut missing_components = Vec::new();
 

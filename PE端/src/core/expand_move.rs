@@ -1,6 +1,6 @@
 //! 无损扩容 Case 2：块级分区移动（仅 PE 内执行）。
 //!
-//! 当 C 盘后方紧邻的不是未分配空间、而是一个**基础数据分区**(如 D:)时，diskpart `extend`
+//! 当目标卷后方紧邻的不是未分配空间、而是一个**基础数据分区**(如 D:)时，普通扩容
 //! 无法把空间并入 C。本模块通过「把后方分区整体向右搬移、在 C 之后腾出未分配空间、再 extend C」
 //! 实现真正的无损扩大 C 盘。
 //!
@@ -10,14 +10,14 @@
 //!   - 需要把 N 右移 shift = delta - adj；
 //!   - 若 shift > free，先把 N 的文件系统 shrink 掉 (shift - free)，使尾部空出到 shift；
 //!   - 右移 N（重叠安全：从高地址向低地址倒序拷贝原始扇区）；
-//!   - diskpart 删除旧 N 表项、在新偏移按原大小重建、还原盘符；
-//!   - diskpart 把 C extend 到 target。
+//!   - 通过 VDS 删除旧 N 表项、在新偏移按原大小重建、还原盘符；
+//!   - 通过 VDS 把目标卷扩展到 target。
 //!
 //! ## 安全防呆（任一不满足直接安全失败，不触碰磁盘）
 //! - N 必须是 C 之后**紧邻**的、有盘符的**基础数据分区**(非 ESP/MSR/恢复/系统)；
 //! - C/N 的偏移、长度、adj、delta、shift 均须 1 MiB 对齐（绝大多数真实分区如此）；
 //! - 搬移前锁定并卸载 N 卷；搬移采用倒序重叠安全拷贝；
-//! - 重建分区表项交给 diskpart（避免手改 GPT CRC / MBR 出错）；
+//! - 重建分区表项交给 VDS（避免手改 GPT CRC / MBR 出错）；
 //! - 全程写 journal 便于诊断；移动数据期间断电会损坏 N（与所有分区工具同理，需提示勿断电）。
 //!
 //! ⚠️ 本路径会搬移用户数据，必须先在虚拟机/废盘充分验证后再用于真机。
@@ -41,7 +41,6 @@ use windows::Win32::System::IO::DeviceIoControl;
 
 use crate::core::disk::{DiskManager, PartitionStyle};
 use crate::tr;
-use crate::utils::path::get_bin_dir;
 
 const MIB: u64 = 1024 * 1024;
 const GENERIC_RW: u32 = 0x8000_0000 | 0x4000_0000; // GENERIC_READ | GENERIC_WRITE
@@ -88,32 +87,6 @@ struct PartEntry {
     is_special: bool, // ESP / MSR / 恢复 等不可随意移动的分区
     mbr_type: Option<u8>,
     mbr_active: bool,
-}
-
-fn diskpart_path() -> String {
-    let builtin = get_bin_dir().join("diskpart").join("diskpart.exe");
-    if builtin.exists() {
-        builtin.to_string_lossy().to_string()
-    } else {
-        "diskpart.exe".to_string()
-    }
-}
-
-/// 运行一段 diskpart 脚本，返回标准输出（GBK→UTF8）。
-fn run_diskpart(script: &str) -> Result<String> {
-    let temp_dir = crate::core::system_utils::get_temp_directory();
-    let output =
-        lr_core::diskpart::execute_script(&temp_dir, "lr-expand-move", diskpart_path(), script)?;
-    lr_core::diskpart::validated_stdout(&output)
-        .map_err(|detail| anyhow!("DiskPart 脚本执行失败: {detail}"))
-}
-
-fn diskpart_ok(text: &str) -> bool {
-    let l = text.to_lowercase();
-    let ok = l.contains("成功") || l.contains("successfully");
-    let err =
-        l.contains("error") || l.contains("错误") || l.contains("失败") || l.contains("failed");
-    ok && !err
 }
 
 /// 读取卷所在物理磁盘号与起始偏移、长度（字节）。
@@ -445,7 +418,7 @@ fn journal(data_partition: &str, line: &str) {
 
 /// 编排：把分区 `letter` 无损扩大到 `target_size_mb`（0=尽量并入相邻未分配空间）。
 ///
-/// 优先 Case 1（diskpart extend 并入相邻未分配空间）；不足时尝试 Case 2（移动紧邻的基础数据分区）。
+/// 优先 Case 1（WinAPI extend 并入相邻未分配空间）；不足时尝试 Case 2（移动紧邻的基础数据分区）。
 /// `data_partition` 仅用于写 journal。
 pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -> Result<String> {
     // 0=尽量扩到相邻未分配空间最大 → 直接 Case 1。
@@ -502,6 +475,12 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
             tr!("C 盘后方分区是系统/ESP/MSR/恢复等特殊分区，为安全起见拒绝移动")
         );
     }
+    if style == PartitionStyle::MBR && n.mbr_type != Some(0x07) {
+        bail!(
+            "{}",
+            tr!("后方 MBR 分区类型不是受支持的 NTFS 基础数据类型（0x07），拒绝移动")
+        );
+    }
     // N 必须紧贴 C（中间最多只有已计入的 adj_unalloc）。
     if n.offset != c_end + adj_unalloc {
         bail!("{}", tr!("分区布局异常（后方分区不连续），拒绝移动"));
@@ -524,7 +503,7 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     // N 右移 shift 后需要的尾部空间：若 free_after_n 不足，先 shrink N。
     let shrink_by = shift.saturating_sub(free_after_n);
 
-    // 对齐校验（绝大多数真实分区 1 MiB 对齐；不对齐则拒绝以保证 diskpart offset/size 精确）。
+    // 对齐校验（绝大多数真实分区 1 MiB 对齐；不对齐则拒绝以保证 WinAPI offset/size 精确）。
     for (name, v) in [
         ("C 偏移", c_off),
         ("C 长度", c_len),
@@ -572,21 +551,18 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
             data_partition,
             &format!("SHRINK {}: by {} MiB", n_letter, shrink_by / MIB),
         );
-        let script = format!(
-            "select volume {}\r\nshrink desired={}\r\n",
-            n_letter,
-            shrink_by / MIB
-        );
-        let out = run_diskpart(&script)?;
-        log::info!("[EXPAND-MOVE] shrink 输出: {}", out);
-        if !diskpart_ok(&out) {
-            bail!(
-                "{}",
-                tr!(
-                    "收缩后方分区 {}: 失败，未做任何移动。输出：{}",
-                    n_letter,
-                    out
+        let reclaimed = lr_core::windows_storage::shrink_volume(n_letter, shrink_by, shrink_by)
+            .map_err(|error| {
+                anyhow!(
+                    "{}",
+                    tr!("收缩后方分区 {}: 失败，未做任何移动：{}", n_letter, error)
                 )
+            })?;
+        if reclaimed != shrink_by {
+            bail!(
+                "收缩后方分区返回了非预期字节数：期望 {}，实际 {}",
+                shrink_by,
+                reclaimed
             );
         }
         // 重新读取布局，确认 N 偏移未变、长度已减小且仍 1 MiB 对齐。
@@ -635,25 +611,8 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     })?;
     journal(data_partition, "MOVE done");
 
-    // ===== Step C：diskpart 删除旧表项、按原大小在新偏移重建、还原盘符 =====
+    // ===== Step C：VDS 删除旧表项、按原大小在新偏移重建、还原盘符 =====
     let new_off = n.offset + shift;
-    let mut recreate = format!(
-        "select disk {}\r\nselect partition {}\r\ndelete partition override\r\ncreate partition primary offset={} size={}\r\n",
-        disk,
-        n.number,
-        new_off / 1024,      // KB
-        n_len_now / MIB,     // MB
-    );
-    if style == PartitionStyle::MBR {
-        let partition_type = n
-            .mbr_type
-            .ok_or_else(|| anyhow!("missing original MBR partition type"))?;
-        recreate.push_str(&format!("set id={partition_type:02X}\r\n"));
-        if n.mbr_active {
-            recreate.push_str("active\r\n");
-        }
-    }
-    recreate.push_str(&format!("assign letter={}\r\n", n_letter));
     journal(
         data_partition,
         &format!(
@@ -661,14 +620,42 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
             new_off, n_len_now, n_letter
         ),
     );
-    let out = run_diskpart(&recreate)?;
-    log::info!("[EXPAND-MOVE] recreate 输出: {}", out);
-    if !diskpart_ok(&out) {
-        bail!(
+    lr_core::windows_storage::delete_partition(disk, n.offset, true).map_err(|error| {
+        anyhow!(
             "{}",
-            tr!("搬移已完成但重建分区表项失败（分区 {} 数据在新位置 offset={} 但表项未建好，请据 journal 手工修复）。输出：{}",
-            n_letter, new_off, out)
-        );
+            tr!(
+                "搬移已完成但删除旧分区表项失败（分区 {} 数据在新位置 offset={}，请据 journal 修复）：{}",
+                n_letter,
+                new_off,
+                error
+            )
+        )
+    })?;
+    let created = lr_core::windows_storage::create_partition(
+        &lr_core::windows_storage::CreatePartitionRequest {
+            disk_number: disk,
+            offset_bytes: new_off,
+            size_bytes: n_len_now,
+            kind: lr_core::windows_storage::PartitionKind::BasicData,
+            file_system: None,
+            label: String::new(),
+            drive_letter: Some(n_letter),
+            active: style == PartitionStyle::MBR && n.mbr_active,
+        },
+    )
+    .map_err(|error| {
+        anyhow!(
+            "{}",
+            tr!(
+                "搬移已完成但重建分区表项失败（分区 {} 数据在新位置 offset={} 但表项未建好，请据 journal 修复）：{}",
+                n_letter,
+                new_off,
+                error
+            )
+        )
+    })?;
+    if created.offset_bytes != new_off || created.size_bytes != n_len_now {
+        bail!("VDS 重建分区返回了非预期的偏移或大小");
     }
 
     // ===== Step D：把 C extend 到目标 =====

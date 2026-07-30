@@ -329,7 +329,9 @@ impl NativeInstallState {
             },
             is_xp,
             is_xp_i386,
-            run_diskpart_scripts: self.advanced_options_enabled && self.prefs.run_diskpart_scripts,
+            // Retain the serialized preference for upgrade compatibility, but arbitrary scripts
+            // are no longer executable after the storage paths moved to parameterized WinAPI.
+            run_diskpart_scripts: false,
         };
 
         Ok(StartInstallIntent {
@@ -431,7 +433,9 @@ impl StartInstallIntent {
             xp_source_arch: String::new(),
             xp_inject_usb3_driver: advanced.xp_inject_usb3_driver,
             xp_inject_nvme_driver: advanced.xp_inject_nvme_driver,
-            run_diskpart_scripts: self.options.run_diskpart_scripts,
+            // The field remains serialized only so old PE/config readers stay compatible.
+            // Typed WinAPI storage operations replace arbitrary partition scripts.
+            run_diskpart_scripts: false,
             boot_mode: self.options.boot_mode.as_u8(),
             boot_pca_mode: self.options.boot_pca_mode,
             pca_compat_package: pca.package,
@@ -657,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn install_config_conversion_preserves_existing_fields() {
+    fn install_config_conversion_disables_legacy_partition_scripts() {
         let mut state = base_state();
         state.prefs.driver_action = DriverAction::AutoImport;
         state.prefs.advanced_options.custom_username = true;
@@ -675,7 +679,7 @@ mod tests {
         let config = intent.to_install_config("images\\install.wim", 1, Some(&pca));
         assert_eq!(config.driver_action_mode, 2);
         assert_eq!(config.custom_username, "LetRecovery");
-        assert!(config.run_diskpart_scripts);
+        assert!(!config.run_diskpart_scripts);
         assert!(!config.is_xp_i386);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
         assert_eq!(config.pca_compat_target_build, 26_100);

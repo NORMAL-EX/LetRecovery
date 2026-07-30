@@ -1,11 +1,10 @@
 use anyhow::Result;
-use lr_core::command::{CommandExecutor, CommandOutcome, CommandRequest, SystemCommandExecutor};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, SetVolumeLabelW,
-    FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, FILE_ATTRIBUTE_NORMAL,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
     IOCTL_DISK_GET_PARTITION_INFO_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER, PARTITION_INFORMATION_EX,
@@ -16,43 +15,12 @@ use windows::Win32::System::IO::DeviceIoControl;
 use crate::tr;
 use crate::utils::command::new_command;
 use crate::utils::encoding::gbk_to_utf8;
-use crate::utils::path::get_bin_dir;
 
 const DRIVE_FIXED: u32 = 3;
-const FORMAT_TEMP_LABEL: &str = "LetRecovery";
 const MAX_ADJACENCY_GAP_BYTES: u64 = 1024 * 1024;
 
 /// 自动创建分区的标志文件名
 pub const AUTO_CREATED_PARTITION_MARKER: &str = "LetRecovery_AutoCreated.marker";
-
-/// 获取 diskpart 可执行文件路径
-/// 优先使用内置的 diskpart，如果不存在则使用系统的
-fn get_diskpart_path() -> String {
-    let builtin_diskpart = get_bin_dir().join("diskpart").join("diskpart.exe");
-    if builtin_diskpart.exists() {
-        log::info!("使用内置 diskpart: {}", builtin_diskpart.display());
-        builtin_diskpart.to_string_lossy().to_string()
-    } else {
-        log::info!("使用系统 diskpart");
-        "diskpart.exe".to_string()
-    }
-}
-
-fn diskpart_reports_success(output: &str) -> bool {
-    let output = output.to_lowercase();
-    output.contains("成功")
-        || output.contains("successfully")
-        || output.contains("extended the volume")
-}
-
-fn diskpart_reports_no_space(output: &str) -> bool {
-    let output = output.to_lowercase();
-    output.contains("没有可用")
-        || output.contains("没有足够")
-        || output.contains("no usable")
-        || output.contains("not enough")
-        || output.contains("空间不足")
-}
 
 /// 分区表类型
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -220,128 +188,10 @@ impl DiskManager {
         result
     }
 
-    fn set_and_verify_volume_label(drive: &str, volume_label: &str) -> Result<()> {
-        let root = format!("{}\\", drive.trim_end_matches('\\'));
-        let wide_root: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
-        let wide_label: Vec<u16> = volume_label
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        unsafe { SetVolumeLabelW(PCWSTR(wide_root.as_ptr()), PCWSTR(wide_label.as_ptr())) }
-            .map_err(|error| anyhow::anyhow!("设置卷标“{volume_label}”失败: {error}"))?;
-
-        let mut actual_label = vec![0u16; 261];
-        unsafe {
-            GetVolumeInformationW(
-                PCWSTR(wide_root.as_ptr()),
-                Some(&mut actual_label),
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        .map_err(|error| anyhow::anyhow!("读取格式化后的卷标失败: {error}"))?;
-        let actual_label = String::from_utf16_lossy(&actual_label)
-            .trim_end_matches('\0')
-            .to_string();
-        if actual_label != volume_label {
-            anyhow::bail!(
-                "卷标写入校验失败：期望“{}”，实际“{}”",
-                volume_label,
-                actual_label
-            );
-        }
-        Ok(())
-    }
-
-    fn format_diskpart_script(drive_letter: char) -> String {
-        format!(
-            "select volume {}\r\nformat fs=ntfs label=\"{}\" quick override\r\nexit\r\n",
-            drive_letter, FORMAT_TEMP_LABEL
-        )
-    }
-
     fn format_failure_hint() -> String {
         tr!(
             "可能原因:\n- 目标盘质量较差或已损坏（坏盘/扩容盘/掉盘）\n- 磁盘存在坏道、I/O 错误或 CRC 错误\n- 数据线、USB 口、硬盘盒或供电不稳定\n- 分区被占用、写保护或分区表异常"
         )
-    }
-
-    fn format_partition_with_format_command(
-        drive: &str,
-        volume_label: &str,
-    ) -> std::result::Result<String, String> {
-        lr_core::format_command::validate_cmd_wrapper_label(volume_label)
-            .map_err(|error| tr!("PE fallback 卷标不安全: {}", error))?;
-        let spec =
-            lr_core::format_command::FormatCommandSpec::new(drive, "NTFS", Some(volume_label))
-                .map_err(|error| tr!("无效的格式化参数: {}", error))?
-                .with_force_dismount(true);
-        let drive = spec.drive().to_string();
-        let args = spec.args();
-        let mut cmd_args = vec!["/d", "/s", "/c", "format.com"];
-        cmd_args.extend(args.iter().map(String::as_str));
-        log::warn!("[FORMAT] DiskPart 失败，尝试 PE fallback: format {}", drive);
-
-        // Keep the legacy WinPE shell wrapper: direct format.com may finish the
-        // format but never exit under CREATE_NO_WINDOW on affected PE images.
-        let request = CommandRequest::new("cmd").args(&cmd_args);
-        let output = SystemCommandExecutor
-            .execute(&request)
-            .map_err(|e| tr!("执行 format 命令失败: {}", e))?;
-
-        let stdout = gbk_to_utf8(output.stdout());
-        let stderr = gbk_to_utf8(output.stderr());
-        let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
-
-        log::info!("[FORMAT] fallback format stdout:\n{}", stdout);
-        if !stderr.is_empty() {
-            log::warn!("[FORMAT] fallback format stderr:\n{}", stderr);
-        }
-
-        if lr_core::format_command::output_indicates_success(&stdout)
-            && !lr_core::format_command::output_indicates_error(
-                output.succeeded(),
-                &stdout,
-                &stderr,
-            )
-        {
-            log::info!("[FORMAT] fallback format {} 成功", drive);
-            Ok(stdout)
-        } else if !combined.trim().is_empty() {
-            Err(combined.trim().to_string())
-        } else {
-            Err(tr!("format 命令无输出，格式化失败。"))
-        }
-    }
-
-    /// 选择一个可靠的临时目录并确保它存在。
-    /// WinPE 下 std::env::temp_dir() 可能指向不存在的路径，
-    /// 直接写 diskpart 脚本会触发 "系统找不到指定的路径 (os error 3)"。
-    fn reliable_temp_dir() -> PathBuf {
-        // 统一走 system_utils::get_temp_directory（按 SystemRoot/PE系统盘动态解析，不写死 X:）
-        crate::core::system_utils::get_temp_directory()
-    }
-
-    fn execute_diskpart(prefix: &str, script: &str) -> Result<CommandOutcome> {
-        lr_core::diskpart::execute_script(
-            &Self::reliable_temp_dir(),
-            prefix,
-            get_diskpart_path(),
-            script,
-        )
-        .map_err(Into::into)
-    }
-
-    fn execute_diskpart_checked(prefix: &str, script: &str) -> Result<String> {
-        lr_core::diskpart::execute_script_checked(
-            &Self::reliable_temp_dir(),
-            prefix,
-            get_diskpart_path(),
-            script,
-        )
-        .map_err(Into::into)
     }
 
     /// 获取所有固定磁盘分区列表
@@ -444,69 +294,21 @@ impl DiskManager {
                 partition_number: Some(geometry.partition_number),
             },
             Err(error) => {
-                log::warn!("[disk] Win32 分区身份查询失败，回退 DiskPart: {}", error);
-                Self::get_partition_style_diskpart(drive)
-            }
-        }
-    }
-
-    /// 使用 diskpart 获取分区信息（备用方法）
-    fn get_partition_style_diskpart(drive: &str) -> PartitionDetail {
-        let letter = drive.chars().next().unwrap_or('C');
-        let script = format!("select volume {}\ndetail volume", letter);
-        let stdout = match Self::execute_diskpart_checked("lr-partition-detail", &script) {
-            Ok(stdout) => stdout,
-            Err(error) => {
-                log::debug!("[disk] 无法查询卷 {} 的分区信息: {}", letter, error);
-                return PartitionDetail {
+                log::warn!("[disk] Win32 分区身份查询失败: {}", error);
+                PartitionDetail {
                     style: PartitionStyle::Unknown,
                     disk_number: None,
                     partition_number: None,
-                };
-            }
-        };
-
-        let mut disk_num: Option<u32> = None;
-        let mut part_num: Option<u32> = None;
-
-        for line in stdout.lines() {
-            let line_upper = line.to_uppercase();
-            if (line_upper.contains("磁盘") || line_upper.contains("DISK"))
-                && !line_upper.contains("磁盘 ID")
-                && !line_upper.contains("DISK ID")
-            {
-                if let Some(num) = line.split_whitespace().find(|s| s.parse::<u32>().is_ok()) {
-                    disk_num = num.parse().ok();
                 }
             }
-            if line_upper.contains("分区") || line_upper.contains("PARTITION") {
-                if let Some(num) = line.split_whitespace().find(|s| s.parse::<u32>().is_ok()) {
-                    part_num = num.parse().ok();
-                }
-            }
-        }
-
-        let style = if let Some(num) = disk_num {
-            Self::get_disk_partition_style(num)
-        } else {
-            PartitionStyle::Unknown
-        };
-
-        PartitionDetail {
-            style,
-            disk_number: disk_num,
-            partition_number: part_num,
         }
     }
 
     /// 获取指定磁盘的分区表类型
     fn get_disk_partition_style(disk_number: u32) -> PartitionStyle {
-        // `detail disk` does not consistently print the words GPT/MBR across
-        // DiskPart versions and languages. `uniqueid disk` is stable: GPT uses
-        // a GUID and MBR uses an eight-digit hexadecimal disk signature.
-        let script = format!("select disk {}\nuniqueid disk", disk_number);
-        match Self::execute_diskpart_checked("lr-disk-style", &script) {
-            Ok(stdout) => Self::partition_style_from_unique_id_output(&stdout),
+        match lr_core::windows_storage::disk_style(disk_number) {
+            Ok(lr_core::windows_storage::DiskStyle::Gpt) => PartitionStyle::GPT,
+            Ok(lr_core::windows_storage::DiskStyle::Mbr) => PartitionStyle::MBR,
             Err(error) => {
                 log::debug!(
                     "[disk] 无法查询磁盘 {} 的分区表类型: {}",
@@ -518,32 +320,8 @@ impl DiskManager {
         }
     }
 
-    fn partition_style_from_unique_id_output(output: &str) -> PartitionStyle {
-        for raw in output.split_whitespace() {
-            let value = raw
-                .trim_matches(|character: char| matches!(character, '{' | '}' | ':' | ',' | ';'));
-            if value.len() == 36
-                && value
-                    .chars()
-                    .enumerate()
-                    .all(|(index, character)| match index {
-                        8 | 13 | 18 | 23 => character == '-',
-                        _ => character.is_ascii_hexdigit(),
-                    })
-            {
-                return PartitionStyle::GPT;
-            }
-            if value.len() == 8 && value.chars().all(|character| character.is_ascii_hexdigit()) {
-                return PartitionStyle::MBR;
-            }
-        }
-        PartitionStyle::Unknown
-    }
-
     /// 格式化指定分区（带卷标）
     ///
-    /// 使用 cmd /c format 进行格式化，因为直接调用 format.com 在 CREATE_NO_WINDOW 模式下
-    /// 会完成格式化但进程不退出，导致程序卡死。通过 cmd /c 包装可以正常退出。
     pub fn format_partition_with_label(
         partition: &str,
         volume_label: Option<&str>,
@@ -560,107 +338,20 @@ impl DiskManager {
         let drive = spec.drive().to_string();
         let drive_letter = drive.as_bytes()[0] as char;
         let vol_label = spec.volume_label().unwrap_or("本地磁盘");
-
-        // 使用 diskpart 格式化，避免 format.com 在 PE 中的交互和参数兼容问题
-        // DiskPart 脚本由窄字节命令行工具按当前 OEM 代码页读取。这里只写 ASCII 临时卷标，
-        // 格式化成功后再通过 SetVolumeLabelW 写入并校验用户的 Unicode 卷标。
-        let script = Self::format_diskpart_script(drive_letter);
-        let cmd_args = format!("diskpart format {}", drive);
-
-        log::info!("执行命令: {}", cmd_args);
-
-        let temp_dir = Self::reliable_temp_dir();
-        let script_file = lr_core::scoped_temp_file::ScopedTempFile::create_in(
-            &temp_dir,
-            "lr_format_part",
-            "txt",
-            script.as_bytes(),
-        )?;
-        let script_path_str = script_file
-            .path()
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("temporary diskpart script path is not UTF-8"))?;
-
-        let diskpart_path = get_diskpart_path();
-
-        let request = CommandRequest::new(&diskpart_path).args(["/s", script_path_str]);
-        let output = SystemCommandExecutor.execute(&request)?;
-
-        let stdout = gbk_to_utf8(output.stdout());
-        let stderr = gbk_to_utf8(output.stderr());
-
-        log::info!("format 输出:\n{}", stdout);
-        if !stderr.is_empty() {
-            log::warn!("format 错误输出:\n{}", stderr);
-        }
-
-        // DiskPart 会输出格式化进度，例如“0 百分比已完成”/“0 percent completed”。
-        // 这些进度行不能作为成功依据；只接受明确的成功句。
-        let stdout_lower = stdout.to_lowercase();
-        let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
-        let combined_lower = combined.to_lowercase();
-        let has_success_indicator = stdout.contains("\u{6210}\u{529f}\u{683c}\u{5f0f}\u{5316}")
-            || stdout_lower.contains("successfully formatted");
-        let has_error_indicator = !output.succeeded()
-            || stdout.contains("无法")
-            || stdout.contains("错误")
-            || stdout.contains("失败")
-            || stdout.contains("拒绝")
-            || stderr.contains("无法")
-            || stderr.contains("错误")
-            || stderr.contains("失败")
-            || stderr.contains("拒绝")
-            || combined_lower.contains("diskpart has encountered an error")
-            || combined_lower.contains("error")
-            || combined_lower.contains("failed")
-            || combined_lower.contains("denied")
-            || combined_lower.contains("i/o device error")
-            || combined_lower.contains("cyclic redundancy check");
-
-        if has_success_indicator && !has_error_indicator {
-            log::info!("分区 {} 格式化成功", drive);
-            Self::set_and_verify_volume_label(&drive, vol_label)?;
-            Ok(stdout)
-        } else {
-            let diskpart_detail = if !combined.trim().is_empty() {
-                combined.trim().to_string()
-            } else {
-                tr!("diskpart 无输出，格式化失败。请确认该分区未被占用后重试。")
-            };
-            match Self::format_partition_with_format_command(&drive, FORMAT_TEMP_LABEL) {
-                Ok(format_stdout) => {
-                    log::info!("[FORMAT] DiskPart 失败后 fallback format 成功");
-                    Self::set_and_verify_volume_label(&drive, vol_label)?;
-                    Ok(format!("{}\n{}", stdout.trim(), format_stdout.trim()))
-                }
-                Err(format_detail) => {
-                    log::warn!("[FORMAT] fallback format 也失败: {}", format_detail);
-                    let hint = Self::format_failure_hint();
-                    let error_msg = if output.succeeded() {
-                        tr!(
-                            "格式化失败。\n{}\n\nDiskPart 输出:\n{}\n\nformat 输出:\n{}",
-                            hint,
-                            diskpart_detail,
-                            format_detail
-                        )
-                    } else {
-                        tr!(
-                            "格式化失败，diskpart 退出码 {}。\n{}\n\nDiskPart 输出:\n{}\n\nformat 输出:\n{}",
-                            output
-                                .exit_code()
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| tr!("未知")),
-                            hint,
-                            diskpart_detail,
-                            format_detail
-                        )
-                    };
-
-                    log::error!("格式化失败: {}", error_msg);
-                    anyhow::bail!("{}", error_msg);
-                }
-            }
-        }
+        lr_core::windows_storage::format_drive(
+            drive_letter,
+            lr_core::windows_storage::FileSystem::Ntfs,
+            vol_label,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{}\n{}",
+                tr!("格式化分区失败: {}", error),
+                Self::format_failure_hint()
+            )
+        })?;
+        log::info!("分区 {} 已通过 VDS 格式化并核验", drive);
+        Ok(tr!("分区 {} 格式化成功", drive))
     }
 
     /// 检测是否为UEFI模式
@@ -692,7 +383,7 @@ impl DiskManager {
     ///
     /// Auto must follow the target partition table rather than the way WinPE
     /// itself was booted. The PE firmware mode is only a last-resort fallback
-    /// when DiskPart cannot identify the target disk layout.
+    /// when the Win32 storage provider cannot identify the target disk layout.
     pub fn resolve_install_uefi_mode(boot_mode: u8, target_partition: &str) -> bool {
         match boot_mode {
             1 => true,
@@ -865,7 +556,7 @@ impl DiskManager {
             );
         }
 
-        // DiskPart extend 只能使用目标分区物理末端之后的相邻未分配空间。分区号不能证明
+        // 基础卷扩展只能使用目标分区物理末端之后的相邻未分配空间。分区号不能证明
         // 物理相邻，因此必须使用 IOCTL 返回的起始偏移和长度做 fail-closed 检查。
         if !partitions_are_physically_adjacent(target_geometry, auto_geometry) {
             anyhow::bail!(
@@ -903,11 +594,12 @@ impl DiskManager {
     )]
     fn delete_partition_by_letter(letter: char) -> Result<()> {
         log::info!("[CLEANUP] 删除分区 {}:", letter);
-
-        let script_content = format!("select volume {}\ndelete partition override", letter);
-        let output_text = Self::execute_diskpart_checked("lr-delete-partition", &script_content)?;
-        log::info!("[CLEANUP] Diskpart 删除输出: {}", output_text);
-
+        let identity = lr_core::windows_storage::volume_identity(letter)?;
+        lr_core::windows_storage::delete_partition(
+            identity.disk_number,
+            identity.offset_bytes,
+            true,
+        )?;
         log::info!("[CLEANUP] 分区 {} 删除成功", letter);
         Ok(())
     }
@@ -951,176 +643,47 @@ impl DiskManager {
         }
 
         // 记录扩展前的分区大小
-        let size_before = Self::get_partition_size_mb(target_letter);
-        log::info!("[CLEANUP] 扩展前目标分区大小: {:?} MB", size_before);
-
-        // Step 1: 删除分区
-        log::info!("[CLEANUP] Step 1: 删除分区 {}:", auto_letter);
-
-        let delete_script = format!(
-            "select disk {}\nselect partition {}\ndelete partition override",
-            expected_auto.disk_number, expected_auto.partition_number
+        let size_before = current_target.partition_length;
+        log::info!(
+            "[CLEANUP] 扩展前目标分区大小: {} MB",
+            size_before / 1024 / 1024
         );
-        let output_text = Self::execute_diskpart_checked("lr-delete-and-extend", &delete_script)?;
-        log::info!("[CLEANUP] 删除分区输出: {}", output_text);
-
+        log::info!("[CLEANUP] Step 1: 删除分区 {}:", auto_letter);
+        lr_core::windows_storage::delete_partition(
+            expected_auto.disk_number,
+            expected_auto.starting_offset,
+            true,
+        )?;
         log::info!("[CLEANUP] 分区 {} 删除成功", auto_letter);
 
-        // Step 2: 运行 rescan 命令刷新磁盘信息
-        log::info!("[CLEANUP] Step 2: 刷新磁盘信息 (rescan)");
-        Self::diskpart_rescan();
-
-        // 等待系统处理 rescan
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        // Step 3: 等待系统识别未分配空间，然后扩展目标分区（带重试）
-        log::info!("[CLEANUP] Step 3: 扩展目标分区 {}（带重试）", target_letter);
-
-        const MAX_RETRIES: u32 = 10; // 增加到 10 次
-        const RETRY_DELAY_SECS: u64 = 3; // 增加到 3 秒
-
-        let mut last_error = String::new();
-
-        for attempt in 1..=MAX_RETRIES {
-            log::info!(
-                "[CLEANUP] 扩展分区 {} 尝试 {}/{}",
-                target_letter,
-                attempt,
-                MAX_RETRIES
+        log::info!("[CLEANUP] Step 2: 扩展目标分区 {}", target_letter);
+        lr_core::windows_storage::extend_volume(
+            target_letter,
+            expected_target.disk_number,
+            expected_auto.partition_length,
+        )
+        .map_err(|error| anyhow::anyhow!("临时分区已删除，但扩展目标分区失败: {error}"))?;
+        let current = Self::partition_geometry(&format!("{}:", target_letter))?;
+        let expected_size = size_before
+            .checked_add(expected_auto.partition_length)
+            .ok_or_else(|| anyhow::anyhow!("扩展后的分区大小计算溢出"))?;
+        if current.disk_number != expected_target.disk_number
+            || current.starting_offset != expected_target.starting_offset
+            || current.partition_length != expected_size
+        {
+            anyhow::bail!(
+                "扩展操作返回成功，但操作后核验失败：期望 {} 字节，实际 {} 字节",
+                expected_size,
+                current.partition_length
             );
-
-            // 尝试扩展
-            match Self::try_extend_volume_enhanced(target_letter, expected_target.disk_number) {
-                Ok(_) => {
-                    // 验证扩展是否成功
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    let size_after = Self::get_partition_size_mb(target_letter);
-                    log::info!("[CLEANUP] 扩展后目标分区大小: {:?} MB", size_after);
-
-                    if let (Some(before), Some(after)) = (size_before, size_after) {
-                        if after > before {
-                            log::info!(
-                                "[CLEANUP] 分区 {} 扩展成功！大小从 {} MB 增加到 {} MB",
-                                target_letter,
-                                before,
-                                after
-                            );
-                            return Ok(());
-                        } else {
-                            // extend 命令返回成功但分区大小未变化
-                            // 可能是系统还未识别到未分配空间，继续重试
-                            last_error = format!(
-                                "extend 命令执行成功但分区大小未变化 (before={} MB, after={} MB)",
-                                before, after
-                            );
-                            log::warn!("[CLEANUP] {}", last_error);
-                        }
-                    } else {
-                        // 无法获取大小进行比较，假设成功
-                        log::info!(
-                            "[CLEANUP] 分区 {} 扩展命令执行成功（无法验证大小变化）",
-                            target_letter
-                        );
-                        return Ok(());
-                    }
-                }
-                Err(e) => {
-                    last_error = e.to_string();
-                    log::warn!("[CLEANUP] 扩展尝试 {} 失败: {}", attempt, e);
-                }
-            }
-
-            if attempt < MAX_RETRIES {
-                log::info!("[CLEANUP] 等待 {} 秒后重试...", RETRY_DELAY_SECS);
-                std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS));
-
-                // 每 3 次尝试后再 rescan 一次
-                if attempt % 3 == 0 {
-                    log::info!("[CLEANUP] 再次刷新磁盘信息...");
-                    Self::diskpart_rescan();
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                }
-            }
         }
-
-        // 所有重试都失败了
-        log::warn!("[CLEANUP] ========================================");
-        log::warn!("[CLEANUP] 分区扩展失败！");
-        log::warn!("[CLEANUP] 目标分区: {}:", target_letter);
-        log::warn!("[CLEANUP] 最后错误: {}", last_error);
-        log::warn!("[CLEANUP] 数据分区已删除，但空间未能自动合并。");
-        log::warn!("[CLEANUP] 用户可在系统安装完成后使用磁盘管理工具手动扩展分区。");
-        log::warn!("[CLEANUP] ========================================");
-        anyhow::bail!("数据分区已删除，但扩展目标分区失败: {}", last_error)
-    }
-
-    /// 运行 diskpart rescan 命令刷新磁盘信息
-    fn diskpart_rescan() {
-        match Self::execute_diskpart_checked("lr-rescan", "rescan") {
-            Ok(output) => log::info!("[CLEANUP] rescan 输出: {}", output),
-            Err(error) => {
-                // rescan is advisory here; the subsequent extend loop still
-                // performs its own retries and verification.
-                log::warn!("[CLEANUP] rescan 失败，将继续重试扩展: {}", error);
-            }
-        }
-    }
-
-    /// 尝试扩展指定分区（增强版，使用 diskpart）
-    /// 先尝试通过卷字母扩展，如果失败则尝试通过磁盘号和分区号扩展
-    fn try_extend_volume_enhanced(letter: char, disk_num: u32) -> Result<()> {
-        // 方法1：通过卷字母扩展（标准方法）
-        let extend_script = format!("select volume {}\nextend", letter);
-        let output = Self::execute_diskpart("lr-extend-volume", &extend_script)?;
-        let validation = lr_core::diskpart::validated_stdout(&output);
-        let output_text = match &validation {
-            Ok(text) | Err(text) => text,
-        };
-
         log::info!(
-            "[CLEANUP] diskpart extend (by volume) 输出: {}",
-            output_text
+            "[CLEANUP] 分区 {} 扩展成功：{} MB -> {} MB",
+            target_letter,
+            size_before / 1024 / 1024,
+            current.partition_length / 1024 / 1024
         );
-
-        if validation.is_ok() && diskpart_reports_success(output_text) {
-            return Ok(());
-        }
-
-        // 检查是否有明确的错误：没有可用的未分配空间
-        if diskpart_reports_no_space(output_text) {
-            // 没有可用的未分配空间，直接失败
-            anyhow::bail!("没有可用的相邻未分配空间: {}", output_text);
-        }
-
-        // 方法2：尝试通过磁盘号扩展（备用方法）
-        log::info!("[CLEANUP] 尝试备用方法：通过磁盘号和分区号扩展");
-
-        // 先获取分区号
-        let detail = Self::get_partition_style(&format!("{}:", letter));
-        if let Some(part_num) = detail.partition_number {
-            let extend_script2 = format!(
-                "select disk {}\nselect partition {}\nextend",
-                disk_num, part_num
-            );
-            let output2 = Self::execute_diskpart("lr-extend-partition", &extend_script2)?;
-            let validation2 = lr_core::diskpart::validated_stdout(&output2);
-            let output_text2 = match &validation2 {
-                Ok(text) | Err(text) => text,
-            };
-
-            log::info!(
-                "[CLEANUP] diskpart extend (by partition) 输出: {}",
-                output_text2
-            );
-
-            if validation2.is_ok() && diskpart_reports_success(output_text2) {
-                return Ok(());
-            }
-
-            anyhow::bail!("extend 失败 (备用方法): {}", output_text2);
-        }
-
-        anyhow::bail!("extend 失败: {}", output_text)
+        Ok(())
     }
 
     /// 无损扩大分区到指定大小（仅并入紧邻其后的未分配空间；不移动其它分区）。
@@ -1128,9 +691,7 @@ impl DiskManager {
     /// - `letter`：目标分区盘符（如 'C'）。在 PE 下应由扩容标记定位后传入。
     /// - `target_size_mb`：期望最终总大小（MB）；0 = 尽可能扩到最大（吃光相邻未分配空间）。
     ///
-    /// 实现：diskpart `select volume L` + `extend [size=delta]`。`extend` 只能并入紧跟该
-    /// 卷之后的未分配空间——这是无损、安全的操作。若其后是别的分区(需要分区移动)，diskpart
-    /// 会报“没有可用的未分配空间”，本函数据此返回明确错误（分区移动属另一条尚未启用的路径）。
+    /// 实现：VDS 只并入紧跟该卷的连续未分配空间；若其后是别的分区则失败关闭。
     pub fn expand_partition_lossless(letter: char, target_size_mb: u64) -> Result<String> {
         let current_mb = Self::get_partition_size_mb(letter)
             .ok_or_else(|| anyhow::anyhow!("{}", tr!("无法获取分区 {}: 的当前大小", letter)))?;
@@ -1141,42 +702,43 @@ impl DiskManager {
             target_size_mb
         );
 
-        // 计算 extend 的 size 参数（MB）。0 或不大于当前 → 扩到最大（不带 size）。
-        let size_arg = if target_size_mb == 0 || target_size_mb <= current_mb {
-            None
+        let identity = lr_core::windows_storage::volume_identity(letter)?;
+        let available = lr_core::windows_storage::contiguous_free_bytes_after(
+            identity.disk_number,
+            identity
+                .offset_bytes
+                .checked_add(identity.extent_length_bytes)
+                .ok_or_else(|| anyhow::anyhow!("分区末端偏移计算溢出"))?,
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{}",
+                tr!("目标分区后面没有相邻的未分配空间可并入。若要从后面的分区夺取空间，需要分区移动功能。")
+            )
+        })?;
+        let bytes_to_add = if target_size_mb == 0 || target_size_mb <= current_mb {
+            available
         } else {
-            Some(target_size_mb - current_mb)
+            (target_size_mb - current_mb)
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| anyhow::anyhow!("目标分区大小超出支持范围"))?
         };
-
-        let script = match size_arg {
-            Some(delta) => format!("select volume {}\r\nextend size={}\r\n", letter, delta),
-            None => format!("select volume {}\r\nextend\r\n", letter),
-        };
-
-        let output = Self::execute_diskpart("lr-expand-lossless", &script)?;
-        let validation = lr_core::diskpart::validated_stdout(&output);
-        let text = match &validation {
-            Ok(text) | Err(text) => text,
-        };
-        log::info!("[EXPAND] diskpart 输出: {}", text);
-
-        if diskpart_reports_no_space(text) {
+        if bytes_to_add == 0 || bytes_to_add > available {
             anyhow::bail!(
                 "{}",
-                tr!("C 盘后面没有相邻的未分配空间可并入。若要从后面的分区夺取空间，需要分区移动功能（暂未启用）。")
+                tr!("目标分区后面的连续未分配空间不足。若要从后面的分区夺取空间，需要分区移动功能。")
             );
         }
-        if validation.is_err() || !diskpart_reports_success(text) {
-            anyhow::bail!("{}", tr!("扩容失败: {}", text));
-        }
-
+        lr_core::windows_storage::extend_volume(letter, identity.disk_number, bytes_to_add)?;
         let new_mb = Self::get_partition_size_mb(letter).unwrap_or(current_mb);
-        if new_mb <= current_mb {
+        let expected_mb = (identity.extent_length_bytes + bytes_to_add) / 1024 / 1024;
+        if new_mb != expected_mb {
             anyhow::bail!(
                 "{}",
                 tr!(
-                    "diskpart 报告成功，但分区大小未增加（{} MB）。可能没有相邻未分配空间。",
-                    new_mb
+                    "扩容操作返回成功，但大小核验失败：期望 {} MB，实际 {} MB。",
+                    expected_mb,
+                    new_mb,
                 )
             );
         }
@@ -1191,10 +753,7 @@ impl DiskManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        diskpart_reports_no_space, diskpart_reports_success, partitions_are_physically_adjacent,
-        DiskManager, PartitionGeometry, PartitionStyle, FORMAT_TEMP_LABEL,
-    };
+    use super::{partitions_are_physically_adjacent, PartitionGeometry};
 
     fn geometry(
         disk_number: u32,
@@ -1242,49 +801,6 @@ mod tests {
         assert!(!partitions_are_physically_adjacent(
             geometry(0, 2, u64::MAX - 10, 20),
             geometry(0, 3, u64::MAX, 1)
-        ));
-    }
-
-    #[test]
-    fn diskpart_format_script_never_contains_the_user_unicode_label() {
-        let script = DiskManager::format_diskpart_script('C');
-        assert!(script.is_ascii());
-        assert!(script.contains(FORMAT_TEMP_LABEL));
-        assert!(!script.contains("uac主播"));
-    }
-
-    #[test]
-    fn parses_diskpart_unique_ids_without_depending_on_language() {
-        assert_eq!(
-            DiskManager::partition_style_from_unique_id_output(
-                "Disk ID: {01234567-89AB-CDEF-0123-456789ABCDEF}"
-            ),
-            PartitionStyle::GPT
-        );
-        assert_eq!(
-            DiskManager::partition_style_from_unique_id_output("磁盘 ID: 89ABCDEF"),
-            PartitionStyle::MBR
-        );
-        assert_eq!(
-            DiskManager::partition_style_from_unique_id_output("DiskPart failed"),
-            PartitionStyle::Unknown
-        );
-    }
-
-    #[test]
-    fn classifies_localized_extend_results() {
-        assert!(diskpart_reports_success(
-            "DiskPart successfully extended the volume."
-        ));
-        assert!(diskpart_reports_success("DiskPart 成功扩展了卷。"));
-        assert!(diskpart_reports_no_space(
-            "There is not enough usable free space on specified disk(s)."
-        ));
-        assert!(diskpart_reports_no_space(
-            "没有足够的可用空间来执行此操作。"
-        ));
-        assert!(!diskpart_reports_success(
-            "DiskPart failed to extend the volume."
         ));
     }
 }

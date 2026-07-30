@@ -37,6 +37,7 @@ pub mod wim_engine;
 pub mod wimgapi;
 pub mod wimlib;
 pub mod wimlib_dll;
+pub mod windows_storage;
 pub mod xp;
 pub mod xp_i386;
 pub mod xp_textmode_drv;

@@ -121,7 +121,7 @@ pub struct InstallConfig {
     /// XP 注入 NVMe 驱动（默认勾选）
     pub xp_inject_nvme_driver: bool,
 
-    /// 是否在释放镜像前运行 diskpart 脚本（数据分区暂存的 diskpart 目录）。
+    /// 历史只读兼容字段；为 true 时仅进入旧脚本拒绝守卫，不执行任何脚本。
     pub run_diskpart_scripts: bool,
 
     /// 引导模式：0=自动，1=UEFI，2=Legacy。

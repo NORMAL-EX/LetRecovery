@@ -43,7 +43,7 @@ pub struct AppConfig {
     pub wim_engine: u8,
 
     /// 是否启用「高级选项」（设置页总开关）。默认关闭，需在设置里或 config.json 显式置 true。
-    /// 开启后解锁：安装 XP 时可选 UEFI 引导（魔改镜像用）、系统安装页的「运行 Diskpart 脚本」复选框、
+    /// 开启后解锁：安装 XP 时可选 UEFI 引导（魔改镜像用）、
     /// 以及自定义修复引导脚本 bin\repair_boot.txt。面向高级用户，小白不要开。
     #[serde(default)]
     pub enable_advanced_options: bool,

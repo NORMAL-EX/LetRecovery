@@ -14,12 +14,11 @@ use std::sync::Arc;
 
 use lr_core::cached_artifact::CachedArtifactStatus;
 use lr_core::cached_artifact::CachedArtifactVerification;
-use lr_core::command::{CommandExecutor, SystemCommandExecutor};
 use lr_core::pca_compat::PreparedPcaCompatPackage;
 
 use super::disk::{DiskManager, Partition, PartitionStyle};
 use super::native_install_compat::{
-    self, DefaultUnattendOptions, MbrSignatureObservation, PartitionIdentity, UnattendArchitecture,
+    self, DefaultUnattendOptions, PartitionIdentity, UnattendArchitecture,
 };
 #[cfg(any(not(feature = "non-elevated-tests"), test))]
 use super::native_install_controller::InstallMode;
@@ -1235,7 +1234,7 @@ impl ProductionInstallBackend {
     }
 
     #[cfg(not(feature = "non-elevated-tests"))]
-    fn refresh_target_after_diskpart(
+    fn refresh_target_after_partition_scripts(
         &mut self,
         context: &InstallExecutionContext,
     ) -> Result<(), InstallBackendError> {
@@ -1259,24 +1258,27 @@ impl ProductionInstallBackend {
                 "no free drive letter is available for the verified target partition",
             )
         })?;
-        let script = format!(
-            "select disk {}\r\nselect partition {}\r\nremove noerr\r\nassign letter={}\r\nexit\r\n",
-            identity.disk_number, identity.partition_number, free
-        );
-        let output = lr_core::diskpart::execute_script(
-            &std::env::temp_dir(),
-            "lr-assign-target",
-            "diskpart",
-            &script,
-        )
-        .map_err(|error| Self::error("assign_target_letter", error))?;
-        let output_text = lr_core::diskpart::validated_stdout(&output)
+        let offset = super::quick_partition::get_physical_disks()
+            .into_iter()
+            .find(|disk| disk.disk_number == identity.disk_number)
+            .and_then(|disk| {
+                disk.partitions
+                    .into_iter()
+                    .find(|partition| partition.partition_number == identity.partition_number)
+            })
+            .map(|partition| partition.offset_bytes)
+            .ok_or_else(|| {
+                InstallBackendError::new(
+                    "target_identity_changed",
+                    "verified target partition disappeared before drive-letter assignment",
+                )
+            })?;
+        lr_core::windows_storage::assign_partition_drive_letter(identity.disk_number, offset, free)
             .map_err(|error| Self::error("assign_target_letter", error))?;
         log::info!(
-            "[NATIVE INSTALL] assigned drive {free}: to disk {} partition {}: {}",
+            "[NATIVE INSTALL] assigned drive {free}: to disk {} partition {} through VDS",
             identity.disk_number,
             identity.partition_number,
-            output_text.trim()
         );
 
         for attempt in 0..4 {
@@ -1292,10 +1294,8 @@ impl ProductionInstallBackend {
         Err(InstallBackendError::new(
             "target_identity_changed",
             format!(
-                "disk {} partition {} no longer exists or could not be assigned a drive letter; DiskPart output: {}",
-                identity.disk_number,
-                identity.partition_number,
-                output_text.trim()
+                "disk {} partition {} no longer exists or could not be assigned a drive letter",
+                identity.disk_number, identity.partition_number,
             ),
         ))
     }
@@ -1498,49 +1498,16 @@ impl ProductionInstallBackend {
 
     fn format_target_compat(&self, intent: &StartInstallIntent) -> Result<(), InstallBackendError> {
         let plan = Self::format_plan_for_intent(&self.target, intent)?;
-        let output = lr_core::diskpart::execute_script(
-            &std::env::temp_dir(),
-            "lr-native-format",
-            "diskpart",
-            &plan.diskpart_script,
+        let letter =
+            plan.drive.chars().next().ok_or_else(|| {
+                InstallBackendError::new("format_target", "target drive is empty")
+            })?;
+        lr_core::windows_storage::format_drive(
+            letter,
+            lr_core::windows_storage::FileSystem::Ntfs,
+            &plan.volume_label,
         )
-        .map_err(|error| Self::error("start_diskpart_format", error))?;
-        let stdout = crate::utils::encoding::gbk_to_utf8(output.stdout());
-        let stderr = crate::utils::encoding::gbk_to_utf8(output.stderr());
-        if native_install_compat::diskpart_format_succeeded(&stdout)
-            && !lr_core::diskpart::output_indicates_error(output.succeeded(), &stdout, &stderr)
-        {
-            return Ok(());
-        }
-
-        log::warn!(
-            "[NATIVE INSTALL] DiskPart format failed, using typed format.com fallback: {} {}",
-            stdout.trim(),
-            stderr.trim()
-        );
-        let fallback = SystemCommandExecutor
-            .execute(&plan.fallback)
-            .map_err(|error| Self::error("start_format_fallback", error))?;
-        let fallback_stdout = crate::utils::encoding::gbk_to_utf8(fallback.stdout());
-        let fallback_stderr = crate::utils::encoding::gbk_to_utf8(fallback.stderr());
-        if native_install_compat::fallback_format_succeeded(
-            fallback.succeeded(),
-            &fallback_stdout,
-            &fallback_stderr,
-        ) {
-            Ok(())
-        } else {
-            Err(InstallBackendError::new(
-                "format_target",
-                format!(
-                    "DiskPart: {} {}; format.com: {} {}",
-                    stdout.trim(),
-                    stderr.trim(),
-                    fallback_stdout.trim(),
-                    fallback_stderr.trim()
-                ),
-            ))
-        }
+        .map_err(|error| Self::error("format_target", error))
     }
 
     fn format_plan_for_intent(
@@ -1563,15 +1530,30 @@ impl ProductionInstallBackend {
                 disk_number: partition.disk_number,
             })
             .collect::<Vec<_>>();
-        for (letter, script) in
-            native_install_compat::sibling_inactive_scripts(&self.target, &identities)
-        {
-            if let Err(error) = lr_core::diskpart::execute_script_checked(
-                &std::env::temp_dir(),
-                "lr-xp-deactivate",
-                "diskpart",
-                &script,
-            ) {
+        let inventory = super::quick_partition::get_physical_disks();
+        for letter in native_install_compat::sibling_inactive_letters(&self.target, &identities) {
+            let letter_char = letter
+                .chars()
+                .next()
+                .map(|value| value.to_ascii_uppercase());
+            let partition = inventory.iter().find_map(|disk| {
+                disk.partitions
+                    .iter()
+                    .find(|partition| {
+                        partition
+                            .drive_letter
+                            .map(|value| value.to_ascii_uppercase())
+                            == letter_char
+                    })
+                    .map(|partition| (disk.disk_number, partition.offset_bytes))
+            });
+            let result = partition
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve sibling partition {letter}:"))
+                .and_then(|(disk_number, offset)| {
+                    lr_core::windows_storage::set_mbr_active(disk_number, offset, false)
+                        .map_err(Into::into)
+                });
+            if let Err(error) = result {
                 // Preserve the old best-effort cleanup policy. The XP engine's
                 // own target activation remains authoritative.
                 log::warn!(
@@ -1582,48 +1564,31 @@ impl ProductionInstallBackend {
     }
 
     fn ensure_mbr_signature(&self, disk_number: u32) -> Result<(), InstallBackendError> {
-        let output = lr_core::diskpart::execute_script(
-            &std::env::temp_dir(),
-            "lr-signature-read",
-            "diskpart",
-            &native_install_compat::mbr_signature_read_script(disk_number),
-        )
-        .map_err(|error| Self::error("read_mbr_signature", error))?;
-        let stdout = crate::utils::encoding::gbk_to_utf8(output.stdout());
-        match native_install_compat::parse_mbr_signature(&stdout) {
-            MbrSignatureObservation::NonZero(signature) => {
-                log::info!("[NATIVE INSTALL] disk {disk_number} keeps MBR signature {signature}");
-                Ok(())
-            }
-            MbrSignatureObservation::NotMbrOrUnparseable => {
-                log::warn!(
-                    "[NATIVE INSTALL] disk {disk_number} has no unambiguous MBR signature; skipped"
+        match lr_core::windows_storage::mbr_signature(disk_number)
+            .map_err(|error| Self::error("read_mbr_signature", error))?
+        {
+            Some(signature) if signature != 0 => {
+                log::info!(
+                    "[NATIVE INSTALL] disk {disk_number} keeps MBR signature {signature:08X}"
                 );
                 Ok(())
             }
-            MbrSignatureObservation::Zero => {
+            None => {
+                log::warn!(
+                    "[NATIVE INSTALL] disk {disk_number} is not MBR; signature check skipped"
+                );
+                Ok(())
+            }
+            Some(0) => {
                 let entropy = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.subsec_nanos() ^ duration.as_secs() as u32)
                     .unwrap_or(0xA1B2_C3D4);
                 let signature = native_install_compat::replacement_mbr_signature(entropy);
-                let script =
-                    native_install_compat::mbr_signature_write_script(disk_number, signature)
-                        .ok_or_else(|| {
-                            InstallBackendError::new(
-                                "invalid_mbr_signature",
-                                "replacement ID was zero",
-                            )
-                        })?;
-                lr_core::diskpart::execute_script_checked(
-                    &std::env::temp_dir(),
-                    "lr-signature-write",
-                    "diskpart",
-                    &script,
-                )
-                .map(|_| ())
-                .map_err(|error| Self::error("write_mbr_signature", error))
+                lr_core::windows_storage::set_mbr_signature(disk_number, signature)
+                    .map_err(|error| Self::error("write_mbr_signature", error))
             }
+            Some(_) => unreachable!("the non-zero signature guard covers every other u32"),
         }
     }
 
@@ -1845,16 +1810,13 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                 }
                 InstallExecutionPhase::ResolveStableTarget => self.refresh_target(context),
                 InstallExecutionPhase::ResolveTargetAfterDiskpart => {
-                    self.refresh_target_after_diskpart(context)
+                    self.refresh_target_after_partition_scripts(context)
                 }
                 InstallExecutionPhase::RunDiskpartScripts => {
                     let directory = crate::utils::path::get_diskpart_scripts_dir();
-                    // Legacy semantics intentionally continue after an individual
-                    // script error, then fail closed if stable target resolution fails.
-                    if let Err(error) = lr_core::diskpart::run_scripts_in_dir(&directory) {
-                        log::warn!("[NATIVE INSTALL] DiskPart scripts reported errors: {error}");
-                    }
-                    Ok(())
+                    lr_core::diskpart::run_scripts_in_dir(&directory)
+                        .map(|_| ())
+                        .map_err(|error| Self::error("legacy_partition_scripts_disabled", error))
                 }
                 InstallExecutionPhase::FormatTarget => {
                     if !intent.options.format_partition {
@@ -2174,25 +2136,14 @@ mod tests {
     }
 
     #[test]
-    fn direct_format_stage_uses_custom_label_in_both_compat_attempts() {
+    fn direct_format_stage_validates_the_custom_label_for_winapi() {
         let mut value = intent(InstallMode::Direct);
         value.options.format_partition = true;
         value.options.advanced_options.custom_volume_label = true;
         value.options.advanced_options.volume_label = "Windows 11".into();
         let plan = ProductionInstallBackend::format_plan_for_intent("E:", &value).unwrap();
-        assert!(plan
-            .diskpart_script
-            .contains("label=\"Windows 11\" quick override"));
-        assert!(plan
-            .fallback
-            .arguments()
-            .iter()
-            .any(|argument| argument == std::ffi::OsStr::new("/V:Windows 11")));
-        assert!(plan
-            .fallback
-            .arguments()
-            .iter()
-            .any(|argument| argument == std::ffi::OsStr::new("/X")));
+        assert_eq!(plan.drive, "E:");
+        assert_eq!(plan.volume_label, "Windows 11");
     }
 
     #[cfg(feature = "non-elevated-tests")]

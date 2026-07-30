@@ -2,7 +2,7 @@
 //!
 //! The UI captures an immutable disk fingerprint together with a typed partition
 //! table and layouts. Production execution enumerates the disk again and refuses
-//! to call the legacy DiskPart boundary if any identity or layout field changed.
+//! to call the shared WinAPI storage boundary if any identity or layout field changed.
 
 use std::collections::HashSet;
 

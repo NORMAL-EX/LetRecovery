@@ -267,14 +267,17 @@ mod tests {
 
     #[test]
     fn typed_execution_distinguishes_command_start_failure() {
-        let error = execute_request(&StartFailureExecutor, &CommandRequest::new("diskpart.exe"))
-            .unwrap_err();
+        let error = execute_request(
+            &StartFailureExecutor,
+            &CommandRequest::new("missing-tool.exe"),
+        )
+        .unwrap_err();
 
         assert_eq!(
             error.kind,
             crate::operation::OperationErrorKind::CommandStart
         );
-        assert_eq!(error.code.as_deref(), Some("diskpart.exe"));
+        assert_eq!(error.code.as_deref(), Some("missing-tool.exe"));
         assert!(!error.retryable);
     }
 }

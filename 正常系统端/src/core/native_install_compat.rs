@@ -1,15 +1,14 @@
 //! Pure compatibility helpers extracted from the legacy direct-install UI.
 //!
-//! This module constructs unattended XML and typed mutation plans.  It never
-//! starts DiskPart/format, writes a disk signature, changes an active flag,
+//! This module constructs unattended XML and validates typed mutation plans. It never
+//! starts a storage utility, writes a disk signature, changes an active flag,
 //! injects a driver, or writes into an offline Windows directory.  Production
 //! execution remains behind the native install backend; development tests can
 //! therefore exercise every branch without touching the host.
 
 use std::path::{Path, PathBuf};
 
-use lr_core::command::CommandRequest;
-use lr_core::format_command::{system_format_executable, FormatCommandError, FormatCommandSpec};
+use lr_core::format_command::{FormatCommandError, FormatCommandSpec};
 use lr_core::offline_international::OfflineInternationalSettings;
 use lr_core::unattend_account::{
     render_builtin_administrator_unattend, BuiltInAdministratorOptions,
@@ -241,53 +240,9 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MbrSignatureObservation {
-    NonZero(String),
-    Zero,
-    NotMbrOrUnparseable,
-}
-
-/// Parses only an eight-hex ID on a line containing `ID`, preserving the old
-/// conservative rule that a GUID/GPT or unfamiliar localized result is skipped.
-pub fn parse_mbr_signature(output: &str) -> MbrSignatureObservation {
-    for line in output.lines() {
-        if !line.to_ascii_lowercase().contains("id") {
-            continue;
-        }
-        // GPT reports a GUID. Never mistake its leading eight-hex group for
-        // an MBR signature and issue `uniqueid disk id=<mbr-id>` against it.
-        if line.contains('{') || line.contains('}') {
-            continue;
-        }
-        if let Some(token) = line
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .find(|token| token.len() == 8 && token.chars().all(|c| c.is_ascii_hexdigit()))
-        {
-            let signature = token.to_ascii_uppercase();
-            return if signature == "00000000" {
-                MbrSignatureObservation::Zero
-            } else {
-                MbrSignatureObservation::NonZero(signature)
-            };
-        }
-    }
-    MbrSignatureObservation::NotMbrOrUnparseable
-}
-
-pub fn mbr_signature_read_script(disk_number: u32) -> String {
-    format!("select disk {disk_number}\r\nuniqueid disk\r\nexit\r\n")
-}
-
 /// Builds a non-zero replacement ID from injected entropy for deterministic tests.
 pub const fn replacement_mbr_signature(entropy: u32) -> u32 {
     entropy | 0x1000_0000
-}
-
-pub fn mbr_signature_write_script(disk_number: u32, signature: u32) -> Option<String> {
-    (signature != 0).then(|| {
-        format!("select disk {disk_number}\r\nuniqueid disk id={signature:08X}\r\nexit\r\n")
-    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -296,12 +251,12 @@ pub struct PartitionIdentity<'a> {
     pub disk_number: Option<u32>,
 }
 
-/// Creates best-effort `inactive` scripts for every other lettered partition
-/// on the target MBR disk. The caller logs individual failures and continues.
-pub fn sibling_inactive_scripts(
+/// Selects every other lettered partition on the target MBR disk for best-effort
+/// active-flag clearing through the shared WinAPI storage boundary.
+pub fn sibling_inactive_letters(
     target_letter: &str,
     partitions: &[PartitionIdentity<'_>],
-) -> Vec<(String, String)> {
+) -> Vec<String> {
     let target = normalize_letter(target_letter);
     let Some(target_disk) = partitions
         .iter()
@@ -317,12 +272,7 @@ pub fn sibling_inactive_scripts(
             (partition.disk_number == Some(target_disk)
                 && !letter.is_empty()
                 && !letter.eq_ignore_ascii_case(&target))
-            .then(|| {
-                (
-                    letter.clone(),
-                    format!("select volume {letter}\r\ninactive\r\nexit\r\n"),
-                )
-            })
+            .then_some(letter)
         })
         .collect()
 }
@@ -337,51 +287,25 @@ fn normalize_letter(value: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatCompatibilityPlan {
     pub drive: String,
-    pub diskpart_script: String,
-    pub fallback: CommandRequest,
+    pub volume_label: String,
 }
 
-/// Validates the drive/label once, then builds the DiskPart primary attempt and
-/// direct `format.com` fallback with arguments kept separate.
+/// Validates the drive and optional volume label before the WinAPI formatting call.
 pub fn build_format_plan(
     drive: &str,
     volume_label: Option<&str>,
 ) -> Result<FormatCompatibilityPlan, FormatCommandError> {
     let label = volume_label.filter(|label| !label.trim().is_empty());
-    let primary = FormatCommandSpec::new(drive, "NTFS", label)?;
-    let letter = primary.drive().trim_end_matches(':');
-    let diskpart_format = match primary.volume_label() {
-        Some(label) => format!("format fs=ntfs label=\"{label}\" quick override"),
-        None => "format fs=ntfs quick override".to_string(),
-    };
-    let diskpart_script = format!("select volume {letter}\r\n{diskpart_format}\r\nexit\r\n");
-
-    // The legacy fallback always supplies a label and forces dismount.
-    let fallback_label = label.unwrap_or("本地磁盘");
-    let fallback_spec = FormatCommandSpec::new(primary.drive(), "NTFS", Some(fallback_label))?
-        .with_force_dismount(true);
+    let validated = FormatCommandSpec::new(drive, "NTFS", label)?;
     Ok(FormatCompatibilityPlan {
-        drive: primary.drive().to_string(),
-        diskpart_script,
-        fallback: fallback_spec.command_request(system_format_executable()),
+        drive: validated.drive().to_string(),
+        volume_label: validated.volume_label().unwrap_or_default().to_string(),
     })
-}
-
-pub fn diskpart_format_succeeded(stdout: &str) -> bool {
-    let lower = stdout.to_ascii_lowercase();
-    stdout.contains("成功格式化") || lower.contains("successfully formatted")
-}
-
-/// Evaluates the fallback with the shared localized output policy.
-pub fn fallback_format_succeeded(exit_succeeded: bool, stdout: &str, stderr: &str) -> bool {
-    lr_core::format_command::output_indicates_success(stdout)
-        && !lr_core::format_command::output_indicates_error(exit_succeeded, stdout, stderr)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
 
     #[test]
     fn version_family_preserves_driver_matrix() {
@@ -505,23 +429,8 @@ mod tests {
 
     #[test]
     fn mbr_signature_is_changed_only_when_exactly_zero() {
-        assert_eq!(
-            parse_mbr_signature("Disk ID: 00000000"),
-            MbrSignatureObservation::Zero
-        );
-        assert_eq!(
-            parse_mbr_signature("磁盘 ID: A1b2c3d4"),
-            MbrSignatureObservation::NonZero("A1B2C3D4".to_string())
-        );
-        assert_eq!(
-            parse_mbr_signature("Disk ID: {01234567-89AB-CDEF}"),
-            MbrSignatureObservation::NotMbrOrUnparseable
-        );
         assert_eq!(replacement_mbr_signature(0), 0x1000_0000);
-        assert!(mbr_signature_write_script(2, 0).is_none());
-        assert!(mbr_signature_write_script(2, 0x1234_5678)
-            .unwrap()
-            .contains("id=12345678"));
+        assert_eq!(replacement_mbr_signature(0x0234_5678), 0x1234_5678);
     }
 
     #[test]
@@ -540,43 +449,14 @@ mod tests {
                 disk_number: Some(1),
             },
         ];
-        let scripts = sibling_inactive_scripts("W:", &partitions);
-        assert_eq!(scripts.len(), 1);
-        assert_eq!(scripts[0].0, "C");
-        assert!(scripts[0].1.contains("select volume C\r\ninactive"));
+        let letters = sibling_inactive_letters("W:", &partitions);
+        assert_eq!(letters, ["C"]);
     }
 
     #[test]
-    fn format_plan_preserves_diskpart_then_typed_fallback() {
+    fn format_plan_validates_the_typed_winapi_request() {
         let plan = build_format_plan("e:\\", Some("Windows 11")).unwrap();
         assert_eq!(plan.drive, "E:");
-        assert!(plan
-            .diskpart_script
-            .contains("format fs=ntfs label=\"Windows 11\" quick override"));
-        assert!(plan.fallback.program() == system_format_executable().as_os_str());
-        assert!(plan
-            .fallback
-            .arguments()
-            .iter()
-            .any(|argument| argument == OsStr::new("/V:Windows 11")));
-        assert!(plan
-            .fallback
-            .arguments()
-            .iter()
-            .any(|argument| argument == OsStr::new("/X")));
-    }
-
-    #[test]
-    fn format_success_requires_explicit_completion() {
-        assert!(diskpart_format_succeeded(
-            "DiskPart successfully formatted the volume."
-        ));
-        assert!(!diskpart_format_succeeded(" 50 percent completed"));
-        assert!(fallback_format_succeeded(true, "Format complete.", ""));
-        assert!(!fallback_format_succeeded(
-            false,
-            "Format complete.",
-            "I/O error"
-        ));
+        assert_eq!(plan.volume_label, "Windows 11");
     }
 }

@@ -50,24 +50,6 @@ fn classify_staging_drive_type(drive_type: u32) -> Option<StagingDriveKind> {
     }
 }
 
-/// 获取 diskpart 可执行文件路径
-/// 优先使用内置的 diskpart，如果不存在则使用系统的
-fn get_diskpart_path() -> String {
-    let builtin_diskpart = get_bin_dir().join("diskpart").join("diskpart.exe");
-    if builtin_diskpart.exists() {
-        log::info!("使用内置 diskpart: {}", builtin_diskpart.display());
-        builtin_diskpart.to_string_lossy().to_string()
-    } else {
-        log::debug!("使用系统 diskpart");
-        "diskpart.exe".to_string()
-    }
-}
-
-fn execute_diskpart_checked(program: &str, prefix: &str, script: &str) -> Result<String> {
-    lr_core::diskpart::execute_script_checked(&std::env::temp_dir(), prefix, program, script)
-        .map_err(Into::into)
-}
-
 /// 自动创建分区的标志文件名
 pub const AUTO_CREATED_PARTITION_MARKER: &str = "LetRecovery_AutoCreated.marker";
 
@@ -694,29 +676,62 @@ impl DiskManager {
         new_letter: &str,
         size_mb: u64,
     ) -> Result<String> {
-        let script_content = format!(
-            "select volume {}\nshrink desired={}\ncreate partition primary size={}\nformat fs=ntfs quick\nassign letter={}",
-            source_partition.chars().next().unwrap_or('C'),
-            size_mb,
-            size_mb,
-            new_letter.chars().next().unwrap_or('Y').to_ascii_lowercase()
+        let source = source_partition
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("源分区盘符为空"))?
+            .to_ascii_uppercase();
+        let target = new_letter
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("新分区盘符为空"))?
+            .to_ascii_uppercase();
+        let (disk_number, _) = Self::get_device_number(source);
+        let disk_number =
+            disk_number.ok_or_else(|| anyhow::anyhow!("无法确认源分区 {}: 所在磁盘", source))?;
+        let bytes = size_mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| anyhow::anyhow!("分区大小超出支持范围"))?;
+        lr_core::windows_storage::shrink_volume(source, bytes, bytes)?;
+        let created = lr_core::windows_storage::create_partition(
+            &lr_core::windows_storage::CreatePartitionRequest {
+                disk_number,
+                offset_bytes: 0,
+                size_bytes: bytes,
+                kind: lr_core::windows_storage::PartitionKind::BasicData,
+                file_system: Some(lr_core::windows_storage::FileSystem::Ntfs),
+                label: String::new(),
+                drive_letter: Some(target),
+                active: false,
+            },
         );
-
-        execute_diskpart_checked(
-            &get_diskpart_path(),
-            "lr-shrink-create-partition",
-            &script_content,
-        )
+        match created {
+            Ok(_) => Ok(format!("{target}:")),
+            Err(error) => {
+                let rollback = lr_core::windows_storage::extend_volume(source, disk_number, bytes);
+                Err(anyhow::anyhow!(
+                    "缩小源分区后创建新分区失败: {error}; 回滚扩容结果: {}",
+                    rollback
+                        .map(|_| "成功".to_string())
+                        .unwrap_or_else(|rollback_error| format!("失败: {rollback_error}"))
+                ))
+            }
+        }
     }
 
     /// 删除指定分区
     pub fn delete_partition(partition_letter: &str) -> Result<String> {
-        let script_content = format!(
-            "select volume {}\ndelete partition override",
-            partition_letter.chars().next().unwrap_or('Y')
-        );
-
-        execute_diskpart_checked(&get_diskpart_path(), "lr-delete-partition", &script_content)
+        let letter = partition_letter
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("分区盘符为空"))?
+            .to_ascii_uppercase();
+        let (disk_number, partition_number) = Self::get_device_number(letter);
+        let disk_number =
+            disk_number.ok_or_else(|| anyhow::anyhow!("无法确认分区 {}: 所在磁盘", letter))?;
+        let partition_number =
+            partition_number.ok_or_else(|| anyhow::anyhow!("无法确认分区 {}: 的分区号", letter))?;
+        super::quick_partition::delete_partition(disk_number, partition_number)
     }
 
     /// 检查指定分区是否包含有效的 Windows 系统
@@ -905,65 +920,7 @@ impl DiskManager {
 
     /// 查询指定分区可缩小的最大空间（MB）
     pub fn query_shrink_max(letter: char) -> Result<u64> {
-        let script_content = format!("select volume {}\nshrink querymax", letter);
-
-        // 首先尝试使用内置 diskpart，如果失败则使用系统 diskpart
-        let diskpart_path = get_diskpart_path();
-        let output = lr_core::diskpart::execute_script(
-            &std::env::temp_dir(),
-            "lr-query-shrink",
-            &diskpart_path,
-            &script_content,
-        )?;
-        let output_text = gbk_to_utf8(output.stdout());
-        let validation = lr_core::diskpart::validated_stdout(&output);
-
-        log::info!("[DISK] Shrink querymax 使用: {}", diskpart_path);
-        log::info!(
-            "[DISK] Shrink querymax stdout 长度: {} 字节",
-            output.stdout().len()
-        );
-        log::info!("[DISK] Shrink querymax 输出: {}", output_text);
-
-        // 内置副本输出异常或明确失败时，使用系统 DiskPart 重试一次。
-        let output_text =
-            if validation.is_err() || output_text.trim().is_empty() || output.stdout().len() < 50 {
-                if let Err(detail) = &validation {
-                    log::warn!("[DISK] 内置 diskpart 查询失败，尝试系统副本: {}", detail);
-                } else {
-                    log::warn!("[DISK] 内置 diskpart 输出异常，尝试使用系统 diskpart");
-                }
-
-                let sys_output = lr_core::diskpart::execute_script(
-                    &std::env::temp_dir(),
-                    "lr-query-shrink-system",
-                    "diskpart.exe",
-                    &script_content,
-                )?;
-                let sys_output_text = lr_core::diskpart::validated_stdout(&sys_output)
-                    .map_err(|detail| anyhow::anyhow!("DiskPart 查询可缩小空间失败: {detail}"))?;
-                log::info!(
-                    "[DISK] 系统 diskpart stdout 长度: {} 字节",
-                    sys_output.stdout().len()
-                );
-                log::info!("[DISK] 系统 diskpart 输出: {}", sys_output_text);
-
-                sys_output_text
-            } else {
-                validation
-                    .map_err(|detail| anyhow::anyhow!("DiskPart 查询可缩小空间失败: {detail}"))?
-            };
-
-        // 解析输出，查找可回收的最大空间
-        // 英文: "The maximum number of reclaimable bytes is: XXX MB"
-        // 中文: "可回收的最大字节数为:  XXX MB" 或 "最多可从此卷收回 XXX MB"
-
-        // 尝试多种模式匹配
-        let max_mb = Self::parse_shrink_max_output(&output_text)
-            .or_else(|| Self::parse_shrink_max_output_cn(&output_text))
-            .or_else(|| Self::parse_shrink_max_generic(&output_text))
-            .unwrap_or(0);
-
+        let max_mb = lr_core::windows_storage::query_max_reclaimable_bytes(letter)? / 1024 / 1024;
         log::info!("[DISK] 分区 {}: 可缩小的最大空间: {} MB", letter, max_mb);
         Ok(max_mb)
     }
@@ -1179,26 +1136,17 @@ impl DiskManager {
             new_letter
         );
 
-        // 使用 diskpart 执行操作
-        // 用刚刚复核的磁盘号和分区号重新建立焦点，不能依赖可能在扫描后变化的盘符。
-        // `minimum=desired` 保证 DiskPart 要么完整缩出所需空间，要么失败，不留下尺寸不足
-        // 但仍继续格式化发布的半成品分区。
-        let script_content = build_staging_shrink_script(
+        let result = Self::shrink_and_create_partition(
+            &source_letter.to_string(),
+            &new_letter.to_string(),
+            actual_size_mb,
+        )?;
+        log::info!(
+            "[DISK] WinAPI 已从磁盘 {} 分区 {} 创建暂存卷 {}",
             expected_disk_number,
             expected_partition_number,
-            actual_size_mb,
-            new_letter,
+            result
         );
-
-        log::info!("[DISK] Diskpart 脚本内容:\n{}", script_content);
-
-        let output_text = execute_diskpart_checked(
-            &get_diskpart_path(),
-            "lr-create-recovery-partition",
-            &script_content,
-        )?;
-
-        log::info!("[DISK] Diskpart 输出: {}", output_text);
 
         // 等待系统识别新分区
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1210,15 +1158,7 @@ impl DiskManager {
                 break;
             }
             if retry == 4 {
-                anyhow::bail!(
-                    "{}",
-                    tr!(
-                        "分区创建失败：新分区 {}: 不可访问。\n\
-                    Diskpart 输出: {}",
-                        new_letter,
-                        output_text
-                    )
-                );
+                anyhow::bail!("{}", tr!("分区创建失败：新分区 {}: 不可访问。", new_letter));
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
@@ -1277,14 +1217,8 @@ impl DiskManager {
 
         log::info!("[DISK] 准备删除自动创建的分区 {}:", letter);
 
-        let script_content = format!("select volume {}\ndelete partition override", letter);
-
-        let output_text = execute_diskpart_checked(
-            &get_diskpart_path(),
-            "lr-delete-recovery-partition",
-            &script_content,
-        )?;
-        log::info!("[DISK] Diskpart 删除输出: {}", output_text);
+        Self::delete_partition(&letter.to_string())?;
+        log::info!("[DISK] WinAPI 已删除自动创建的分区 {}:", letter);
 
         Ok(())
     }

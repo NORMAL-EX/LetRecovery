@@ -648,6 +648,17 @@ impl DialogShell {
         }
     }
 
+    /// Returns a shell command button so a tool can insert an additional command in the shared
+    /// bottom bar without guessing its translated width or DPI-scaled position.
+    pub fn command_button(&self, result: DialogResult) -> Option<HWND> {
+        let handles = self.state.handles.as_ref()?;
+        match result {
+            DialogResult::Primary => Some(handles.primary),
+            DialogResult::Secondary => handles.secondary,
+            DialogResult::Cancel => handles.cancel,
+        }
+    }
+
     pub unsafe fn set_selected_navigation_command(&mut self, command_id: u16) {
         self.state.selected_navigation_command = Some(command_id);
         if let Some(handles) = &self.state.handles {

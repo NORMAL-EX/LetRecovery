@@ -328,7 +328,6 @@ struct InstallControlSnapshot {
     repair_boot: bool,
     unattended_install: bool,
     auto_reboot: bool,
-    run_diskpart_scripts: bool,
     driver_index: isize,
     boot_mode_index: isize,
     pca_mode_index: isize,
@@ -340,7 +339,7 @@ impl InstallControlSnapshot {
         prefs.repair_boot = self.repair_boot;
         prefs.unattended_install = self.unattended_install;
         prefs.auto_reboot = self.auto_reboot;
-        prefs.run_diskpart_scripts = self.run_diskpart_scripts;
+        prefs.run_diskpart_scripts = false;
         prefs.driver_action = match self.driver_index {
             1 => crate::core::ui_state::DriverAction::SaveOnly,
             2 => crate::core::ui_state::DriverAction::None,
@@ -365,8 +364,6 @@ struct PcaTargetContext {
     boot_mode: crate::core::ui_state::BootModeSelection,
     partition_style: crate::core::disk::PartitionStyle,
     image_supports_pca: bool,
-    advanced_options_enabled: bool,
-    run_diskpart_scripts: bool,
 }
 
 fn pca_target_uses_uefi(
@@ -387,13 +384,78 @@ fn pca_target_probe_required(context: PcaTargetContext) -> bool {
         && context.image_supports_pca
 }
 
-fn pca_target_error_blocks(
-    context: PcaTargetContext,
-    firmware_available: bool,
-    target_error: bool,
-) -> bool {
+fn pca_target_error_blocks(target_error: bool) -> bool {
     target_error
-        && !(context.advanced_options_enabled && context.run_diskpart_scripts && firmware_available)
+}
+
+#[cfg(feature = "non-elevated-tests")]
+fn quick_partition_visual_fixture() -> Vec<crate::core::quick_partition::PhysicalDisk> {
+    use crate::core::disk::PartitionStyle;
+    use crate::core::quick_partition::{DiskPartitionInfo, PhysicalDisk};
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let Ok(windows_letter) = lr_core::windows_storage::current_windows_drive_letter() else {
+        return Vec::new();
+    };
+    let partitions = vec![
+        DiskPartitionInfo {
+            partition_number: 1,
+            size_bytes: 512 * MIB,
+            offset_bytes: MIB,
+            drive_letter: None,
+            label: "EFI".into(),
+            file_system: "FAT32".into(),
+            is_esp: true,
+            is_msr: false,
+            is_recovery: false,
+            partition_type: "EFI System".into(),
+            used_bytes: 96 * MIB,
+            free_bytes: 416 * MIB,
+            is_active: false,
+        },
+        DiskPartitionInfo {
+            partition_number: 2,
+            size_bytes: 240 * GIB,
+            offset_bytes: 513 * MIB,
+            drive_letter: Some(windows_letter),
+            label: "Windows".into(),
+            file_system: "NTFS".into(),
+            is_esp: false,
+            is_msr: false,
+            is_recovery: false,
+            partition_type: "Basic data".into(),
+            used_bytes: 126 * GIB,
+            free_bytes: 114 * GIB,
+            is_active: false,
+        },
+        DiskPartitionInfo {
+            partition_number: 3,
+            size_bytes: 500 * GIB,
+            offset_bytes: 240 * GIB + 513 * MIB,
+            drive_letter: Some('D'),
+            label: "Data".into(),
+            file_system: "NTFS".into(),
+            is_esp: false,
+            is_msr: false,
+            is_recovery: false,
+            partition_type: "Basic data".into(),
+            used_bytes: 310 * GIB,
+            free_bytes: 190 * GIB,
+            is_active: false,
+        },
+    ];
+    let size_bytes = 954 * GIB;
+    let allocated_bytes = partitions.iter().map(|item| item.size_bytes).sum::<u64>();
+    vec![PhysicalDisk {
+        disk_number: 0,
+        size_bytes,
+        model: "LetRecovery UI QA Disk".into(),
+        partition_style: PartitionStyle::GPT,
+        is_initialized: true,
+        partitions,
+        unallocated_bytes: size_bytes.saturating_sub(allocated_bytes),
+    }]
 }
 
 fn pca_target_result_is_current(
@@ -526,7 +588,7 @@ enum ToolWorkerMessage {
     QuickPartitionInventoryCompleted(
         Result<Vec<crate::core::quick_partition::PhysicalDisk>, String>,
     ),
-    QuickPartitionResizeCompleted(Result<String, String>),
+    QuickPartitionPendingCompleted(Result<String, String>),
     BitLockerManageInventoryCompleted(
         Result<Vec<crate::core::native_bitlocker_manage::BitLockerManageVolume>, String>,
     ),
@@ -1068,7 +1130,6 @@ mod layout_tests {
             repair_boot: true,
             unattended_install: true,
             auto_reboot: true,
-            run_diskpart_scripts: false,
             driver_index: 0,
             boot_mode_index: 0,
             pca_mode_index: 2,
@@ -1135,8 +1196,6 @@ mod layout_tests {
             boot_mode: BootModeSelection::Auto,
             partition_style: PartitionStyle::GPT,
             image_supports_pca: true,
-            advanced_options_enabled: false,
-            run_diskpart_scripts: false,
         };
         assert!(pca_target_probe_required(base));
         assert!(!pca_target_probe_required(PcaTargetContext {
@@ -1162,25 +1221,9 @@ mod layout_tests {
     }
 
     #[test]
-    fn diskpart_override_only_allows_a_missing_esp_when_firmware_is_known() {
-        let context = PcaTargetContext {
-            repair_boot: true,
-            boot_mode: BootModeSelection::UEFI,
-            partition_style: PartitionStyle::GPT,
-            image_supports_pca: true,
-            advanced_options_enabled: true,
-            run_diskpart_scripts: true,
-        };
-        assert!(pca_target_error_blocks(context, false, true));
-        assert!(!pca_target_error_blocks(context, true, true));
-        assert!(pca_target_error_blocks(
-            PcaTargetContext {
-                run_diskpart_scripts: false,
-                ..context
-            },
-            true,
-            true
-        ));
+    fn target_efi_detection_errors_always_fail_closed() {
+        assert!(pca_target_error_blocks(true));
+        assert!(!pca_target_error_blocks(false));
     }
 
     #[test]
@@ -1626,6 +1669,7 @@ struct NativeWindow {
     partition_refresh_generation: u64,
     partition_refresh_in_flight: bool,
     partition_refresh_requested: bool,
+    quick_partition_refresh_requested: bool,
     partition_refresh_error: Option<String>,
     partition_list_replacing: bool,
     install_selection_update_pending: bool,
@@ -1809,6 +1853,7 @@ impl NativeWindow {
             partition_refresh_generation: 0,
             partition_refresh_in_flight: false,
             partition_refresh_requested: false,
+            quick_partition_refresh_requested: false,
             partition_refresh_error: None,
             partition_list_replacing: false,
             install_selection_update_pending: false,
@@ -2255,12 +2300,7 @@ impl NativeWindow {
             BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
             ID_RUN_DISKPART,
         )?;
-        let _ = SendMessageW(
-            run_diskpart,
-            0x00F1,
-            WPARAM(usize::from(prefs.run_diskpart_scripts)),
-            LPARAM(0),
-        );
+        let _ = SendMessageW(run_diskpart, 0x00F1, WPARAM(0), LPARAM(0));
         let open_diskpart_dir = child(
             hwnd,
             w!("BUTTON"),
@@ -2511,8 +2551,6 @@ impl NativeWindow {
                 boot_mode: self.app_config.install_prefs.boot_mode,
                 partition_style: target.style,
                 image_supports_pca: self.selected_image_supports_pca(),
-                advanced_options_enabled: self.app_config.enable_advanced_options,
-                run_diskpart_scripts: self.app_config.install_prefs.run_diskpart_scripts,
             },
         ))
     }
@@ -2606,20 +2644,10 @@ impl NativeWindow {
             };
             set_text(handles.status, &text);
         } else if let Some(error) = self.pca_target_detection_error.as_ref() {
-            let diskpart_may_create_esp = self.pca_target_context().is_some_and(|(_, context)| {
-                !pca_target_error_blocks(context, self.pca_firmware.is_some(), true)
-            });
-            if diskpart_may_create_esp {
-                set_text(
-                    handles.status,
-                    &crate::tr!("当前未检测到同盘 ESP；Diskpart 脚本必须在安装前创建 ESP。"),
-                );
-            } else {
-                set_text(
-                    handles.status,
-                    &crate::tr!("目标系统所在磁盘没有可用的 ESP: {}", error),
-                );
-            }
+            set_text(
+                handles.status,
+                &crate::tr!("目标系统所在磁盘没有可用的 ESP: {}", error),
+            );
         } else if let Some(error) = self.pca_selection_error() {
             set_text(handles.status, &error);
         } else {
@@ -3978,15 +4006,16 @@ impl NativeWindow {
             },
         );
         let show_install_advanced = install_visible && self.app_config.enable_advanced_options;
-        for control in [h.run_diskpart, h.open_diskpart_dir, h.edit_boot_commands] {
-            let _ = ShowWindow(
-                control,
-                if show_install_advanced {
-                    SW_SHOW
-                } else {
-                    SW_HIDE
-                },
-            );
+        let _ = ShowWindow(
+            h.edit_boot_commands,
+            if show_install_advanced {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+        for control in [h.run_diskpart, h.open_diskpart_dir] {
+            let _ = ShowWindow(control, SW_HIDE);
         }
         let show_pe = install_visible && self.install_pe_selector_should_be_visible();
         let pe_command = if show_pe { SW_SHOW } else { SW_HIDE };
@@ -4064,7 +4093,6 @@ impl NativeWindow {
             repair_boot: checked(h.boot),
             unattended_install: checked(h.unattend),
             auto_reboot: checked(h.reboot),
-            run_diskpart_scripts: checked(h.run_diskpart),
             driver_index: SendMessageW(h.driver, 0x0147, WPARAM(0), LPARAM(0)).0,
             boot_mode_index: SendMessageW(h.boot_mode, 0x0147, WPARAM(0), LPARAM(0)).0,
             pca_mode_index: SendMessageW(h.pca_mode, 0x0147, WPARAM(0), LPARAM(0)).0,
@@ -4425,9 +4453,7 @@ impl NativeWindow {
             return None;
         }
         if let Some(error) = self.pca_target_detection_error.as_ref() {
-            let target_error_blocks = self.pca_target_context().is_none_or(|(_, context)| {
-                pca_target_error_blocks(context, self.pca_firmware.is_some(), true)
-            });
+            let target_error_blocks = pca_target_error_blocks(true);
             if target_error_blocks {
                 return Some(crate::tr!("目标系统所在磁盘没有可用的 ESP: {}", error));
             }
@@ -4968,13 +4994,14 @@ impl NativeWindow {
 
     unsafe fn schedule_partition_refresh(&mut self, hwnd: HWND) {
         self.partition_refresh_requested = true;
+        self.quick_partition_refresh_requested = self.quick_partition_dialog.is_some();
         self.partition_refresh_error = None;
         let _ = KillTimer(hwnd, PARTITION_REFRESH_TIMER_ID);
         if self.pca_target_detection_pending {
             // The read-only PCA probe temporarily assigns and removes an ESP drive letter. Those
-            // operations generate device-change broadcasts while DiskPart still owns the probe
-            // transaction. Defer the inventory scan until the probe has posted its terminal
-            // result so a transient snapshot cannot replace a previously stable target.
+            // operations generate device-change broadcasts while the storage probe transaction is
+            // still active. Defer the inventory scan until the probe has posted its terminal result
+            // so a transient snapshot cannot replace a previously stable target.
             return;
         }
         if self.page == Page::Install {
@@ -5021,6 +5048,19 @@ impl NativeWindow {
                 }
             }
         });
+        if self.quick_partition_refresh_requested {
+            self.quick_partition_refresh_requested = false;
+            let refresh = self
+                .quick_partition_dialog
+                .as_mut()
+                .is_some_and(|dialog| dialog.mark_inventory_changed());
+            if refresh {
+                if let Some(dialog) = &mut self.quick_partition_dialog {
+                    dialog.set_loading();
+                }
+                self.start_quick_partition_inventory();
+            }
+        }
     }
 
     unsafe fn finish_partition_refresh(&mut self, hwnd: HWND, message: PartitionRefreshMessage) {
@@ -5630,10 +5670,17 @@ impl NativeWindow {
                 .iter()
                 .filter_map(|partition| partition.letter.chars().next())
                 .collect();
-            let system_drive = std::env::var("SystemDrive")
-                .ok()
-                .and_then(|drive| drive.chars().next())
-                .unwrap_or('C');
+            let system_drive = match lr_core::windows_storage::current_windows_drive_letter() {
+                Ok(letter) => letter,
+                Err(error) => {
+                    let message = crate::tr!("无法识别当前运行的 Windows 分区：{}", error);
+                    log::error!("{message}");
+                    if let Some(page) = &self.tools_page {
+                        set_text(page.introduction, &message);
+                    }
+                    return;
+                }
+            };
             match NativeQuickPartitionDialog::create(
                 hwnd,
                 recommended_style,
@@ -5723,26 +5770,29 @@ impl NativeWindow {
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
             #[cfg(feature = "non-elevated-tests")]
-            let result = Err(crate::tr!("开发测试构建已禁用物理磁盘读取。"));
+            let result = if std::env::var_os("LETRECOVERY_UI_QUICK_PARTITION_FIXTURE").is_some() {
+                Ok(quick_partition_visual_fixture())
+            } else {
+                Err(crate::tr!("开发测试构建已禁用物理磁盘读取。"))
+            };
             #[cfg(not(feature = "non-elevated-tests"))]
             let result = Ok(crate::core::quick_partition::get_physical_disks());
             let _ = sender.send(ToolWorkerMessage::QuickPartitionInventoryCompleted(result));
         });
     }
 
-    fn start_quick_partition_resize(
+    fn start_quick_partition_pending(
         &self,
-        request: crate::core::native_quick_partition_dialog::ExistingPartitionResizeRequest,
+        operations: Vec<crate::core::native_quick_partition_dialog::PendingPartitionOperation>,
     ) {
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
             let result =
-                crate::core::native_quick_partition_dialog::execute_existing_partition_resize(
-                    &request,
+                crate::core::native_quick_partition_dialog::execute_pending_partition_operations(
+                    &operations,
                 )
-                .map(|outcome| outcome.message)
                 .map_err(|error| error.to_string());
-            let _ = sender.send(ToolWorkerMessage::QuickPartitionResizeCompleted(result));
+            let _ = sender.send(ToolWorkerMessage::QuickPartitionPendingCompleted(result));
         });
     }
 
@@ -6818,11 +6868,11 @@ impl NativeWindow {
                         dialog.show_modeless();
                     }
                 }
-                ToolWorkerMessage::QuickPartitionResizeCompleted(result) => {
+                ToolWorkerMessage::QuickPartitionPendingCompleted(result) => {
                     if let Some(page) = &self.tools_page {
                         set_text(
                             page.introduction,
-                            &result.unwrap_or_else(|error| crate::tr!("调整分区失败：{}", error)),
+                            &result.unwrap_or_else(|error| crate::tr!("分区操作失败：{}", error)),
                         );
                     }
                     self.start_quick_partition_inventory();
@@ -7472,6 +7522,7 @@ impl NativeWindow {
                 };
                 match DialogShell::create(hwnd, spec) {
                     Ok(mut confirmation) => {
+                        confirmation.fit_content_height(0);
                         if confirmation.show_modal() == DialogResult::Primary {
                             self.batch_format_dialog = None;
                             self.start_confirmed_tool(MutatingToolKind::BatchFormat, &execution);
@@ -7954,36 +8005,88 @@ impl NativeWindow {
                     Err(error) => log::error!("创建一键分区二次确认对话框失败: {error}"),
                 }
             }
-            Some(QuickPartitionDialogIntent::RequestExistingResize(request)) => {
+            Some(QuickPartitionDialogIntent::RequestFormatOptions(target)) => {
+                if let Some(options) = prompt_partition_format_options(hwnd, &target.current_label)
+                {
+                    if let Some(dialog) = &mut self.quick_partition_dialog {
+                        dialog.stage_format(target, options);
+                        dialog.show_modeless();
+                    }
+                } else if let Some(dialog) = &mut self.quick_partition_dialog {
+                    dialog.show_modeless();
+                }
+            }
+            Some(QuickPartitionDialogIntent::ApplyPending(operations)) => {
                 let spec = DialogSpec {
-                    window_title: crate::tr!("确认调整分区大小"),
-                    title: crate::tr!("确认调整分区大小"),
+                    window_title: crate::tr!("确认分区操作"),
+                    title: crate::tr!("确认分区操作"),
                     description: crate::tr!(
-                        "将把 {}: 从 {} MB 调整为 {} MB。\n\n执行前会重新读取并复核物理磁盘和分区状态。",
-                        request.drive_letter,
-                        request.current_size_mb,
-                        request.new_size_mb
+                        "将应用 {} 项暂存的分区修改。\n\n执行前会重新读取磁盘身份和分区布局，每一步完成后都会复核结果。此操作可能导致数据丢失。",
+                        operations.len()
                     ),
                     width: 620,
-                    height: 310,
+                    height: 260,
                     buttons: DialogButtons {
-                        primary: crate::tr!("确认调整"),
+                        primary: crate::tr!("确认执行"),
                         secondary: None,
                         cancel: Some(crate::tr!("返回检查")),
                     },
                 };
                 match DialogShell::create(hwnd, spec) {
                     Ok(mut confirmation) => {
+                        confirmation.fit_content_height(0);
                         if confirmation.show_modal() == DialogResult::Primary {
                             if let Some(dialog) = &mut self.quick_partition_dialog {
-                                dialog.set_loading();
+                                dialog.finish_pending_apply();
                             }
-                            self.start_quick_partition_resize(request);
+                            self.start_quick_partition_pending(operations);
                         } else if let Some(dialog) = &mut self.quick_partition_dialog {
                             dialog.show_modeless();
                         }
                     }
-                    Err(error) => log::error!("创建分区调整二次确认对话框失败: {error}"),
+                    Err(error) => log::error!("创建分区操作二次确认对话框失败: {error}"),
+                }
+            }
+            Some(QuickPartitionDialogIntent::CloseWithPending { apply_allowed }) => {
+                let spec = DialogSpec {
+                    window_title: crate::tr!("保存分区修改"),
+                    title: crate::tr!("存在未应用的修改"),
+                    description: crate::tr!("关闭前是否应用已暂存的分区修改？"),
+                    width: 560,
+                    height: 240,
+                    buttons: DialogButtons {
+                        primary: crate::tr!("应用"),
+                        secondary: Some(crate::tr!("放弃修改")),
+                        cancel: Some(crate::tr!("取消")),
+                    },
+                };
+                match DialogShell::create(hwnd, spec) {
+                    Ok(mut confirmation) => {
+                        confirmation.fit_content_height(0);
+                        confirmation.set_primary_enabled(apply_allowed);
+                        match confirmation.show_modal() {
+                            DialogResult::Primary => {
+                                let operations = self
+                                    .quick_partition_dialog
+                                    .as_ref()
+                                    .map(|dialog| dialog.pending_operations())
+                                    .unwrap_or_default();
+                                if !operations.is_empty() {
+                                    if let Some(dialog) = &mut self.quick_partition_dialog {
+                                        dialog.finish_pending_apply();
+                                    }
+                                    self.start_quick_partition_pending(operations);
+                                }
+                            }
+                            DialogResult::Secondary => self.quick_partition_dialog = None,
+                            DialogResult::Cancel => {
+                                if let Some(dialog) = &mut self.quick_partition_dialog {
+                                    dialog.show_modeless();
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => log::error!("创建未应用修改确认对话框失败: {error}"),
                 }
             }
             None => {}
@@ -10139,6 +10242,133 @@ unsafe fn get_text(hwnd: HWND) -> String {
     let mut buffer = vec![0u16; length + 1];
     let copied = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut buffer);
     String::from_utf16_lossy(&buffer[..copied.max(0) as usize])
+}
+
+unsafe fn prompt_partition_format_options(
+    owner: HWND,
+    current_label: &str,
+) -> Option<lr_core::windows_storage::FormatOptions> {
+    let mut dialog = DialogShell::create(
+        owner,
+        DialogSpec {
+            window_title: crate::tr!("格式化分区"),
+            title: crate::tr!("格式化选项"),
+            description: crate::tr!("选择文件系统、卷标、分配单元大小和格式化方式。"),
+            width: 520,
+            height: 320,
+            buttons: DialogButtons {
+                primary: crate::tr!("保存修改"),
+                secondary: None,
+                cancel: Some(crate::tr!("取消")),
+            },
+        },
+    )
+    .ok()?;
+    let parent = dialog.content();
+    let fs_label = child(parent, w!("STATIC"), &crate::tr!("文件系统:"), 0, 0).ok()?;
+    let fs = child(
+        parent,
+        w!("COMBOBOX"),
+        "",
+        CBS_DROPDOWNLIST | WS_TABSTOP.0 as i32,
+        64_900,
+    )
+    .ok()?;
+    let volume_label = child(parent, w!("STATIC"), &crate::tr!("卷标:"), 0, 0).ok()?;
+    let volume = child(
+        parent,
+        w!("EDIT"),
+        current_label,
+        ES_AUTOHSCROLL | WS_TABSTOP.0 as i32,
+        64_901,
+    )
+    .ok()?;
+    let unit_label = child(parent, w!("STATIC"), &crate::tr!("分配单元大小:"), 0, 0).ok()?;
+    let unit = child(
+        parent,
+        w!("COMBOBOX"),
+        "",
+        CBS_DROPDOWNLIST | WS_TABSTOP.0 as i32,
+        64_902,
+    )
+    .ok()?;
+    let quick = child(
+        parent,
+        w!("BUTTON"),
+        &crate::tr!("执行快速格式化"),
+        BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
+        64_903,
+    )
+    .ok()?;
+    for text in ["NTFS", "FAT32", "exFAT"] {
+        let value = wide(text);
+        let _ = SendMessageW(fs, 0x0143, WPARAM(0), LPARAM(value.as_ptr() as isize));
+    }
+    let _ = SendMessageW(fs, 0x014E, WPARAM(0), LPARAM(0));
+    for text in [
+        crate::tr!("默认"),
+        "4096".into(),
+        "8192".into(),
+        "16384".into(),
+        "32768".into(),
+        "65536".into(),
+    ] {
+        let value = wide(&text);
+        let _ = SendMessageW(unit, 0x0143, WPARAM(0), LPARAM(value.as_ptr() as isize));
+    }
+    let _ = SendMessageW(unit, 0x014E, WPARAM(0), LPARAM(0));
+    let _ = SendMessageW(quick, 0x00F1, WPARAM(1), LPARAM(0));
+
+    let dpi = GetDpiForWindow(dialog.hwnd()).max(96);
+    let metrics = LayoutMetrics::for_dpi(dpi);
+    let mut rect = RECT::default();
+    let _ = GetClientRect(parent, &mut rect);
+    let width = (rect.right - rect.left).max(1);
+    let label_width = 120 * dpi as i32 / 96;
+    let field_x = label_width + metrics.control_gap;
+    let field_width = (width - field_x).max(1);
+    let mut y = 0;
+    for (label, control) in [(fs_label, fs), (volume_label, volume), (unit_label, unit)] {
+        let _ = MoveWindow(label, 0, y, label_width, metrics.field_height, true);
+        let _ = MoveWindow(
+            control,
+            field_x,
+            y,
+            field_width,
+            if control == volume {
+                metrics.field_height
+            } else {
+                160 * dpi as i32 / 96
+            },
+            true,
+        );
+        y += metrics.field_height + metrics.control_gap;
+    }
+    let _ = MoveWindow(quick, field_x, y, field_width, metrics.button_height, true);
+    y += metrics.button_height;
+    dialog.fit_content_height((y * 96 / dpi as i32).max(0));
+    if dialog.show_modal() != DialogResult::Primary {
+        return None;
+    }
+    let file_system = match SendMessageW(fs, 0x0147, WPARAM(0), LPARAM(0)).0 {
+        1 => lr_core::windows_storage::FileSystem::Fat32,
+        2 => lr_core::windows_storage::FileSystem::ExFat,
+        _ => lr_core::windows_storage::FileSystem::Ntfs,
+    };
+    let allocation_unit_size = match SendMessageW(unit, 0x0147, WPARAM(0), LPARAM(0)).0 {
+        1 => 4096,
+        2 => 8192,
+        3 => 16384,
+        4 => 32768,
+        5 => 65536,
+        _ => 0,
+    };
+    Some(lr_core::windows_storage::FormatOptions {
+        file_system,
+        label: get_text(volume),
+        allocation_unit_size,
+        quick: SendMessageW(quick, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1,
+    })
 }
 
 fn install_phase_label(

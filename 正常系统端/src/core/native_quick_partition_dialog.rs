@@ -7,7 +7,8 @@
 
 use super::disk::PartitionStyle;
 use super::native_quick_partition::{
-    validate_request, DiskFingerprint, QuickPartitionError, QuickPartitionRequest,
+    validate_request, DiskFingerprint, DiskPartitionFingerprint, QuickPartitionError,
+    QuickPartitionRequest,
 };
 use super::quick_partition::{
     get_unallocated_space_after_partition_with_disk, DiskPartitionInfo, PartitionLayout,
@@ -24,6 +25,472 @@ pub struct ExistingPartitionResizeRequest {
     pub current_size_mb: u64,
     pub new_size_mb: u64,
     pub used_size_mb: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartitionManagementAction {
+    Delete {
+        partition: DiskPartitionFingerprint,
+    },
+    Format {
+        partition: DiskPartitionFingerprint,
+        options: lr_core::windows_storage::FormatOptions,
+    },
+    AssignDriveLetter {
+        partition: DiskPartitionFingerprint,
+        drive_letter: char,
+    },
+    RemoveDriveLetter {
+        partition: DiskPartitionFingerprint,
+    },
+    SetMbrActive {
+        partition: DiskPartitionFingerprint,
+        active: bool,
+    },
+    CreateNtfs {
+        offset_bytes: u64,
+        size_bytes: u64,
+        drive_letter: char,
+        initialize_style: Option<PartitionStyle>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartitionManagementRequest {
+    pub disk: DiskFingerprint,
+    pub action: PartitionManagementAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PendingPartitionOperation {
+    Resize(ExistingPartitionResizeRequest),
+    Manage(PartitionManagementRequest),
+}
+
+pub fn execute_pending_partition_operations(
+    operations: &[PendingPartitionOperation],
+) -> Result<String, ExistingPartitionResizeError> {
+    if operations.is_empty() {
+        return Err(ExistingPartitionResizeError::InvalidRequest(
+            "no pending partition operations".into(),
+        ));
+    }
+    #[cfg(feature = "non-elevated-tests")]
+    {
+        let _ = operations;
+        Err(ExistingPartitionResizeError::DevelopmentBuildDenied)
+    }
+    #[cfg(not(feature = "non-elevated-tests"))]
+    {
+        execute_pending_partition_operations_production(operations)
+    }
+}
+
+#[cfg(not(feature = "non-elevated-tests"))]
+fn execute_pending_partition_operations_production(
+    operations: &[PendingPartitionOperation],
+) -> Result<String, ExistingPartitionResizeError> {
+    let expected_disk = match &operations[0] {
+        PendingPartitionOperation::Resize(request) => &request.disk,
+        PendingPartitionOperation::Manage(request) => &request.disk,
+    };
+    if operations.iter().any(|operation| {
+        let disk = match operation {
+            PendingPartitionOperation::Resize(request) => &request.disk,
+            PendingPartitionOperation::Manage(request) => &request.disk,
+        };
+        disk != expected_disk
+    }) {
+        return Err(ExistingPartitionResizeError::InvalidRequest(
+            "all pending operations must target the same unchanged disk".into(),
+        ));
+    }
+    let initial = super::quick_partition::get_physical_disks();
+    let disk = initial
+        .iter()
+        .find(|disk| disk.disk_number == expected_disk.disk_number)
+        .ok_or(ExistingPartitionResizeError::DiskMissing(
+            expected_disk.disk_number,
+        ))?;
+    if DiskFingerprint::from(disk) != *expected_disk {
+        return Err(ExistingPartitionResizeError::DiskChanged);
+    }
+
+    let mut messages = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let inventory = super::quick_partition::get_physical_disks();
+        let disk = inventory
+            .iter()
+            .find(|disk| disk.disk_number == expected_disk.disk_number)
+            .ok_or(ExistingPartitionResizeError::DiskMissing(
+                expected_disk.disk_number,
+            ))?;
+        match operation {
+            PendingPartitionOperation::Resize(original) => {
+                let partition = disk
+                    .partitions
+                    .iter()
+                    .find(|partition| partition.partition_number == original.partition_number)
+                    .ok_or(ExistingPartitionResizeError::PartitionMissing(
+                        original.partition_number,
+                    ))?;
+                let request = ExistingPartitionResizeRequest {
+                    disk: DiskFingerprint::from(disk),
+                    partition_number: partition.partition_number,
+                    drive_letter: partition
+                        .drive_letter
+                        .ok_or(ExistingPartitionResizeError::PartitionChanged)?,
+                    current_size_mb: bytes_to_mib(partition.size_bytes),
+                    new_size_mb: original.new_size_mb,
+                    used_size_mb: bytes_to_mib(partition.used_bytes),
+                };
+                messages.push(execute_existing_partition_resize(&request)?.message);
+            }
+            PendingPartitionOperation::Manage(original) => {
+                let action = rebase_management_action(&original.action, disk)?;
+                let request = PartitionManagementRequest {
+                    disk: DiskFingerprint::from(disk),
+                    action,
+                };
+                messages.push(execute_partition_management(&request)?);
+            }
+        }
+    }
+    Ok(messages.join("；"))
+}
+
+#[cfg(not(feature = "non-elevated-tests"))]
+fn rebase_management_action(
+    action: &PartitionManagementAction,
+    disk: &PhysicalDisk,
+) -> Result<PartitionManagementAction, ExistingPartitionResizeError> {
+    let current = |fingerprint: &DiskPartitionFingerprint| {
+        disk.partitions
+            .iter()
+            .find(|partition| partition.offset_bytes == fingerprint.offset_bytes)
+            .map(DiskPartitionFingerprint::from)
+            .ok_or(ExistingPartitionResizeError::PartitionChanged)
+    };
+    Ok(match action {
+        PartitionManagementAction::Delete { partition } => PartitionManagementAction::Delete {
+            partition: current(partition)?,
+        },
+        PartitionManagementAction::Format { partition, options } => {
+            PartitionManagementAction::Format {
+                partition: current(partition)?,
+                options: options.clone(),
+            }
+        }
+        PartitionManagementAction::AssignDriveLetter {
+            partition,
+            drive_letter,
+        } => PartitionManagementAction::AssignDriveLetter {
+            partition: current(partition)?,
+            drive_letter: *drive_letter,
+        },
+        PartitionManagementAction::RemoveDriveLetter { partition } => {
+            PartitionManagementAction::RemoveDriveLetter {
+                partition: current(partition)?,
+            }
+        }
+        PartitionManagementAction::SetMbrActive { partition, active } => {
+            PartitionManagementAction::SetMbrActive {
+                partition: current(partition)?,
+                active: *active,
+            }
+        }
+        PartitionManagementAction::CreateNtfs {
+            offset_bytes,
+            size_bytes,
+            drive_letter,
+            initialize_style,
+        } => PartitionManagementAction::CreateNtfs {
+            offset_bytes: *offset_bytes,
+            size_bytes: *size_bytes,
+            drive_letter: *drive_letter,
+            initialize_style: *initialize_style,
+        },
+    })
+}
+
+pub fn execute_partition_management(
+    request: &PartitionManagementRequest,
+) -> Result<String, ExistingPartitionResizeError> {
+    #[cfg(feature = "non-elevated-tests")]
+    {
+        let _ = request;
+        Err(ExistingPartitionResizeError::DevelopmentBuildDenied)
+    }
+    #[cfg(not(feature = "non-elevated-tests"))]
+    {
+        execute_partition_management_production(request)
+    }
+}
+
+#[cfg(not(feature = "non-elevated-tests"))]
+fn execute_partition_management_production(
+    request: &PartitionManagementRequest,
+) -> Result<String, ExistingPartitionResizeError> {
+    let before = super::quick_partition::get_physical_disks();
+    let disk = before
+        .iter()
+        .find(|disk| disk.disk_number == request.disk.disk_number)
+        .ok_or(ExistingPartitionResizeError::DiskMissing(
+            request.disk.disk_number,
+        ))?;
+    if DiskFingerprint::from(disk) != request.disk {
+        return Err(ExistingPartitionResizeError::DiskChanged);
+    }
+    let running = lr_core::windows_storage::volume_identity(
+        lr_core::windows_storage::current_windows_drive_letter().map_err(|error| {
+            ExistingPartitionResizeError::Inventory(format!(
+                "cannot identify the running Windows volume: {error}"
+            ))
+        })?,
+    )
+    .map_err(|error| ExistingPartitionResizeError::Inventory(error.to_string()))?;
+    let operation_on_partition = |fingerprint: &DiskPartitionFingerprint| {
+        disk.partitions
+            .iter()
+            .find(|partition| DiskPartitionFingerprint::from(*partition) == *fingerprint)
+            .ok_or(ExistingPartitionResizeError::PartitionChanged)
+    };
+    let disk_number = disk.disk_number;
+    let result = match &request.action {
+        PartitionManagementAction::Delete { partition } => {
+            let partition = operation_on_partition(partition)?;
+            reject_protected_management_target(disk_number, partition, running, true)?;
+            lr_core::windows_storage::delete_partition(disk_number, partition.offset_bytes, true)
+                .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            crate::tr!("分区已删除")
+        }
+        PartitionManagementAction::Format { partition, options } => {
+            let partition = operation_on_partition(partition)?;
+            reject_protected_management_target(disk_number, partition, running, true)?;
+            if partition.is_esp || partition.is_msr || partition.is_recovery {
+                return Err(ExistingPartitionResizeError::InvalidRequest(
+                    "special partitions cannot be formatted from this tool".into(),
+                ));
+            }
+            let letter = partition.drive_letter.ok_or_else(|| {
+                ExistingPartitionResizeError::InvalidRequest(
+                    "partition needs a drive letter before formatting".into(),
+                )
+            })?;
+            lr_core::windows_storage::format_drive_with_options(letter, options)
+                .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            crate::tr!("分区已格式化为 {}", options.file_system.name())
+        }
+        PartitionManagementAction::AssignDriveLetter {
+            partition,
+            drive_letter,
+        } => {
+            let partition = operation_on_partition(partition)?;
+            reject_protected_management_target(disk_number, partition, running, false)?;
+            if partition.drive_letter.is_some() {
+                return Err(ExistingPartitionResizeError::InvalidRequest(
+                    "partition already has a drive letter".into(),
+                ));
+            }
+            lr_core::windows_storage::assign_partition_drive_letter(
+                disk_number,
+                partition.offset_bytes,
+                *drive_letter,
+            )
+            .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            crate::tr!("已分配盘符 {}:", drive_letter)
+        }
+        PartitionManagementAction::RemoveDriveLetter { partition } => {
+            let partition = operation_on_partition(partition)?;
+            reject_protected_management_target(disk_number, partition, running, true)?;
+            let letter = partition.drive_letter.ok_or_else(|| {
+                ExistingPartitionResizeError::InvalidRequest("partition has no drive letter".into())
+            })?;
+            lr_core::windows_storage::remove_drive_letter(letter)
+                .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            crate::tr!("已移除盘符 {}:", letter)
+        }
+        PartitionManagementAction::SetMbrActive { partition, active } => {
+            let partition = operation_on_partition(partition)?;
+            reject_protected_management_target(disk_number, partition, running, false)?;
+            if disk.partition_style != PartitionStyle::MBR {
+                return Err(ExistingPartitionResizeError::InvalidRequest(
+                    "active flags are available only on MBR disks".into(),
+                ));
+            }
+            lr_core::windows_storage::set_mbr_active(disk_number, partition.offset_bytes, *active)
+                .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            if *active {
+                crate::tr!("已设为活动分区")
+            } else {
+                crate::tr!("已取消活动分区")
+            }
+        }
+        PartitionManagementAction::CreateNtfs {
+            offset_bytes,
+            size_bytes,
+            drive_letter,
+            initialize_style,
+        } => {
+            if *size_bytes < 1024 * 1024
+                || offset_bytes % (1024 * 1024) != 0
+                || size_bytes % (1024 * 1024) != 0
+            {
+                return Err(ExistingPartitionResizeError::InvalidRequest(
+                    "unallocated extent is not 1 MiB aligned".into(),
+                ));
+            }
+            let end = offset_bytes.checked_add(*size_bytes).ok_or_else(|| {
+                ExistingPartitionResizeError::InvalidRequest("unallocated extent overflows".into())
+            })?;
+            if end > disk.size_bytes
+                || disk.partitions.iter().any(|partition| {
+                    let partition_end = partition.offset_bytes.saturating_add(partition.size_bytes);
+                    *offset_bytes < partition_end && end > partition.offset_bytes
+                })
+            {
+                return Err(ExistingPartitionResizeError::InvalidRequest(
+                    "requested extent is no longer unallocated".into(),
+                ));
+            }
+            if let Some(style) = initialize_style {
+                if disk.is_initialized || !disk.partitions.is_empty() {
+                    return Err(ExistingPartitionResizeError::InvalidRequest(
+                        "only an empty, uninitialized disk can be initialized".into(),
+                    ));
+                }
+                let style = match style {
+                    PartitionStyle::GPT => lr_core::windows_storage::DiskStyle::Gpt,
+                    PartitionStyle::MBR => lr_core::windows_storage::DiskStyle::Mbr,
+                    PartitionStyle::Unknown => {
+                        return Err(ExistingPartitionResizeError::InvalidRequest(
+                            "initialization style must be GPT or MBR".into(),
+                        ));
+                    }
+                };
+                lr_core::windows_storage::clean_and_initialize(disk_number, style)
+                    .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            } else if !disk.is_initialized {
+                return Err(ExistingPartitionResizeError::InvalidRequest(
+                    "an uninitialized disk requires an explicit GPT or MBR choice".into(),
+                ));
+            }
+            lr_core::windows_storage::create_partition(
+                &lr_core::windows_storage::CreatePartitionRequest {
+                    disk_number,
+                    offset_bytes: *offset_bytes,
+                    size_bytes: *size_bytes,
+                    kind: lr_core::windows_storage::PartitionKind::BasicData,
+                    file_system: Some(lr_core::windows_storage::FileSystem::Ntfs),
+                    label: crate::tr!("新加卷"),
+                    drive_letter: Some(*drive_letter),
+                    active: false,
+                },
+            )
+            .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            crate::tr!("已创建分区 {}:", drive_letter)
+        }
+    };
+    verify_partition_management(request)?;
+    Ok(result)
+}
+
+#[cfg(not(feature = "non-elevated-tests"))]
+fn reject_protected_management_target(
+    disk_number: u32,
+    partition: &DiskPartitionInfo,
+    running: lr_core::windows_storage::VolumeIdentity,
+    protect_running_disk: bool,
+) -> Result<(), ExistingPartitionResizeError> {
+    if disk_number == running.disk_number
+        && (protect_running_disk || partition.offset_bytes == running.offset_bytes)
+    {
+        return Err(ExistingPartitionResizeError::InvalidRequest(
+            "the running Windows volume or its disk is protected".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "non-elevated-tests"))]
+fn verify_partition_management(
+    request: &PartitionManagementRequest,
+) -> Result<(), ExistingPartitionResizeError> {
+    let after = super::quick_partition::get_physical_disks();
+    let disk = after
+        .iter()
+        .find(|disk| disk.disk_number == request.disk.disk_number)
+        .ok_or(ExistingPartitionResizeError::DiskMissing(
+            request.disk.disk_number,
+        ))?;
+    let valid = match &request.action {
+        PartitionManagementAction::Delete { partition } => !disk
+            .partitions
+            .iter()
+            .any(|current| current.offset_bytes == partition.offset_bytes),
+        PartitionManagementAction::Format { partition, options } => disk
+            .partitions
+            .iter()
+            .find(|current| current.offset_bytes == partition.offset_bytes)
+            .is_some_and(|current| {
+                current
+                    .file_system
+                    .eq_ignore_ascii_case(options.file_system.name())
+                    && current.label == options.label
+            }),
+        PartitionManagementAction::AssignDriveLetter {
+            partition,
+            drive_letter,
+        } => disk
+            .partitions
+            .iter()
+            .find(|current| current.offset_bytes == partition.offset_bytes)
+            .is_some_and(|current| {
+                current
+                    .drive_letter
+                    .is_some_and(|letter| letter.eq_ignore_ascii_case(drive_letter))
+            }),
+        PartitionManagementAction::RemoveDriveLetter { partition } => disk
+            .partitions
+            .iter()
+            .find(|current| current.offset_bytes == partition.offset_bytes)
+            .is_some_and(|current| current.drive_letter.is_none()),
+        PartitionManagementAction::SetMbrActive { partition, active } => disk
+            .partitions
+            .iter()
+            .find(|current| current.offset_bytes == partition.offset_bytes)
+            .is_some_and(|current| current.is_active == *active),
+        PartitionManagementAction::CreateNtfs {
+            offset_bytes,
+            size_bytes,
+            drive_letter,
+            initialize_style: _,
+        } => disk
+            .partitions
+            .iter()
+            .find(|current| current.offset_bytes == *offset_bytes)
+            .is_some_and(|current| {
+                current.size_bytes == *size_bytes
+                    && current.file_system.eq_ignore_ascii_case("NTFS")
+                    && current
+                        .drive_letter
+                        .is_some_and(|letter| letter.eq_ignore_ascii_case(drive_letter))
+            }),
+    };
+    let style_valid = match &request.action {
+        PartitionManagementAction::CreateNtfs {
+            initialize_style: Some(expected),
+            ..
+        } => disk.partition_style == *expected,
+        _ => true,
+    };
+    if valid && style_valid {
+        Ok(())
+    } else {
+        Err(ExistingPartitionResizeError::Execution(
+            "post-operation partition inventory does not match the requested state".into(),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,7 +582,7 @@ pub(crate) fn execute_existing_partition_resize_with_backends(
 }
 
 /// Production wrapper. Development builds return before constructing an inventory or runner, so
-/// tests and UI visual regression runs cannot reach host disk enumeration or DiskPart.
+/// tests and UI visual regression runs cannot reach host disk enumeration or storage writes.
 pub fn execute_existing_partition_resize(
     request: &ExistingPartitionResizeRequest,
 ) -> Result<ExistingPartitionResizeOutcome, ExistingPartitionResizeError> {
@@ -145,10 +612,12 @@ pub fn execute_existing_partition_resize(
                 )
             }
         }
-        let system_drive = std::env::var("SystemDrive")
-            .ok()
-            .and_then(|drive| drive.chars().next())
-            .unwrap_or('C');
+        let system_drive =
+            lr_core::windows_storage::current_windows_drive_letter().map_err(|error| {
+                ExistingPartitionResizeError::Inventory(format!(
+                    "cannot identify the running Windows volume: {error}"
+                ))
+            })?;
         execute_existing_partition_resize_with_backends(
             request,
             system_drive,
@@ -428,6 +897,36 @@ impl QuickPartitionDialogState {
         };
         validate_request(&request).map_err(localize_plan_error)?;
         Ok(request)
+    }
+
+    pub fn available_drive_letters(&self) -> Vec<char> {
+        let used = self.used_letters_for_selected_disk();
+        ('C'..='Z')
+            .filter(|letter| !used.contains(letter))
+            .collect()
+    }
+
+    pub fn running_windows_drive(&self) -> char {
+        self.system_drive
+    }
+
+    pub fn selected_disk_unallocated_gb(&self) -> f64 {
+        self.selected_disk()
+            .map_or(0.0, |disk| self.unallocated_gb(disk))
+    }
+
+    pub fn selected_disk_has_esp(&self) -> bool {
+        self.selected_disk()
+            .is_some_and(|disk| disk.partitions.iter().any(|partition| partition.is_esp))
+            || self.planned.iter().any(|layout| layout.is_esp)
+    }
+
+    pub fn existing_resize_request_mb(
+        &self,
+        index: usize,
+        new_size_mb: u64,
+    ) -> Result<ExistingPartitionResizeRequest, String> {
+        self.existing_resize_request(index, new_size_mb as f64 / 1024.0)
     }
 
     fn existing_resize_request(
@@ -891,6 +1390,17 @@ mod tests {
         #[cfg(feature = "non-elevated-tests")]
         assert_eq!(
             execute_existing_partition_resize(&resize_request()),
+            Err(ExistingPartitionResizeError::DevelopmentBuildDenied)
+        );
+    }
+
+    #[test]
+    fn non_elevated_pending_batch_is_denied_before_any_disk_io() {
+        #[cfg(feature = "non-elevated-tests")]
+        assert_eq!(
+            execute_pending_partition_operations(&[PendingPartitionOperation::Resize(
+                resize_request()
+            )]),
             Err(ExistingPartitionResizeError::DevelopmentBuildDenied)
         );
     }

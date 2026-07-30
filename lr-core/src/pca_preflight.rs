@@ -1,7 +1,7 @@
 //! Pre-format compatibility checks for PCA2011/PCA2023 UEFI boot files.
 //!
 //! The checks in this module are deliberately read-only. They inspect the
-//! selected WIM image before DiskPart or formatting can alter the target disk.
+//! selected WIM image before partitioning or formatting can alter the target disk.
 
 use std::fmt;
 use std::fs;

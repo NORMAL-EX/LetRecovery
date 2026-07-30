@@ -1,8 +1,8 @@
 //! 一键分区核心模块
 //!
-//! 提供磁盘分区的底层操作功能，使用 diskpart 和 Windows API 实现
+//! 提供磁盘分区的底层操作功能，所有查询和写入均使用文档化 Windows API。
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::path::Path;
 
 #[cfg(windows)]
@@ -11,8 +11,10 @@ use windows::{
     Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
     Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
     Win32::System::Ioctl::{
-        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, PARTITION_STYLE_GPT,
-        PARTITION_STYLE_MBR, PARTITION_STYLE_RAW,
+        PropertyStandardQuery, StorageDeviceProperty, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+        IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_STYLE_GPT,
+        PARTITION_STYLE_MBR, PARTITION_STYLE_RAW, STORAGE_DEVICE_DESCRIPTOR,
+        STORAGE_PROPERTY_QUERY,
     },
     Win32::System::IO::DeviceIoControl,
 };
@@ -24,21 +26,12 @@ use windows::{
 const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x00560000;
 
 use crate::tr;
-use crate::utils::encoding::gbk_to_utf8;
-use crate::utils::path::get_bin_dir;
 
 use super::disk::PartitionStyle;
 use super::system_info::BootMode;
 
-/// 获取 diskpart 可执行文件路径
-fn get_diskpart_path() -> String {
-    let builtin_diskpart = get_bin_dir().join("diskpart").join("diskpart.exe");
-    if builtin_diskpart.exists() {
-        builtin_diskpart.to_string_lossy().to_string()
-    } else {
-        "diskpart.exe".to_string()
-    }
-}
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
 
 /// 物理磁盘信息
 #[derive(Debug, Clone)]
@@ -750,52 +743,73 @@ fn get_volume_info(letter: char) -> (String, String, u64, u64) {
 /// 获取磁盘型号
 #[cfg(windows)]
 fn get_disk_model(disk_number: u32) -> Option<String> {
-    use crate::utils::cmd::create_command;
-
-    // 使用 PowerShell 获取磁盘型号
-    let output = create_command("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "Get-Disk -Number {} | Select-Object -ExpandProperty FriendlyName",
-                disk_number
-            ),
-        ])
-        .output()
+    unsafe {
+        let path = format!(r"\\.\PhysicalDrive{disk_number}");
+        let wide = path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let handle = CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            Default::default(),
+            None,
+        )
         .ok()?;
-
-    if output.status.success() {
-        let model = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !model.is_empty() {
-            return Some(model);
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
         }
-    }
-
-    // 备选：使用 WMIC
-    let output = create_command("wmic")
-        .args([
-            "diskdrive",
-            "where",
-            &format!("Index={}", disk_number),
-            "get",
-            "Model",
-            "/format:list",
-        ])
-        .output()
-        .ok()?;
-
-    let text = gbk_to_utf8(&output.stdout);
-    for line in text.lines() {
-        if line.starts_with("Model=") {
-            let model = line.trim_start_matches("Model=").trim().to_string();
-            if !model.is_empty() {
-                return Some(model);
+        let query = STORAGE_PROPERTY_QUERY {
+            PropertyId: StorageDeviceProperty,
+            QueryType: PropertyStandardQuery,
+            AdditionalParameters: [0],
+        };
+        // u64 storage gives the descriptor its required native alignment.
+        let mut storage = vec![0_u64; 512];
+        let mut returned = 0_u32;
+        let result = DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some((&query as *const STORAGE_PROPERTY_QUERY).cast()),
+            std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            Some(storage.as_mut_ptr().cast()),
+            (storage.len() * std::mem::size_of::<u64>()) as u32,
+            Some(&mut returned),
+            None,
+        );
+        let _ = CloseHandle(handle);
+        if result.is_err() || returned < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() as u32 {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), returned as usize);
+        let descriptor = &*bytes.as_ptr().cast::<STORAGE_DEVICE_DESCRIPTOR>();
+        let vendor = descriptor_string(bytes, descriptor.VendorIdOffset);
+        let product = descriptor_string(bytes, descriptor.ProductIdOffset);
+        let model = match (vendor, product) {
+            (Some(vendor), Some(product)) if !product.starts_with(&vendor) => {
+                format!("{vendor} {product}")
             }
-        }
+            (_, Some(product)) => product,
+            (Some(vendor), None) => vendor,
+            (None, None) => return None,
+        };
+        (!model.is_empty()).then_some(model)
     }
+}
 
-    None
+fn descriptor_string(buffer: &[u8], offset: u32) -> Option<String> {
+    let offset = usize::try_from(offset).ok()?;
+    if offset == 0 || offset >= buffer.len() {
+        return None;
+    }
+    let end = buffer[offset..].iter().position(|byte| *byte == 0)?;
+    let value = String::from_utf8_lossy(&buffer[offset..offset + end])
+        .trim()
+        .to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 /// 执行一键分区操作
@@ -840,141 +854,187 @@ pub(crate) fn execute_quick_partition_validated(
     partition_style: PartitionStyle,
     layouts: &[PartitionLayout],
 ) -> QuickPartitionResult {
-    // 构建 diskpart 脚本
-    let mut script = String::new();
-
-    // 选择磁盘
-    script.push_str(&format!("select disk {}\n", disk_number));
-
-    // 清除磁盘（删除所有分区）
-    script.push_str("clean\n");
-
-    // 转换分区表类型
-    match partition_style {
-        PartitionStyle::GPT => {
-            script.push_str("convert gpt\n");
-        }
-        PartitionStyle::MBR => {
-            script.push_str("convert mbr\n");
-        }
-        _ => {
-            return QuickPartitionResult {
-                success: false,
-                message: tr!("无效的分区表类型"),
-                created_partitions: Vec::new(),
-            };
-        }
+    let style = match storage_style(partition_style) {
+        Ok(style) => style,
+        Err(error) => return quick_partition_failure(error),
+    };
+    if layouts.is_empty() {
+        return quick_partition_failure(anyhow!("分区方案不能为空"));
+    }
+    if let Err(error) = lr_core::windows_storage::clean_and_initialize(disk_number, style) {
+        return quick_partition_failure(anyhow!("清除并初始化磁盘失败: {error}"));
     }
 
+    let mut expected = Vec::with_capacity(layouts.len());
     let mut created_partitions = Vec::new();
-
-    // 创建分区
+    let mut assigned_letters = get_used_drive_letters();
     for (i, layout) in layouts.iter().enumerate() {
         let is_last = i == layouts.len() - 1;
-
-        if layout.is_esp {
-            // 创建 ESP 分区
-            let size_mb = (layout.size_gb * 1024.0) as u64;
-            script.push_str(&format!("create partition efi size={}\n", size_mb));
-            script.push_str("format fs=fat32 quick label=\"EFI\"\n");
-            created_partitions.push("ESP".to_string());
+        let file_system = match storage_file_system(&layout.file_system) {
+            Ok(value) => value,
+            Err(error) => return quick_partition_failure(error),
+        };
+        let size_bytes = if is_last {
+            0
         } else {
-            // 创建普通分区
-            if is_last {
-                // 最后一个分区使用剩余空间
-                script.push_str("create partition primary\n");
-            } else {
-                let size_mb = (layout.size_gb * 1024.0) as u64;
-                script.push_str(&format!("create partition primary size={}\n", size_mb));
+            match gib_to_bytes(layout.size_gb) {
+                Ok(value) => value,
+                Err(error) => return quick_partition_failure(error),
             }
-
-            // 格式化
-            let label = if layout.label.is_empty() {
-                "新加卷".to_string()
+        };
+        let label = if layout.is_esp {
+            "EFI".to_string()
+        } else if layout.label.is_empty() {
+            tr!("新加卷")
+        } else {
+            layout.label.clone()
+        };
+        let drive_letter = if layout.is_esp {
+            None
+        } else if let Some(letter) = layout.drive_letter {
+            Some(letter.to_ascii_uppercase())
+        } else {
+            get_next_available_drive_letter(&assigned_letters)
+        };
+        if let Some(letter) = drive_letter {
+            assigned_letters.push(letter);
+        }
+        let request = lr_core::windows_storage::CreatePartitionRequest {
+            disk_number,
+            offset_bytes: 0,
+            size_bytes,
+            kind: if layout.is_esp {
+                lr_core::windows_storage::PartitionKind::EfiSystem
             } else {
-                layout.label.clone()
-            };
-            let fs = if layout.file_system.is_empty() {
-                "NTFS"
-            } else {
-                &layout.file_system
-            };
-            script.push_str(&format!("format fs={} quick label=\"{}\"\n", fs, label));
-
-            // 分配盘符
-            if let Some(letter) = layout.drive_letter {
-                script.push_str(&format!("assign letter={}\n", letter));
-                created_partitions.push(format!("{}:", letter));
-            } else {
-                script.push_str("assign\n");
-                created_partitions.push(tr!("分区 {}", i + 1));
+                lr_core::windows_storage::PartitionKind::BasicData
+            },
+            file_system: Some(file_system),
+            label,
+            drive_letter,
+            active: false,
+        };
+        match lr_core::windows_storage::create_partition(&request) {
+            Ok(created) => {
+                expected.push(created);
+                created_partitions.push(
+                    drive_letter
+                        .map(|letter| format!("{letter}:"))
+                        .unwrap_or_else(|| {
+                            if layout.is_esp {
+                                "ESP".to_string()
+                            } else {
+                                tr!("分区 {}", i + 1)
+                            }
+                        }),
+                );
+            }
+            Err(error) => {
+                return quick_partition_failure(anyhow!(
+                    "创建第 {} 个分区失败；磁盘当前可能处于部分完成状态，请刷新后检查: {}",
+                    i + 1,
+                    error
+                ));
             }
         }
     }
 
-    // 执行脚本
-    match execute_diskpart_script(&script) {
-        Ok(output) => {
-            // 检查输出是否包含错误
-            let output_lower = output.to_lowercase();
-            if output_lower.contains("错误")
-                || output_lower.contains("error")
-                || output_lower.contains("失败")
-                || output_lower.contains("failed")
-            {
-                QuickPartitionResult {
-                    success: false,
-                    message: tr!("分区操作失败: {}", output),
-                    created_partitions: Vec::new(),
-                }
-            } else {
-                QuickPartitionResult {
-                    success: true,
-                    message: tr!("分区操作完成"),
-                    created_partitions,
-                }
-            }
+    let Some(current) = get_physical_disks()
+        .into_iter()
+        .find(|disk| disk.disk_number == disk_number)
+    else {
+        return quick_partition_failure(anyhow!("操作后无法重新读取目标磁盘"));
+    };
+    if current.partition_style != partition_style {
+        return quick_partition_failure(anyhow!("操作后的分区表类型与请求不一致"));
+    }
+    for created in &expected {
+        let verified = current.partitions.iter().any(|partition| {
+            partition.offset_bytes == created.offset_bytes
+                && partition.size_bytes == created.size_bytes
+        });
+        if !verified {
+            return quick_partition_failure(anyhow!(
+                "操作后核验失败：偏移 {}、大小 {} 字节的分区不存在",
+                created.offset_bytes,
+                created.size_bytes
+            ));
         }
-        Err(e) => QuickPartitionResult {
-            success: false,
-            message: tr!("执行 diskpart 失败: {}", e),
-            created_partitions: Vec::new(),
-        },
+    }
+    QuickPartitionResult {
+        success: true,
+        message: tr!("分区操作完成"),
+        created_partitions,
     }
 }
 
-/// 执行 diskpart 脚本
-fn execute_diskpart_script(script: &str) -> Result<String> {
-    let temp_dir = std::env::temp_dir();
+fn quick_partition_failure(error: anyhow::Error) -> QuickPartitionResult {
+    log::error!("一键分区失败: {error:#}");
+    QuickPartitionResult {
+        success: false,
+        message: tr!("分区操作失败: {}", error),
+        created_partitions: Vec::new(),
+    }
+}
 
-    log::debug!("Diskpart 脚本内容:\n{}", script);
+fn storage_style(style: PartitionStyle) -> Result<lr_core::windows_storage::DiskStyle> {
+    match style {
+        PartitionStyle::GPT => Ok(lr_core::windows_storage::DiskStyle::Gpt),
+        PartitionStyle::MBR => Ok(lr_core::windows_storage::DiskStyle::Mbr),
+        _ => Err(anyhow!("无效的分区表类型")),
+    }
+}
 
-    let output = lr_core::diskpart::execute_script(
-        &temp_dir,
-        "lr-quick-partition",
-        get_diskpart_path(),
-        script,
-    )?;
-    let output_text = lr_core::diskpart::validated_stdout(&output)
-        .map_err(|detail| anyhow::anyhow!("DiskPart 脚本执行失败: {detail}"))?;
+fn storage_file_system(value: &str) -> Result<lr_core::windows_storage::FileSystem> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("NTFS") {
+        Ok(lr_core::windows_storage::FileSystem::Ntfs)
+    } else if value.eq_ignore_ascii_case("FAT32") {
+        Ok(lr_core::windows_storage::FileSystem::Fat32)
+    } else if value.eq_ignore_ascii_case("EXFAT") {
+        Ok(lr_core::windows_storage::FileSystem::ExFat)
+    } else {
+        Err(anyhow!("不支持的文件系统: {value}"))
+    }
+}
 
-    log::info!("Diskpart 输出: {}", output_text);
-
-    Ok(output_text)
+fn gib_to_bytes(size_gb: f64) -> Result<u64> {
+    if !size_gb.is_finite() || size_gb <= 0.0 {
+        return Err(anyhow!("分区大小必须是大于 0 的有限数值"));
+    }
+    let bytes = size_gb * GIB as f64;
+    if bytes > u64::MAX as f64 {
+        return Err(anyhow!("分区大小超出支持范围"));
+    }
+    Ok((bytes.round() as u64 / MIB) * MIB)
 }
 
 /// 检查磁盘是否可以安全分区（没有系统盘）
 pub fn can_safely_partition(disk: &PhysicalDisk) -> (bool, String) {
-    // 检查是否包含系统盘
-    let system_drive = std::env::var("SystemDrive")
-        .unwrap_or_else(|_| "C:".to_string())
-        .chars()
-        .next()
-        .unwrap_or('C');
+    let system_drive = match lr_core::windows_storage::current_windows_drive_letter() {
+        Ok(letter) => letter,
+        Err(error) => {
+            return (
+                false,
+                tr!("无法确认当前运行的系统卷，已阻止磁盘写入: {}", error),
+            );
+        }
+    };
+    if get_volume_offset(system_drive)
+        .is_some_and(|(disk_number, _)| disk_number == disk.disk_number)
+    {
+        return (
+            false,
+            tr!(
+                "磁盘 {} 包含当前运行的系统卷 {}:，无法进行一键分区",
+                disk.disk_number,
+                system_drive
+            ),
+        );
+    }
 
     for partition in &disk.partitions {
         if let Some(letter) = partition.drive_letter {
-            if letter == system_drive {
+            if letter.eq_ignore_ascii_case(&system_drive) {
                 return (
                     false,
                     tr!(
@@ -1048,60 +1108,88 @@ pub fn create_single_partition(
     drive_letter: Option<char>,
     label: &str,
 ) -> Result<String> {
-    let mut script = String::new();
-
-    script.push_str(&format!("select disk {}\n", disk_number));
-
-    if size_mb > 0 {
-        script.push_str(&format!("create partition primary size={}\n", size_mb));
-    } else {
-        // 使用所有剩余空间
-        script.push_str("create partition primary\n");
-    }
-
     let vol_label = if label.is_empty() { "OS" } else { label };
-    script.push_str(&format!("format fs=ntfs quick label=\"{}\"\n", vol_label));
-
-    if let Some(letter) = drive_letter {
-        script.push_str(&format!("assign letter={}\n", letter));
-    } else {
-        script.push_str("assign\n");
-    }
-
-    execute_diskpart_script(&script)
+    let letter = drive_letter
+        .map(|letter| letter.to_ascii_uppercase())
+        .or_else(|| get_next_available_drive_letter(&get_used_drive_letters()))
+        .ok_or_else(|| anyhow!("没有可用盘符"))?;
+    let created = lr_core::windows_storage::create_partition(
+        &lr_core::windows_storage::CreatePartitionRequest {
+            disk_number,
+            offset_bytes: 0,
+            size_bytes: size_mb.saturating_mul(MIB),
+            kind: lr_core::windows_storage::PartitionKind::BasicData,
+            file_system: Some(lr_core::windows_storage::FileSystem::Ntfs),
+            label: vol_label.to_string(),
+            drive_letter: Some(letter),
+            active: false,
+        },
+    )?;
+    verify_created_partition(
+        disk_number,
+        created.offset_bytes,
+        created.size_bytes,
+        Some(letter),
+    )?;
+    Ok(format!("{letter}:"))
 }
 
 /// 创建 ESP 分区
 pub fn create_esp_partition(disk_number: u32, size_mb: u64) -> Result<String> {
-    let mut script = String::new();
-
-    script.push_str(&format!("select disk {}\n", disk_number));
-    script.push_str(&format!("create partition efi size={}\n", size_mb));
-    script.push_str("format fs=fat32 quick label=\"EFI\"\n");
-
-    execute_diskpart_script(&script)
+    let created = lr_core::windows_storage::create_partition(
+        &lr_core::windows_storage::CreatePartitionRequest {
+            disk_number,
+            offset_bytes: 0,
+            size_bytes: size_mb.saturating_mul(MIB),
+            kind: lr_core::windows_storage::PartitionKind::EfiSystem,
+            file_system: Some(lr_core::windows_storage::FileSystem::Fat32),
+            label: "EFI".to_string(),
+            drive_letter: None,
+            active: false,
+        },
+    )?;
+    verify_created_partition(disk_number, created.offset_bytes, created.size_bytes, None)?;
+    Ok("ESP".to_string())
 }
 
 /// 删除指定分区
 pub fn delete_partition(disk_number: u32, partition_number: u32) -> Result<String> {
-    let mut script = String::new();
-
-    script.push_str(&format!("select disk {}\n", disk_number));
-    script.push_str(&format!("select partition {}\n", partition_number));
-    script.push_str("delete partition override\n");
-
-    execute_diskpart_script(&script)
+    let partition = current_partition(disk_number, partition_number)?;
+    reject_running_system_partition(disk_number, &partition)?;
+    lr_core::windows_storage::delete_partition(disk_number, partition.offset_bytes, true)?;
+    let still_exists = get_physical_disks()
+        .into_iter()
+        .find(|disk| disk.disk_number == disk_number)
+        .is_some_and(|disk| {
+            disk.partitions
+                .iter()
+                .any(|value| value.offset_bytes == partition.offset_bytes)
+        });
+    if still_exists {
+        return Err(anyhow!("删除操作返回成功，但目标分区仍然存在"));
+    }
+    Ok(tr!("分区已删除"))
 }
 
 /// 缩小分区
 pub fn shrink_partition(disk_number: u32, partition_number: u32, shrink_mb: u64) -> Result<String> {
-    let mut script = String::new();
-
-    script.push_str(&format!("select disk {}\n", disk_number));
-    script.push_str(&format!("select partition {}\n", partition_number));
-    script.push_str(&format!("shrink desired={}\n", shrink_mb));
-
-    execute_diskpart_script(&script)
+    let partition = current_partition(disk_number, partition_number)?;
+    reject_running_system_partition(disk_number, &partition)?;
+    let letter = partition
+        .drive_letter
+        .ok_or_else(|| anyhow!("目标分区没有盘符，无法安全缩小文件系统"))?;
+    let requested = shrink_mb
+        .checked_mul(MIB)
+        .ok_or_else(|| anyhow!("缩小大小超出支持范围"))?;
+    let reclaimed = lr_core::windows_storage::shrink_volume(letter, requested, requested)?;
+    verify_partition_delta(
+        disk_number,
+        partition.offset_bytes,
+        partition.size_bytes,
+        reclaimed,
+        false,
+    )?;
+    Ok(tr!("分区已成功缩小 {} MB", reclaimed / MIB))
 }
 
 /// 扩展分区
@@ -1110,19 +1198,128 @@ pub fn extend_partition(
     partition_number: u32,
     extend_mb: Option<u64>,
 ) -> Result<String> {
-    let mut script = String::new();
-
-    script.push_str(&format!("select disk {}\n", disk_number));
-    script.push_str(&format!("select partition {}\n", partition_number));
-
-    if let Some(size) = extend_mb {
-        script.push_str(&format!("extend size={}\n", size));
-    } else {
-        // 使用所有可用空间
-        script.push_str("extend\n");
+    let disk = get_physical_disks()
+        .into_iter()
+        .find(|disk| disk.disk_number == disk_number)
+        .ok_or_else(|| anyhow!("磁盘 {} 不存在", disk_number))?;
+    let partition = disk
+        .partitions
+        .iter()
+        .find(|partition| partition.partition_number == partition_number)
+        .cloned()
+        .ok_or_else(|| anyhow!("分区 {} 不存在", partition_number))?;
+    reject_running_system_partition(disk_number, &partition)?;
+    let letter = partition
+        .drive_letter
+        .ok_or_else(|| anyhow!("目标分区没有盘符，无法安全扩展文件系统"))?;
+    let available_mb = get_unallocated_space_after_partition_with_disk(&disk, partition_number);
+    let requested_mb = extend_mb.unwrap_or(available_mb);
+    if requested_mb == 0 || requested_mb > available_mb {
+        return Err(anyhow!(
+            "请求扩展 {} MB，但分区后方只有 {} MB 连续未分配空间",
+            requested_mb,
+            available_mb
+        ));
     }
+    let requested = requested_mb
+        .checked_mul(MIB)
+        .ok_or_else(|| anyhow!("扩展大小超出支持范围"))?;
+    lr_core::windows_storage::extend_volume(letter, disk_number, requested)?;
+    verify_partition_delta(
+        disk_number,
+        partition.offset_bytes,
+        partition.size_bytes,
+        requested,
+        true,
+    )?;
+    Ok(tr!("分区已成功扩展 {} MB", requested_mb))
+}
 
-    execute_diskpart_script(&script)
+fn current_partition(disk_number: u32, partition_number: u32) -> Result<DiskPartitionInfo> {
+    get_physical_disks()
+        .into_iter()
+        .find(|disk| disk.disk_number == disk_number)
+        .ok_or_else(|| anyhow!("磁盘 {} 不存在", disk_number))?
+        .partitions
+        .into_iter()
+        .find(|partition| partition.partition_number == partition_number)
+        .ok_or_else(|| anyhow!("分区 {} 不存在", partition_number))
+}
+
+fn reject_running_system_partition(disk_number: u32, partition: &DiskPartitionInfo) -> Result<()> {
+    let system_letter = lr_core::windows_storage::current_windows_drive_letter()
+        .map_err(|error| anyhow!("无法确认当前运行的系统卷，已阻止写入: {error}"))?;
+    let Some((system_disk, system_offset)) = get_volume_offset(system_letter) else {
+        return Err(anyhow!("无法解析当前运行系统卷的物理磁盘，已阻止写入"));
+    };
+    if system_disk == disk_number && system_offset == partition.offset_bytes {
+        return Err(anyhow!("不能修改当前运行的系统分区 {system_letter}:"));
+    }
+    Ok(())
+}
+
+fn verify_created_partition(
+    disk_number: u32,
+    offset_bytes: u64,
+    size_bytes: u64,
+    drive_letter: Option<char>,
+) -> Result<()> {
+    let partition = get_physical_disks()
+        .into_iter()
+        .find(|disk| disk.disk_number == disk_number)
+        .and_then(|disk| {
+            disk.partitions
+                .into_iter()
+                .find(|partition| partition.offset_bytes == offset_bytes)
+        })
+        .ok_or_else(|| anyhow!("创建操作返回成功，但重新枚举时找不到新分区"))?;
+    if partition.size_bytes != size_bytes {
+        return Err(anyhow!(
+            "新分区大小核验失败：期望 {} 字节，实际 {} 字节",
+            size_bytes,
+            partition.size_bytes
+        ));
+    }
+    if drive_letter.map(|letter| letter.to_ascii_uppercase())
+        != partition
+            .drive_letter
+            .map(|letter| letter.to_ascii_uppercase())
+    {
+        return Err(anyhow!("新分区盘符核验失败"));
+    }
+    Ok(())
+}
+
+fn verify_partition_delta(
+    disk_number: u32,
+    offset_bytes: u64,
+    previous_size: u64,
+    delta: u64,
+    extending: bool,
+) -> Result<()> {
+    let current = get_physical_disks()
+        .into_iter()
+        .find(|disk| disk.disk_number == disk_number)
+        .and_then(|disk| {
+            disk.partitions
+                .into_iter()
+                .find(|partition| partition.offset_bytes == offset_bytes)
+        })
+        .ok_or_else(|| anyhow!("调整操作后无法重新定位目标分区"))?;
+    let expected = if extending {
+        previous_size.checked_add(delta)
+    } else {
+        previous_size.checked_sub(delta)
+    }
+    .ok_or_else(|| anyhow!("分区大小计算溢出"))?;
+    if current.size_bytes != expected {
+        return Err(anyhow!(
+            "调整操作返回成功，但分区大小核验失败：期望 {} 字节，实际 {} 字节",
+            expected,
+            current.size_bytes
+        ));
+    }
+    Ok(())
 }
 
 /// 调整已有分区大小的结果
@@ -1195,160 +1392,60 @@ pub fn resize_existing_partition(
         };
     }
 
-    // 判断是缩小还是扩大
-    if new_size_mb < current_size_mb {
-        // 缩小分区
-        let shrink_amount_mb = current_size_mb - new_size_mb;
-
-        log::info!("缩小分区 {} MB", shrink_amount_mb);
-
-        // 使用 diskpart shrink 命令
-        // 注意：diskpart 的 shrink 命令需要通过卷来选择，而不是分区
-        let result = if let Some(letter) = drive_letter {
-            // 通过盘符选择卷进行缩小
-            let mut script = String::new();
-            script.push_str(&format!("select volume {}\n", letter));
-            script.push_str(&format!(
-                "shrink desired={} minimum={}\n",
-                shrink_amount_mb, shrink_amount_mb
-            ));
-            execute_diskpart_script(&script)
-        } else {
-            // 没有盘符的分区使用分区编号
-            let mut script = String::new();
-            script.push_str(&format!("select disk {}\n", disk_number));
-            script.push_str(&format!("select partition {}\n", partition_number));
-            script.push_str(&format!(
-                "shrink desired={} minimum={}\n",
-                shrink_amount_mb, shrink_amount_mb
-            ));
-            execute_diskpart_script(&script)
+    let Some(letter) = drive_letter else {
+        return ResizePartitionResult {
+            success: false,
+            message: tr!("分区没有盘符，无法安全调整文件系统大小"),
+            new_size_mb: current_size_mb,
         };
-
-        match result {
-            Ok(output) => {
-                let output_lower = output.to_lowercase();
-                if output_lower.contains("错误")
-                    || output_lower.contains("error")
-                    || output_lower.contains("失败")
-                    || output_lower.contains("failed")
-                    || output_lower.contains("没有足够")
-                    || output_lower.contains("insufficient")
-                {
-                    ResizePartitionResult {
-                        success: false,
-                        message: tr!("缩小分区失败: {}", output.trim()),
-                        new_size_mb: current_size_mb,
-                    }
-                } else {
-                    ResizePartitionResult {
-                        success: true,
-                        message: tr!("分区已成功缩小 {} MB", shrink_amount_mb),
-                        new_size_mb,
-                    }
-                }
-            }
-            Err(e) => ResizePartitionResult {
+    };
+    let fresh = match current_partition(disk_number, partition_number) {
+        Ok(partition) => partition,
+        Err(error) => {
+            return ResizePartitionResult {
                 success: false,
-                message: tr!("执行 diskpart 失败: {}", e),
+                message: error.to_string(),
                 new_size_mb: current_size_mb,
-            },
+            };
         }
+    };
+    if fresh.drive_letter.map(|letter| letter.to_ascii_uppercase())
+        != Some(letter.to_ascii_uppercase())
+        || fresh.size_bytes / MIB != current_size_mb
+    {
+        return ResizePartitionResult {
+            success: false,
+            message: tr!("目标分区在执行前已发生变化，请刷新后重试"),
+            new_size_mb: current_size_mb,
+        };
+    }
+    let result = if new_size_mb < current_size_mb {
+        shrink_partition(disk_number, partition_number, current_size_mb - new_size_mb)
     } else {
-        // 扩大分区
-        let extend_amount_mb = new_size_mb - current_size_mb;
-
-        log::info!("扩大分区 {} MB", extend_amount_mb);
-
-        // 使用 diskpart extend 命令
-        let result = if let Some(letter) = drive_letter {
-            // 通过盘符选择卷进行扩展
-            let mut script = String::new();
-            script.push_str(&format!("select volume {}\n", letter));
-            script.push_str(&format!("extend size={}\n", extend_amount_mb));
-            execute_diskpart_script(&script)
-        } else {
-            // 没有盘符的分区使用分区编号
-            let mut script = String::new();
-            script.push_str(&format!("select disk {}\n", disk_number));
-            script.push_str(&format!("select partition {}\n", partition_number));
-            script.push_str(&format!("extend size={}\n", extend_amount_mb));
-            execute_diskpart_script(&script)
-        };
-
-        match result {
-            Ok(output) => {
-                let output_lower = output.to_lowercase();
-                if output_lower.contains("错误")
-                    || output_lower.contains("error")
-                    || output_lower.contains("失败")
-                    || output_lower.contains("failed")
-                    || output_lower.contains("没有足够")
-                    || output_lower.contains("insufficient")
-                {
-                    ResizePartitionResult {
-                        success: false,
-                        message: tr!("扩展分区失败: {}", output.trim()),
-                        new_size_mb: current_size_mb,
-                    }
-                } else {
-                    ResizePartitionResult {
-                        success: true,
-                        message: tr!("分区已成功扩展 {} MB", extend_amount_mb),
-                        new_size_mb,
-                    }
-                }
-            }
-            Err(e) => ResizePartitionResult {
-                success: false,
-                message: tr!("执行 diskpart 失败: {}", e),
-                new_size_mb: current_size_mb,
-            },
-        }
+        extend_partition(
+            disk_number,
+            partition_number,
+            Some(new_size_mb - current_size_mb),
+        )
+    };
+    match result {
+        Ok(message) => ResizePartitionResult {
+            success: true,
+            message,
+            new_size_mb,
+        },
+        Err(error) => ResizePartitionResult {
+            success: false,
+            message: error.to_string(),
+            new_size_mb: current_size_mb,
+        },
     }
 }
 
 /// 查询分区可缩小的最大空间（MB）
 ///
-/// 使用 diskpart 的 shrink querymax 命令获取
 pub fn query_shrink_max(drive_letter: char) -> Result<u64> {
-    let mut script = String::new();
-    script.push_str(&format!("select volume {}\n", drive_letter));
-    script.push_str("shrink querymax\n");
-
-    let output = execute_diskpart_script(&script)?;
-
-    // 解析输出，查找可缩小的最大值
-    // 输出格式通常为 "可回收的最大字节数:  XXX MB" 或 "The maximum number of reclaimable bytes is: XXX MB"
-    for line in output.lines() {
-        let line_lower = line.to_lowercase();
-        if line_lower.contains("可回收")
-            || line_lower.contains("reclaimable")
-            || line_lower.contains("maximum")
-        {
-            // 尝试提取数字
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            for (i, part) in parts.iter().enumerate() {
-                if let Ok(num) = part.replace(",", "").replace(".", "").parse::<u64>() {
-                    // 检查下一个部分是否是 MB 或 GB
-                    if i + 1 < parts.len() {
-                        let unit = parts[i + 1].to_uppercase();
-                        if unit.starts_with("MB") || unit.starts_with("M") {
-                            return Ok(num);
-                        } else if unit.starts_with("GB") || unit.starts_with("G") {
-                            return Ok(num * 1024);
-                        }
-                    }
-                    // 如果没有单位，假设是 MB
-                    return Ok(num);
-                }
-            }
-        }
-    }
-
-    // 如果无法解析，返回0
-    log::warn!("无法解析 shrink querymax 输出: {}", output);
-    Ok(0)
+    Ok(lr_core::windows_storage::query_max_reclaimable_bytes(drive_letter)? / MIB)
 }
 
 /// 获取磁盘上指定分区后面的未分配空间大小（MB）
@@ -1435,14 +1532,21 @@ pub fn can_resize_partition(
 
     let drive_letter = partition.drive_letter.unwrap();
 
-    // 检查是否是当前系统盘
-    let system_drive = std::env::var("SystemDrive")
-        .unwrap_or_else(|_| "C:".to_string())
-        .chars()
-        .next()
-        .unwrap_or('C');
-
-    if drive_letter == system_drive {
+    let system_drive = match lr_core::windows_storage::current_windows_drive_letter() {
+        Ok(letter) => letter,
+        Err(error) => {
+            return (
+                false,
+                tr!("无法确认当前运行的系统卷，已阻止调整大小: {}", error),
+                0,
+                0,
+            );
+        }
+    };
+    if get_volume_offset(system_drive).is_some_and(|(number, offset)| {
+        number == disk.disk_number && offset == partition.offset_bytes
+    }) || drive_letter.eq_ignore_ascii_case(&system_drive)
+    {
         return (false, tr!("无法调整当前系统分区大小"), 0, 0);
     }
 
@@ -1453,7 +1557,7 @@ pub fn can_resize_partition(
     // 计算最大大小
     let current_size_mb = partition.size_bytes / 1024 / 1024;
     let unallocated_after_mb =
-        get_unallocated_space_after_partition(disk.disk_number, partition.partition_number);
+        get_unallocated_space_after_partition_with_disk(disk, partition.partition_number);
     let max_size_mb = current_size_mb + unallocated_after_mb;
 
     // 如果没有可调整的空间

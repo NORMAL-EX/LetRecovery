@@ -614,11 +614,11 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         };
 
         if config.run_diskpart_scripts {
-            log::info!("[PE INSTALL] Step 0.5: 运行 Diskpart 脚本");
+            log::info!("[PE INSTALL] Step 0.5: 检查已停用的旧分区脚本");
             let scripts_dir = std::path::Path::new(&data_dir).join("diskpart");
             if let Err(error) = lr_core::diskpart::run_scripts_in_dir(&scripts_dir) {
-                log::error!("[PE INSTALL] Diskpart 脚本执行失败: {error}");
-                show_error_message(&tr!("Diskpart 脚本执行失败: {}", error));
+                log::error!("[PE INSTALL] 旧分区脚本已停用: {error}");
+                show_error_message(&tr!("旧分区脚本已停用: {}", error));
                 return Ok(());
             }
         }

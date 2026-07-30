@@ -7,7 +7,6 @@ use crate::utils::cmd::create_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_bin_dir;
 use lr_core::boot_pca::BootPcaMode;
-use lr_core::command::CommandOutcome;
 
 static ESP_MOUNT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -23,15 +22,6 @@ impl BootManager {
             bcdedit_path: bin_dir.join("bcdedit.exe").to_string_lossy().to_string(),
             bcdboot_path: bin_dir.join("bcdboot.exe").to_string_lossy().to_string(),
         }
-    }
-
-    fn run_diskpart_script(script: &str, purpose: &str) -> Result<CommandOutcome> {
-        let prefix = format!("lr-{purpose}");
-        let output =
-            lr_core::diskpart::execute_script(&std::env::temp_dir(), &prefix, "diskpart", script)?;
-        lr_core::diskpart::validated_stdout(&output)
-            .map_err(|detail| anyhow::anyhow!("DiskPart 脚本执行失败 ({purpose}): {detail}"))?;
-        Ok(output)
     }
 
     /// 获取当前系统引导 GUID
@@ -65,111 +55,55 @@ impl BootManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!("[BOOT] 查找 {} 所在磁盘的 ESP 分区...", windows_partition);
 
-        // 提取盘符（去掉冒号）
         let drive_letter = windows_partition
             .trim_end_matches(':')
-            .trim_end_matches('\\');
-
-        // Step 1: 使用 diskpart 获取该分区所在的磁盘号
-        let script1 = format!(
-            r#"select volume {}
-detail volume
-"#,
-            drive_letter
-        );
-
-        let output = Self::run_diskpart_script(&script1, "find_disk")?;
-
-        let stdout = gbk_to_utf8(output.stdout());
-        log::info!("[BOOT] 查找磁盘号:\n{}", stdout);
-
-        // 解析磁盘号
-        let mut disk_num: Option<usize> = None;
-        for line in stdout.lines() {
-            let line_lower = line.to_lowercase();
-            // 查找 "Disk 0" 或 "磁盘 0"
-            if line_lower.contains("disk") || line_lower.contains("磁盘") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                for (i, part) in parts.iter().enumerate() {
-                    if part.to_lowercase().contains("disk") || *part == "磁盘" {
-                        if let Some(num_str) = parts.get(i + 1) {
-                            if let Ok(num) = num_str.parse::<usize>() {
-                                disk_num = Some(num);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let disk_num =
-            disk_num.ok_or_else(|| anyhow::anyhow!("{}", tr!("无法确定分区所在磁盘")))?;
+            .trim_end_matches('\\')
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{}", tr!("无法确定分区所在磁盘")))?
+            .to_ascii_uppercase();
+        let disks = super::quick_partition::get_physical_disks();
+        let disk = disks
+            .iter()
+            .find(|disk| {
+                disk.partitions.iter().any(|partition| {
+                    partition
+                        .drive_letter
+                        .is_some_and(|letter| letter.eq_ignore_ascii_case(&drive_letter))
+                })
+            })
+            .ok_or_else(|| anyhow::anyhow!("{}", tr!("无法确定分区所在磁盘")))?;
+        let disk_num = disk.disk_number;
         log::info!("[BOOT] 目标分区在磁盘 {}", disk_num);
 
-        // Step 2: 查找该磁盘上的 ESP 分区（使用 GPT 类型）
-        let script2 = format!(
-            r#"select disk {}
-list partition
-"#,
-            disk_num
+        let esp = disk
+            .partitions
+            .iter()
+            .find(|partition| partition.is_esp)
+            .ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
+        log::info!(
+            "[BOOT] 找到 ESP: 分区 {}，偏移 {}",
+            esp.partition_number,
+            esp.offset_bytes
         );
-
-        let output = Self::run_diskpart_script(&script2, "list_partitions")?;
-
-        let stdout = gbk_to_utf8(output.stdout());
-        log::info!("[BOOT] 分区列表:\n{}", stdout);
-
-        // 查找 System/系统 类型的分区（ESP）
-        let mut esp_partition: Option<usize> = None;
-        for line in stdout.lines() {
-            let line_lower = line.to_lowercase();
-            // 查找 "System" 或 "系统" 类型的分区
-            if line_lower.contains("system") || line_lower.contains("系统") {
-                // 提取分区号
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                for (i, part) in parts.iter().enumerate() {
-                    if part.to_lowercase().contains("partition") || *part == "分区" {
-                        if let Some(num_str) = parts.get(i + 1) {
-                            if let Ok(num) = num_str.parse::<usize>() {
-                                esp_partition = Some(num);
-                                log::info!("[BOOT] 找到 ESP: 分区 {}", num);
-                                break;
-                            }
-                        }
-                    }
-                }
-                if esp_partition.is_some() {
-                    break;
-                }
-            }
-        }
-
-        let esp_partition =
-            esp_partition.ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
 
         // Step 3: 使用真正空闲的盘符挂载 ESP，不能覆盖用户已有的 S: 等盘符。
         let mount_letter = lr_core::boot_pca::find_available_drive_letter()
             .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
 
-        let script3 = format!(
-            r#"select disk {}
-select partition {}
-assign letter={}
-"#,
-            disk_num, esp_partition, mount_letter
-        );
+        lr_core::windows_storage::assign_partition_drive_letter(
+            disk_num,
+            esp.offset_bytes,
+            mount_letter,
+        )?;
 
-        let output = Self::run_diskpart_script(&script3, "assign_esp")?;
-
-        let stdout = gbk_to_utf8(output.stdout());
-        log::info!("[BOOT] 分配 ESP 盘符:\n{}", stdout);
-
-        // 等待盘符生效
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // 验证
         let mount_root = format!("{}:\\", mount_letter);
+        for _ in 0..20 {
+            if Path::new(&mount_root).exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         if Path::new(&mount_root).exists() {
             let mounted = format!("{}:", mount_letter);
             log::info!("[BOOT] ESP 已挂载到 {}", mounted);
@@ -220,78 +154,38 @@ assign letter={}
             }
         }
 
-        // 方法2: 使用 diskpart 查找所有磁盘的 ESP。
-        self.find_esp_with_diskpart(mount_letter)
+        // 方法2: 通过 IOCTL 枚举全部物理磁盘上的 ESP。
+        self.find_esp_with_windows_api(mount_letter)
     }
 
-    /// 使用 diskpart 查找任意磁盘上的 ESP
-    fn find_esp_with_diskpart(&self, mount_letter: char) -> Result<String> {
-        log::info!("[BOOT] 使用 diskpart 查找 ESP");
-
-        // 遍历磁盘0-3
-        for disk in 0..4 {
-            let script = format!(
-                r#"select disk {}
-list partition
-"#,
-                disk
-            );
-
-            let output = match Self::run_diskpart_script(&script, "scan_esp") {
-                Ok(output) => output,
-                Err(error) => {
-                    log::debug!("[BOOT] 跳过无法查询的磁盘 {disk}: {error}");
+    fn find_esp_with_windows_api(&self, mount_letter: char) -> Result<String> {
+        log::info!("[BOOT] 使用 WinAPI 查找 ESP");
+        for disk in crate::core::quick_partition::get_physical_disks() {
+            for partition in disk.partitions.iter().filter(|partition| partition.is_esp) {
+                if let Err(error) = lr_core::windows_storage::assign_partition_drive_letter(
+                    disk.disk_number,
+                    partition.offset_bytes,
+                    mount_letter,
+                ) {
+                    log::warn!(
+                        "[BOOT] 无法挂载磁盘 {} 分区 {}: {}",
+                        disk.disk_number,
+                        partition.partition_number,
+                        error
+                    );
                     continue;
                 }
-            };
-            let stdout = gbk_to_utf8(output.stdout());
-
-            // 查找 System 类型分区
-            for line in stdout.lines() {
-                let line_lower = line.to_lowercase();
-                if line_lower.contains("system") || line_lower.contains("系统") {
-                    // 提取分区号
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    for (i, part) in parts.iter().enumerate() {
-                        if part.to_lowercase().contains("partition") || *part == "分区" {
-                            if let Some(num_str) = parts.get(i + 1) {
-                                if let Ok(part_num) = num_str.parse::<usize>() {
-                                    // 找到了，分配盘符
-                                    let assign_script = format!(
-                                        r#"select disk {}
-select partition {}
-assign letter={}
-"#,
-                                        disk, part_num, mount_letter
-                                    );
-
-                                    if let Err(error) =
-                                        Self::run_diskpart_script(&assign_script, "assign_esp")
-                                    {
-                                        log::warn!(
-                                            "[BOOT] 无法挂载磁盘 {} 分区 {}: {}",
-                                            disk,
-                                            part_num,
-                                            error
-                                        );
-                                        continue;
-                                    }
-
-                                    std::thread::sleep(std::time::Duration::from_millis(500));
-
-                                    let mount_root = format!("{}:\\", mount_letter);
-                                    if Path::new(&mount_root).exists() {
-                                        log::info!(
-                                            "[BOOT] 找到 ESP: 磁盘 {} 分区 {}",
-                                            disk,
-                                            part_num
-                                        );
-                                        return Ok(format!("{}:", mount_letter));
-                                    }
-                                }
-                            }
-                        }
+                let mount_root = format!("{}:\\", mount_letter);
+                for _ in 0..20 {
+                    if Path::new(&mount_root).exists() {
+                        log::info!(
+                            "[BOOT] 找到 ESP: 磁盘 {} 分区 {}",
+                            disk.disk_number,
+                            partition.partition_number
+                        );
+                        return Ok(format!("{}:", mount_letter));
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             }
         }
@@ -439,16 +333,27 @@ assign letter={}
                 return Ok(letter);
             }
         }
-        // 没有则用 diskpart 给它分配一个空闲盘符。
+        // 没有则通过 VDS 给它分配一个空闲盘符。
         let free = crate::core::disk::DiskManager::find_available_drive_letter()
             .ok_or_else(|| anyhow::anyhow!("没有空闲盘符可分配给引导分区"))?;
-        let script = format!(
-            "select disk {}\r\nselect partition {}\r\nassign letter={}\r\n",
-            disk_num, part, free
-        );
-        Self::run_diskpart_script(&script, "assign_boot_partition")?;
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        let offset = disks
+            .iter()
+            .find(|disk| disk.disk_number == disk_num)
+            .and_then(|disk| {
+                disk.partitions
+                    .iter()
+                    .find(|partition| partition.partition_number == part)
+            })
+            .map(|partition| partition.offset_bytes)
+            .ok_or_else(|| anyhow::anyhow!("无法重新定位引导分区"))?;
+        lr_core::windows_storage::assign_partition_drive_letter(disk_num, offset, free)?;
         let letter = format!("{}:", free);
+        for _ in 0..20 {
+            if Path::new(&format!("{}\\", letter)).exists() {
+                return Ok(letter);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         if !Path::new(&format!("{}\\", letter)).exists() {
             anyhow::bail!(
                 "引导分区 磁盘{}:分区{} 盘符 {} 不可用",
@@ -462,31 +367,39 @@ assign letter={}
 
     /// 把指定 磁盘:分区 设为活动分区（Legacy/MBR 引导必需，照搬 DSI 的 PART *a）。
     fn set_partition_active(&self, disk_num: usize, part_num: usize) -> Result<()> {
-        let script = format!(
-            "select disk {}\r\nselect partition {}\r\nactive\r\n",
-            disk_num, part_num
-        );
-        let out = Self::run_diskpart_script(&script, "set_active")?;
+        let partition = crate::core::quick_partition::get_physical_disks()
+            .into_iter()
+            .find(|disk| disk.disk_number == disk_num as u32)
+            .and_then(|disk| {
+                disk.partitions
+                    .into_iter()
+                    .find(|partition| partition.partition_number == part_num as u32)
+            })
+            .ok_or_else(|| anyhow::anyhow!("无法重新定位要设为活动的分区"))?;
+        lr_core::windows_storage::set_mbr_active(disk_num as u32, partition.offset_bytes, true)?;
         log::info!(
-            "[BOOT] 设活动分区 磁盘{}:分区{}: {}",
+            "[BOOT] 已通过 WinAPI 设活动分区 磁盘{}:分区{}",
             disk_num,
-            part_num,
-            gbk_to_utf8(out.stdout()).trim()
+            part_num
         );
         Ok(())
     }
 
     /// 按盘符把卷所在分区设为活动（磁盘:分区号未知时的兜底）。
-    /// diskpart `active` 作用于当前焦点分区，`select volume <letter>` 先把焦点落到该卷即可。
     fn set_partition_active_by_letter(&self, boot_letter: &str) -> Result<()> {
-        let vol = boot_letter.trim_end_matches('\\').trim_end_matches(':');
-        let script = format!("select volume {}\r\nactive\r\n", vol);
-        let out = Self::run_diskpart_script(&script, "set_active_volume")?;
-        log::info!(
-            "[BOOT] 设活动分区 卷{}: {}",
-            vol,
-            gbk_to_utf8(out.stdout()).trim()
-        );
+        let letter = boot_letter
+            .trim_end_matches('\\')
+            .trim_end_matches(':')
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("引导分区盘符为空"))?;
+        let identity = lr_core::windows_storage::volume_identity(letter)?;
+        lr_core::windows_storage::set_mbr_active(
+            identity.disk_number,
+            identity.offset_bytes,
+            true,
+        )?;
+        log::info!("[BOOT] 已通过 WinAPI 设活动分区 卷{}:", letter);
         Ok(())
     }
 

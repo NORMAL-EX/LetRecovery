@@ -134,22 +134,6 @@ fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::rename(source, destination)
 }
 
-/// 递归复制目录（用于把 diskpart 脚本暂存到数据分区）。
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
 /// 系统安装配置（用于PE环境内安装）
 #[derive(Debug, Clone, Default)]
 pub struct InstallConfig {
@@ -234,7 +218,7 @@ pub struct InstallConfig {
     /// XP 注入 NVMe 驱动（检测到 XP 时默认勾选）
     pub xp_inject_nvme_driver: bool,
 
-    /// 是否在释放镜像前运行 diskpart 脚本（程序目录\diskpart\ 下所有脚本）。
+    /// 历史只读兼容字段；新配置固定为 false，旧脚本不得执行。
     pub run_diskpart_scripts: bool,
     /// 引导模式：0=自动，1=UEFI，2=Legacy。
     pub boot_mode: u8,
@@ -599,23 +583,9 @@ impl ConfigFileManager {
             log::info!("[CONFIG] 已复制自定义无人值守文件 -> {}", dst);
         }
 
-        // 暂存 diskpart 脚本到数据目录，供重启进 PE 后执行（程序目录\bin\diskpart\ -> 数据目录\diskpart\）
-        if config.run_diskpart_scripts {
-            let src = crate::utils::path::get_diskpart_scripts_dir();
-            let dst = format!("{}\\diskpart", data_dir);
-            if src.exists() {
-                if let Err(e) = copy_dir_recursive(&src, std::path::Path::new(&dst)) {
-                    log::warn!("[CONFIG] 暂存 diskpart 脚本失败: {}", e);
-                } else {
-                    log::info!("[CONFIG] 已暂存 diskpart 脚本 -> {}", dst);
-                }
-            } else {
-                log::info!(
-                    "[CONFIG] 程序目录无 diskpart 文件夹，跳过暂存: {}",
-                    src.display()
-                );
-            }
-        }
+        // Keep the historical configuration key readable, but new sessions never stage or
+        // execute arbitrary partition scripts after the storage path moved to typed WinAPI.
+        config.run_diskpart_scripts = false;
 
         // 写入配置文件
         let config_path = format!("{}\\{}", data_dir, Self::INSTALL_CONFIG);
@@ -914,7 +884,7 @@ XpInjectNvmeDriver={}
             config.is_xp,
             config.is_xp_i386,
             config.xp_source_arch,
-            config.run_diskpart_scripts,
+            false,
             config.boot_mode,
             config.boot_pca_mode.as_config_value(),
             config.pca_compat_package,

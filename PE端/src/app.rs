@@ -478,16 +478,16 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         }
     };
 
-    // 装机前运行 diskpart 脚本（分区准备）——来自数据目录暂存的 diskpart\
+    // Historical compatibility gate: arbitrary partition scripts are no longer executable.
     if config.run_diskpart_scripts {
-        let _ = tx.send(WorkerMessage::SetStatus(tr!("正在运行 Diskpart 脚本...")));
+        let _ = tx.send(WorkerMessage::SetStatus(tr!("正在检查旧分区脚本兼容性...")));
         let scripts_dir = std::path::Path::new(&data_dir).join("diskpart");
-        log::info!("[PE安装] 运行 Diskpart 脚本: {}", scripts_dir.display());
+        log::info!("[PE安装] 检查已停用的旧分区脚本: {}", scripts_dir.display());
         match lr_core::diskpart::run_scripts_in_dir(&scripts_dir) {
-            Ok(out) => log::info!("[PE安装] Diskpart 脚本执行完成:\n{}", out),
+            Ok(out) => log::info!("[PE安装] 旧分区脚本兼容检查完成:\n{}", out),
             Err(e) => {
-                log::error!("[PE安装] Diskpart 脚本执行失败: {}", e);
-                let _ = tx.send(WorkerMessage::Failed(tr!("Diskpart 脚本执行失败: {}", e)));
+                log::error!("[PE安装] 旧分区脚本已停用: {}", e);
+                let _ = tx.send(WorkerMessage::Failed(tr!("旧分区脚本已停用: {}", e)));
                 return;
             }
         }

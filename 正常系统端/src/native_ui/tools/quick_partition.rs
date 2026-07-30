@@ -5,23 +5,36 @@
 //! resize operation, refresh enumeration, or other host I/O is performed here.
 
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, InvalidateRect, HFONT};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, ClientToScreen, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DeleteObject,
+    DrawTextW, EndPaint, FillRect, InvalidateRect, MapWindowPoints, SelectClipRgn, SelectObject,
+    SetBkMode, SetTextColor, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    HFONT, PAINTSTRUCT, TRANSPARENT,
+};
 use windows::Win32::UI::Controls::{
-    LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_GETNEXTITEM,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETBKCOLOR, LVM_SETCOLUMNWIDTH,
+    DRAWITEMSTRUCT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS,
+    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETBKCOLOR, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_REPORT, LVS_SHOWSELALWAYS,
+    LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_REPORT, LVS_SHOWSELALWAYS, MEASUREITEMSTRUCT,
+    ODS_DISABLED, ODS_GRAYED, ODS_SELECTED, ODT_MENU,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetCapture, ReleaseCapture, SetCapture,
+};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW, SetWindowTextW,
-    ShowWindow, BM_SETCHECK, BS_AUTORADIOBUTTON, BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING,
-    CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, ES_AUTOHSCROLL, SW_HIDE, SW_SHOW, WM_SETFONT,
-    WS_BORDER, WS_TABSTOP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetParent, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW, SetMenuInfo, SetWindowTextW,
+    ShowWindow, TrackPopupMenu, BM_SETCHECK, BS_AUTORADIOBUTTON, BS_OWNERDRAW, CBS_DROPDOWNLIST,
+    CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, ES_AUTOHSCROLL, MENUINFO, MF_GRAYED,
+    MF_OWNERDRAW, MF_POPUP, MIM_BACKGROUND, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WM_CAPTURECHANGED, WM_COMMAND, WM_DRAWITEM, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WS_BORDER, WS_TABSTOP,
 };
 
+use super::super::controls::fill_round_rect_antialiased;
 use super::super::controls::{child, combo_inventory_index, wide, NO_COMBO_SELECTION};
 use super::super::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
 use super::super::layout::{
@@ -30,9 +43,12 @@ use super::super::layout::{
 };
 use super::super::theme::{apply_control_theme, apply_list_view_theme, NativeControlKind, Palette};
 use crate::core::disk::PartitionStyle;
-use crate::core::native_quick_partition::QuickPartitionRequest;
+use crate::core::native_quick_partition::{
+    DiskFingerprint, DiskPartitionFingerprint, QuickPartitionRequest,
+};
 use crate::core::native_quick_partition_dialog::{
-    EditorRow, ExistingPartitionResizeRequest, QuickPartitionDialogState,
+    EditorRow, ExistingPartitionResizeRequest, PartitionManagementAction,
+    PartitionManagementRequest, PendingPartitionOperation, QuickPartitionDialogState,
 };
 use crate::core::quick_partition::{DiskPartitionInfo, PartitionLayout, PhysicalDisk};
 
@@ -45,6 +61,19 @@ pub const ID_DELETE: u16 = 65_305;
 pub const ID_APPLY_SIZE: u16 = 65_306;
 const ID_PARTITIONS: u16 = 65_307;
 const ID_SIZE: u16 = 65_308;
+const ID_PARTITION_MAP: u16 = 65_309;
+const ID_MAP_SELECT: u16 = 65_310;
+const ID_MAP_RESIZE: u16 = 65_311;
+const ID_MAP_DELETE: u16 = 65_312;
+const ID_MAP_FORMAT_NTFS: u16 = 65_313;
+const ID_MAP_REMOVE_LETTER: u16 = 65_314;
+const ID_MAP_SET_ACTIVE: u16 = 65_315;
+const ID_MAP_CLEAR_ACTIVE: u16 = 65_316;
+const ID_APPLY_PENDING: u16 = 65_318;
+const ID_MAP_DRAG_COMMIT: u16 = 65_319;
+const ID_MAP_ASSIGN_LETTER_FIRST: u16 = 65_340;
+const ID_MAP_CREATE_LETTER_FIRST: u16 = 65_366;
+const PARTITION_MAP_SUBCLASS_ID: usize = 0x4c52_504d;
 const RADIO_CONTROL_KIND: NativeControlKind = NativeControlKind::General;
 
 const LVM_SETITEMTEXTW_LOCAL: u32 = 0x104C;
@@ -52,11 +81,198 @@ const LVM_SETITEMSTATE: u32 = 0x102B;
 const LVNI_SELECTED: isize = 0x0002;
 const LVIS_SELECTED: u32 = 0x0002;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PartitionMapTarget {
+    Existing(usize),
+    Unallocated { offset_bytes: u64, size_bytes: u64 },
+}
+
+#[derive(Clone, Debug)]
+struct PartitionMapSegment {
+    target: PartitionMapTarget,
+    label: String,
+    size: String,
+    weight: u64,
+    special: bool,
+    protected: bool,
+    drive_letter: Option<char>,
+    active: bool,
+    minimum_bytes: u64,
+}
+
+struct PartitionMapModel {
+    font: HFONT,
+    segments: Vec<PartitionMapSegment>,
+    selected: Option<PartitionMapTarget>,
+    context_target: Option<PartitionMapTarget>,
+    available_letters: Vec<char>,
+    style: PartitionStyle,
+    initialized: bool,
+    enabled: bool,
+    drag: Option<PartitionMapDrag>,
+    committed_resize: Option<(usize, u64)>,
+}
+
+struct PartitionMenuItem {
+    text: String,
+    palette: Palette,
+    font: HFONT,
+    dpi: u32,
+    separator: bool,
+    submenu: bool,
+}
+
+struct PartitionMenuBuilder {
+    font: HFONT,
+    palette: Palette,
+    dpi: u32,
+    background: windows::Win32::Graphics::Gdi::HBRUSH,
+    // Windows stores each owner-draw item pointer until TrackPopupMenu returns.
+    // Individual boxes keep those addresses stable while this vector grows.
+    #[allow(clippy::vec_box)]
+    visuals: Vec<Box<PartitionMenuItem>>,
+}
+
+impl PartitionMenuBuilder {
+    fn new(
+        font: HFONT,
+        palette: Palette,
+        dpi: u32,
+        background: windows::Win32::Graphics::Gdi::HBRUSH,
+    ) -> Self {
+        Self {
+            font,
+            palette,
+            dpi,
+            background,
+            visuals: Vec::new(),
+        }
+    }
+
+    unsafe fn item(
+        &mut self,
+        menu: windows::Win32::UI::WindowsAndMessaging::HMENU,
+        command: u16,
+        text: &str,
+        disabled: bool,
+    ) {
+        let visual = Box::new(PartitionMenuItem {
+            text: text.to_owned(),
+            palette: self.palette,
+            font: self.font,
+            dpi: self.dpi,
+            separator: false,
+            submenu: false,
+        });
+        let data = (&*visual as *const PartitionMenuItem) as *const u16;
+        self.visuals.push(visual);
+        let flags = if disabled {
+            MF_OWNERDRAW | MF_GRAYED
+        } else {
+            MF_OWNERDRAW
+        };
+        let _ = AppendMenuW(menu, flags, command as usize, PCWSTR(data));
+    }
+
+    unsafe fn separator(&mut self, menu: windows::Win32::UI::WindowsAndMessaging::HMENU) {
+        let visual = Box::new(PartitionMenuItem {
+            text: String::new(),
+            palette: self.palette,
+            font: self.font,
+            dpi: self.dpi,
+            separator: true,
+            submenu: false,
+        });
+        let data = (&*visual as *const PartitionMenuItem) as *const u16;
+        self.visuals.push(visual);
+        let _ = AppendMenuW(menu, MF_OWNERDRAW | MF_GRAYED, 0, PCWSTR(data));
+    }
+
+    unsafe fn letter_submenu(
+        &mut self,
+        menu: windows::Win32::UI::WindowsAndMessaging::HMENU,
+        title: &str,
+        first_command: u16,
+        letters: &[char],
+    ) {
+        let Ok(submenu) = CreatePopupMenu() else {
+            return;
+        };
+        apply_partition_menu_background(submenu, self.background);
+        if letters.is_empty() {
+            self.item(submenu, 0, &crate::tr!("没有可用盘符"), true);
+        } else {
+            for letter in letters {
+                self.item(
+                    submenu,
+                    first_command + (*letter as u16 - 'A' as u16),
+                    &format!("{letter}:"),
+                    false,
+                );
+            }
+        }
+        let visual = Box::new(PartitionMenuItem {
+            text: title.to_owned(),
+            palette: self.palette,
+            font: self.font,
+            dpi: self.dpi,
+            separator: false,
+            submenu: true,
+        });
+        let data = (&*visual as *const PartitionMenuItem) as *const u16;
+        self.visuals.push(visual);
+        let _ = AppendMenuW(
+            menu,
+            MF_POPUP | MF_OWNERDRAW,
+            submenu.0 as usize,
+            PCWSTR(data),
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PartitionMapDrag {
+    partition_index: usize,
+    left_segment: usize,
+    start_x: i32,
+    current_x: i32,
+    combined_width: i32,
+    combined_bytes: u64,
+    original_bytes: u64,
+    minimum_bytes: u64,
+}
+
+impl PartitionMapModel {
+    fn new(font: HFONT) -> Self {
+        Self {
+            font,
+            segments: Vec::new(),
+            selected: None,
+            context_target: None,
+            available_letters: Vec::new(),
+            style: PartitionStyle::Unknown,
+            initialized: false,
+            enabled: false,
+            drag: None,
+            committed_resize: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartitionFormatTarget {
+    pub disk: DiskFingerprint,
+    pub partition: DiskPartitionFingerprint,
+    pub current_label: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum QuickPartitionDialogIntent {
     RefreshInventory,
     RequestConfirmation(QuickPartitionRequest),
-    RequestExistingResize(ExistingPartitionResizeRequest),
+    RequestFormatOptions(PartitionFormatTarget),
+    ApplyPending(Vec<PendingPartitionOperation>),
+    CloseWithPending { apply_allowed: bool },
     Close,
 }
 
@@ -68,6 +284,7 @@ struct Controls {
     style_mbr: HWND,
     style_gpt: HWND,
     recommendation: HWND,
+    partition_map: HWND,
     add_partition: HWND,
     add_esp: HWND,
     delete: HWND,
@@ -75,6 +292,7 @@ struct Controls {
     size_label: HWND,
     size: HWND,
     apply_size: HWND,
+    apply_pending: HWND,
     warning: HWND,
     status: HWND,
 }
@@ -84,6 +302,9 @@ pub struct NativeQuickPartitionDialog {
     controls: Controls,
     state: QuickPartitionDialogState,
     font: HFONT,
+    partition_map: Box<PartitionMapModel>,
+    pending: Vec<PendingPartitionOperation>,
+    inventory_stale: bool,
 }
 
 impl NativeQuickPartitionDialog {
@@ -126,7 +347,14 @@ impl NativeQuickPartitionDialog {
             0,
             PCWSTR(face.as_ptr()),
         );
-        let controls = create_controls(shell.content())?;
+        let controls = create_controls(shell.content(), shell.hwnd())?;
+        let mut partition_map = Box::new(PartitionMapModel::new(font));
+        let _ = SetWindowSubclass(
+            controls.partition_map,
+            Some(partition_map_proc),
+            PARTITION_MAP_SUBCLASS_ID,
+            (&mut *partition_map as *mut PartitionMapModel) as usize,
+        );
         let mut dialog = Self {
             shell,
             controls,
@@ -136,6 +364,9 @@ impl NativeQuickPartitionDialog {
                 system_drive,
             ),
             font,
+            partition_map,
+            pending: Vec::new(),
+            inventory_stale: false,
         };
         dialog.apply_font_and_theme();
         dialog.layout();
@@ -158,8 +389,23 @@ impl NativeQuickPartitionDialog {
     pub fn owns_command(command_id: u16) -> bool {
         matches!(
             command_id,
-            ID_STYLE_MBR | ID_STYLE_GPT | ID_ADD_PARTITION | ID_ADD_ESP | ID_DELETE | ID_APPLY_SIZE
-        )
+            ID_STYLE_MBR
+                | ID_STYLE_GPT
+                | ID_ADD_PARTITION
+                | ID_ADD_ESP
+                | ID_DELETE
+                | ID_APPLY_SIZE
+                | ID_APPLY_PENDING
+                | ID_MAP_DRAG_COMMIT
+                | ID_MAP_SELECT
+                | ID_MAP_RESIZE
+                | ID_MAP_DELETE
+                | ID_MAP_FORMAT_NTFS
+                | ID_MAP_REMOVE_LETTER
+                | ID_MAP_SET_ACTIVE
+                | ID_MAP_CLEAR_ACTIVE
+        ) || (ID_MAP_ASSIGN_LETTER_FIRST..ID_MAP_ASSIGN_LETTER_FIRST + 26).contains(&command_id)
+            || (ID_MAP_CREATE_LETTER_FIRST..ID_MAP_CREATE_LETTER_FIRST + 26).contains(&command_id)
     }
 
     pub unsafe fn set_loading(&mut self) {
@@ -169,7 +415,42 @@ impl NativeQuickPartitionDialog {
 
     pub unsafe fn set_inventory(&mut self, result: Result<Vec<PhysicalDisk>, String>) {
         self.state.apply_inventory(result);
+        self.inventory_stale = false;
         self.render_state();
+    }
+
+    pub fn has_pending_changes(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub unsafe fn mark_inventory_changed(&mut self) -> bool {
+        if self.state.loading {
+            return false;
+        }
+        if self.pending.is_empty() {
+            return true;
+        }
+        self.inventory_stale = true;
+        self.state.message = crate::tr!("磁盘布局已在外部发生变化；请刷新并重新检查暂存修改。");
+        self.render_state();
+        false
+    }
+
+    pub unsafe fn discard_pending(&mut self) {
+        self.pending.clear();
+        self.inventory_stale = false;
+        self.state.message.clear();
+        self.render_state();
+    }
+
+    pub unsafe fn finish_pending_apply(&mut self) {
+        self.pending.clear();
+        self.inventory_stale = false;
+        self.set_loading();
+    }
+
+    pub fn pending_operations(&self) -> Vec<PendingPartitionOperation> {
+        self.pending.clone()
     }
 
     pub unsafe fn handle_choice_changed(&mut self, control: HWND) -> bool {
@@ -217,19 +498,206 @@ impl NativeQuickPartitionDialog {
             }
             ID_APPLY_SIZE => {
                 self.state.resize_size_text = window_text(self.controls.size);
+                if !matches!(self.state.selected_row, Some(EditorRow::Planned(_))) {
+                    return None;
+                }
                 match self.state.apply_resize_text() {
-                    Ok(Some(request)) => {
-                        self.render_state();
-                        return Some(QuickPartitionDialogIntent::RequestExistingResize(request));
-                    }
+                    Ok(Some(_)) => unreachable!("planned resize never returns an existing request"),
                     Ok(None) => {}
                     Err(error) => self.state.message = error,
                 }
             }
-            _ => return None,
+            ID_APPLY_PENDING => {
+                if !self.pending.is_empty() && !self.inventory_stale {
+                    return Some(QuickPartitionDialogIntent::ApplyPending(
+                        self.pending.clone(),
+                    ));
+                }
+            }
+            ID_MAP_DRAG_COMMIT => {
+                if let Some((index, new_size_mb)) = self.partition_map.committed_resize.take() {
+                    match self.state.existing_resize_request_mb(index, new_size_mb) {
+                        Ok(request) => self.stage_resize(request),
+                        Err(error) => self.state.message = error,
+                    }
+                }
+            }
+            ID_MAP_SELECT => {
+                self.select_map_target(self.partition_map.selected);
+            }
+            ID_MAP_RESIZE => {
+                self.state.message = crate::tr!("拖动分区图上的调整手柄来扩大或缩小分区。");
+            }
+            ID_MAP_DELETE => {
+                self.stage_partition_action(|partition| PartitionManagementAction::Delete {
+                    partition,
+                });
+            }
+            ID_MAP_FORMAT_NTFS => {
+                return self.partition_format_intent();
+            }
+            ID_MAP_REMOVE_LETTER => {
+                self.stage_partition_action(|partition| {
+                    PartitionManagementAction::RemoveDriveLetter { partition }
+                });
+            }
+            ID_MAP_SET_ACTIVE | ID_MAP_CLEAR_ACTIVE => {
+                let active = command_id == ID_MAP_SET_ACTIVE;
+                self.stage_partition_action(|partition| PartitionManagementAction::SetMbrActive {
+                    partition,
+                    active,
+                });
+            }
+            _ => {}
+        }
+        if (ID_MAP_ASSIGN_LETTER_FIRST..ID_MAP_ASSIGN_LETTER_FIRST + 26).contains(&command_id) {
+            let drive_letter = char::from(b'A' + (command_id - ID_MAP_ASSIGN_LETTER_FIRST) as u8);
+            self.stage_partition_action(|partition| PartitionManagementAction::AssignDriveLetter {
+                partition,
+                drive_letter,
+            });
+        }
+        if (ID_MAP_CREATE_LETTER_FIRST..ID_MAP_CREATE_LETTER_FIRST + 26).contains(&command_id) {
+            let drive_letter = char::from(b'A' + (command_id - ID_MAP_CREATE_LETTER_FIRST) as u8);
+            let Some(PartitionMapTarget::Unallocated {
+                offset_bytes,
+                size_bytes,
+            }) = self.partition_map.context_target
+            else {
+                self.state.message = crate::tr!("未选择未分配空间");
+                self.render_state();
+                return None;
+            };
+            let Some(disk) = self.state.selected_disk() else {
+                self.state.message = crate::tr!("请先选择要分区的磁盘");
+                self.render_state();
+                return None;
+            };
+            let request = PartitionManagementRequest {
+                disk: DiskFingerprint::from(disk),
+                action: PartitionManagementAction::CreateNtfs {
+                    offset_bytes,
+                    size_bytes,
+                    drive_letter,
+                    initialize_style: (!disk.is_initialized).then_some(self.state.partition_style),
+                },
+            };
+            self.stage_management(request);
         }
         self.render_state();
         None
+    }
+
+    unsafe fn select_map_target(&mut self, target: Option<PartitionMapTarget>) {
+        match target {
+            Some(PartitionMapTarget::Existing(index)) => {
+                self.state.select_row(Some(EditorRow::Existing(index)));
+            }
+            _ => self.state.select_row(None),
+        }
+        self.render_state();
+    }
+
+    unsafe fn stage_partition_action(
+        &mut self,
+        build: impl FnOnce(DiskPartitionFingerprint) -> PartitionManagementAction,
+    ) {
+        let Some(PartitionMapTarget::Existing(index)) = self.partition_map.context_target else {
+            self.state.message = crate::tr!("未选择已有分区");
+            self.render_state();
+            return;
+        };
+        let Some(disk) = self.state.selected_disk() else {
+            self.state.message = crate::tr!("请先选择要分区的磁盘");
+            self.render_state();
+            return;
+        };
+        let Some(partition) = disk.partitions.get(index) else {
+            self.state.message = crate::tr!("分区信息不可用");
+            self.render_state();
+            return;
+        };
+        self.stage_management(PartitionManagementRequest {
+            disk: DiskFingerprint::from(disk),
+            action: build(DiskPartitionFingerprint::from(partition)),
+        });
+    }
+
+    unsafe fn partition_format_intent(&mut self) -> Option<QuickPartitionDialogIntent> {
+        let PartitionMapTarget::Existing(index) = self.partition_map.context_target? else {
+            return None;
+        };
+        let disk = self.state.selected_disk()?;
+        let partition = disk.partitions.get(index)?;
+        if self.partition_map.segments.iter().any(|segment| {
+            segment.target == PartitionMapTarget::Existing(index)
+                && (segment.protected || segment.special || segment.drive_letter.is_none())
+        }) {
+            return None;
+        }
+        Some(QuickPartitionDialogIntent::RequestFormatOptions(
+            PartitionFormatTarget {
+                disk: DiskFingerprint::from(disk),
+                partition: DiskPartitionFingerprint::from(partition),
+                current_label: partition.label.clone(),
+            },
+        ))
+    }
+
+    fn stage_resize(&mut self, request: ExistingPartitionResizeRequest) {
+        self.pending.retain(|operation| match operation {
+            PendingPartitionOperation::Resize(existing) => {
+                existing.partition_number != request.partition_number
+            }
+            PendingPartitionOperation::Manage(existing) => !matches!(
+                &existing.action,
+                PartitionManagementAction::Delete { partition }
+                    if partition.partition_number == request.partition_number
+            ),
+        });
+        if request.new_size_mb != request.current_size_mb {
+            self.pending
+                .push(PendingPartitionOperation::Resize(request));
+        }
+        if !self.inventory_stale {
+            self.state.message = crate::tr!("修改已暂存，点击“应用”后才会写入磁盘。");
+        }
+    }
+
+    pub unsafe fn stage_format(
+        &mut self,
+        target: PartitionFormatTarget,
+        options: lr_core::windows_storage::FormatOptions,
+    ) {
+        self.stage_management(PartitionManagementRequest {
+            disk: target.disk,
+            action: PartitionManagementAction::Format {
+                partition: target.partition,
+                options,
+            },
+        });
+        self.render_state();
+    }
+
+    fn stage_management(&mut self, request: PartitionManagementRequest) {
+        let key = management_partition_offset(&request.action);
+        let deleting_partition = match &request.action {
+            PartitionManagementAction::Delete { partition } => Some(partition.partition_number),
+            _ => None,
+        };
+        self.pending.retain(|operation| match operation {
+            PendingPartitionOperation::Manage(existing) => {
+                management_partition_offset(&existing.action) != key || key.is_none()
+            }
+            PendingPartitionOperation::Resize(existing) => {
+                deleting_partition != Some(existing.partition_number)
+            }
+        });
+        self.pending
+            .push(PendingPartitionOperation::Manage(request));
+        if !self.inventory_stale {
+            self.state.message = crate::tr!("修改已暂存，点击“应用”后才会写入磁盘。");
+        }
     }
 
     pub unsafe fn show_modeless(&mut self) {
@@ -243,6 +711,12 @@ impl NativeQuickPartitionDialog {
     pub unsafe fn take_intent(&mut self) -> Option<QuickPartitionDialogIntent> {
         match self.shell.take_result()? {
             DialogResult::Secondary => {
+                if !self.pending.is_empty() {
+                    self.state.message = crate::tr!("请先应用或放弃暂存修改，再刷新磁盘布局。");
+                    self.render_state();
+                    self.shell.show_modeless();
+                    return None;
+                }
                 self.set_loading();
                 Some(QuickPartitionDialogIntent::RefreshInventory)
             }
@@ -256,6 +730,11 @@ impl NativeQuickPartitionDialog {
                     None
                 }
             },
+            DialogResult::Cancel if !self.pending.is_empty() => {
+                Some(QuickPartitionDialogIntent::CloseWithPending {
+                    apply_allowed: !self.inventory_stale,
+                })
+            }
             DialogResult::Cancel => Some(QuickPartitionDialogIntent::Close),
         }
     }
@@ -318,14 +797,14 @@ impl NativeQuickPartitionDialog {
         let mbr_width = measured_button_width(
             self.shell.hwnd(),
             self.font,
-            &crate::tr!("MBR"),
+            &crate::tr!("BIOS (MBR)"),
             dpi,
             scale(64, dpi),
         );
         let gpt_width = measured_button_width(
             self.shell.hwnd(),
             self.font,
-            &crate::tr!("GPT"),
+            &crate::tr!("UEFI (GPT)"),
             dpi,
             scale(64, dpi),
         );
@@ -373,13 +852,17 @@ impl NativeQuickPartitionDialog {
         }
         y += metrics.control_gap;
 
+        move_control(self.controls.partition_map, 0, y, width, scale(68, dpi));
+        y += scale(68, dpi) + metrics.control_gap;
+
+        let has_free_space = self.state.selected_disk_unallocated_gb() >= 0.5;
+        let can_create_esp = has_free_space
+            && self.state.partition_style == PartitionStyle::GPT
+            && !self.state.selected_disk_has_esp();
         x = 0;
         for (control, visible) in [
-            (self.controls.add_partition, true),
-            (
-                self.controls.add_esp,
-                self.state.partition_style == PartitionStyle::GPT,
-            ),
+            (self.controls.add_partition, has_free_space),
+            (self.controls.add_esp, can_create_esp),
             (self.controls.delete, true),
         ] {
             if !visible {
@@ -405,6 +888,7 @@ impl NativeQuickPartitionDialog {
         move_control(self.controls.partitions, 0, y, width, list_height);
         y += list_height + metrics.control_gap;
 
+        let planned_selected = matches!(self.state.selected_row, Some(EditorRow::Planned(_)));
         let size_label_width = measure_text(
             self.shell.hwnd(),
             self.font,
@@ -420,24 +904,27 @@ impl NativeQuickPartitionDialog {
             dpi,
             scale(75, dpi),
         );
-        move_control(
-            self.controls.size_label,
-            0,
-            y + label_offset,
-            size_label_width,
-            label_height,
-        );
-        x = size_label_width + metrics.control_gap;
-        move_control(self.controls.size, x, y, size_width, metrics.field_height);
-        x += size_width + metrics.control_gap;
-        move_control(
-            self.controls.apply_size,
-            x,
-            y,
-            apply_width,
-            metrics.button_height,
-        );
-        x += apply_width + metrics.control_gap;
+        x = 0;
+        if planned_selected {
+            move_control(
+                self.controls.size_label,
+                0,
+                y + label_offset,
+                size_label_width,
+                label_height,
+            );
+            x = size_label_width + metrics.control_gap;
+            move_control(self.controls.size, x, y, size_width, metrics.field_height);
+            x += size_width + metrics.control_gap;
+            move_control(
+                self.controls.apply_size,
+                x,
+                y,
+                apply_width,
+                metrics.button_height,
+            );
+            x += apply_width + metrics.control_gap;
+        }
         let warning_text = window_text(self.controls.warning);
         let warning_width = measure_text(self.shell.hwnd(), self.font, &warning_text, None).width;
         if x + warning_width <= width {
@@ -469,6 +956,7 @@ impl NativeQuickPartitionDialog {
             y += status_height;
         }
         self.shell.fit_content_height(logical_height(y, dpi));
+        self.layout_apply_button(dpi);
         for (column, value) in partition_columns(width, dpi).into_iter().enumerate() {
             let _ = SendMessageW(
                 self.controls.partitions,
@@ -477,6 +965,49 @@ impl NativeQuickPartitionDialog {
                 LPARAM(value as isize),
             );
         }
+    }
+
+    unsafe fn layout_apply_button(&self, dpi: u32) {
+        let Some(refresh) = self.shell.command_button(DialogResult::Secondary) else {
+            return;
+        };
+        let mut refresh_rect = RECT::default();
+        let _ = GetWindowRect(refresh, &mut refresh_rect);
+        let mut points = [
+            POINT {
+                x: refresh_rect.left,
+                y: refresh_rect.top,
+            },
+            POINT {
+                x: refresh_rect.right,
+                y: refresh_rect.bottom,
+            },
+        ];
+        let _ = MapWindowPoints(HWND::default(), self.shell.hwnd(), &mut points);
+        let gap = LayoutMetrics::for_dpi(dpi).control_gap;
+        let width = measured_button_width(
+            self.shell.hwnd(),
+            self.font,
+            &window_text(self.controls.apply_pending),
+            dpi,
+            scale(68, dpi),
+        );
+        let refresh_width = (points[1].x - points[0].x).max(1);
+        let height = (points[1].y - points[0].y).max(1);
+        move_control(
+            refresh,
+            points[0].x - width - gap,
+            points[0].y,
+            refresh_width,
+            height,
+        );
+        move_control(
+            self.controls.apply_pending,
+            points[0].x,
+            points[0].y,
+            width,
+            height,
+        );
     }
 
     unsafe fn render_state(&mut self) {
@@ -498,6 +1029,7 @@ impl NativeQuickPartitionDialog {
             &crate::tr!("推荐：{}", self.state.recommended_style.to_string()),
         );
         refill_partitions(self.controls.partitions, &self.state);
+        self.refresh_partition_map();
         self.render_selection();
         let has_disk = !self.state.loading && self.state.selected_disk().is_some();
         let _ = EnableWindow(self.controls.disk, !self.state.loading);
@@ -505,31 +1037,168 @@ impl NativeQuickPartitionDialog {
             self.controls.style_mbr,
             self.controls.style_gpt,
             self.controls.add_partition,
+            self.controls.partition_map,
             self.controls.partitions,
         ] {
             let _ = EnableWindow(control, has_disk);
         }
-        let _ = EnableWindow(
-            self.controls.add_esp,
-            has_disk && self.state.partition_style == PartitionStyle::GPT,
-        );
+        let has_free_space = self.state.selected_disk_unallocated_gb() >= 0.5;
+        let can_create_esp = has_disk
+            && has_free_space
+            && self.state.partition_style == PartitionStyle::GPT
+            && !self.state.selected_disk_has_esp();
+        let _ = EnableWindow(self.controls.add_esp, can_create_esp);
         let _ = ShowWindow(
-            self.controls.add_esp,
-            if self.state.partition_style == PartitionStyle::GPT {
+            self.controls.add_partition,
+            if has_disk && has_free_space {
                 SW_SHOW
             } else {
                 SW_HIDE
             },
         );
+        let _ = ShowWindow(
+            self.controls.add_esp,
+            if can_create_esp { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = EnableWindow(
+            self.controls.apply_pending,
+            !self.pending.is_empty() && !self.inventory_stale && !self.state.loading,
+        );
         self.shell
             .set_primary_enabled(self.state.quick_partition_request().is_ok());
+    }
+
+    unsafe fn refresh_partition_map(&mut self) {
+        let selected = self.state.selected_row.and_then(|row| match row {
+            EditorRow::Existing(index) => Some(PartitionMapTarget::Existing(index)),
+            EditorRow::Planned(_) => None,
+        });
+        self.partition_map.segments.clear();
+        self.partition_map.selected = selected;
+        self.partition_map.context_target = self
+            .partition_map
+            .context_target
+            .filter(|target| selected_disk_contains_target(self.state.selected_disk(), *target));
+        self.partition_map.available_letters = self.state.available_drive_letters();
+        self.partition_map.style = self.state.partition_style;
+        self.partition_map.enabled = !self.state.loading && self.state.selected_disk().is_some();
+        let Some(disk) = self.state.selected_disk() else {
+            self.partition_map.initialized = false;
+            let _ = InvalidateRect(self.controls.partition_map, None, false);
+            return;
+        };
+        self.partition_map.initialized = disk.is_initialized;
+        let mut ordered = disk.partitions.iter().enumerate().collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, partition)| partition.offset_bytes);
+        let mut cursor = 0_u64;
+        for (index, partition) in ordered {
+            if partition.offset_bytes > cursor {
+                push_unallocated_segment(
+                    &mut self.partition_map.segments,
+                    cursor,
+                    partition.offset_bytes - cursor,
+                );
+            }
+            let name = partition_name(
+                partition.drive_letter,
+                partition.is_esp,
+                partition.is_msr,
+                partition.is_recovery,
+            );
+            let label = if partition.label.trim().is_empty() {
+                name
+            } else {
+                format!("{name}  {}", partition.label.trim())
+            };
+            self.partition_map.segments.push(PartitionMapSegment {
+                target: PartitionMapTarget::Existing(index),
+                label,
+                size: format_capacity(partition.size_bytes),
+                weight: partition.size_bytes.max(1),
+                special: partition.is_esp || partition.is_msr || partition.is_recovery,
+                protected: partition.drive_letter.is_some_and(|letter| {
+                    letter.eq_ignore_ascii_case(&self.state.running_windows_drive())
+                }),
+                drive_letter: partition.drive_letter,
+                active: partition.is_active,
+                minimum_bytes: partition
+                    .used_bytes
+                    .saturating_add(100 * 1024 * 1024)
+                    .max(512 * 1024 * 1024),
+            });
+            cursor = cursor.max(partition.offset_bytes.saturating_add(partition.size_bytes));
+        }
+        if cursor < disk.size_bytes {
+            push_unallocated_segment(
+                &mut self.partition_map.segments,
+                cursor,
+                disk.size_bytes - cursor,
+            );
+        }
+        for operation in &self.pending {
+            let PendingPartitionOperation::Resize(request) = operation else {
+                continue;
+            };
+            let Some(partition_index) = disk
+                .partitions
+                .iter()
+                .position(|partition| partition.partition_number == request.partition_number)
+            else {
+                continue;
+            };
+            let Some(segment_index) = self.partition_map.segments.iter().position(|segment| {
+                segment.target == PartitionMapTarget::Existing(partition_index)
+            }) else {
+                continue;
+            };
+            if segment_index + 1 >= self.partition_map.segments.len()
+                || !matches!(
+                    self.partition_map.segments[segment_index + 1].target,
+                    PartitionMapTarget::Unallocated { .. }
+                )
+            {
+                continue;
+            }
+            let new_bytes = request.new_size_mb.saturating_mul(1024 * 1024);
+            let combined = self.partition_map.segments[segment_index]
+                .weight
+                .saturating_add(self.partition_map.segments[segment_index + 1].weight);
+            if new_bytes >= combined {
+                continue;
+            }
+            let offset = disk.partitions[partition_index].offset_bytes;
+            self.partition_map.segments[segment_index].weight = new_bytes;
+            self.partition_map.segments[segment_index].size = format_capacity(new_bytes);
+            let free = combined - new_bytes;
+            self.partition_map.segments[segment_index + 1].weight = free;
+            self.partition_map.segments[segment_index + 1].size = format_capacity(free);
+            self.partition_map.segments[segment_index + 1].target =
+                PartitionMapTarget::Unallocated {
+                    offset_bytes: offset.saturating_add(new_bytes),
+                    size_bytes: free,
+                };
+        }
+        let _ = InvalidateRect(self.controls.partition_map, None, false);
     }
 
     unsafe fn render_selection(&self) {
         set_text(self.controls.size, &self.state.resize_size_text);
         let selected = self.state.selected_row.is_some();
-        let _ = EnableWindow(self.controls.size, selected);
-        let _ = EnableWindow(self.controls.apply_size, selected);
+        let planned = matches!(self.state.selected_row, Some(EditorRow::Planned(_)));
+        let _ = ShowWindow(
+            self.controls.size_label,
+            if planned { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = ShowWindow(self.controls.size, if planned { SW_SHOW } else { SW_HIDE });
+        let _ = ShowWindow(
+            self.controls.apply_size,
+            if planned { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = EnableWindow(self.controls.size, selected && planned);
+        let _ = EnableWindow(
+            self.controls.apply_size,
+            matches!(self.state.selected_row, Some(EditorRow::Planned(_))),
+        );
         // Disabled/enabled transitions can leave USER32's previous one-pixel bottom edge cached
         // until another input message.  Repaint only this owner-drawn button, without erasing the
         // row behind it, so all four Inno edges are present in the same frame.
@@ -557,6 +1226,7 @@ impl NativeQuickPartitionDialog {
             self.controls.add_esp,
             self.controls.delete,
             self.controls.apply_size,
+            self.controls.apply_pending,
         ] {
             apply_control_theme(button, palette, NativeControlKind::General);
         }
@@ -574,7 +1244,7 @@ impl NativeQuickPartitionDialog {
         }
     }
 
-    fn controls(&self) -> [HWND; 15] {
+    fn controls(&self) -> [HWND; 17] {
         let c = self.controls;
         [
             c.disk_label,
@@ -583,6 +1253,7 @@ impl NativeQuickPartitionDialog {
             c.style_mbr,
             c.style_gpt,
             c.recommendation,
+            c.partition_map,
             c.add_partition,
             c.add_esp,
             c.delete,
@@ -590,6 +1261,7 @@ impl NativeQuickPartitionDialog {
             c.size_label,
             c.size,
             c.apply_size,
+            c.apply_pending,
             c.warning,
             c.status,
         ]
@@ -599,6 +1271,11 @@ impl NativeQuickPartitionDialog {
 impl Drop for NativeQuickPartitionDialog {
     fn drop(&mut self) {
         unsafe {
+            let _ = RemoveWindowSubclass(
+                self.controls.partition_map,
+                Some(partition_map_proc),
+                PARTITION_MAP_SUBCLASS_ID,
+            );
             if !self.font.is_invalid() {
                 let _ = DeleteObject(self.font);
             }
@@ -606,7 +1283,729 @@ impl Drop for NativeQuickPartitionDialog {
     }
 }
 
-unsafe fn create_controls(parent: HWND) -> windows::core::Result<Controls> {
+fn management_partition_offset(action: &PartitionManagementAction) -> Option<u64> {
+    match action {
+        PartitionManagementAction::Delete { partition }
+        | PartitionManagementAction::Format { partition, .. }
+        | PartitionManagementAction::AssignDriveLetter { partition, .. }
+        | PartitionManagementAction::RemoveDriveLetter { partition }
+        | PartitionManagementAction::SetMbrActive { partition, .. } => Some(partition.offset_bytes),
+        PartitionManagementAction::CreateNtfs { offset_bytes, .. } => Some(*offset_bytes),
+    }
+}
+
+fn selected_disk_contains_target(disk: Option<&PhysicalDisk>, target: PartitionMapTarget) -> bool {
+    let Some(disk) = disk else {
+        return false;
+    };
+    match target {
+        PartitionMapTarget::Existing(index) => index < disk.partitions.len(),
+        PartitionMapTarget::Unallocated {
+            offset_bytes,
+            size_bytes,
+        } => {
+            let end = offset_bytes.saturating_add(size_bytes);
+            end <= disk.size_bytes
+                && disk.partitions.iter().all(|partition| {
+                    let partition_end = partition.offset_bytes.saturating_add(partition.size_bytes);
+                    offset_bytes >= partition_end || end <= partition.offset_bytes
+                })
+        }
+    }
+}
+
+fn push_unallocated_segment(
+    segments: &mut Vec<PartitionMapSegment>,
+    offset_bytes: u64,
+    size_bytes: u64,
+) {
+    if size_bytes < 1024 * 1024 {
+        return;
+    }
+    segments.push(PartitionMapSegment {
+        target: PartitionMapTarget::Unallocated {
+            offset_bytes,
+            size_bytes,
+        },
+        label: crate::tr!("未分配"),
+        size: format_capacity(size_bytes),
+        weight: size_bytes,
+        special: false,
+        protected: false,
+        drive_letter: None,
+        active: false,
+        minimum_bytes: 0,
+    });
+}
+
+fn format_capacity(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", bytes as f64 / GIB)
+    } else {
+        format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn partition_map_rects(width: i32, count: usize, weights: &[u64], dpi: u32) -> Vec<(i32, i32)> {
+    if count == 0 || width <= 0 {
+        return Vec::new();
+    }
+    let usable = width.max(count as i32);
+    let preferred_min = scale(38, dpi);
+    let minimum = preferred_min.min((usable / count as i32).max(1));
+    let fixed = minimum.saturating_mul(count as i32);
+    let flexible = (usable - fixed).max(0);
+    let total_weight = weights
+        .iter()
+        .copied()
+        .fold(0_u128, |sum, value| sum + u128::from(value.max(1)));
+    let mut result = Vec::with_capacity(count);
+    let mut x = 0_i32;
+    let mut assigned_flexible = 0_i32;
+    let mut cumulative_weight = 0_u128;
+    for (index, weight) in weights.iter().copied().enumerate() {
+        cumulative_weight += u128::from(weight.max(1));
+        let target_flexible = if index + 1 == count {
+            flexible
+        } else {
+            ((u128::from(flexible as u32) * cumulative_weight) / total_weight) as i32
+        };
+        let part_flexible = target_flexible - assigned_flexible;
+        assigned_flexible = target_flexible;
+        let segment_width = minimum + part_flexible;
+        result.push((x, x + segment_width));
+        x += segment_width;
+    }
+    result
+}
+
+unsafe extern "system" fn partition_map_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    reference_data: usize,
+) -> LRESULT {
+    let model = &mut *(reference_data as *mut PartitionMapModel);
+    match message {
+        WM_PAINT => {
+            paint_partition_map(hwnd, model);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let point = point_from_lparam(lparam);
+            if let Some(drag) = begin_partition_map_drag(hwnd, model, point) {
+                model.drag = Some(drag);
+                let _ = SetCapture(hwnd);
+                let _ = InvalidateRect(hwnd, None, false);
+                return LRESULT(0);
+            }
+            let target = hit_test_partition_map(hwnd, model, point);
+            model.selected = target;
+            model.context_target = target;
+            let _ = InvalidateRect(hwnd, None, false);
+            if let Ok(parent) = GetParent(hwnd) {
+                let _ = SendMessageW(
+                    parent,
+                    WM_COMMAND,
+                    WPARAM(ID_MAP_SELECT as usize),
+                    LPARAM(hwnd.0 as isize),
+                );
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if let Some(drag) = &mut model.drag {
+                let half = drag.combined_width.max(1);
+                drag.current_x = point_from_lparam(lparam)
+                    .x
+                    .clamp(drag.start_x - half, drag.start_x + half);
+                let _ = InvalidateRect(hwnd, None, false);
+                return LRESULT(0);
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_LBUTTONUP => {
+            if let Some(drag) = model.drag.take() {
+                if GetCapture() == hwnd {
+                    let _ = ReleaseCapture();
+                }
+                let delta = i64::from(drag.current_x - drag.start_x);
+                let change = (i128::from(delta) * i128::from(drag.combined_bytes))
+                    / i128::from(drag.combined_width.max(1));
+                let target = (i128::from(drag.original_bytes) + change).clamp(
+                    i128::from(drag.minimum_bytes),
+                    i128::from(drag.combined_bytes.saturating_sub(1024 * 1024)),
+                ) as u64;
+                let aligned = (target / (1024 * 1024)) * (1024 * 1024);
+                model.committed_resize = Some((drag.partition_index, aligned / (1024 * 1024)));
+                let _ = InvalidateRect(hwnd, None, false);
+                if let Ok(parent) = GetParent(hwnd) {
+                    let _ = SendMessageW(
+                        parent,
+                        WM_COMMAND,
+                        WPARAM(ID_MAP_DRAG_COMMIT as usize),
+                        LPARAM(hwnd.0 as isize),
+                    );
+                }
+                return LRESULT(0);
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_CAPTURECHANGED => {
+            if model.drag.take().is_some() {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_RBUTTONUP => {
+            let point = point_from_lparam(lparam);
+            model.context_target = hit_test_partition_map(hwnd, model, point);
+            model.selected = model.context_target;
+            let _ = InvalidateRect(hwnd, None, false);
+            if model.context_target.is_some() {
+                show_partition_context_menu(hwnd, model, point);
+            }
+            LRESULT(0)
+        }
+        WM_MEASUREITEM => {
+            let item = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
+            if item.CtlType == ODT_MENU && item.itemData != 0 {
+                let visual = &*(item.itemData as *const PartitionMenuItem);
+                item.itemWidth = scale(218, visual.dpi).max(1) as u32;
+                item.itemHeight =
+                    scale(if visual.separator { 9 } else { 32 }, visual.dpi).max(1) as u32;
+                return LRESULT(1);
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_DRAWITEM => {
+            let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
+            if item.CtlType == ODT_MENU && item.itemData != 0 {
+                draw_partition_menu_item(item);
+                return LRESULT(1);
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        WM_NCDESTROY => {
+            let _ = RemoveWindowSubclass(hwnd, Some(partition_map_proc), PARTITION_MAP_SUBCLASS_ID);
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, message, wparam, lparam),
+    }
+}
+
+unsafe fn draw_partition_menu_item(item: &DRAWITEMSTRUCT) {
+    let visual = &*(item.itemData as *const PartitionMenuItem);
+    let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
+    let disabled = item.itemState.0 & (ODS_DISABLED.0 | ODS_GRAYED.0) != 0;
+    let background = if selected && !disabled {
+        visual.palette.button_pressed
+    } else {
+        visual.palette.window
+    };
+    let brush = CreateSolidBrush(background);
+    let _ = FillRect(item.hDC, &item.rcItem, brush);
+    let _ = DeleteObject(brush);
+    if visual.separator {
+        let mut separator = item.rcItem;
+        separator.left += scale(10, visual.dpi);
+        separator.right -= scale(10, visual.dpi);
+        separator.top = (separator.top + separator.bottom) / 2;
+        separator.bottom = separator.top + scale(1, visual.dpi).max(1);
+        let brush = CreateSolidBrush(visual.palette.separator);
+        let _ = FillRect(item.hDC, &separator, brush);
+        let _ = DeleteObject(brush);
+        return;
+    }
+    let _ = SetBkMode(item.hDC, TRANSPARENT);
+    let _ = SetTextColor(
+        item.hDC,
+        if disabled {
+            visual.palette.text_disabled
+        } else {
+            visual.palette.text
+        },
+    );
+    let old_font = SelectObject(item.hDC, visual.font);
+    let mut text = wide(&visual.text);
+    let mut rect = item.rcItem;
+    rect.left += scale(14, visual.dpi);
+    rect.right -= scale(if visual.submenu { 26 } else { 12 }, visual.dpi);
+    let _ = DrawTextW(
+        item.hDC,
+        &mut text,
+        &mut rect,
+        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+    );
+    if visual.submenu {
+        let mut arrow = wide("›");
+        let mut arrow_rect = item.rcItem;
+        arrow_rect.left = arrow_rect.right - scale(24, visual.dpi);
+        arrow_rect.right -= scale(8, visual.dpi);
+        let _ = DrawTextW(
+            item.hDC,
+            &mut arrow,
+            &mut arrow_rect,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
+    }
+    let _ = SelectObject(item.hDC, old_font);
+}
+
+unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
+    let mut paint = PAINTSTRUCT::default();
+    let dc = BeginPaint(hwnd, &mut paint);
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let palette = Palette::system();
+    let background = CreateSolidBrush(palette.window);
+    let _ = FillRect(dc, &client, background);
+    let _ = DeleteObject(background);
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let margin = scale(2, dpi);
+    let inner_width = (client.right - client.left - margin * 2).max(0);
+    let mut weights = model
+        .segments
+        .iter()
+        .map(|segment| segment.weight)
+        .collect::<Vec<_>>();
+    if let Some(drag) = model.drag {
+        let delta = i64::from(drag.current_x - drag.start_x);
+        let change = (i128::from(delta) * i128::from(drag.combined_bytes))
+            / i128::from(drag.combined_width.max(1));
+        let left = (i128::from(drag.original_bytes) + change).clamp(
+            i128::from(drag.minimum_bytes),
+            i128::from(drag.combined_bytes.saturating_sub(1024 * 1024)),
+        ) as u64;
+        weights[drag.left_segment] = left;
+        weights[drag.left_segment + 1] = drag.combined_bytes - left;
+    }
+    let rects = partition_map_rects(inner_width, model.segments.len(), &weights, dpi);
+    if rects.is_empty() {
+        let mut text = wide(if model.enabled {
+            crate::tr!("磁盘没有可显示的空间")
+        } else {
+            crate::tr!("请选择磁盘")
+        });
+        let mut text_rect = client;
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let _ = SetTextColor(dc, palette.text_secondary);
+        let old_font = SelectObject(dc, model.font);
+        let _ = DrawTextW(
+            dc,
+            &mut text,
+            &mut text_rect,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
+        let _ = SelectObject(dc, old_font);
+        let _ = EndPaint(hwnd, &paint);
+        return;
+    }
+    let outer = RECT {
+        left: margin,
+        top: margin,
+        right: client.right - margin,
+        bottom: client.bottom - margin,
+    };
+    let segment_fill = |segment: &PartitionMapSegment| {
+        let selected = model.selected == Some(segment.target);
+        let unallocated = matches!(segment.target, PartitionMapTarget::Unallocated { .. });
+        if selected {
+            palette.highlight_fill
+        } else if unallocated {
+            palette.edit
+        } else if segment.special {
+            palette.button_pressed
+        } else {
+            palette.button
+        }
+    };
+    let base_fill = segment_fill(&model.segments[0]);
+    let radius = scale(4, dpi);
+    fill_round_rect_antialiased(dc, outer, radius, base_fill, palette.border, palette.window);
+    let frame = scale(1, dpi).max(1);
+    let clip = CreateRoundRectRgn(
+        outer.left + frame,
+        outer.top + frame,
+        outer.right - frame + 1,
+        outer.bottom - frame + 1,
+        (radius - frame).max(1) * 2,
+        (radius - frame).max(1) * 2,
+    );
+    if !clip.is_invalid() {
+        let _ = SelectClipRgn(dc, clip);
+        for (segment, (left, right)) in model.segments.iter().zip(rects.iter().copied()) {
+            let rect = RECT {
+                left: margin + left,
+                top: outer.top + frame,
+                right: margin + right,
+                bottom: outer.bottom - frame,
+            };
+            let brush = CreateSolidBrush(segment_fill(segment));
+            let _ = FillRect(dc, &rect, brush);
+            let _ = DeleteObject(brush);
+        }
+        for (_, right) in rects.iter().take(rects.len().saturating_sub(1)) {
+            let divider = RECT {
+                left: margin + right - frame / 2,
+                top: outer.top + frame,
+                right: margin + right - frame / 2 + frame,
+                bottom: outer.bottom - frame,
+            };
+            let brush = CreateSolidBrush(palette.border);
+            let _ = FillRect(dc, &divider, brush);
+            let _ = DeleteObject(brush);
+        }
+        let _ = SelectClipRgn(dc, None);
+        let _ = DeleteObject(clip);
+    }
+    for divider in draggable_partition_map_dividers(model, &rects, margin) {
+        let handle_width = scale(8, dpi).max(6);
+        let handle_height = scale(24, dpi).min((outer.bottom - outer.top - scale(8, dpi)).max(8));
+        let handle = RECT {
+            left: divider - handle_width / 2,
+            top: outer.top + (outer.bottom - outer.top - handle_height) / 2,
+            right: divider + (handle_width + 1) / 2,
+            bottom: outer.top + (outer.bottom - outer.top + handle_height) / 2,
+        };
+        fill_round_rect_antialiased(
+            dc,
+            handle,
+            scale(3, dpi),
+            palette.button_hot,
+            palette.border,
+            palette.window,
+        );
+        let line = RECT {
+            left: divider,
+            top: handle.top + scale(5, dpi),
+            right: divider + scale(1, dpi).max(1),
+            bottom: handle.bottom - scale(5, dpi),
+        };
+        let brush = CreateSolidBrush(palette.text_secondary);
+        let _ = FillRect(dc, &line, brush);
+        let _ = DeleteObject(brush);
+    }
+    for (segment, (left, right)) in model.segments.iter().zip(rects.iter().copied()) {
+        let selected = model.selected == Some(segment.target);
+        let rect = RECT {
+            left: margin + left,
+            top: margin,
+            right: margin + right,
+            bottom: client.bottom - margin,
+        };
+        let text_color = if selected {
+            if palette.dark {
+                COLORREF(0)
+            } else {
+                COLORREF(0x00ff_ffff)
+            }
+        } else if segment.protected {
+            palette.text_disabled
+        } else {
+            palette.text
+        };
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let _ = SetTextColor(dc, text_color);
+        let old_font = SelectObject(dc, model.font);
+        let mut label = wide(&segment.label);
+        let mut label_rect = rect;
+        label_rect.left += scale(5, dpi);
+        label_rect.right -= scale(5, dpi);
+        label_rect.bottom = rect.top + (rect.bottom - rect.top) / 2 + scale(7, dpi);
+        let _ = DrawTextW(
+            dc,
+            &mut label,
+            &mut label_rect,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+        let mut size = wide(&segment.size);
+        let mut size_rect = rect;
+        size_rect.left += scale(5, dpi);
+        size_rect.right -= scale(5, dpi);
+        size_rect.top = rect.top + (rect.bottom - rect.top) / 2 - scale(5, dpi);
+        let _ = DrawTextW(
+            dc,
+            &mut size,
+            &mut size_rect,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+        let _ = SelectObject(dc, old_font);
+    }
+    let _ = EndPaint(hwnd, &paint);
+}
+
+fn draggable_partition_map_dividers(
+    model: &PartitionMapModel,
+    rects: &[(i32, i32)],
+    margin: i32,
+) -> Vec<i32> {
+    model
+        .segments
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| {
+            let left = &pair[0];
+            let right = &pair[1];
+            let resizable = matches!(left.target, PartitionMapTarget::Existing(_))
+                && matches!(right.target, PartitionMapTarget::Unallocated { .. })
+                && !left.protected
+                && !left.special
+                && left.drive_letter.is_some();
+            resizable.then(|| margin + rects[index].1)
+        })
+        .collect()
+}
+
+unsafe fn begin_partition_map_drag(
+    hwnd: HWND,
+    model: &PartitionMapModel,
+    point: POINT,
+) -> Option<PartitionMapDrag> {
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let margin = scale(2, dpi);
+    let weights = model
+        .segments
+        .iter()
+        .map(|segment| segment.weight)
+        .collect::<Vec<_>>();
+    let rects = partition_map_rects(
+        (client.right - client.left - margin * 2).max(0),
+        model.segments.len(),
+        &weights,
+        dpi,
+    );
+    let hit_radius = scale(7, dpi);
+    for (index, divider) in draggable_partition_map_dividers(model, &rects, margin)
+        .into_iter()
+        .enumerate()
+    {
+        if (point.x - divider).abs() > hit_radius {
+            continue;
+        }
+        // `index` above counts only draggable dividers, so locate the actual segment boundary.
+        let left_segment = model
+            .segments
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| {
+                matches!(pair[0].target, PartitionMapTarget::Existing(_))
+                    && matches!(pair[1].target, PartitionMapTarget::Unallocated { .. })
+                    && !pair[0].protected
+                    && !pair[0].special
+                    && pair[0].drive_letter.is_some()
+            })
+            .nth(index)
+            .map(|(segment, _)| segment)?;
+        let left = &model.segments[left_segment];
+        let right = &model.segments[left_segment + 1];
+        let PartitionMapTarget::Existing(partition_index) = left.target else {
+            continue;
+        };
+        return Some(PartitionMapDrag {
+            partition_index,
+            left_segment,
+            start_x: divider,
+            current_x: divider,
+            combined_width: rects[left_segment + 1].1 - rects[left_segment].0,
+            combined_bytes: left.weight.saturating_add(right.weight),
+            original_bytes: left.weight,
+            minimum_bytes: left.minimum_bytes,
+        });
+    }
+    None
+}
+
+unsafe fn hit_test_partition_map(
+    hwnd: HWND,
+    model: &PartitionMapModel,
+    point: POINT,
+) -> Option<PartitionMapTarget> {
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let margin = scale(2, dpi);
+    let weights = model
+        .segments
+        .iter()
+        .map(|segment| segment.weight)
+        .collect::<Vec<_>>();
+    let rects = partition_map_rects(
+        (client.right - client.left - margin * 2).max(0),
+        model.segments.len(),
+        &weights,
+        dpi,
+    );
+    model
+        .segments
+        .iter()
+        .zip(rects)
+        .find(|(_, (left, right))| {
+            point.x >= margin + *left
+                && point.x < margin + *right
+                && point.y >= margin
+                && point.y < client.bottom - margin
+        })
+        .map(|(segment, _)| segment.target)
+}
+
+unsafe fn show_partition_context_menu(hwnd: HWND, model: &PartitionMapModel, mut point: POINT) {
+    let Some(target) = model.context_target else {
+        return;
+    };
+    let menu = match CreatePopupMenu() {
+        Ok(menu) => menu,
+        Err(_) => return,
+    };
+    let palette = Palette::system();
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let menu_background = CreateSolidBrush(palette.window);
+    apply_partition_menu_background(menu, menu_background);
+    let mut builder = PartitionMenuBuilder::new(model.font, palette, dpi, menu_background);
+    match target {
+        PartitionMapTarget::Existing(index) => {
+            let Some(segment) = model
+                .segments
+                .iter()
+                .find(|segment| segment.target == PartitionMapTarget::Existing(index))
+            else {
+                let _ = DestroyMenu(menu);
+                let _ = DeleteObject(menu_background);
+                return;
+            };
+            let can_resize = model
+                .segments
+                .iter()
+                .position(|candidate| candidate.target == segment.target)
+                .is_some_and(|position| {
+                    model.segments.get(position + 1).is_some_and(|next| {
+                        matches!(next.target, PartitionMapTarget::Unallocated { .. })
+                    })
+                });
+            builder.item(
+                menu,
+                ID_MAP_RESIZE,
+                &crate::tr!("扩大/缩小分区"),
+                !can_resize
+                    || segment.protected
+                    || segment.special
+                    || segment.drive_letter.is_none(),
+            );
+            builder.item(
+                menu,
+                ID_MAP_FORMAT_NTFS,
+                &crate::tr!("格式化..."),
+                segment.protected || segment.special || segment.drive_letter.is_none(),
+            );
+            builder.separator(menu);
+            if segment.drive_letter.is_some() {
+                builder.item(
+                    menu,
+                    ID_MAP_REMOVE_LETTER,
+                    &crate::tr!("移除盘符"),
+                    segment.protected,
+                );
+            } else {
+                builder.letter_submenu(
+                    menu,
+                    &crate::tr!("分配盘符"),
+                    ID_MAP_ASSIGN_LETTER_FIRST,
+                    &model.available_letters,
+                );
+            }
+            if model.style == PartitionStyle::MBR && !segment.special {
+                let active_label = if segment.active {
+                    crate::tr!("取消活动分区")
+                } else {
+                    crate::tr!("设为活动分区")
+                };
+                builder.item(
+                    menu,
+                    if segment.active {
+                        ID_MAP_CLEAR_ACTIVE
+                    } else {
+                        ID_MAP_SET_ACTIVE
+                    },
+                    &active_label,
+                    segment.protected,
+                );
+            }
+            builder.separator(menu);
+            builder.item(
+                menu,
+                ID_MAP_DELETE,
+                &crate::tr!("删除分区"),
+                segment.protected,
+            );
+        }
+        PartitionMapTarget::Unallocated { size_bytes, .. } => {
+            let label = if model.initialized {
+                crate::tr!("创建 NTFS 分区并分配盘符")
+            } else if model.style == PartitionStyle::GPT {
+                crate::tr!("初始化为 UEFI (GPT) 并创建 NTFS")
+            } else {
+                crate::tr!("初始化为 BIOS (MBR) 并创建 NTFS")
+            };
+            if size_bytes >= 1024 * 1024 {
+                builder.letter_submenu(
+                    menu,
+                    &label,
+                    ID_MAP_CREATE_LETTER_FIRST,
+                    &model.available_letters,
+                );
+            }
+        }
+    }
+    let _ = ClientToScreen(hwnd, &mut point);
+    let command = TrackPopupMenu(
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON,
+        point.x,
+        point.y,
+        0,
+        hwnd,
+        None,
+    );
+    if command.0 != 0 {
+        if let Ok(parent) = GetParent(hwnd) {
+            let _ = SendMessageW(
+                parent,
+                WM_COMMAND,
+                WPARAM(command.0 as usize),
+                LPARAM(hwnd.0 as isize),
+            );
+        }
+    }
+    let _ = DestroyMenu(menu);
+    let _ = DeleteObject(menu_background);
+}
+
+unsafe fn apply_partition_menu_background(
+    menu: windows::Win32::UI::WindowsAndMessaging::HMENU,
+    brush: windows::Win32::Graphics::Gdi::HBRUSH,
+) {
+    let info = MENUINFO {
+        cbSize: std::mem::size_of::<MENUINFO>() as u32,
+        fMask: MIM_BACKGROUND,
+        hbrBack: brush,
+        ..Default::default()
+    };
+    let _ = SetMenuInfo(menu, &info);
+}
+
+fn point_from_lparam(lparam: LPARAM) -> POINT {
+    POINT {
+        x: (lparam.0 as u16 as i16) as i32,
+        y: ((lparam.0 >> 16) as u16 as i16) as i32,
+    }
+}
+
+unsafe fn create_controls(parent: HWND, command_parent: HWND) -> windows::core::Result<Controls> {
     let label = |text: &str| child(parent, w!("STATIC"), text, 0, 0);
     let button = |text: &str, id| {
         child(
@@ -644,18 +2043,25 @@ unsafe fn create_controls(parent: HWND) -> windows::core::Result<Controls> {
         style_mbr: child(
             parent,
             w!("BUTTON"),
-            "MBR",
+            &crate::tr!("BIOS (MBR)"),
             BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
             ID_STYLE_MBR,
         )?,
         style_gpt: child(
             parent,
             w!("BUTTON"),
-            "GPT",
+            &crate::tr!("UEFI (GPT)"),
             BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
             ID_STYLE_GPT,
         )?,
         recommendation: label("")?,
+        partition_map: child(
+            parent,
+            w!("STATIC"),
+            "",
+            0x0100, // SS_NOTIFY
+            ID_PARTITION_MAP,
+        )?,
         add_partition: button(&crate::tr!("添加分区"), ID_ADD_PARTITION)?,
         add_esp: button(&crate::tr!("创建 ESP 分区 (500 MB)"), ID_ADD_ESP)?,
         delete: button(&crate::tr!("删除"), ID_DELETE)?,
@@ -669,6 +2075,13 @@ unsafe fn create_controls(parent: HWND) -> windows::core::Result<Controls> {
             ID_SIZE,
         )?,
         apply_size: button(&crate::tr!("调整大小"), ID_APPLY_SIZE)?,
+        apply_pending: child(
+            command_parent,
+            w!("BUTTON"),
+            &crate::tr!("应用"),
+            BS_OWNERDRAW | WS_TABSTOP.0 as i32,
+            ID_APPLY_PENDING,
+        )?,
         warning: label(&crate::tr!("提示: 一键分区会清除整个磁盘"))?,
         status: label("")?,
     })
@@ -917,5 +2330,112 @@ mod tests {
         };
         assert_eq!(planned_columns(&planned)[0], crate::tr!("新建"));
         assert_eq!(planned_columns(&planned)[1], "ESP");
+    }
+
+    #[test]
+    fn partition_map_rectangles_are_ordered_non_overlapping_and_fill_the_width() {
+        for dpi in [96, 144, 192] {
+            for weights in [
+                vec![1],
+                vec![1, 1],
+                vec![1, 10, 100],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+            ] {
+                let width = scale(720, dpi);
+                let rects = partition_map_rects(width, weights.len(), &weights, dpi);
+                assert_eq!(rects.len(), weights.len());
+                assert!(rects.iter().all(|(left, right)| right > left));
+                assert!(rects.windows(2).all(|pair| pair[0].1 == pair[1].0));
+                assert_eq!(rects.last().unwrap().1, width);
+            }
+        }
+    }
+
+    #[test]
+    fn map_hit_target_validation_rejects_stale_or_overlapping_free_space() {
+        let disk = PhysicalDisk {
+            disk_number: 1,
+            model: "test".into(),
+            size_bytes: 100 * 1024 * 1024,
+            partition_style: PartitionStyle::GPT,
+            is_initialized: true,
+            unallocated_bytes: 70 * 1024 * 1024,
+            partitions: vec![DiskPartitionInfo {
+                partition_number: 1,
+                size_bytes: 20 * 1024 * 1024,
+                offset_bytes: 10 * 1024 * 1024,
+                drive_letter: Some('D'),
+                label: String::new(),
+                file_system: "NTFS".into(),
+                is_esp: false,
+                is_msr: false,
+                is_recovery: false,
+                partition_type: String::new(),
+                used_bytes: 0,
+                free_bytes: 20 * 1024 * 1024,
+                is_active: false,
+            }],
+        };
+        assert!(selected_disk_contains_target(
+            Some(&disk),
+            PartitionMapTarget::Existing(0)
+        ));
+        assert!(selected_disk_contains_target(
+            Some(&disk),
+            PartitionMapTarget::Unallocated {
+                offset_bytes: 30 * 1024 * 1024,
+                size_bytes: 70 * 1024 * 1024,
+            }
+        ));
+        assert!(!selected_disk_contains_target(
+            Some(&disk),
+            PartitionMapTarget::Unallocated {
+                offset_bytes: 20 * 1024 * 1024,
+                size_bytes: 20 * 1024 * 1024,
+            }
+        ));
+    }
+
+    #[test]
+    fn resize_handle_exists_only_for_unprotected_volume_followed_by_free_space() {
+        let segment = |target, protected| PartitionMapSegment {
+            target,
+            label: String::new(),
+            size: String::new(),
+            weight: 100,
+            special: false,
+            protected,
+            drive_letter: Some('D'),
+            active: false,
+            minimum_bytes: 50,
+        };
+        let unallocated = PartitionMapSegment {
+            target: PartitionMapTarget::Unallocated {
+                offset_bytes: 100,
+                size_bytes: 100,
+            },
+            label: String::new(),
+            size: String::new(),
+            weight: 100,
+            special: false,
+            protected: false,
+            drive_letter: None,
+            active: false,
+            minimum_bytes: 0,
+        };
+        let mut model = PartitionMapModel::new(HFONT::default());
+        model.segments = vec![
+            segment(PartitionMapTarget::Existing(0), true),
+            unallocated.clone(),
+        ];
+        let rects = vec![(0, 100), (100, 200)];
+        assert!(draggable_partition_map_dividers(&model, &rects, 2).is_empty());
+        model.segments[0].protected = false;
+        assert_eq!(
+            draggable_partition_map_dividers(&model, &rects, 2),
+            vec![102]
+        );
+        model.segments.swap(0, 1);
+        assert!(draggable_partition_map_dividers(&model, &rects, 2).is_empty());
     }
 }

@@ -590,43 +590,24 @@ fn ini_header_name(line: &str) -> Option<&str> {
     Some(t[1..close].trim())
 }
 
-/// 用 diskpart 把指定盘符（如 `"C"`）的卷标记为「活动分区」。仅 MBR 有意义。
+/// 通过卷的物理磁盘与偏移把指定盘符标记为活动分区。仅 MBR 有意义。
 fn set_volume_active(letter: &str) -> Result<String, String> {
-    let script = format!("select volume {letter}\r\nactive\r\nexit\r\n");
-    let out = crate::diskpart::execute_script(
-        &std::env::temp_dir(),
-        "lr-xp-set-active",
-        "diskpart",
-        &script,
-    )
-    .map_err(|e| format!("diskpart 执行失败: {e}"))?;
-    let so = crate::diskpart::validated_stdout(&out).map_err(|detail| {
-        format!(
-            "diskpart 未能把 {letter}: 设为活动分区（可能目标是 GPT/动态盘/逻辑分区，无法设活动）：\n{}",
-            detail.trim()
-        )
-    })?;
-    // diskpart 即使内部失败（目标是 GPT/动态盘/逻辑分区，无法设活动）也常返回 0，故再按输出里的错误标志判一次。
-    // 用【否定检测】：只有命中已知错误词才算失败，绝不会把成功误判为失败 → 不会挡住本能正常设活动的盘。
-    if diskpart_reported_failure(&so) {
-        return Err(format!(
-            "diskpart 未能把 {letter}: 设为活动分区（可能目标是 GPT/动态盘/逻辑分区，无法设活动）：\n{}",
-            so.trim()
-        ));
-    }
-    Ok(so)
-}
-
-/// diskpart 输出里是否报了失败（中/英 PE）。diskpart 内部失败常仍返回 0，故按输出里的错误词判断。
-/// 仅否定检测：命中已知错误词才算失败；成功串（「…标记为活动分区」/「marked … as active」）不含这些词，故不会误判。
-fn diskpart_reported_failure(output: &str) -> bool {
-    let lo = output.to_ascii_lowercase();
-    output.contains("无法")
-        || output.contains("错误")
-        || lo.contains("cannot")
-        || lo.contains("is not")
-        || lo.contains("no volume")
-        || lo.contains("error")
+    let drive_letter = letter
+        .trim()
+        .trim_end_matches([':', '\\'])
+        .chars()
+        .next()
+        .ok_or_else(|| "目标卷盘符为空".to_string())?;
+    let identity = crate::windows_storage::volume_identity(drive_letter)
+        .map_err(|error| format!("无法解析 {drive_letter}: 的物理分区身份: {error}"))?;
+    crate::windows_storage::set_mbr_active(identity.disk_number, identity.offset_bytes, true)
+        .map_err(|error| {
+            format!("无法把 {drive_letter}: 设为活动分区（目标必须是 MBR 基础分区）: {error}")
+        })?;
+    Ok(format!(
+        "已把磁盘 {} 偏移 {} 的分区设为活动",
+        identity.disk_number, identity.offset_bytes
+    ))
 }
 
 /// 强制写入硬盘安装必需的应答键（照搬 DSI 的 `NT5部署无人值守`）。无论用户自定义 .sif 怎么写，
@@ -787,26 +768,6 @@ mod tests {
             .unwrap_err()
             .contains("setupreg.hiv"));
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn diskpart_reported_failure_negative_detection() {
-        // 成功串（中/英）→ 不算失败（关键：成功串里没有「无法/错误/cannot/is not/error」）
-        assert!(!diskpart_reported_failure(
-            "DiskPart 已将当前分区标记为活动分区。"
-        ));
-        assert!(!diskpart_reported_failure(
-            "DiskPart marked the current partition as active."
-        ));
-        assert!(!diskpart_reported_failure(""));
-        // 失败串 → 算失败
-        assert!(diskpart_reported_failure(
-            "DiskPart 无法在所选磁盘上标记活动分区。"
-        ));
-        assert!(diskpart_reported_failure(
-            "The selected disk is not a fixed MBR disk."
-        ));
-        assert!(diskpart_reported_failure("There is no volume selected."));
     }
 
     #[test]
