@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use super::dism::ImageInfo;
 
+const MEDIA_INSTALL_IMAGE_NAMES: [&str; 2] = ["install.esd", "install.wim"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageSourceKind {
     WimFamily,
@@ -62,6 +64,51 @@ pub fn classify_image_source(path: &Path) -> ImageSourceKind {
         Some("iso") => ImageSourceKind::Iso,
         _ => ImageSourceKind::Unsupported,
     }
+}
+
+fn unique_install_image_from_roots<I, P>(roots: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut found = None;
+    for root in roots {
+        let sources = root.as_ref().join("sources");
+        for name in MEDIA_INSTALL_IMAGE_NAMES {
+            let candidate = sources.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(candidate);
+        }
+    }
+    found
+}
+
+/// Find the only `?:\sources\install.esd` or `install.wim` visible to Windows.
+///
+/// Missing or inaccessible drives are ignored. Finding more than one candidate is deliberately
+/// ambiguous and returns `None`, so callers never guess which installation source the user meant.
+#[cfg(windows)]
+pub fn discover_unique_windows_install_image() -> Option<PathBuf> {
+    use windows::Win32::Storage::FileSystem::GetLogicalDrives;
+
+    let drive_mask = unsafe { GetLogicalDrives() };
+    let roots = (0..26)
+        .filter(|&index| drive_mask & (1 << index) != 0)
+        .map(|index| {
+            let letter = char::from(b'A' + index as u8);
+            PathBuf::from(format!("{letter}:\\"))
+        });
+    unique_install_image_from_roots(roots)
+}
+
+#[cfg(not(windows))]
+pub fn discover_unique_windows_install_image() -> Option<PathBuf> {
+    None
 }
 
 pub fn inspect_image_source(
@@ -185,6 +232,7 @@ fn inspect_iso(path: &Path) -> Result<InspectedImageSource, ImageSourceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lr_core::scoped_temp_file::ScopedTempDir;
 
     #[test]
     fn supported_extensions_are_case_insensitive() {
@@ -212,5 +260,54 @@ mod tests {
             classify_image_source(Path::new("setup.exe")),
             ImageSourceKind::Unsupported
         );
+    }
+
+    #[test]
+    fn exactly_one_media_install_image_is_selected() {
+        let temp =
+            ScopedTempDir::create_in(&std::env::temp_dir(), "lr-native-image-discovery-one-test")
+                .expect("create temp directory");
+        let media = temp.path().join("media");
+        let sources = media.join("sources");
+        std::fs::create_dir_all(&sources).expect("create sources directory");
+        let image = sources.join("install.esd");
+        std::fs::write(&image, b"fixture").expect("write image fixture");
+
+        assert_eq!(unique_install_image_from_roots([&media]), Some(image));
+    }
+
+    #[test]
+    fn zero_or_multiple_media_install_images_are_ambiguous() {
+        let temp =
+            ScopedTempDir::create_in(&std::env::temp_dir(), "lr-native-image-discovery-many-test")
+                .expect("create temp directory");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::create_dir_all(first.join("sources")).expect("create first sources directory");
+        std::fs::create_dir_all(second.join("sources")).expect("create second sources directory");
+
+        assert_eq!(unique_install_image_from_roots([&first, &second]), None);
+
+        std::fs::write(first.join("sources").join("install.wim"), b"first")
+            .expect("write first image fixture");
+        std::fs::write(second.join("sources").join("install.esd"), b"second")
+            .expect("write second image fixture");
+        assert_eq!(unique_install_image_from_roots([&first, &second]), None);
+    }
+
+    #[test]
+    fn wim_and_esd_on_the_same_media_are_not_auto_selected() {
+        let temp = ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-native-image-discovery-same-root-test",
+        )
+        .expect("create temp directory");
+        let media = temp.path().join("media");
+        let sources = media.join("sources");
+        std::fs::create_dir_all(&sources).expect("create sources directory");
+        std::fs::write(sources.join("install.wim"), b"wim").expect("write WIM fixture");
+        std::fs::write(sources.join("install.esd"), b"esd").expect("write ESD fixture");
+
+        assert_eq!(unique_install_image_from_roots([&media]), None);
     }
 }

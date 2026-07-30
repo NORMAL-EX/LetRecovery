@@ -159,6 +159,7 @@ const WM_PCA_TARGET_READY: u32 = 0x8004;
 const WM_TOOL_WORKER_READY: u32 = 0x8005;
 const WM_PARTITIONS_READY: u32 = 0x8006;
 const WM_INSTALL_PARTITION_SELECTION_CHANGED: u32 = 0x8007;
+const WM_AUTO_IMAGE_DISCOVERY_READY: u32 = 0x8008;
 const BACKUP_TIMER_ID: usize = 1;
 const DOWNLOAD_TIMER_ID: usize = 2;
 const INSTALL_TIMER_ID: usize = 3;
@@ -194,6 +195,17 @@ const fn unattended_checked_for_source_preference(
     source_has_unattend: bool,
 ) -> bool {
     configured_preference && !source_has_unattend
+}
+
+fn should_apply_auto_discovered_image(
+    discovery_pending: bool,
+    current_generation: u64,
+    discovery_generation: u64,
+    current_text: &str,
+) -> bool {
+    discovery_pending
+        && current_generation == discovery_generation
+        && current_text.trim().is_empty()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,6 +284,11 @@ struct ImageInfoMessage {
     >,
 }
 
+struct AutoImageDiscoveryMessage {
+    generation: u64,
+    path: Option<std::path::PathBuf>,
+}
+
 struct PartitionRefreshMessage {
     generation: u64,
     result: Result<Vec<crate::core::disk::Partition>, String>,
@@ -288,6 +305,21 @@ struct PcaTargetMessage {
     generation: u64,
     target: PcaTargetKey,
     result: Result<(), String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PcaTargetCacheEntry {
+    target: PcaTargetKey,
+    result: Result<(), String>,
+}
+
+fn reusable_pca_target_result(
+    cached: Option<&PcaTargetCacheEntry>,
+    target: &PcaTargetKey,
+) -> Option<Result<(), String>> {
+    cached
+        .filter(|entry| &entry.target == target)
+        .map(|entry| entry.result.clone())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -760,10 +792,11 @@ mod layout_tests {
         minimum_window_size, page_switch_requires_full_layout, pca_pending_status,
         pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
         pca_target_uses_uefi, preferred_window_size, preserved_pe_selection,
-        primary_state_refresh_for_page, shared_install_mode_label_width,
-        tool_backend_result_succeeded, unattended_checked_for_source_preference,
-        BitLockerGateCompletion, InstallControlSnapshot, Page, PcaPendingStatus, PcaTargetContext,
-        PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
+        primary_state_refresh_for_page, reusable_pca_target_result,
+        shared_install_mode_label_width, tool_backend_result_succeeded,
+        unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
+        Page, PcaPendingStatus, PcaTargetCacheEntry, PcaTargetContext, PcaTargetKey,
+        PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
         DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
     };
     use crate::core::disk::PartitionStyle;
@@ -1173,6 +1206,43 @@ mod layout_tests {
     }
 
     #[test]
+    fn completed_pca_target_probe_is_reused_only_for_the_same_target() {
+        let target = PcaTargetKey {
+            partition: "D:".into(),
+            disk_number: Some(1),
+            partition_number: Some(3),
+        };
+        let success = PcaTargetCacheEntry {
+            target: target.clone(),
+            result: Ok(()),
+        };
+        assert_eq!(
+            reusable_pca_target_result(Some(&success), &target),
+            Some(Ok(()))
+        );
+
+        let failed = PcaTargetCacheEntry {
+            target: target.clone(),
+            result: Err("ESP unavailable".into()),
+        };
+        assert_eq!(
+            reusable_pca_target_result(Some(&failed), &target),
+            Some(Err("ESP unavailable".into()))
+        );
+
+        let other_target = PcaTargetKey {
+            partition: "E:".into(),
+            disk_number: Some(2),
+            partition_number: Some(1),
+        };
+        assert_eq!(
+            reusable_pca_target_result(Some(&success), &other_target),
+            None
+        );
+        assert_eq!(reusable_pca_target_result(None, &target), None);
+    }
+
+    #[test]
     fn bitlocker_gate_only_continues_after_successful_unlock_and_refresh() {
         assert_eq!(
             bitlocker_gate_completion(false, true, 0),
@@ -1567,6 +1637,7 @@ struct NativeWindow {
     mounted_iso: Option<std::path::PathBuf>,
     image_request_generation: u64,
     image_edit_programmatic_change: bool,
+    auto_image_discovery_pending: bool,
     advanced_defaults_target: Option<String>,
     custom_unattend_path: String,
     custom_unattend_error: Option<String>,
@@ -1575,6 +1646,7 @@ struct NativeWindow {
     pca_detection_pending: bool,
     pca_target_generation: u64,
     pca_target_key: Option<PcaTargetKey>,
+    pca_target_cache: Option<PcaTargetCacheEntry>,
     pca_target_detection_pending: bool,
     pca_target_detection_error: Option<String>,
     backup_page: Option<BackupPage>,
@@ -1748,6 +1820,7 @@ impl NativeWindow {
             mounted_iso: None,
             image_request_generation: 0,
             image_edit_programmatic_change: false,
+            auto_image_discovery_pending: true,
             advanced_defaults_target: None,
             custom_unattend_path: String::new(),
             custom_unattend_error: None,
@@ -1756,6 +1829,7 @@ impl NativeWindow {
             pca_detection_pending: false,
             pca_target_generation: 0,
             pca_target_key: None,
+            pca_target_cache: None,
             pca_target_detection_pending: false,
             pca_target_detection_error: None,
             backup_page: None,
@@ -2459,6 +2533,11 @@ impl NativeWindow {
         self.pca_target_generation = self.pca_target_generation.wrapping_add(1);
         self.pca_target_key = Some(target.clone());
         self.pca_target_detection_error = None;
+        if let Some(result) = reusable_pca_target_result(self.pca_target_cache.as_ref(), &target) {
+            self.pca_target_detection_pending = false;
+            self.pca_target_detection_error = result.err();
+            return;
+        }
 
         #[cfg(feature = "non-elevated-tests")]
         {
@@ -4627,6 +4706,7 @@ impl NativeWindow {
     }
 
     unsafe fn browse_for_image(&mut self, hwnd: HWND) {
+        self.auto_image_discovery_pending = false;
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
                 crate::tr!("系统镜像"),
@@ -4664,6 +4744,7 @@ impl NativeWindow {
         if self.image_edit_programmatic_change {
             return;
         }
+        self.auto_image_discovery_pending = false;
         let Some(handles) = self.handles else { return };
         // A visible path must never remain associated with metadata from a previously inspected
         // source. Invalidate the generation immediately; a late result is discarded by the
@@ -4711,6 +4792,7 @@ impl NativeWindow {
     }
 
     unsafe fn load_image_path(&mut self, hwnd: HWND, path: std::path::PathBuf) {
+        self.auto_image_discovery_pending = false;
         let Some(h) = self.handles else { return };
         if let Some(previous) = self.mounted_iso.take() {
             if let Err(error) =
@@ -4752,6 +4834,29 @@ impl NativeWindow {
                 if PostMessageW(
                     HWND(window as *mut _),
                     WM_IMAGE_INFO_READY,
+                    WPARAM(0),
+                    LPARAM(payload as isize),
+                )
+                .is_err()
+                {
+                    drop(Box::from_raw(payload));
+                }
+            }
+        });
+    }
+
+    fn request_auto_image_discovery(&self, hwnd: HWND) {
+        let window = hwnd.0 as usize;
+        let generation = self.image_request_generation;
+        std::thread::spawn(move || {
+            let payload = Box::into_raw(Box::new(AutoImageDiscoveryMessage {
+                generation,
+                path: crate::core::native_image_source::discover_unique_windows_install_image(),
+            }));
+            unsafe {
+                if PostMessageW(
+                    HWND(window as *mut _),
+                    WM_AUTO_IMAGE_DISCOVERY_READY,
                     WPARAM(0),
                     LPARAM(payload as isize),
                 )
@@ -10347,6 +10452,8 @@ unsafe extern "system" fn window_proc(
                     return LRESULT(-1);
                 }
                 #[cfg(not(feature = "non-elevated-tests"))]
+                state.request_auto_image_discovery(hwnd);
+                #[cfg(not(feature = "non-elevated-tests"))]
                 state.handle_download_intent(hwnd, DownloadIntent::RefreshCatalogue);
             }
             LRESULT(0)
@@ -10460,6 +10567,10 @@ unsafe extern "system" fn window_proc(
                     &message,
                 ) {
                     state.pca_target_detection_pending = false;
+                    state.pca_target_cache = Some(PcaTargetCacheEntry {
+                        target: message.target,
+                        result: message.result.clone(),
+                    });
                     state.pca_target_detection_error = message.result.err();
                     state.update_pca_detection_status();
                     if state.partition_refresh_requested {
@@ -10484,6 +10595,25 @@ unsafe extern "system" fn window_proc(
                 let redraw = redraw::suspend(hwnd);
                 state.handle_install_partition_changed(hwnd);
                 redraw::resume_client(hwnd, redraw);
+            }
+            LRESULT(0)
+        }
+        WM_AUTO_IMAGE_DISCOVERY_READY => {
+            let message = *Box::from_raw(lparam.0 as *mut AutoImageDiscoveryMessage);
+            if let Some(state) = state {
+                let discovery_pending = state.auto_image_discovery_pending;
+                state.auto_image_discovery_pending = false;
+                if let (Some(handles), Some(path)) = (state.handles, message.path) {
+                    let current_text = get_text(handles.image_edit);
+                    if should_apply_auto_discovered_image(
+                        discovery_pending,
+                        state.image_request_generation,
+                        message.generation,
+                        &current_text,
+                    ) {
+                        state.load_image_path(hwnd, path);
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -12073,7 +12203,9 @@ unsafe fn draw_line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF
 
 #[cfg(test)]
 mod tests {
-    use super::{image_architecture_label, HardwareCopyFeedback};
+    use super::{
+        image_architecture_label, should_apply_auto_discovered_image, HardwareCopyFeedback,
+    };
 
     #[test]
     fn hardware_copy_feedback_expires_back_to_the_normal_caption() {
@@ -12091,5 +12223,19 @@ mod tests {
         assert_eq!(image_architecture_label(Some(9)), "x64");
         assert_eq!(image_architecture_label(Some(12)), "ARM64");
         assert_eq!(image_architecture_label(None), "未知");
+    }
+
+    #[test]
+    fn auto_discovery_never_overwrites_user_input_or_a_newer_request() {
+        assert!(should_apply_auto_discovered_image(true, 0, 0, ""));
+        assert!(should_apply_auto_discovered_image(true, 4, 4, "   "));
+        assert!(!should_apply_auto_discovered_image(
+            true,
+            0,
+            0,
+            r"D:\manual.wim"
+        ));
+        assert!(!should_apply_auto_discovered_image(true, 5, 4, ""));
+        assert!(!should_apply_auto_discovered_image(false, 0, 0, ""));
     }
 }
