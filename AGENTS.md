@@ -24,7 +24,6 @@ LetRecovery 是具有管理员权限的 Windows 系统安装、备份和磁盘�
 - `正常系统端/`：桌面环境主程序，负责系统安装、备份、在线下载、工具箱和写入 PE 启动配置。
 - `PE端/`：WinPE 中运行的安装、备份、扩容和离线系统处理程序。
 - `官网/`：React、TypeScript、Vite 官网和文档站。
-- `website-misanthropic-style/`：独立的 React、TypeScript、Vite 品牌增强版落地页；使用仓库内本地字体和项目专属 Anthropic editorial 主视觉，不替换现有 `官网/`，也不接管 Release 版本同步或正式部署入口。
 - `assets/`：发布包资源、语言文件、工具和内置运行时文件。
 - `docs/`：架构、安全、第三方二进制来源及用户文档。
 - `.github/ISSUE_TEMPLATE/`：问题与功能反馈表单；Bug 表单只要求用户描述现象、复现步骤、上传对应阶段日志和截图，不得再要求手工抄写日志已经自动记录的软件版本、源/目标系统、固件、Secure Boot、BitLocker、磁盘结构、所用 PE 和实体机/虚拟机线索。
@@ -161,17 +160,6 @@ npm run lint
 npm run type-check
 npm run build
 ```
-
-修改 `website-misanthropic-style/` 时，从该目录运行相同的独立前端门禁：
-
-```text
-npm ci
-npm run lint
-npm run type-check
-npm run build
-```
-
-该备选官网的生成主视觉必须作为普通静态资源保存在自身 `public/` 内，构建不得依赖 Codex 临时生成目录、外部图片热链或现有 `官网/` 的构建产物；更新页面时必须同时检查桌面和移动断点、导航交互、无横向溢出以及 `prefers-reduced-motion` 下的完整内容可见性。
 
 提交前还必须：
 
