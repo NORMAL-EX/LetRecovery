@@ -15,6 +15,23 @@ fn installed_dll_matches(path: &Path) -> bool {
     std::fs::read(path).is_ok_and(|bytes| bytes == EMBEDDED_WIMLIB_DLL)
 }
 
+fn sync_embedded_dll(dir: &Path) -> std::io::Result<bool> {
+    let dst = dir.join("libwim-15.dll");
+    if installed_dll_matches(&dst) {
+        return Ok(false);
+    }
+
+    let staged = ScopedTempFile::create_in(dir, "libwim-15", "tmp", EMBEDDED_WIMLIB_DLL)?;
+    if !installed_dll_matches(staged.path()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "staged wimlib DLL differs from the embedded bytes",
+        ));
+    }
+    staged.persist_replace(&dst)?;
+    Ok(true)
+}
+
 /// 确保 exe 同目录的 libwim-15.dll 与本次构建的内嵌版本逐字节一致。幂等。
 ///
 /// 临时文件与目标位于同一目录，完整写入并回读后才通过原子替换发布，避免程序崩溃时
@@ -23,24 +40,9 @@ pub fn ensure_dll_available() {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let dst = dir.join("libwim-15.dll");
-            if installed_dll_matches(&dst) {
-                return;
-            }
-
-            let result = (|| -> std::io::Result<()> {
-                let staged =
-                    ScopedTempFile::create_in(dir, "libwim-15", "dll.tmp", EMBEDDED_WIMLIB_DLL)?;
-                if !installed_dll_matches(staged.path()) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "staged wimlib DLL differs from the embedded bytes",
-                    ));
-                }
-                staged.persist_replace(&dst)
-            })();
-
-            match result {
-                Ok(()) => log::info!("已同步内置 libwim-15.dll 到 {}", dst.display()),
+            match sync_embedded_dll(dir) {
+                Ok(true) => log::info!("已同步内置 libwim-15.dll 到 {}", dst.display()),
+                Ok(false) => {}
                 Err(error) => {
                     log::warn!("同步内置 libwim-15.dll 失败 {}: {}", dst.display(), error)
                 }
@@ -65,5 +67,26 @@ mod tests {
         assert!(!installed_dll_matches(&dll));
         std::fs::write(&dll, EMBEDDED_WIMLIB_DLL).expect("write embedded DLL");
         assert!(installed_dll_matches(&dll));
+    }
+
+    #[test]
+    fn synchronizes_embedded_dll_through_a_valid_temporary_name() {
+        let temp = ScopedTempDir::create_in(&std::env::temp_dir(), "lr-wimlib-sync-test")
+            .expect("create temp directory");
+        let dll = temp.path().join("libwim-15.dll");
+        std::fs::write(&dll, b"stale DLL").expect("write stale DLL");
+
+        assert!(sync_embedded_dll(temp.path()).expect("synchronize embedded DLL"));
+        assert!(!sync_embedded_dll(temp.path()).expect("reuse matching embedded DLL"));
+
+        assert!(installed_dll_matches(&dll));
+        let remaining_files = std::fs::read_dir(temp.path())
+            .expect("read temp directory")
+            .map(|entry| entry.expect("read directory entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remaining_files,
+            vec![std::ffi::OsString::from("libwim-15.dll")]
+        );
     }
 }
