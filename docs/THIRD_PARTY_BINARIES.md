@@ -14,10 +14,10 @@ Hashes in this file are for the exact bytes committed to this repository.
 | Upstream Git URL | `https://wimlib.net/git/wimlib` |
 | Pinned upstream commit | `cd5e231c348c255ae5088873b5a66ee0eb96fa07` |
 | LetRecovery patch | `docs/third-party/wimlib-1.14.5/letrecovery-parallel-decompression.patch` |
-| Patch SHA-256 | `D350BC3C767C1F5B32A9AA2B6BD580A725BD117D83285F4A96380EE9FB86C8BC` |
+| Patch SHA-256 | `6EEDE7B504B8ED905A7F86CEB681CA40256D642D2CDC17B65568D2E4FD0122BE` |
 | Reproducible build script | `.github/scripts/build-wimlib-parallel.ps1` |
-| Committed DLL size | `497152` bytes |
-| Committed DLL SHA-256 | `0EC3576B460A06B2679679C2053107AB1FE470B392C8384C39C548B158F2CCE3` |
+| Committed DLL size | `496640` bytes |
+| Committed DLL SHA-256 | `78822F2CEF8FE4BD9EBD91943373BA8EA8A32ADA17C49AFC496123B2A938F4EF` |
 | License used for `libwim` and the LetRecovery patch | GNU Lesser General Public License v3.0 or later |
 | Additional bundled notice | `libdivsufsort-lite` license from upstream |
 
@@ -31,15 +31,6 @@ also reuse a bounded sliding read window, reducing fragmented reads without
 changing resource parsing, decompression, SHA-1 comparison, or progress
 callbacks. The window is charged to the same explicit memory budget and is
 disabled when less than 1 MiB per worker remains.
-
-On Windows targets that support hard links, application sets inode-owned
-metadata only once after the first alias completes every requested object-ID,
-EA, security-descriptor and basic-metadata operation. Later aliases still
-produce progress in the original reverse-dentry order. A structure error,
-including one ignored by the caller, disables deduplication for that inode.
-Raw or compatibility-path metadata failures leave the inode unmarked so the
-next alias retries. Temporary inode and dentry markers are cleared on every
-exit, and this optimization adds no allocation or new out-of-memory path.
 
 Windows workers use independent read handles because wimlib's Windows `pread`
 compatibility path changes a handle's shared file position. Automatic worker
