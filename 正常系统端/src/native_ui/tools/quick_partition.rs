@@ -7,10 +7,11 @@
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DeleteObject,
-    DrawTextW, EndPaint, FillRect, InvalidateRect, MapWindowPoints, SelectClipRgn, SelectObject,
-    SetBkMode, SetTextColor, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    HFONT, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
+    InvalidateRect, MapWindowPoints, SelectClipRgn, SelectObject, SetBkMode, SetTextColor,
+    DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HFONT, PAINTSTRUCT,
+    SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     DRAWITEMSTRUCT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS,
@@ -30,8 +31,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, TrackPopupMenu, BM_SETCHECK, BS_AUTORADIOBUTTON, BS_OWNERDRAW, CBS_DROPDOWNLIST,
     CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, ES_AUTOHSCROLL, MENUINFO, MF_GRAYED,
     MF_OWNERDRAW, MF_POPUP, MIM_BACKGROUND, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WM_CAPTURECHANGED, WM_COMMAND, WM_DRAWITEM, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM,
-    WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WS_BORDER, WS_TABSTOP,
+    WM_CAPTURECHANGED, WM_COMMAND, WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WS_BORDER,
+    WS_TABSTOP,
 };
 
 use super::super::controls::fill_round_rect_antialiased;
@@ -111,6 +113,7 @@ struct PartitionMapModel {
     enabled: bool,
     drag: Option<PartitionMapDrag>,
     committed_resize: Option<(usize, u64)>,
+    growth_blocked_by_neighbor: bool,
 }
 
 struct PartitionMenuItem {
@@ -236,10 +239,13 @@ struct PartitionMapDrag {
     left_segment: usize,
     start_x: i32,
     current_x: i32,
-    combined_width: i32,
-    combined_bytes: u64,
+    scale_width: i32,
+    scale_bytes: u64,
     original_bytes: u64,
     minimum_bytes: u64,
+    maximum_bytes: u64,
+    right_is_unallocated: bool,
+    right_is_borrowed_partition: bool,
 }
 
 impl PartitionMapModel {
@@ -255,6 +261,7 @@ impl PartitionMapModel {
             enabled: false,
             drag: None,
             committed_resize: None,
+            growth_blocked_by_neighbor: false,
         }
     }
 }
@@ -449,6 +456,18 @@ impl NativeQuickPartitionDialog {
         self.set_loading();
     }
 
+    pub unsafe fn set_operation_error(&mut self, message: impl Into<String>) {
+        self.state.loading = false;
+        self.state.message = message.into();
+        self.render_state();
+    }
+
+    pub unsafe fn set_operation_status(&mut self, message: impl Into<String>) {
+        self.state.loading = true;
+        self.state.message = message.into();
+        self.render_state();
+    }
+
     pub fn pending_operations(&self) -> Vec<PendingPartitionOperation> {
         self.pending.clone()
     }
@@ -520,6 +539,8 @@ impl NativeQuickPartitionDialog {
                         Ok(request) => self.stage_resize(request),
                         Err(error) => self.state.message = error,
                     }
+                } else if std::mem::take(&mut self.partition_map.growth_blocked_by_neighbor) {
+                    self.state.message = crate::tr!("ℹ 分区后方无未分配空间，只能缩小");
                 }
             }
             ID_MAP_SELECT => {
@@ -1151,32 +1172,62 @@ impl NativeQuickPartitionDialog {
             }) else {
                 continue;
             };
-            if segment_index + 1 >= self.partition_map.segments.len()
-                || !matches!(
-                    self.partition_map.segments[segment_index + 1].target,
-                    PartitionMapTarget::Unallocated { .. }
-                )
-            {
-                continue;
-            }
             let new_bytes = request.new_size_mb.saturating_mul(1024 * 1024);
-            let combined = self.partition_map.segments[segment_index]
-                .weight
-                .saturating_add(self.partition_map.segments[segment_index + 1].weight);
-            if new_bytes >= combined {
+            let current_bytes = disk.partitions[partition_index].size_bytes;
+            if new_bytes == current_bytes {
                 continue;
             }
             let offset = disk.partitions[partition_index].offset_bytes;
             self.partition_map.segments[segment_index].weight = new_bytes;
             self.partition_map.segments[segment_index].size = format_capacity(new_bytes);
-            let free = combined - new_bytes;
-            self.partition_map.segments[segment_index + 1].weight = free;
-            self.partition_map.segments[segment_index + 1].size = format_capacity(free);
-            self.partition_map.segments[segment_index + 1].target =
-                PartitionMapTarget::Unallocated {
-                    offset_bytes: offset.saturating_add(new_bytes),
-                    size_bytes: free,
-                };
+            let next_is_unallocated = self
+                .partition_map
+                .segments
+                .get(segment_index + 1)
+                .is_some_and(|segment| {
+                    matches!(segment.target, PartitionMapTarget::Unallocated { .. })
+                });
+            if new_bytes < current_bytes {
+                let released = current_bytes - new_bytes;
+                if next_is_unallocated {
+                    let free = self.partition_map.segments[segment_index + 1]
+                        .weight
+                        .saturating_add(released);
+                    self.partition_map.segments[segment_index + 1].weight = free;
+                    self.partition_map.segments[segment_index + 1].size = format_capacity(free);
+                    self.partition_map.segments[segment_index + 1].target =
+                        PartitionMapTarget::Unallocated {
+                            offset_bytes: offset.saturating_add(new_bytes),
+                            size_bytes: free,
+                        };
+                } else {
+                    self.partition_map.segments.insert(
+                        segment_index + 1,
+                        unallocated_segment(offset.saturating_add(new_bytes), released),
+                    );
+                }
+            } else if next_is_unallocated {
+                let consumed = new_bytes - current_bytes;
+                let available = self.partition_map.segments[segment_index + 1].weight;
+                if consumed < available {
+                    let free = available - consumed;
+                    self.partition_map.segments[segment_index + 1].weight = free;
+                    self.partition_map.segments[segment_index + 1].size = format_capacity(free);
+                    self.partition_map.segments[segment_index + 1].target =
+                        PartitionMapTarget::Unallocated {
+                            offset_bytes: offset.saturating_add(new_bytes),
+                            size_bytes: free,
+                        };
+                } else if consumed == available {
+                    self.partition_map.segments.remove(segment_index + 1);
+                }
+            } else if request.new_size_mb > request.no_move_max_size_mb {
+                let borrowed = new_bytes.saturating_sub(current_bytes);
+                if let Some(next) = self.partition_map.segments.get_mut(segment_index + 1) {
+                    next.weight = next.weight.saturating_sub(borrowed).max(1);
+                    next.size = format_capacity(next.weight);
+                }
+            }
         }
         let _ = InvalidateRect(self.controls.partition_map, None, false);
     }
@@ -1322,7 +1373,11 @@ fn push_unallocated_segment(
     if size_bytes < 1024 * 1024 {
         return;
     }
-    segments.push(PartitionMapSegment {
+    segments.push(unallocated_segment(offset_bytes, size_bytes));
+}
+
+fn unallocated_segment(offset_bytes: u64, size_bytes: u64) -> PartitionMapSegment {
+    PartitionMapSegment {
         target: PartitionMapTarget::Unallocated {
             offset_bytes,
             size_bytes,
@@ -1335,7 +1390,7 @@ fn push_unallocated_segment(
         drive_letter: None,
         active: false,
         minimum_bytes: 0,
-    });
+    }
 }
 
 fn format_capacity(bytes: u64) -> String {
@@ -1390,6 +1445,7 @@ unsafe extern "system" fn partition_map_proc(
 ) -> LRESULT {
     let model = &mut *(reference_data as *mut PartitionMapModel);
     match message {
+        WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             paint_partition_map(hwnd, model);
             LRESULT(0)
@@ -1418,11 +1474,14 @@ unsafe extern "system" fn partition_map_proc(
         }
         WM_MOUSEMOVE => {
             if let Some(drag) = &mut model.drag {
-                let half = drag.combined_width.max(1);
-                drag.current_x = point_from_lparam(lparam)
+                let span = drag.scale_width.max(1);
+                let current_x = point_from_lparam(lparam)
                     .x
-                    .clamp(drag.start_x - half, drag.start_x + half);
-                let _ = InvalidateRect(hwnd, None, false);
+                    .clamp(drag.start_x - span, drag.start_x + span);
+                if current_x != drag.current_x {
+                    drag.current_x = current_x;
+                    let _ = InvalidateRect(hwnd, None, false);
+                }
                 return LRESULT(0);
             }
             DefSubclassProc(hwnd, message, wparam, lparam)
@@ -1432,15 +1491,19 @@ unsafe extern "system" fn partition_map_proc(
                 if GetCapture() == hwnd {
                     let _ = ReleaseCapture();
                 }
-                let delta = i64::from(drag.current_x - drag.start_x);
-                let change = (i128::from(delta) * i128::from(drag.combined_bytes))
-                    / i128::from(drag.combined_width.max(1));
-                let target = (i128::from(drag.original_bytes) + change).clamp(
-                    i128::from(drag.minimum_bytes),
-                    i128::from(drag.combined_bytes.saturating_sub(1024 * 1024)),
-                ) as u64;
-                let aligned = (target / (1024 * 1024)) * (1024 * 1024);
-                model.committed_resize = Some((drag.partition_index, aligned / (1024 * 1024)));
+                let target = drag_target_bytes(drag);
+                const MIB: u64 = 1024 * 1024;
+                let minimum_mib = drag.minimum_bytes.saturating_add(MIB - 1) / MIB;
+                let maximum_mib = drag.maximum_bytes / MIB;
+                let aligned_mib = (target / MIB).clamp(minimum_mib, maximum_mib);
+                model.growth_blocked_by_neighbor = !drag.right_is_unallocated
+                    && !drag.right_is_borrowed_partition
+                    && drag.current_x > drag.start_x
+                    && target == drag.original_bytes;
+                let original_mib = drag.original_bytes / MIB;
+                model.committed_resize = (!model.growth_blocked_by_neighbor
+                    && aligned_mib != original_mib)
+                    .then_some((drag.partition_index, aligned_mib));
                 let _ = InvalidateRect(hwnd, None, false);
                 if let Ok(parent) = GetParent(hwnd) {
                     let _ = SendMessageW(
@@ -1555,11 +1618,87 @@ unsafe fn draw_partition_menu_item(item: &DRAWITEMSTRUCT) {
     let _ = SelectObject(item.hDC, old_font);
 }
 
+fn drag_target_bytes(drag: PartitionMapDrag) -> u64 {
+    let delta = i64::from(drag.current_x - drag.start_x);
+    let change =
+        (i128::from(delta) * i128::from(drag.scale_bytes)) / i128::from(drag.scale_width.max(1));
+    (i128::from(drag.original_bytes) + change).clamp(
+        i128::from(drag.minimum_bytes.min(drag.maximum_bytes)),
+        i128::from(drag.maximum_bytes),
+    ) as u64
+}
+
+fn partition_map_display_segments(model: &PartitionMapModel) -> Vec<PartitionMapSegment> {
+    let mut segments = model.segments.clone();
+    let Some(drag) = model.drag else {
+        return segments;
+    };
+    if drag.left_segment >= segments.len() {
+        return segments;
+    }
+    let target = drag_target_bytes(drag);
+    segments[drag.left_segment].weight = target.max(1);
+    segments[drag.left_segment].size = format_capacity(target);
+    if drag.right_is_unallocated {
+        let remaining = drag.scale_bytes.saturating_sub(target);
+        if remaining == 0 {
+            if drag.left_segment + 1 < segments.len() {
+                segments.remove(drag.left_segment + 1);
+            }
+        } else if let Some(right) = segments.get_mut(drag.left_segment + 1) {
+            right.weight = remaining;
+            right.size = format_capacity(remaining);
+            if let PartitionMapTarget::Unallocated {
+                offset_bytes,
+                size_bytes,
+            } = &mut right.target
+            {
+                *offset_bytes = offset_bytes.saturating_add(size_bytes.saturating_sub(remaining));
+                *size_bytes = remaining;
+            }
+        }
+    } else if target < drag.original_bytes {
+        segments.insert(
+            drag.left_segment + 1,
+            unallocated_segment(0, drag.original_bytes - target),
+        );
+    } else if drag.right_is_borrowed_partition && target > drag.original_bytes {
+        if let Some(right) = segments.get_mut(drag.left_segment + 1) {
+            let borrowed = target - drag.original_bytes;
+            right.weight = right.weight.saturating_sub(borrowed).max(1);
+            right.size = format_capacity(right.weight);
+        }
+    }
+    segments
+}
+
 unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
     let mut paint = PAINTSTRUCT::default();
-    let dc = BeginPaint(hwnd, &mut paint);
+    let target_dc = BeginPaint(hwnd, &mut paint);
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
+    let width = (client.right - client.left).max(0);
+    let height = (client.bottom - client.top).max(0);
+    let buffer = if width > 0 && height > 0 {
+        let memory_dc = CreateCompatibleDC(target_dc);
+        if memory_dc.is_invalid() {
+            None
+        } else {
+            let bitmap = CreateCompatibleBitmap(target_dc, width, height);
+            if bitmap.is_invalid() {
+                let _ = DeleteDC(memory_dc);
+                None
+            } else {
+                let old_bitmap = SelectObject(memory_dc, bitmap);
+                Some((memory_dc, bitmap, old_bitmap))
+            }
+        }
+    } else {
+        None
+    };
+    let dc = buffer
+        .as_ref()
+        .map_or(target_dc, |(memory_dc, _, _)| *memory_dc);
     let palette = Palette::system();
     let background = CreateSolidBrush(palette.window);
     let _ = FillRect(dc, &client, background);
@@ -1567,23 +1706,12 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
     let dpi = GetDpiForWindow(hwnd).max(96);
     let margin = scale(2, dpi);
     let inner_width = (client.right - client.left - margin * 2).max(0);
-    let mut weights = model
-        .segments
+    let display_segments = partition_map_display_segments(model);
+    let weights = display_segments
         .iter()
         .map(|segment| segment.weight)
         .collect::<Vec<_>>();
-    if let Some(drag) = model.drag {
-        let delta = i64::from(drag.current_x - drag.start_x);
-        let change = (i128::from(delta) * i128::from(drag.combined_bytes))
-            / i128::from(drag.combined_width.max(1));
-        let left = (i128::from(drag.original_bytes) + change).clamp(
-            i128::from(drag.minimum_bytes),
-            i128::from(drag.combined_bytes.saturating_sub(1024 * 1024)),
-        ) as u64;
-        weights[drag.left_segment] = left;
-        weights[drag.left_segment + 1] = drag.combined_bytes - left;
-    }
-    let rects = partition_map_rects(inner_width, model.segments.len(), &weights, dpi);
+    let rects = partition_map_rects(inner_width, display_segments.len(), &weights, dpi);
     if rects.is_empty() {
         let mut text = wide(if model.enabled {
             crate::tr!("磁盘没有可显示的空间")
@@ -1601,6 +1729,12 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
             DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
         let _ = SelectObject(dc, old_font);
+        if let Some((memory_dc, bitmap, old_bitmap)) = buffer {
+            let _ = BitBlt(target_dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
+            let _ = SelectObject(memory_dc, old_bitmap);
+            let _ = DeleteObject(bitmap);
+            let _ = DeleteDC(memory_dc);
+        }
         let _ = EndPaint(hwnd, &paint);
         return;
     }
@@ -1623,7 +1757,7 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
             palette.button
         }
     };
-    let base_fill = segment_fill(&model.segments[0]);
+    let base_fill = segment_fill(&display_segments[0]);
     let radius = scale(4, dpi);
     fill_round_rect_antialiased(dc, outer, radius, base_fill, palette.border, palette.window);
     let frame = scale(1, dpi).max(1);
@@ -1637,7 +1771,7 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
     );
     if !clip.is_invalid() {
         let _ = SelectClipRgn(dc, clip);
-        for (segment, (left, right)) in model.segments.iter().zip(rects.iter().copied()) {
+        for (segment, (left, right)) in display_segments.iter().zip(rects.iter().copied()) {
             let rect = RECT {
                 left: margin + left,
                 top: outer.top + frame,
@@ -1662,13 +1796,17 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
         let _ = SelectClipRgn(dc, None);
         let _ = DeleteObject(clip);
     }
-    for divider in draggable_partition_map_dividers(model, &rects, margin) {
+    for (_, divider) in draggable_partition_map_dividers(&display_segments, &rects, margin) {
         let handle_width = scale(8, dpi).max(6);
         let handle_height = scale(24, dpi).min((outer.bottom - outer.top - scale(8, dpi)).max(8));
+        let handle_center = divider.clamp(
+            outer.left + handle_width / 2 + frame,
+            outer.right - (handle_width + 1) / 2 - frame,
+        );
         let handle = RECT {
-            left: divider - handle_width / 2,
+            left: handle_center - handle_width / 2,
             top: outer.top + (outer.bottom - outer.top - handle_height) / 2,
-            right: divider + (handle_width + 1) / 2,
+            right: handle_center + (handle_width + 1) / 2,
             bottom: outer.top + (outer.bottom - outer.top + handle_height) / 2,
         };
         fill_round_rect_antialiased(
@@ -1680,16 +1818,16 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
             palette.window,
         );
         let line = RECT {
-            left: divider,
+            left: handle_center,
             top: handle.top + scale(5, dpi),
-            right: divider + scale(1, dpi).max(1),
+            right: handle_center + scale(1, dpi).max(1),
             bottom: handle.bottom - scale(5, dpi),
         };
         let brush = CreateSolidBrush(palette.text_secondary);
         let _ = FillRect(dc, &line, brush);
         let _ = DeleteObject(brush);
     }
-    for (segment, (left, right)) in model.segments.iter().zip(rects.iter().copied()) {
+    for (segment, (left, right)) in display_segments.iter().zip(rects.iter().copied()) {
         let selected = model.selected == Some(segment.target);
         let rect = RECT {
             left: margin + left,
@@ -1735,29 +1873,58 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
         );
         let _ = SelectObject(dc, old_font);
     }
+    if let Some((memory_dc, bitmap, old_bitmap)) = buffer {
+        let _ = BitBlt(target_dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
+        let _ = SelectObject(memory_dc, old_bitmap);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(memory_dc);
+    }
     let _ = EndPaint(hwnd, &paint);
 }
 
 fn draggable_partition_map_dividers(
-    model: &PartitionMapModel,
+    segments: &[PartitionMapSegment],
     rects: &[(i32, i32)],
     margin: i32,
-) -> Vec<i32> {
-    model
-        .segments
-        .windows(2)
+) -> Vec<(usize, i32)> {
+    segments
+        .iter()
         .enumerate()
-        .filter_map(|(index, pair)| {
-            let left = &pair[0];
-            let right = &pair[1];
-            let resizable = matches!(left.target, PartitionMapTarget::Existing(_))
-                && matches!(right.target, PartitionMapTarget::Unallocated { .. })
-                && !left.protected
-                && !left.special
-                && left.drive_letter.is_some();
-            resizable.then(|| margin + rects[index].1)
+        .filter_map(|(index, left)| {
+            let right = segments.get(index + 1);
+            if !partition_segment_can_resize(left, right) {
+                return None;
+            }
+            rects.get(index).map(|(_, right)| (index, margin + *right))
         })
         .collect()
+}
+
+fn partition_segment_can_resize(
+    segment: &PartitionMapSegment,
+    right: Option<&PartitionMapSegment>,
+) -> bool {
+    if !matches!(segment.target, PartitionMapTarget::Existing(_))
+        || segment.protected
+        || segment.special
+        || segment.drive_letter.is_none()
+    {
+        return false;
+    }
+    let can_shrink = segment.minimum_bytes < segment.weight;
+    let can_expand = right.is_some_and(|right| {
+        (matches!(right.target, PartitionMapTarget::Unallocated { .. }) && right.weight > 0)
+            || partition_segment_can_be_moved(right)
+    });
+    can_shrink || can_expand
+}
+
+fn partition_segment_can_be_moved(segment: &PartitionMapSegment) -> bool {
+    matches!(segment.target, PartitionMapTarget::Existing(_))
+        && !segment.protected
+        && !segment.special
+        && segment.drive_letter.is_some()
+        && segment.minimum_bytes < segment.weight
 }
 
 unsafe fn begin_partition_map_drag(
@@ -1781,41 +1948,53 @@ unsafe fn begin_partition_map_drag(
         dpi,
     );
     let hit_radius = scale(7, dpi);
-    for (index, divider) in draggable_partition_map_dividers(model, &rects, margin)
-        .into_iter()
-        .enumerate()
+    for (left_segment, divider) in draggable_partition_map_dividers(&model.segments, &rects, margin)
     {
         if (point.x - divider).abs() > hit_radius {
             continue;
         }
-        // `index` above counts only draggable dividers, so locate the actual segment boundary.
-        let left_segment = model
-            .segments
-            .windows(2)
-            .enumerate()
-            .filter(|(_, pair)| {
-                matches!(pair[0].target, PartitionMapTarget::Existing(_))
-                    && matches!(pair[1].target, PartitionMapTarget::Unallocated { .. })
-                    && !pair[0].protected
-                    && !pair[0].special
-                    && pair[0].drive_letter.is_some()
-            })
-            .nth(index)
-            .map(|(segment, _)| segment)?;
         let left = &model.segments[left_segment];
-        let right = &model.segments[left_segment + 1];
         let PartitionMapTarget::Existing(partition_index) = left.target else {
             continue;
+        };
+        let right = model.segments.get(left_segment + 1);
+        let right_is_unallocated = right
+            .is_some_and(|right| matches!(right.target, PartitionMapTarget::Unallocated { .. }));
+        let right_is_borrowed_partition = right.is_some_and(partition_segment_can_be_moved);
+        let (scale_width, scale_bytes, maximum_bytes) = if right_is_unallocated {
+            let right = right?;
+            (
+                rects[left_segment + 1].1 - rects[left_segment].0,
+                left.weight.saturating_add(right.weight),
+                left.weight.saturating_add(right.weight),
+            )
+        } else if right_is_borrowed_partition {
+            let right = right?;
+            let reclaimable = right.weight.saturating_sub(right.minimum_bytes);
+            (
+                (rects[left_segment + 1].1 - rects[left_segment].0).max(1),
+                left.weight.saturating_add(right.weight),
+                left.weight.saturating_add(reclaimable),
+            )
+        } else {
+            (
+                rects[left_segment].1 - rects[left_segment].0,
+                left.weight,
+                left.weight,
+            )
         };
         return Some(PartitionMapDrag {
             partition_index,
             left_segment,
             start_x: divider,
             current_x: divider,
-            combined_width: rects[left_segment + 1].1 - rects[left_segment].0,
-            combined_bytes: left.weight.saturating_add(right.weight),
+            scale_width,
+            scale_bytes,
             original_bytes: left.weight,
             minimum_bytes: left.minimum_bytes,
+            maximum_bytes,
+            right_is_unallocated,
+            right_is_borrowed_partition,
         });
     }
     None
@@ -1883,9 +2062,7 @@ unsafe fn show_partition_context_menu(hwnd: HWND, model: &PartitionMapModel, mut
                 .iter()
                 .position(|candidate| candidate.target == segment.target)
                 .is_some_and(|position| {
-                    model.segments.get(position + 1).is_some_and(|next| {
-                        matches!(next.target, PartitionMapTarget::Unallocated { .. })
-                    })
+                    partition_segment_can_resize(segment, model.segments.get(position + 1))
                 });
             builder.item(
                 menu,
@@ -2397,7 +2574,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_handle_exists_only_for_unprotected_volume_followed_by_free_space() {
+    fn resize_handles_allow_shrink_without_preexisting_unallocated_space() {
         let segment = |target, protected| PartitionMapSegment {
             target,
             label: String::new(),
@@ -2429,13 +2606,126 @@ mod tests {
             unallocated.clone(),
         ];
         let rects = vec![(0, 100), (100, 200)];
-        assert!(draggable_partition_map_dividers(&model, &rects, 2).is_empty());
+        assert!(draggable_partition_map_dividers(&model.segments, &rects, 2).is_empty());
         model.segments[0].protected = false;
         assert_eq!(
-            draggable_partition_map_dividers(&model, &rects, 2),
-            vec![102]
+            draggable_partition_map_dividers(&model.segments, &rects, 2),
+            vec![(0, 102)]
         );
-        model.segments.swap(0, 1);
-        assert!(draggable_partition_map_dividers(&model, &rects, 2).is_empty());
+
+        model.segments[1] = segment(PartitionMapTarget::Existing(1), false);
+        assert_eq!(
+            draggable_partition_map_dividers(&model.segments, &rects, 2),
+            vec![(0, 102), (1, 202)]
+        );
+
+        model.segments[0].minimum_bytes = model.segments[0].weight;
+        assert_eq!(
+            draggable_partition_map_dividers(&model.segments, &rects, 2),
+            vec![(0, 102), (1, 202)]
+        );
+    }
+
+    #[test]
+    fn dragging_left_between_existing_partitions_previews_real_unallocated_space() {
+        let segment = |index, weight, minimum_bytes| PartitionMapSegment {
+            target: PartitionMapTarget::Existing(index),
+            label: format!("P{index}"),
+            size: format_capacity(weight),
+            weight,
+            special: false,
+            protected: false,
+            drive_letter: Some((b'D' + index as u8) as char),
+            active: false,
+            minimum_bytes,
+        };
+        let mut model = PartitionMapModel::new(HFONT::default());
+        model.segments = vec![segment(0, 100, 50), segment(1, 200, 100)];
+        model.drag = Some(PartitionMapDrag {
+            partition_index: 0,
+            left_segment: 0,
+            start_x: 100,
+            current_x: 75,
+            scale_width: 100,
+            scale_bytes: 100,
+            original_bytes: 100,
+            minimum_bytes: 50,
+            maximum_bytes: 100,
+            right_is_unallocated: false,
+            right_is_borrowed_partition: false,
+        });
+
+        let display = partition_map_display_segments(&model);
+        assert_eq!(display.len(), 3);
+        assert_eq!(display[0].weight, 75);
+        assert!(matches!(
+            display[1].target,
+            PartitionMapTarget::Unallocated { .. }
+        ));
+        assert_eq!(display[1].weight, 25);
+        assert_eq!(display[2].target, PartitionMapTarget::Existing(1));
+        assert_eq!(display[2].weight, 200);
+    }
+
+    #[test]
+    fn existing_neighbor_prevents_growth_but_not_shrink() {
+        let drag = PartitionMapDrag {
+            partition_index: 0,
+            left_segment: 0,
+            start_x: 100,
+            current_x: 160,
+            scale_width: 100,
+            scale_bytes: 100,
+            original_bytes: 100,
+            minimum_bytes: 50,
+            maximum_bytes: 100,
+            right_is_unallocated: false,
+            right_is_borrowed_partition: false,
+        };
+        assert_eq!(drag_target_bytes(drag), 100);
+        assert_eq!(
+            drag_target_bytes(PartitionMapDrag {
+                current_x: 50,
+                ..drag
+            }),
+            50
+        );
+    }
+
+    #[test]
+    fn movable_neighbor_contributes_reclaimable_space_to_right_drag() {
+        let mut drag = PartitionMapDrag {
+            partition_index: 0,
+            left_segment: 0,
+            start_x: 100,
+            current_x: 150,
+            scale_width: 300,
+            scale_bytes: 300,
+            original_bytes: 100,
+            minimum_bytes: 50,
+            maximum_bytes: 220,
+            right_is_unallocated: false,
+            right_is_borrowed_partition: true,
+        };
+        assert_eq!(drag_target_bytes(drag), 150);
+
+        let segment = |index, weight, minimum_bytes| PartitionMapSegment {
+            target: PartitionMapTarget::Existing(index),
+            label: format!("P{index}"),
+            size: format_capacity(weight),
+            weight,
+            special: false,
+            protected: false,
+            drive_letter: Some((b'D' + index as u8) as char),
+            active: false,
+            minimum_bytes,
+        };
+        let mut model = PartitionMapModel::new(HFONT::default());
+        model.segments = vec![segment(0, 100, 50), segment(1, 200, 80)];
+        drag.current_x = 220;
+        model.drag = Some(drag);
+        let display = partition_map_display_segments(&model);
+        assert_eq!(display[0].weight, 220);
+        assert_eq!(display[1].weight, 80);
     }
 }

@@ -25,6 +25,12 @@ pub struct ExistingPartitionResizeRequest {
     pub current_size_mb: u64,
     pub new_size_mb: u64,
     pub used_size_mb: u64,
+    /// Largest target which can be reached without moving another partition.
+    pub no_move_max_size_mb: u64,
+    /// Largest target advertised by the current layout, including space reclaimable from the
+    /// immediately following basic data volume. The PE handoff re-queries the real VDS shrink
+    /// limit before writing anything.
+    pub move_max_size_mb: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +149,8 @@ fn execute_pending_partition_operations_production(
                     current_size_mb: bytes_to_mib(partition.size_bytes),
                     new_size_mb: original.new_size_mb,
                     used_size_mb: bytes_to_mib(partition.used_bytes),
+                    no_move_max_size_mb: original.no_move_max_size_mb,
+                    move_max_size_mb: original.move_max_size_mb,
                 };
                 messages.push(execute_existing_partition_resize(&request)?.message);
             }
@@ -566,6 +574,11 @@ pub(crate) fn execute_existing_partition_resize_with_backends(
         return Err(ExistingPartitionResizeError::DiskChanged);
     }
     validate_resize_request_against_disk(request, disk, system_drive)?;
+    if request.new_size_mb > request.no_move_max_size_mb {
+        return Err(ExistingPartitionResizeError::InvalidRequest(
+            "this expansion requires the typed WinPE partition-move handoff".into(),
+        ));
+    }
     let result = runner.run(request);
     if !result.success {
         return Err(ExistingPartitionResizeError::Execution(result.message));
@@ -943,10 +956,14 @@ impl QuickPartitionDialogState {
             .ok_or_else(|| crate::tr!("分区信息不可用"))?;
         validate_existing_resize_target(partition, self.system_drive)?;
         let min = (partition.used_gb() + 0.1).max(0.5);
-        let max = partition.size_gb()
-            + get_unallocated_space_after_partition_with_disk(disk, partition.partition_number)
-                as f64
-                / 1024.0;
+        let current_size_mb = bytes_to_mib(partition.size_bytes);
+        let no_move_max_size_mb = current_size_mb.saturating_add(
+            get_unallocated_space_after_partition_with_disk(disk, partition.partition_number),
+        );
+        let move_max_size_mb = no_move_max_size_mb.saturating_add(
+            following_partition_reclaimable_mib(disk, partition, self.system_drive),
+        );
+        let max = move_max_size_mb as f64 / 1024.0;
         if new_size_gb < min || new_size_gb > max {
             return Err(crate::tr!(
                 "大小必须在 {} GB 到 {} GB 之间",
@@ -958,9 +975,11 @@ impl QuickPartitionDialogState {
             disk: DiskFingerprint::from(disk),
             partition_number: partition.partition_number,
             drive_letter: partition.drive_letter.expect("validated drive letter"),
-            current_size_mb: bytes_to_mib(partition.size_bytes),
+            current_size_mb,
             new_size_mb: gib_to_mib(new_size_gb),
             used_size_mb: bytes_to_mib(partition.used_bytes),
+            no_move_max_size_mb,
+            move_max_size_mb,
         })
     }
 
@@ -1055,6 +1074,12 @@ fn validate_resize_request_shape(
             "target size must be at least {minimum} MiB"
         )));
     }
+    if request.no_move_max_size_mb < request.current_size_mb
+        || request.move_max_size_mb < request.no_move_max_size_mb
+        || request.new_size_mb > request.move_max_size_mb
+    {
+        return Err(invalid_resize("partition move limits are inconsistent"));
+    }
     Ok(())
 }
 
@@ -1085,13 +1110,44 @@ fn validate_resize_request_against_disk(
         .map_err(ExistingPartitionResizeError::InvalidRequest)?;
     let adjacent_mb =
         get_unallocated_space_after_partition_with_disk(disk, request.partition_number);
-    let maximum = current_size_mb.saturating_add(adjacent_mb);
+    let no_move_maximum = current_size_mb.saturating_add(adjacent_mb);
+    let maximum = no_move_maximum.saturating_add(following_partition_reclaimable_mib(
+        disk,
+        partition,
+        system_drive,
+    ));
+    if request.no_move_max_size_mb != no_move_maximum || request.move_max_size_mb != maximum {
+        return Err(ExistingPartitionResizeError::DiskChanged);
+    }
     if request.new_size_mb > maximum {
         return Err(invalid_resize(format!(
             "target size exceeds the current adjacent limit of {maximum} MiB"
         )));
     }
     Ok(())
+}
+
+fn following_partition_reclaimable_mib(
+    disk: &PhysicalDisk,
+    target: &DiskPartitionInfo,
+    system_drive: char,
+) -> u64 {
+    let target_end = target.offset_bytes.saturating_add(target.size_bytes);
+    let Some(next) = disk
+        .partitions
+        .iter()
+        .filter(|partition| partition.offset_bytes >= target_end)
+        .min_by_key(|partition| partition.offset_bytes)
+    else {
+        return 0;
+    };
+    if validate_existing_resize_target(next, system_drive).is_err() {
+        return 0;
+    }
+    bytes_to_mib(
+        next.size_bytes
+            .saturating_sub(next.used_bytes.saturating_add(100 * 1024 * 1024)),
+    )
 }
 
 fn validate_existing_resize_target(
@@ -1194,6 +1250,8 @@ mod tests {
             current_size_mb: 50 * 1024,
             new_size_mb: 40 * 1024,
             used_size_mb: 10 * 1024,
+            no_move_max_size_mb: 100 * 1024 - 1,
+            move_max_size_mb: 100 * 1024 - 1,
         }
     }
 
@@ -1310,6 +1368,52 @@ mod tests {
         assert_eq!(request.partition_number, 7);
         assert_eq!(request.new_size_mb, 40 * 1024);
         assert_eq!(state.selected_disk().unwrap().partitions[0].size_gb(), 50.0);
+    }
+
+    #[test]
+    fn adjacent_data_volume_contributes_a_pe_move_expansion_range() {
+        let mut value = disk(8, true, PartitionStyle::GPT);
+        value.size_bytes = 700 * GIB as u64;
+        value.partitions = vec![
+            DiskPartitionInfo {
+                partition_number: 1,
+                size_bytes: 200 * GIB as u64,
+                offset_bytes: GIB as u64,
+                drive_letter: Some('D'),
+                label: "Data".into(),
+                file_system: "NTFS".into(),
+                is_esp: false,
+                is_msr: false,
+                is_recovery: false,
+                partition_type: "basic".into(),
+                used_bytes: 100 * GIB as u64,
+                free_bytes: 100 * GIB as u64,
+                is_active: false,
+            },
+            DiskPartitionInfo {
+                partition_number: 2,
+                size_bytes: 400 * GIB as u64,
+                offset_bytes: 201 * GIB as u64,
+                drive_letter: Some('E'),
+                label: "More data".into(),
+                file_system: "NTFS".into(),
+                is_esp: false,
+                is_msr: false,
+                is_recovery: false,
+                partition_type: "basic".into(),
+                used_bytes: 150 * GIB as u64,
+                free_bytes: 250 * GIB as u64,
+                is_active: false,
+            },
+        ];
+        value.unallocated_bytes = 99 * GIB as u64;
+        let mut state = QuickPartitionDialogState::new(PartitionStyle::GPT, vec![], 'C');
+        state.apply_inventory(Ok(vec![value]));
+        state.select_row(Some(EditorRow::Existing(0)));
+        let request = state.existing_resize_request_mb(0, 300 * 1024).unwrap();
+        assert_eq!(request.no_move_max_size_mb, 200 * 1024);
+        assert!(request.move_max_size_mb >= 300 * 1024);
+        assert!(request.new_size_mb > request.no_move_max_size_mb);
     }
 
     #[test]

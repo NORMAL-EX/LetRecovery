@@ -7,6 +7,8 @@
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NativeExpandCAnalysis {
     pub found: bool,
+    pub disk: Option<crate::core::native_quick_partition::DiskFingerprint>,
+    pub partition_number: u32,
     pub current_size_mb: u64,
     pub used_mb: u64,
     pub free_mb: u64,
@@ -30,45 +32,72 @@ pub fn analyze_expand_c() -> Result<NativeExpandCAnalysis, NativeExpandCAnalysis
     Err(NativeExpandCAnalysisError::DisabledInDevelopment)
 }
 
+#[cfg(feature = "non-elevated-tests")]
+pub fn analyze_expand_partition(
+    _target_letter: char,
+) -> Result<NativeExpandCAnalysis, NativeExpandCAnalysisError> {
+    Err(NativeExpandCAnalysisError::DisabledInDevelopment)
+}
+
 #[cfg(not(feature = "non-elevated-tests"))]
 pub fn analyze_expand_c() -> Result<NativeExpandCAnalysis, NativeExpandCAnalysisError> {
+    analyze_expand_partition('C')
+}
+
+#[cfg(not(feature = "non-elevated-tests"))]
+pub fn analyze_expand_partition(
+    target_letter: char,
+) -> Result<NativeExpandCAnalysis, NativeExpandCAnalysisError> {
     use crate::core::quick_partition::{get_physical_disks, query_shrink_max};
 
     const BYTES_PER_MB: u64 = 1024 * 1024;
+    let target_letter = target_letter.to_ascii_uppercase();
     let disks = get_physical_disks();
-    let Some((disk, c_index)) = disks.iter().find_map(|disk| {
+    let Some((disk, target_index)) = disks.iter().find_map(|disk| {
         disk.partitions
             .iter()
-            .position(|partition| partition.drive_letter == Some('C'))
+            .position(|partition| {
+                partition
+                    .drive_letter
+                    .is_some_and(|letter| letter.eq_ignore_ascii_case(&target_letter))
+            })
             .map(|index| (disk, index))
     }) else {
         return Ok(NativeExpandCAnalysis {
-            reason: crate::tr!("未找到当前系统 C 盘"),
+            reason: crate::tr!("未找到目标分区 {}:", target_letter),
             ..Default::default()
         });
     };
 
-    let c_partition = &disk.partitions[c_index];
-    let current_size_mb = c_partition.size_bytes / BYTES_PER_MB;
-    let c_end = c_partition
+    let target_partition = &disk.partitions[target_index];
+    let current_size_mb = target_partition.size_bytes / BYTES_PER_MB;
+    let target_end = target_partition
         .offset_bytes
-        .saturating_add(c_partition.size_bytes);
+        .saturating_add(target_partition.size_bytes);
     let mut following: Vec<_> = disk
         .partitions
         .iter()
-        .filter(|partition| partition.offset_bytes >= c_end)
+        .filter(|partition| partition.offset_bytes >= target_end)
         .collect();
     following.sort_by_key(|partition| partition.offset_bytes);
 
     let unallocated_after_bytes = following.first().map_or_else(
-        || disk.size_bytes.saturating_sub(c_end),
-        |next| next.offset_bytes.saturating_sub(c_end),
+        || disk.size_bytes.saturating_sub(target_end),
+        |next| next.offset_bytes.saturating_sub(target_end),
     );
     let unallocated_after_mb = unallocated_after_bytes / BYTES_PER_MB;
     let mut next_shrinkable_mb = 0;
     if let Some(next) = following.first() {
-        let adjacent = next.offset_bytes.saturating_sub(c_end) < 2 * BYTES_PER_MB;
-        let movable = adjacent && !next.is_esp && !next.is_msr && !next.is_recovery;
+        let system_letter = std::env::var("SystemDrive")
+            .ok()
+            .and_then(|value| value.chars().next())
+            .map(|letter| letter.to_ascii_uppercase());
+        let movable = !next.is_esp
+            && !next.is_msr
+            && !next.is_recovery
+            && next
+                .drive_letter
+                .is_some_and(|letter| Some(letter.to_ascii_uppercase()) != system_letter);
         if movable {
             if let Some(letter) = next.drive_letter {
                 if let Ok(value) = query_shrink_max(letter) {
@@ -82,7 +111,7 @@ pub fn analyze_expand_c() -> Result<NativeExpandCAnalysis, NativeExpandCAnalysis
     let max_size_mb = no_move_max_mb.saturating_add(next_shrinkable_mb);
     let can_expand = max_size_mb > current_size_mb.saturating_add(1024);
     let reason = if !can_expand {
-        crate::tr!("C 盘后方没有可用于扩容的空间。可先用「一键分区」在 C 盘后方腾出未分配空间。")
+        crate::tr!("分区 {}: 后方没有可用于扩容的空间。", target_letter)
     } else if next_shrinkable_mb > 1024 {
         crate::tr!(
             "可无损并入：相邻未分配约 {} GB（直接扩）+ 后方分区可让出约 {} GB（需移动该分区的数据）。",
@@ -95,9 +124,13 @@ pub fn analyze_expand_c() -> Result<NativeExpandCAnalysis, NativeExpandCAnalysis
 
     Ok(NativeExpandCAnalysis {
         found: true,
+        disk: Some(crate::core::native_quick_partition::DiskFingerprint::from(
+            disk,
+        )),
+        partition_number: target_partition.partition_number,
         current_size_mb,
-        used_mb: c_partition.used_bytes / BYTES_PER_MB,
-        free_mb: c_partition.free_bytes / BYTES_PER_MB,
+        used_mb: target_partition.used_bytes / BYTES_PER_MB,
+        free_mb: target_partition.free_bytes / BYTES_PER_MB,
         max_size_mb,
         no_move_max_mb,
         can_expand,

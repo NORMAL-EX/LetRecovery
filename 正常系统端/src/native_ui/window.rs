@@ -1704,6 +1704,7 @@ struct NativeWindow {
         Option<crate::core::native_install_controller::StartInstallIntent>,
     pending_backup_after_pe_download: Option<BackupLaunchIntent>,
     pending_expand_after_pe_download: Option<ExpandCRequest>,
+    expand_from_quick_partition: bool,
     pending_bitlocker_gate: Option<PendingBitLockerGate>,
     tools_page: Option<ToolsPage>,
     hardware_page: Option<HardwareInfoPage>,
@@ -1887,6 +1888,7 @@ impl NativeWindow {
             pending_install_after_pe_download: None,
             pending_backup_after_pe_download: None,
             pending_expand_after_pe_download: None,
+            expand_from_quick_partition: false,
             pending_bitlocker_gate: None,
             tools_page: None,
             hardware_page: None,
@@ -6292,6 +6294,8 @@ impl NativeWindow {
 
     unsafe fn start_expand_c_execution(&mut self, _hwnd: HWND, request: ExpandCRequest) {
         let Some(handles) = self.handles else { return };
+        self.expand_from_quick_partition =
+            self.quick_partition_dialog.is_some() && self.expand_c_dialog.is_none();
         let pe = self.available_pe();
         let selected = usize::try_from(SendMessageW(handles.pe, 0x0147, WPARAM(0), LPARAM(0)).0)
             .ok()
@@ -6299,6 +6303,11 @@ impl NativeWindow {
         let Some(pe) = selected.and_then(|index| pe.get(index)).cloned() else {
             if let Some(dialog) = &mut self.expand_c_dialog {
                 dialog.set_error(crate::tr!("未选择 PE 环境，无法扩容"));
+            }
+            if self.expand_from_quick_partition {
+                if let Some(dialog) = &mut self.quick_partition_dialog {
+                    dialog.set_operation_error(crate::tr!("未选择 PE 环境，无法扩容"));
+                }
             }
             return;
         };
@@ -6317,6 +6326,12 @@ impl NativeWindow {
                     Err(error) => {
                         if let Some(dialog) = &mut self.expand_c_dialog {
                             dialog.set_error(crate::tr!("PE 校验配置无效：{}", error));
+                        }
+                        if self.expand_from_quick_partition {
+                            if let Some(dialog) = &mut self.quick_partition_dialog {
+                                dialog
+                                    .set_operation_error(crate::tr!("PE 校验配置无效：{}", error));
+                            }
                         }
                         return;
                     }
@@ -6341,6 +6356,14 @@ impl NativeWindow {
                         if let Some(dialog) = &mut self.expand_c_dialog {
                             dialog.set_error(crate::tr!("无法下载所需 PE 环境：{}", error));
                         }
+                        if self.expand_from_quick_partition {
+                            if let Some(dialog) = &mut self.quick_partition_dialog {
+                                dialog.set_operation_error(crate::tr!(
+                                    "无法下载所需 PE 环境：{}",
+                                    error
+                                ));
+                            }
+                        }
                     }
                 }
                 return;
@@ -6350,15 +6373,24 @@ impl NativeWindow {
                 if let Some(dialog) = &mut self.expand_c_dialog {
                     dialog.set_error(crate::tr!("PE 文件安全校验失败：{}", error));
                 }
+                if self.expand_from_quick_partition {
+                    if let Some(dialog) = &mut self.quick_partition_dialog {
+                        dialog.set_operation_error(crate::tr!("PE 文件安全校验失败：{}", error));
+                    }
+                }
                 return;
             }
         }
         let handoff = ExpandCHandoffRequest {
+            target_partition: request.target_partition,
+            expected_disk: request.expected_disk,
+            expected_partition_number: request.expected_partition_number,
             target_size_mb: request.target_size_mb,
             use_maximum: request.use_maximum,
             analyzed_current_size_mb: request.analyzed_current_size_mb,
             analyzed_max_size_mb: request.analyzed_max_size_mb,
             analyzed_no_move_max_mb: request.analyzed_no_move_max_mb,
+            strict_analysis_snapshot: request.strict_analysis_snapshot,
             wim_engine: self.app_config.wim_engine,
             pe,
         };
@@ -6367,11 +6399,21 @@ impl NativeWindow {
                 if let Some(dialog) = &mut self.expand_c_dialog {
                     dialog.set_executing(true, crate::tr!("正在准备扩容环境..."));
                 }
+                if self.expand_from_quick_partition {
+                    if let Some(dialog) = &mut self.quick_partition_dialog {
+                        dialog.set_operation_status(crate::tr!("正在准备扩容环境..."));
+                    }
+                }
                 self.expand_c_execution = Some(receiver);
             }
             Err(error) => {
                 if let Some(dialog) = &mut self.expand_c_dialog {
                     dialog.set_error(error.to_string());
+                }
+                if self.expand_from_quick_partition {
+                    if let Some(dialog) = &mut self.quick_partition_dialog {
+                        dialog.set_operation_error(error.to_string());
+                    }
                 }
             }
         }
@@ -8017,12 +8059,59 @@ impl NativeWindow {
                 }
             }
             Some(QuickPartitionDialogIntent::ApplyPending(operations)) => {
+                let offline_expand = match operations.as_slice() {
+                    [crate::core::native_quick_partition_dialog::PendingPartitionOperation::Resize(
+                        request,
+                    )] if request.new_size_mb > request.no_move_max_size_mb => {
+                        Some(ExpandCRequest {
+                            target_partition: request.drive_letter,
+                            expected_disk: Some(request.disk.clone()),
+                            expected_partition_number: Some(request.partition_number),
+                            target_size_mb: request.new_size_mb,
+                            use_maximum: false,
+                            requires_partition_move: true,
+                            analyzed_current_size_mb: request.current_size_mb,
+                            analyzed_max_size_mb: request.move_max_size_mb,
+                            analyzed_no_move_max_mb: request.no_move_max_size_mb,
+                            strict_analysis_snapshot: false,
+                        })
+                    }
+                    _ => None,
+                };
+                let has_offline_expand = operations.iter().any(|operation| {
+                    matches!(
+                        operation,
+                        crate::core::native_quick_partition_dialog::PendingPartitionOperation::Resize(
+                            request
+                        ) if request.new_size_mb > request.no_move_max_size_mb
+                    )
+                });
+                if has_offline_expand && offline_expand.is_none() {
+                    if let Some(dialog) = &mut self.quick_partition_dialog {
+                        dialog.set_operation_error(crate::tr!(
+                            "需要移动后方分区的扩容不能与其他暂存操作同时应用；请只保留这一项后重试。"
+                        ));
+                        dialog.show_modeless();
+                    }
+                    return;
+                }
                 let spec = DialogSpec {
                     window_title: crate::tr!("确认分区操作"),
                     title: crate::tr!("确认分区操作"),
-                    description: crate::tr!(
-                        "将应用 {} 项暂存的分区修改。\n\n执行前会重新读取磁盘身份和分区布局，每一步完成后都会复核结果。此操作可能导致数据丢失。",
-                        operations.len()
+                    description: offline_expand.as_ref().map_or_else(
+                        || {
+                            crate::tr!(
+                                "将应用 {} 项暂存的分区修改。\n\n执行前会重新读取磁盘身份和分区布局，每一步完成后都会复核结果。此操作可能导致数据丢失。",
+                                operations.len()
+                            )
+                        },
+                        |request| {
+                            crate::tr!(
+                                "将把分区 {}: 扩大到 {:.1} GB。需要先收缩并向右移动紧邻的后方分区；操作将在 WinPE 中执行并需要重启，请先备份重要数据。",
+                                request.target_partition,
+                                request.target_size_mb as f64 / 1024.0
+                            )
+                        },
                     ),
                     width: 620,
                     height: 260,
@@ -8036,10 +8125,17 @@ impl NativeWindow {
                     Ok(mut confirmation) => {
                         confirmation.fit_content_height(0);
                         if confirmation.show_modal() == DialogResult::Primary {
-                            if let Some(dialog) = &mut self.quick_partition_dialog {
-                                dialog.finish_pending_apply();
+                            if let Some(request) = offline_expand {
+                                if let Some(dialog) = &mut self.quick_partition_dialog {
+                                    dialog.set_operation_status(crate::tr!("正在准备扩容环境..."));
+                                }
+                                self.start_expand_c_execution(hwnd, request);
+                            } else {
+                                if let Some(dialog) = &mut self.quick_partition_dialog {
+                                    dialog.finish_pending_apply();
+                                }
+                                self.start_quick_partition_pending(operations);
                             }
-                            self.start_quick_partition_pending(operations);
                         } else if let Some(dialog) = &mut self.quick_partition_dialog {
                             dialog.show_modeless();
                         }
@@ -8392,21 +8488,41 @@ impl NativeWindow {
             match message {
                 ExpandCWorkerMessage::Progress(status) => {
                     if let Some(dialog) = &mut self.expand_c_dialog {
-                        dialog.set_executing(true, status);
+                        dialog.set_executing(true, status.clone());
+                    }
+                    if self.expand_from_quick_partition {
+                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                            dialog.set_operation_status(status);
+                        }
                     }
                 }
                 ExpandCWorkerMessage::ReadyToReboot => {
                     if let Some(dialog) = &mut self.expand_c_dialog {
                         dialog.set_executing(false, crate::tr!("准备完成，即将重启进入 WinPE..."));
                     }
+                    if self.expand_from_quick_partition {
+                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                            dialog.finish_pending_apply();
+                            dialog.set_operation_status(crate::tr!(
+                                "准备完成，即将重启进入 WinPE..."
+                            ));
+                        }
+                    }
                     self.expand_c_execution = None;
+                    self.expand_from_quick_partition = false;
                     crate::core::pe::PeManager::reboot();
                 }
                 ExpandCWorkerMessage::Failed(error) => {
                     if let Some(dialog) = &mut self.expand_c_dialog {
-                        dialog.set_error(error);
+                        dialog.set_error(error.clone());
+                    }
+                    if self.expand_from_quick_partition {
+                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                            dialog.set_operation_error(error);
+                        }
                     }
                     self.expand_c_execution = None;
+                    self.expand_from_quick_partition = false;
                 }
             }
         }

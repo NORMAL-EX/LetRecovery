@@ -21,6 +21,7 @@ use super::super::controls::{child, wide};
 use super::super::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
 use super::super::layout::{measure_text, LayoutMetrics};
 use super::super::theme::{apply_control_theme, apply_trackbar_theme, NativeControlKind, Palette};
+use crate::core::native_quick_partition::DiskFingerprint;
 
 const ID_CURRENT_SIZE: u16 = 64_600;
 const ID_USED_SIZE: u16 = 64_601;
@@ -138,6 +139,9 @@ impl ExpandCDialogState {
             });
         }
         Ok(ExpandCRequest {
+            target_partition: 'C',
+            expected_disk: None,
+            expected_partition_number: None,
             target_size_mb,
             use_maximum: target_size_mb >= maximum,
             requires_partition_move: self.analysis.no_move_max_mb > 0
@@ -145,12 +149,16 @@ impl ExpandCDialogState {
             analyzed_current_size_mb: self.analysis.current_size_mb,
             analyzed_max_size_mb: maximum,
             analyzed_no_move_max_mb: self.analysis.no_move_max_mb,
+            strict_analysis_snapshot: true,
         })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpandCRequest {
+    pub target_partition: char,
+    pub expected_disk: Option<DiskFingerprint>,
+    pub expected_partition_number: Option<u32>,
     pub target_size_mb: u64,
     /// The legacy PE configuration encodes "maximum available" as zero.  The execution
     /// controller, not this UI module, owns that compatibility conversion.
@@ -160,6 +168,7 @@ pub struct ExpandCRequest {
     pub analyzed_current_size_mb: u64,
     pub analyzed_max_size_mb: u64,
     pub analyzed_no_move_max_mb: u64,
+    pub strict_analysis_snapshot: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
