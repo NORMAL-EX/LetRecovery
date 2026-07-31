@@ -20,6 +20,7 @@ pub struct ExpandCHandoffRequest {
     pub analyzed_no_move_max_mb: u64,
     pub strict_analysis_snapshot: bool,
     pub borrow_from_left: bool,
+    pub donor_target_size_mb: u64,
     pub minimum_free_mb: u64,
     pub wim_engine: u8,
     pub pe: OnlinePE,
@@ -38,6 +39,43 @@ pub enum ExpandCStartError {
     DisabledInDevelopment,
     #[error("无法启动扩容准备线程: {0}")]
     Spawn(String),
+}
+
+fn validate_adjacent_transfer_geometry(
+    target: &crate::core::native_quick_partition::DiskPartitionFingerprint,
+    donor: &crate::core::native_quick_partition::DiskPartitionFingerprint,
+    target_size_mb: u64,
+    donor_size_mb: u64,
+    borrow_from_left: bool,
+) -> Result<(), String> {
+    let target_end = target
+        .offset_bytes
+        .checked_add(target.size_bytes)
+        .ok_or_else(|| crate::tr!("执行前目标分区几何溢出。"))?;
+    let donor_end = donor
+        .offset_bytes
+        .checked_add(donor.size_bytes)
+        .ok_or_else(|| crate::tr!("执行前供体分区几何溢出。"))?;
+    let final_target_bytes = target_size_mb
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| crate::tr!("执行前目标分区大小溢出。"))?;
+    let final_donor_bytes = donor_size_mb
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| crate::tr!("执行前供体分区大小溢出。"))?;
+    let adjacent = if borrow_from_left {
+        donor_end == target.offset_bytes
+    } else {
+        donor.offset_bytes == target_end
+    };
+    if !adjacent
+        || final_target_bytes.checked_add(final_donor_bytes)
+            != target.size_bytes.checked_add(donor.size_bytes)
+    {
+        return Err(crate::tr!(
+            "相邻分区转移的当前与最终总容量不一致，请重新检查分区布局。"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "non-elevated-tests")]
@@ -130,9 +168,31 @@ fn run_handoff(
                 })
                 .ok_or_else(|| crate::tr!("执行前未能在磁盘指纹中定位左侧相邻分区。"))?,
         )
+    } else if request.donor_target_size_mb > 0 {
+        let target_end = target_fingerprint
+            .offset_bytes
+            .checked_add(target_fingerprint.size_bytes)
+            .ok_or_else(|| crate::tr!("执行前目标分区几何溢出。"))?;
+        Some(
+            disk.partitions
+                .iter()
+                .filter(|partition| partition.offset_bytes >= target_end)
+                .min_by_key(|partition| partition.offset_bytes)
+                .ok_or_else(|| crate::tr!("执行前未能在磁盘指纹中定位右侧相邻分区。"))?,
+        )
     } else {
         None
     };
+    if request.donor_target_size_mb > 0 {
+        let donor = donor_fingerprint.ok_or_else(|| crate::tr!("执行前未能定位相邻供体分区。"))?;
+        validate_adjacent_transfer_geometry(
+            target_fingerprint,
+            donor,
+            request.target_size_mb,
+            request.donor_target_size_mb,
+            request.borrow_from_left,
+        )?;
+    }
 
     let pe_path = match super::pe::PeManager::check_cached_pe(
         &request.pe.filename,
@@ -158,6 +218,7 @@ fn run_handoff(
         },
         wim_engine: request.wim_engine,
         borrow_from_left: request.borrow_from_left,
+        donor_target_size_mb: request.donor_target_size_mb,
         expected_disk_number: disk.disk_number,
         expected_disk_size_bytes: disk.size_bytes,
         expected_partition_number: target_fingerprint.partition_number,
@@ -219,6 +280,34 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn adjacent_transfer_geometry_preserves_pair_total_and_adjacency() {
+        const MIB: u64 = 1024 * 1024;
+        let partition = |number, offset_mb, size_mb, letter| {
+            crate::core::native_quick_partition::DiskPartitionFingerprint {
+                partition_number: number,
+                offset_bytes: offset_mb * MIB,
+                size_bytes: size_mb * MIB,
+                drive_letter: Some(letter),
+                partition_type: "BASIC".into(),
+                is_esp: false,
+                is_msr: false,
+                is_recovery: false,
+            }
+        };
+        let target = partition(1, 1, 100, 'D');
+        let donor = partition(2, 101, 150, 'E');
+        assert!(validate_adjacent_transfer_geometry(&target, &donor, 125, 125, false).is_ok());
+        assert!(validate_adjacent_transfer_geometry(&target, &donor, 125, 120, false).is_err());
+        let separated = partition(2, 102, 150, 'E');
+        assert!(validate_adjacent_transfer_geometry(&target, &separated, 125, 125, false).is_err());
+        let left_donor = partition(1, 1, 150, 'D');
+        let right_target = partition(2, 151, 100, 'E');
+        assert!(
+            validate_adjacent_transfer_geometry(&right_target, &left_donor, 125, 125, true).is_ok()
+        );
+    }
+
     #[cfg(feature = "non-elevated-tests")]
     #[test]
     fn development_build_refuses_before_starting_a_worker() {
@@ -233,6 +322,7 @@ mod tests {
             analyzed_no_move_max_mb: 2,
             strict_analysis_snapshot: true,
             borrow_from_left: false,
+            donor_target_size_mb: 0,
             minimum_free_mb: 1024,
             wim_engine: 0,
             pe: OnlinePE {
@@ -271,6 +361,7 @@ mod tests {
                 target_size_mb: 0,
                 wim_engine: 0,
                 borrow_from_left: false,
+                donor_target_size_mb: 0,
                 expected_disk_number: 0,
                 expected_disk_size_bytes: 0,
                 expected_partition_number: 0,

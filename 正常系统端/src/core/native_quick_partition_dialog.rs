@@ -89,6 +89,138 @@ pub enum PendingPartitionOperation {
     Manage(PartitionManagementRequest),
 }
 
+/// Returns the transfer represented by the only supported compound offline plan.
+///
+/// A right-hand volume may first consume some or all unallocated space immediately after it, then
+/// donate part of that enlarged extent to its left-hand neighbour in WinPE. Keeping these ordered
+/// operations is essential: collapsing them into a single transfer would let WinPE move the donor
+/// into the still-unallocated extent without shrinking it, producing a different final layout.
+pub fn compound_offline_transfer_preview(
+    operations: &[PendingPartitionOperation],
+) -> Result<AdjacentPartitionTransferRequest, String> {
+    let [PendingPartitionOperation::Resize(resize), PendingPartitionOperation::Transfer(transfer)] =
+        operations
+    else {
+        return Err(crate::tr!(
+            "连续空间转移必须依次包含右侧分区扩容和相邻分区转移"
+        ));
+    };
+    if resize.disk != transfer.disk
+        || resize.partition_number != transfer.right_partition.partition_number
+        || resize.new_size_mb <= resize.current_size_mb
+        || resize.new_size_mb > resize.no_move_max_size_mb
+        || resize.new_size_mb > resize.move_max_size_mb
+        || resize.new_size_mb != transfer.right_current_size_mb
+        || transfer.left_current_size_mb != bytes_to_mib(transfer.left_partition.size_bytes)
+        || transfer
+            .left_new_size_mb
+            .saturating_add(transfer.right_new_size_mb)
+            != transfer
+                .left_current_size_mb
+                .saturating_add(transfer.right_current_size_mb)
+    {
+        return Err(crate::tr!(
+            "连续空间转移的暂存布局不一致；请刷新磁盘布局后重新拖动"
+        ));
+    }
+    Ok(transfer.clone())
+}
+
+/// Applies the direct, no-move prerequisite of a compound transfer and then fingerprints the
+/// resulting adjacent pair for the existing typed WinPE handoff.
+pub fn prepare_compound_offline_transfer(
+    operations: &[PendingPartitionOperation],
+) -> Result<AdjacentPartitionTransferRequest, ExistingPartitionResizeError> {
+    let transfer = compound_offline_transfer_preview(operations)
+        .map_err(ExistingPartitionResizeError::InvalidRequest)?;
+    let resize = operations
+        .iter()
+        .find_map(|operation| match operation {
+            PendingPartitionOperation::Resize(request) => Some(request),
+            _ => None,
+        })
+        .expect("compound preview validated the resize");
+
+    #[cfg(feature = "non-elevated-tests")]
+    {
+        let _ = (transfer, resize);
+        Err(ExistingPartitionResizeError::DevelopmentBuildDenied)
+    }
+
+    #[cfg(not(feature = "non-elevated-tests"))]
+    {
+        execute_existing_partition_resize(resize)?;
+        let inventory = super::quick_partition::get_physical_disks();
+        let disk = inventory
+            .iter()
+            .find(|disk| disk.disk_number == transfer.disk.disk_number)
+            .ok_or(ExistingPartitionResizeError::DiskMissing(
+                transfer.disk.disk_number,
+            ))?;
+        let left = disk
+            .partitions
+            .iter()
+            .find(|partition| {
+                partition.partition_number == transfer.left_partition.partition_number
+            })
+            .ok_or(ExistingPartitionResizeError::PartitionMissing(
+                transfer.left_partition.partition_number,
+            ))?;
+        let right = disk
+            .partitions
+            .iter()
+            .find(|partition| {
+                partition.partition_number == transfer.right_partition.partition_number
+            })
+            .ok_or(ExistingPartitionResizeError::PartitionMissing(
+                transfer.right_partition.partition_number,
+            ))?;
+        let left_letter = left
+            .drive_letter
+            .ok_or(ExistingPartitionResizeError::PartitionChanged)?;
+        let right_letter = right
+            .drive_letter
+            .ok_or(ExistingPartitionResizeError::PartitionChanged)?;
+        if !left_letter.eq_ignore_ascii_case(&transfer.left_drive_letter)
+            || !right_letter.eq_ignore_ascii_case(&transfer.right_drive_letter)
+            || left.offset_bytes.saturating_add(left.size_bytes) != right.offset_bytes
+        {
+            return Err(ExistingPartitionResizeError::PartitionChanged);
+        }
+        let left_current_size_mb = bytes_to_mib(left.size_bytes);
+        let right_current_size_mb = bytes_to_mib(right.size_bytes);
+        if left_current_size_mb.saturating_add(right_current_size_mb)
+            != transfer
+                .left_new_size_mb
+                .saturating_add(transfer.right_new_size_mb)
+        {
+            return Err(ExistingPartitionResizeError::Execution(crate::tr!(
+                "右侧分区扩容已完成，但重新读取的分区总大小与暂存布局不一致；已停止 WinPE 转移"
+            )));
+        }
+        if transfer.left_new_size_mb < bytes_to_mib(left.used_bytes).saturating_add(100)
+            || transfer.right_new_size_mb < bytes_to_mib(right.used_bytes).saturating_add(100)
+        {
+            return Err(ExistingPartitionResizeError::Execution(crate::tr!(
+                "右侧分区扩容已完成，但重新读取的使用量已超过暂存安全范围；已停止 WinPE 转移"
+            )));
+        }
+        Ok(AdjacentPartitionTransferRequest {
+            disk: DiskFingerprint::from(disk),
+            left_partition: DiskPartitionFingerprint::from(left),
+            left_drive_letter: left_letter,
+            left_current_size_mb,
+            left_new_size_mb: transfer.left_new_size_mb,
+            left_used_size_mb: bytes_to_mib(left.used_bytes),
+            right_partition: DiskPartitionFingerprint::from(right),
+            right_drive_letter: right_letter,
+            right_current_size_mb,
+            right_new_size_mb: transfer.right_new_size_mb,
+            right_used_size_mb: bytes_to_mib(right.used_bytes),
+        })
+    }
+}
+
 pub fn execute_pending_partition_operations(
     operations: &[PendingPartitionOperation],
 ) -> Result<String, ExistingPartitionResizeError> {
@@ -975,6 +1107,34 @@ impl QuickPartitionDialogState {
         let disk = self
             .selected_disk()
             .ok_or_else(|| crate::tr!("请先选择要分区的磁盘"))?;
+        let left = disk
+            .partitions
+            .get(left_index)
+            .ok_or_else(|| crate::tr!("分区信息不可用"))?;
+        let right = disk
+            .partitions
+            .get(right_index)
+            .ok_or_else(|| crate::tr!("分区信息不可用"))?;
+        self.adjacent_transfer_request_from_current_sizes_mb(
+            left_index,
+            right_index,
+            bytes_to_mib(left.size_bytes),
+            bytes_to_mib(right.size_bytes),
+            left_new_size_mb,
+        )
+    }
+
+    pub fn adjacent_transfer_request_from_current_sizes_mb(
+        &self,
+        left_index: usize,
+        right_index: usize,
+        left_current_size_mb: u64,
+        right_current_size_mb: u64,
+        left_new_size_mb: u64,
+    ) -> Result<AdjacentPartitionTransferRequest, String> {
+        let disk = self
+            .selected_disk()
+            .ok_or_else(|| crate::tr!("请先选择要分区的磁盘"))?;
         if right_index != left_index.saturating_add(1) {
             return Err(crate::tr!("相邻分区信息不可用"));
         }
@@ -992,8 +1152,6 @@ impl QuickPartitionDialogState {
         if right.offset_bytes != left_end {
             return Err(crate::tr!("只能在两个紧邻分区之间转移空间"));
         }
-        let left_current_size_mb = bytes_to_mib(left.size_bytes);
-        let right_current_size_mb = bytes_to_mib(right.size_bytes);
         let total_size_mb = left_current_size_mb.saturating_add(right_current_size_mb);
         if left_new_size_mb == left_current_size_mb || left_new_size_mb >= total_size_mb {
             return Err(crate::tr!("分区大小没有变化"));
@@ -1591,6 +1749,112 @@ mod tests {
         let mut state = QuickPartitionDialogState::new(PartitionStyle::GPT, vec![], 'C');
         state.apply_inventory(Ok(vec![value]));
         assert!(state.adjacent_transfer_request_mb(0, 1, 40 * 1024).is_err());
+    }
+
+    fn compound_transfer_operations() -> Vec<PendingPartitionOperation> {
+        let mut value = disk(9, true, PartitionStyle::GPT);
+        value.size_bytes = 300 * GIB as u64 + 1024 * 1024;
+        value.partitions = vec![
+            DiskPartitionInfo {
+                partition_number: 1,
+                size_bytes: 100 * GIB as u64,
+                offset_bytes: 1024 * 1024,
+                drive_letter: Some('D'),
+                label: "D".into(),
+                file_system: "NTFS".into(),
+                is_esp: false,
+                is_msr: false,
+                is_recovery: false,
+                partition_type: "basic".into(),
+                used_bytes: 20 * GIB as u64,
+                free_bytes: 80 * GIB as u64,
+                is_active: false,
+            },
+            DiskPartitionInfo {
+                partition_number: 2,
+                size_bytes: 100 * GIB as u64,
+                offset_bytes: 100 * GIB as u64 + 1024 * 1024,
+                drive_letter: Some('E'),
+                label: "E".into(),
+                file_system: "NTFS".into(),
+                is_esp: false,
+                is_msr: false,
+                is_recovery: false,
+                partition_type: "basic".into(),
+                used_bytes: 20 * GIB as u64,
+                free_bytes: 80 * GIB as u64,
+                is_active: false,
+            },
+        ];
+        value.unallocated_bytes = 100 * GIB as u64;
+        let resize = ExistingPartitionResizeRequest {
+            disk: DiskFingerprint::from(&value),
+            partition_number: 2,
+            drive_letter: 'E',
+            current_size_mb: 100 * 1024,
+            new_size_mb: 200 * 1024,
+            used_size_mb: 20 * 1024,
+            no_move_max_size_mb: 200 * 1024,
+            move_max_size_mb: 200 * 1024,
+        };
+        let mut state = QuickPartitionDialogState::new(PartitionStyle::GPT, vec![], 'C');
+        state.apply_inventory(Ok(vec![value]));
+        let transfer = state
+            .adjacent_transfer_request_from_current_sizes_mb(
+                0,
+                1,
+                100 * 1024,
+                200 * 1024,
+                150 * 1024,
+            )
+            .unwrap();
+        vec![
+            PendingPartitionOperation::Resize(resize),
+            PendingPartitionOperation::Transfer(transfer),
+        ]
+    }
+
+    #[test]
+    fn compound_transfer_preserves_the_expanded_pair_total() {
+        let operations = compound_transfer_operations();
+        let transfer = compound_offline_transfer_preview(&operations).unwrap();
+        assert_eq!(transfer.left_current_size_mb, 100 * 1024);
+        assert_eq!(transfer.right_current_size_mb, 200 * 1024);
+        assert_eq!(transfer.left_new_size_mb, 150 * 1024);
+        assert_eq!(transfer.right_new_size_mb, 150 * 1024);
+        assert_eq!(
+            transfer.left_new_size_mb + transfer.right_new_size_mb,
+            300 * 1024
+        );
+    }
+
+    #[test]
+    fn compound_transfer_preserves_a_partially_consumed_trailing_extent() {
+        let mut operations = compound_transfer_operations();
+        let PendingPartitionOperation::Resize(resize) = &mut operations[0] else {
+            unreachable!()
+        };
+        resize.new_size_mb = 150 * 1024;
+        let PendingPartitionOperation::Transfer(transfer) = &mut operations[1] else {
+            unreachable!()
+        };
+        transfer.right_current_size_mb = 150 * 1024;
+        transfer.left_new_size_mb = 125 * 1024;
+        transfer.right_new_size_mb = 125 * 1024;
+        let transfer = compound_offline_transfer_preview(&operations).unwrap();
+        assert_eq!(
+            transfer.left_new_size_mb + transfer.right_new_size_mb,
+            250 * 1024
+        );
+    }
+
+    #[test]
+    fn non_elevated_compound_transfer_is_denied_before_disk_io() {
+        #[cfg(feature = "non-elevated-tests")]
+        assert_eq!(
+            prepare_compound_offline_transfer(&compound_transfer_operations()),
+            Err(ExistingPartitionResizeError::DevelopmentBuildDenied)
+        );
     }
 
     #[test]

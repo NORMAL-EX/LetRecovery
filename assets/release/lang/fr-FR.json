@@ -2341,6 +2341,26 @@
     "目标数据已左移到 offset={}，但重建分区表项失败；请按 journal 修复：{}": "Les données cibles ont été déplacées vers offset={}, mais la recréation de l’entrée a échoué. Réparez selon le journal : {}",
     "重建目标分区返回了非预期的偏移或大小": "La recréation de la partition cible a renvoyé un décalage ou une taille inattendus",
     "目标分区已成功左移，但最后扩展 {}: 失败；当前表项和数据仍可访问，可重试扩展：{}": "La partition cible a été déplacée vers la gauche, mais l’extension finale de {}: a échoué. L’entrée et les données restent accessibles ; l’extension peut être réessayée : {}",
-    "已从左侧分区 {}: 转移空间并{}": "Espace transféré depuis la partition gauche {}: et {}"
+    "已从左侧分区 {}: 转移空间并{}": "Espace transféré depuis la partition gauche {}: et {}",
+    "连续空间转移必须依次包含右侧分区扩容和相邻分区转移": "Un transfert en chaîne doit contenir une extension de la partition droite suivie d’un transfert entre partitions adjacentes",
+    "连续空间转移的暂存布局不一致；请刷新磁盘布局后重新拖动": "La disposition temporaire du transfert en chaîne est incohérente. Actualisez la disposition du disque et recommencez le glissement.",
+    "右侧分区扩容已完成，但重新读取的分区总大小与暂存布局不一致；已停止 WinPE 转移": "La partition droite a été étendue, mais la taille totale relue ne correspond pas à la disposition temporaire. Le transfert WinPE a été arrêté.",
+    "暂存的连续分区调整无法形成安全、确定的执行顺序；请刷新磁盘布局后重新拖动。": "Les modifications temporaires ne forment pas une séquence d’exécution sûre et déterministe. Actualisez la disposition du disque et recommencez.",
+    "正在应用右侧分区扩容并复核磁盘布局...": "Extension de la partition droite et vérification de la disposition du disque...",
+    "连续分区调整失败：{}。请刷新磁盘布局后再继续。": "Échec de l’ajustement en chaîne des partitions : {}. Actualisez la disposition du disque avant de continuer.",
+    "执行前目标分区几何溢出。": "La géométrie de la partition cible a débordé avant l’exécution.",
+    "执行前未能在磁盘指纹中定位右侧相邻分区。": "Impossible de localiser la partition adjacente droite dans l’empreinte du disque avant l’exécution.",
+    "磁盘布局中未找到目标分区，拒绝操作": "La partition cible est absente de la disposition du disque ; opération refusée",
+    "重启后磁盘或相邻分区身份/几何已变化，拒绝写盘": "L’identité ou la géométrie du disque ou de la partition adjacente a changé après le redémarrage ; écriture refusée",
+    "供体分区目标大小溢出": "La taille cible de la partition donneuse a débordé",
+    "相邻分区转移的目标/供体最终大小与当前布局不一致，拒绝写盘": "Les tailles finales cible/donneuse ne correspondent pas à la disposition actuelle ; écriture refusée",
+    "供体分区的计划收缩量不足以容纳移动后的分区，拒绝写盘": "La réduction prévue de la partition donneuse est insuffisante pour accueillir la partition déplacée ; écriture refusée",
+    "分区间的空间转移已撤销，其他暂存修改保持不变。": "Le transfert entre partitions a été annulé ; les autres modifications temporaires sont conservées.",
+    "右侧分区扩容已完成，但重新读取的使用量已超过暂存安全范围；已停止 WinPE 转移": "La partition droite a été étendue, mais son utilisation relue dépasse la marge de sécurité temporaire. Le transfert WinPE a été arrêté.",
+    "执行前未能定位相邻供体分区。": "Impossible de localiser la partition donneuse adjacente avant l’exécution.",
+    "执行前目标分区大小溢出。": "La taille de la partition cible a débordé avant l’exécution.",
+    "执行前供体分区大小溢出。": "La taille de la partition donneuse a débordé avant l’exécution.",
+    "相邻分区转移的当前与最终总容量不一致，请重新检查分区布局。": "Les capacités totales actuelle et finale du transfert adjacent ne correspondent pas. Vérifiez à nouveau la disposition.",
+    "执行前供体分区几何溢出。": "La géométrie de la partition donneuse a débordé avant l’exécution."
   }
 }

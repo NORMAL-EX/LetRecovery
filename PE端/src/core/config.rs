@@ -573,6 +573,7 @@ impl ConfigFileManager {
                     "TargetSizeMb" => config.target_size_mb = value.parse().unwrap_or(0),
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "BorrowFromLeft" => config.borrow_from_left = value.parse().unwrap_or(false),
+                    "DonorTargetSizeMb" => config.donor_target_size_mb = value.parse().unwrap_or(0),
                     "ExpectedDiskNumber" => {
                         config.expected_disk_number = value.parse().unwrap_or(0)
                     }
@@ -978,6 +979,8 @@ pub struct ExpandConfig {
     pub wim_engine: u8,
     /// 是否从目标分区左侧相邻数据分区借用空间并左移目标分区。
     pub borrow_from_left: bool,
+    /// 相邻转移中供体分区的精确最终大小；旧配置缺失时为 0。
+    pub donor_target_size_mb: u64,
     /// 正常端在重启前保存的磁盘/分区几何；新左侧转移缺失任一字段时失败关闭。
     pub expected_disk_number: u32,
     pub expected_disk_size_bytes: u64,
@@ -1002,16 +1005,18 @@ mod expand_config_tests {
         )
         .unwrap();
         assert!(!config.borrow_from_left);
+        assert_eq!(config.donor_target_size_mb, 0);
         assert_eq!(config.expected_disk_number, 0);
     }
 
     #[test]
     fn expand_config_reads_left_side_donor_flag() {
         let config = ConfigFileManager::deserialize_expand_config(
-            "[Expand]\nTargetPartition=E:\nTargetSizeMb=204800\nBorrowFromLeft=true\nExpectedDiskNumber=2\nExpectedDiskSizeBytes=1000000\nExpectedPartitionNumber=4\nExpectedPartitionOffsetBytes=600000\nExpectedPartitionSizeBytes=200000\nExpectedDonorPartitionNumber=3\nExpectedDonorOffsetBytes=200000\nExpectedDonorSizeBytes=400000\n",
+            "[Expand]\nTargetPartition=E:\nTargetSizeMb=204800\nBorrowFromLeft=true\nDonorTargetSizeMb=153600\nExpectedDiskNumber=2\nExpectedDiskSizeBytes=1000000\nExpectedPartitionNumber=4\nExpectedPartitionOffsetBytes=600000\nExpectedPartitionSizeBytes=200000\nExpectedDonorPartitionNumber=3\nExpectedDonorOffsetBytes=200000\nExpectedDonorSizeBytes=400000\n",
         )
         .unwrap();
         assert!(config.borrow_from_left);
+        assert_eq!(config.donor_target_size_mb, 153_600);
         assert_eq!(config.expected_disk_number, 2);
         assert_eq!(config.expected_partition_number, 4);
         assert_eq!(config.expected_donor_partition_number, 3);

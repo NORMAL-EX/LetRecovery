@@ -660,11 +660,50 @@ impl NativeQuickPartitionDialog {
                 if let Some((left_index, right_index, left_new_size_mb)) =
                     self.partition_map.committed_transfer.take()
                 {
-                    match self.state.adjacent_transfer_request_mb(
-                        left_index,
-                        right_index,
-                        left_new_size_mb,
-                    ) {
+                    let staged_sizes = self.state.selected_disk().and_then(|disk| {
+                        Some((
+                            staged_direct_partition_size_mb(disk, &self.pending, left_index)?,
+                            staged_direct_partition_size_mb(disk, &self.pending, right_index)?,
+                        ))
+                    });
+                    if staged_sizes.is_some_and(|(left_current_size_mb, _)| {
+                        left_new_size_mb == left_current_size_mb
+                    }) {
+                        if let Some(disk) = self.state.selected_disk() {
+                            if let (Some(left), Some(right)) = (
+                                disk.partitions.get(left_index),
+                                disk.partitions.get(right_index),
+                            ) {
+                                self.pending.retain(|operation| {
+                                    !matches!(
+                                        operation,
+                                        PendingPartitionOperation::Transfer(existing)
+                                            if transfer_targets_pair(
+                                                existing,
+                                                left.partition_number,
+                                                right.partition_number
+                                            )
+                                    )
+                                });
+                            }
+                        }
+                        self.state.message =
+                            crate::tr!("分区间的空间转移已撤销，其他暂存修改保持不变。");
+                        self.render_after_map_drag();
+                        return None;
+                    }
+                    let request = staged_sizes
+                        .ok_or_else(|| crate::tr!("分区信息不可用"))
+                        .and_then(|(left_current_size_mb, right_current_size_mb)| {
+                            self.state.adjacent_transfer_request_from_current_sizes_mb(
+                                left_index,
+                                right_index,
+                                left_current_size_mb,
+                                right_current_size_mb,
+                                left_new_size_mb,
+                            )
+                        });
+                    match request {
                         Ok(request) => self.stage_transfer(request),
                         Err(error) => self.state.message = error,
                     }
@@ -843,21 +882,8 @@ impl NativeQuickPartitionDialog {
     fn stage_transfer(&mut self, request: AdjacentPartitionTransferRequest) {
         let left = request.left_partition.partition_number;
         let right = request.right_partition.partition_number;
-        self.pending.retain(|operation| match operation {
-            PendingPartitionOperation::Resize(existing) => {
-                existing.partition_number != left && existing.partition_number != right
-            }
-            PendingPartitionOperation::Transfer(existing) => ![
-                existing.left_partition.partition_number,
-                existing.right_partition.partition_number,
-            ]
-            .iter()
-            .any(|partition| matches!(*partition, value if value == left || value == right)),
-            PendingPartitionOperation::Manage(existing) => {
-                !management_targets_partition(&existing.action, left)
-                    && !management_targets_partition(&existing.action, right)
-            }
-        });
+        self.pending
+            .retain(|operation| retain_operation_before_transfer(operation, &request, left, right));
         self.pending
             .push(PendingPartitionOperation::Transfer(request));
         if !self.inventory_stale {
@@ -1585,6 +1611,68 @@ fn management_targets_partition(action: &PartitionManagementAction, partition_nu
         }
         PartitionManagementAction::CreateNtfs { .. } => false,
     }
+}
+
+fn staged_direct_partition_size_mb(
+    disk: &PhysicalDisk,
+    pending: &[PendingPartitionOperation],
+    partition_index: usize,
+) -> Option<u64> {
+    let partition = disk.partitions.get(partition_index)?;
+    let original_size_mb = partition.size_bytes / 1024 / 1024;
+    Some(
+        pending
+            .iter()
+            .filter_map(|operation| match operation {
+                PendingPartitionOperation::Resize(request)
+                    if request.partition_number == partition.partition_number
+                        && request.new_size_mb <= request.no_move_max_size_mb =>
+                {
+                    Some(request.new_size_mb)
+                }
+                _ => None,
+            })
+            .next_back()
+            .unwrap_or(original_size_mb),
+    )
+}
+
+fn retain_operation_before_transfer(
+    operation: &PendingPartitionOperation,
+    request: &AdjacentPartitionTransferRequest,
+    left: u32,
+    right: u32,
+) -> bool {
+    match operation {
+        PendingPartitionOperation::Resize(existing) => {
+            let prerequisite_for_right = existing.partition_number == right
+                && existing.new_size_mb > existing.current_size_mb
+                && existing.new_size_mb <= existing.no_move_max_size_mb
+                && existing.new_size_mb == request.right_current_size_mb;
+            prerequisite_for_right
+                || (existing.partition_number != left && existing.partition_number != right)
+        }
+        PendingPartitionOperation::Transfer(existing) => {
+            !transfer_targets_pair(existing, left, right)
+        }
+        PendingPartitionOperation::Manage(existing) => {
+            !management_targets_partition(&existing.action, left)
+                && !management_targets_partition(&existing.action, right)
+        }
+    }
+}
+
+fn transfer_targets_pair(
+    request: &AdjacentPartitionTransferRequest,
+    left: u32,
+    right: u32,
+) -> bool {
+    [
+        request.left_partition.partition_number,
+        request.right_partition.partition_number,
+    ]
+    .iter()
+    .any(|partition| matches!(*partition, value if value == left || value == right))
 }
 
 fn selected_disk_contains_target(disk: Option<&PhysicalDisk>, target: PartitionMapTarget) -> bool {
@@ -3038,5 +3126,72 @@ mod tests {
         let display = partition_map_display_segments(&model);
         assert_eq!(display[0].weight, 220);
         assert_eq!(display[1].weight, 80);
+    }
+
+    #[test]
+    fn expanding_right_then_transferring_to_left_keeps_the_resize_prerequisite() {
+        const MIB: u64 = 1024 * 1024;
+        let partition = |number, offset_mb, letter| DiskPartitionInfo {
+            partition_number: number,
+            size_bytes: 100 * MIB,
+            offset_bytes: offset_mb * MIB,
+            drive_letter: Some(letter),
+            label: letter.to_string(),
+            file_system: "NTFS".into(),
+            is_esp: false,
+            is_msr: false,
+            is_recovery: false,
+            partition_type: "basic".into(),
+            used_bytes: 20 * MIB,
+            free_bytes: 80 * MIB,
+            is_active: false,
+        };
+        let disk = PhysicalDisk {
+            disk_number: 3,
+            model: "compound-plan".into(),
+            size_bytes: 301 * MIB,
+            partition_style: PartitionStyle::GPT,
+            is_initialized: true,
+            partitions: vec![partition(1, 1, 'D'), partition(2, 101, 'E')],
+            unallocated_bytes: 100 * MIB,
+        };
+        let resize = ExistingPartitionResizeRequest {
+            disk: DiskFingerprint::from(&disk),
+            partition_number: 2,
+            drive_letter: 'E',
+            current_size_mb: 100,
+            new_size_mb: 200,
+            used_size_mb: 20,
+            no_move_max_size_mb: 200,
+            move_max_size_mb: 200,
+        };
+        let mut pending = vec![PendingPartitionOperation::Resize(resize.clone())];
+        assert_eq!(
+            staged_direct_partition_size_mb(&disk, &pending, 0),
+            Some(100)
+        );
+        assert_eq!(
+            staged_direct_partition_size_mb(&disk, &pending, 1),
+            Some(200)
+        );
+
+        let mut state = QuickPartitionDialogState::new(PartitionStyle::GPT, vec![], 'C');
+        state.apply_inventory(Ok(vec![disk]));
+        let transfer = state
+            .adjacent_transfer_request_from_current_sizes_mb(0, 1, 100, 200, 150)
+            .unwrap();
+        pending.retain(|operation| retain_operation_before_transfer(operation, &transfer, 1, 2));
+        pending.push(PendingPartitionOperation::Transfer(transfer));
+
+        assert_eq!(pending.len(), 2);
+        assert!(matches!(
+            &pending[0],
+            PendingPartitionOperation::Resize(request) if request == &resize
+        ));
+        let PendingPartitionOperation::Transfer(transfer) = &pending[1] else {
+            unreachable!()
+        };
+        assert_eq!(transfer.left_new_size_mb, 150);
+        assert_eq!(transfer.right_new_size_mb, 150);
     }
 }

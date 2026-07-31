@@ -2341,6 +2341,26 @@
     "目标数据已左移到 offset={}，但重建分区表项失败；请按 journal 修复：{}": "Zieldaten wurden zu Offset={} verschoben, der Partitionseintrag konnte jedoch nicht neu erstellt werden. Reparatur gemäß Journal: {}",
     "重建目标分区返回了非预期的偏移或大小": "Beim Neuerstellen der Zielpartition wurde ein unerwarteter Offset oder eine unerwartete Größe zurückgegeben",
     "目标分区已成功左移，但最后扩展 {}: 失败；当前表项和数据仍可访问，可重试扩展：{}": "Die Zielpartition wurde erfolgreich nach links verschoben, aber die abschließende Erweiterung von {}: ist fehlgeschlagen. Eintrag und Daten sind weiterhin zugänglich; die Erweiterung kann erneut versucht werden: {}",
-    "已从左侧分区 {}: 转移空间并{}": "Speicherplatz wurde von der linken Partition {}: übertragen und {}"
+    "已从左侧分区 {}: 转移空间并{}": "Speicherplatz wurde von der linken Partition {}: übertragen und {}",
+    "连续空间转移必须依次包含右侧分区扩容和相邻分区转移": "Eine verkettete Speicherübertragung muss zuerst die rechte Partition erweitern und danach Speicher zwischen benachbarten Partitionen übertragen",
+    "连续空间转移的暂存布局不一致；请刷新磁盘布局后重新拖动": "Das vorgemerkte Layout der verketteten Übertragung ist inkonsistent. Aktualisieren Sie das Datenträgerlayout und ziehen Sie erneut.",
+    "右侧分区扩容已完成，但重新读取的分区总大小与暂存布局不一致；已停止 WinPE 转移": "Die rechte Partition wurde erweitert, aber die erneut gelesene Gesamtgröße stimmt nicht mit dem vorgemerkten Layout überein. Die WinPE-Übertragung wurde beendet.",
+    "暂存的连续分区调整无法形成安全、确定的执行顺序；请刷新磁盘布局后重新拖动。": "Die vorgemerkten Änderungen ergeben keine sichere, eindeutige Ausführungsreihenfolge. Aktualisieren Sie das Datenträgerlayout und ziehen Sie erneut.",
+    "正在应用右侧分区扩容并复核磁盘布局...": "Rechte Partition wird erweitert und Datenträgerlayout überprüft...",
+    "连续分区调整失败：{}。请刷新磁盘布局后再继续。": "Die verkettete Partitionsanpassung ist fehlgeschlagen: {}. Aktualisieren Sie vor dem Fortfahren das Datenträgerlayout.",
+    "执行前目标分区几何溢出。": "Die Geometrie der Zielpartition ist vor der Ausführung übergelaufen.",
+    "执行前未能在磁盘指纹中定位右侧相邻分区。": "Die rechte benachbarte Partition wurde im Datenträgerfingerabdruck vor der Ausführung nicht gefunden.",
+    "磁盘布局中未找到目标分区，拒绝操作": "Die Zielpartition wurde im Datenträgerlayout nicht gefunden; Vorgang abgelehnt",
+    "重启后磁盘或相邻分区身份/几何已变化，拒绝写盘": "Identität oder Geometrie des Datenträgers bzw. der benachbarten Partition hat sich nach dem Neustart geändert; Schreibvorgang abgelehnt",
+    "供体分区目标大小溢出": "Die Zielgröße der Geberpartition ist übergelaufen",
+    "相邻分区转移的目标/供体最终大小与当前布局不一致，拒绝写盘": "Die endgültigen Größen von Ziel- und Geberpartition stimmen nicht mit dem aktuellen Layout überein; Schreibvorgang abgelehnt",
+    "供体分区的计划收缩量不足以容纳移动后的分区，拒绝写盘": "Die geplante Verkleinerung der Geberpartition reicht für die verschobene Partition nicht aus; Schreibvorgang abgelehnt",
+    "分区间的空间转移已撤销，其他暂存修改保持不变。": "Die Speicherübertragung zwischen den Partitionen wurde rückgängig gemacht; andere vorgemerkte Änderungen bleiben erhalten.",
+    "右侧分区扩容已完成，但重新读取的使用量已超过暂存安全范围；已停止 WinPE 转移": "Die rechte Partition wurde erweitert, aber die erneut gelesene Belegung überschreitet den vorgemerkten Sicherheitsbereich. Die WinPE-Übertragung wurde beendet.",
+    "执行前未能定位相邻供体分区。": "Die benachbarte Geberpartition konnte vor der Ausführung nicht gefunden werden.",
+    "执行前目标分区大小溢出。": "Die Größe der Zielpartition ist vor der Ausführung übergelaufen.",
+    "执行前供体分区大小溢出。": "Die Größe der Geberpartition ist vor der Ausführung übergelaufen.",
+    "相邻分区转移的当前与最终总容量不一致，请重新检查分区布局。": "Die aktuelle und endgültige Gesamtkapazität der benachbarten Übertragung stimmen nicht überein. Prüfen Sie das Partitionslayout erneut.",
+    "执行前供体分区几何溢出。": "Die Geometrie der Geberpartition ist vor der Ausführung übergelaufen."
   }
 }

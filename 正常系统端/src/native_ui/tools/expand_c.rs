@@ -147,6 +147,7 @@ impl ExpandCDialogState {
             requires_partition_move: self.analysis.no_move_max_mb > 0
                 && target_size_mb > self.analysis.no_move_max_mb,
             borrow_from_left: false,
+            donor_target_size_mb: 0,
             minimum_free_mb: 1024,
             analyzed_current_size_mb: self.analysis.current_size_mb,
             analyzed_max_size_mb: maximum,
@@ -169,6 +170,9 @@ pub struct ExpandCRequest {
     /// Move/shrink the immediately preceding data partition and move this target left before
     /// extending it. This is only used by the paired divider-transfer workflow.
     pub borrow_from_left: bool,
+    /// Exact final size for the adjacent donor in a divider-transfer request. Zero keeps the
+    /// legacy "use only as much donor space as needed" expansion behaviour.
+    pub donor_target_size_mb: u64,
     /// Free-space safety margin that must remain inside the expanded target volume.
     pub minimum_free_mb: u64,
     /// Analysis snapshot retained so the execution controller can reject a changed layout.

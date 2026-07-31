@@ -2351,6 +2351,26 @@
     "目标数据已左移到 offset={}，但重建分区表项失败；请按 journal 修复：{}": "Target data was moved left to offset={}, but recreating the partition-table entry failed. Repair it using the journal: {}",
     "重建目标分区返回了非预期的偏移或大小": "Recreating the target partition returned an unexpected offset or size",
     "目标分区已成功左移，但最后扩展 {}: 失败；当前表项和数据仍可访问，可重试扩展：{}": "The target partition was moved left successfully, but the final expansion of {}: failed. Its current entry and data remain accessible, and expansion can be retried: {}",
-    "已从左侧分区 {}: 转移空间并{}": "Transferred space from the left partition {}: and {}"
+    "已从左侧分区 {}: 转移空间并{}": "Transferred space from the left partition {}: and {}",
+    "连续空间转移必须依次包含右侧分区扩容和相邻分区转移": "A chained space transfer must contain a right-partition expansion followed by an adjacent-partition transfer",
+    "连续空间转移的暂存布局不一致；请刷新磁盘布局后重新拖动": "The staged chained-transfer layout is inconsistent. Refresh the disk layout and drag again.",
+    "右侧分区扩容已完成，但重新读取的分区总大小与暂存布局不一致；已停止 WinPE 转移": "The right partition was expanded, but the re-read partition total does not match the staged layout. The WinPE transfer was stopped.",
+    "暂存的连续分区调整无法形成安全、确定的执行顺序；请刷新磁盘布局后重新拖动。": "The staged partition changes do not form a safe, deterministic execution sequence. Refresh the disk layout and drag again.",
+    "正在应用右侧分区扩容并复核磁盘布局...": "Expanding the right partition and verifying the disk layout...",
+    "连续分区调整失败：{}。请刷新磁盘布局后再继续。": "The chained partition adjustment failed: {}. Refresh the disk layout before continuing.",
+    "执行前目标分区几何溢出。": "The target-partition geometry overflowed before execution.",
+    "执行前未能在磁盘指纹中定位右侧相邻分区。": "The right adjacent partition could not be located in the pre-execution disk fingerprint.",
+    "磁盘布局中未找到目标分区，拒绝操作": "The target partition was not found in the disk layout; the operation was refused",
+    "重启后磁盘或相邻分区身份/几何已变化，拒绝写盘": "The disk or adjacent-partition identity/geometry changed after reboot; disk writes were refused",
+    "供体分区目标大小溢出": "The donor-partition target size overflowed",
+    "相邻分区转移的目标/供体最终大小与当前布局不一致，拒绝写盘": "The target/donor final sizes for the adjacent transfer do not match the current layout; disk writes were refused",
+    "供体分区的计划收缩量不足以容纳移动后的分区，拒绝写盘": "The planned donor shrink is insufficient to fit the moved partition; disk writes were refused",
+    "分区间的空间转移已撤销，其他暂存修改保持不变。": "The transfer between partitions was undone; other staged changes were kept.",
+    "右侧分区扩容已完成，但重新读取的使用量已超过暂存安全范围；已停止 WinPE 转移": "The right partition was expanded, but its re-read usage exceeds the staged safety range. The WinPE transfer was stopped.",
+    "执行前未能定位相邻供体分区。": "The adjacent donor partition could not be located before execution.",
+    "执行前目标分区大小溢出。": "The target-partition size overflowed before execution.",
+    "执行前供体分区大小溢出。": "The donor-partition size overflowed before execution.",
+    "相邻分区转移的当前与最终总容量不一致，请重新检查分区布局。": "The current and final totals for the adjacent transfer do not match. Check the partition layout again.",
+    "执行前供体分区几何溢出。": "The donor-partition geometry overflowed before execution."
   }
 }

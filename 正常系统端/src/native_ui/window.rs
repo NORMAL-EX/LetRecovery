@@ -163,6 +163,7 @@ fn pending_offline_expand_request(
                 use_maximum: false,
                 requires_partition_move: true,
                 borrow_from_left: false,
+                donor_target_size_mb: 0,
                 minimum_free_mb: 100,
                 analyzed_current_size_mb: request.current_size_mb,
                 analyzed_max_size_mb: request.move_max_size_mb,
@@ -171,55 +172,80 @@ fn pending_offline_expand_request(
             })
         }
         [PendingPartitionOperation::Transfer(request)] => {
-            let left_grows = request.left_new_size_mb > request.left_current_size_mb;
-            let (
-                target_partition,
-                expected_partition,
-                current_size_mb,
-                target_size_mb,
-                donor_current_size_mb,
-                donor_used_size_mb,
-                borrow_from_left,
-            ) = if left_grows {
-                (
-                    request.left_drive_letter,
-                    &request.left_partition,
-                    request.left_current_size_mb,
-                    request.left_new_size_mb,
-                    request.right_current_size_mb,
-                    request.right_used_size_mb,
-                    false,
-                )
-            } else {
-                (
-                    request.right_drive_letter,
-                    &request.right_partition,
-                    request.right_current_size_mb,
-                    request.right_new_size_mb,
-                    request.left_current_size_mb,
-                    request.left_used_size_mb,
-                    true,
-                )
-            };
-            Some(ExpandCRequest {
-                target_partition,
-                expected_disk: Some(request.disk.clone()),
-                expected_partition_number: Some(expected_partition.partition_number),
-                target_size_mb,
-                use_maximum: false,
-                requires_partition_move: true,
-                borrow_from_left,
-                minimum_free_mb: 100,
-                analyzed_current_size_mb: current_size_mb,
-                analyzed_max_size_mb: current_size_mb.saturating_add(
-                    donor_current_size_mb.saturating_sub(donor_used_size_mb.saturating_add(100)),
-                ),
-                analyzed_no_move_max_mb: current_size_mb,
-                strict_analysis_snapshot: false,
-            })
+            Some(expand_request_from_adjacent_transfer(request))
         }
         _ => None,
     }
+}
+
+fn expand_request_from_adjacent_transfer(
+    request: &crate::core::native_quick_partition_dialog::AdjacentPartitionTransferRequest,
+) -> ExpandCRequest {
+    let left_grows = request.left_new_size_mb > request.left_current_size_mb;
+    let (
+        target_partition,
+        expected_partition,
+        current_size_mb,
+        target_size_mb,
+        donor_current_size_mb,
+        donor_used_size_mb,
+        borrow_from_left,
+    ) = if left_grows {
+        (
+            request.left_drive_letter,
+            &request.left_partition,
+            request.left_current_size_mb,
+            request.left_new_size_mb,
+            request.right_current_size_mb,
+            request.right_used_size_mb,
+            false,
+        )
+    } else {
+        (
+            request.right_drive_letter,
+            &request.right_partition,
+            request.right_current_size_mb,
+            request.right_new_size_mb,
+            request.left_current_size_mb,
+            request.left_used_size_mb,
+            true,
+        )
+    };
+    ExpandCRequest {
+        target_partition,
+        expected_disk: Some(request.disk.clone()),
+        expected_partition_number: Some(expected_partition.partition_number),
+        target_size_mb,
+        use_maximum: false,
+        requires_partition_move: true,
+        borrow_from_left,
+        donor_target_size_mb: if left_grows {
+            request.right_new_size_mb
+        } else {
+            request.left_new_size_mb
+        },
+        minimum_free_mb: 100,
+        analyzed_current_size_mb: current_size_mb,
+        analyzed_max_size_mb: current_size_mb.saturating_add(
+            donor_current_size_mb.saturating_sub(donor_used_size_mb.saturating_add(100)),
+        ),
+        analyzed_no_move_max_mb: current_size_mb,
+        strict_analysis_snapshot: false,
+    }
+}
+
+fn pending_compound_offline_expand_preview(
+    operations: &[crate::core::native_quick_partition_dialog::PendingPartitionOperation],
+) -> Option<ExpandCRequest> {
+    (operations.len() > 1)
+        .then(|| {
+            crate::core::native_quick_partition_dialog::compound_offline_transfer_preview(
+                operations,
+            )
+            .ok()
+            .map(|request| expand_request_from_adjacent_transfer(&request))
+        })
+        .flatten()
 }
 
 fn pending_requires_offline_expand(
@@ -692,6 +718,7 @@ enum ToolWorkerMessage {
         Result<Vec<crate::core::quick_partition::PhysicalDisk>, String>,
     ),
     QuickPartitionPendingCompleted(Result<String, String>),
+    QuickPartitionCompoundOfflinePrepared(Result<ExpandCRequest, String>),
     BitLockerManageInventoryCompleted(
         Result<Vec<crate::core::native_bitlocker_manage::BitLockerManageVolume>, String>,
     ),
@@ -5901,6 +5928,24 @@ impl NativeWindow {
         });
     }
 
+    fn start_quick_partition_compound_offline(
+        &self,
+        operations: Vec<crate::core::native_quick_partition_dialog::PendingPartitionOperation>,
+    ) {
+        let sender = self.tool_worker_sender.clone();
+        std::thread::spawn(move || {
+            let result =
+                crate::core::native_quick_partition_dialog::prepare_compound_offline_transfer(
+                    &operations,
+                )
+                .map(|request| expand_request_from_adjacent_transfer(&request))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ToolWorkerMessage::QuickPartitionCompoundOfflinePrepared(
+                result,
+            ));
+        });
+    }
+
     fn start_bitlocker_manage_inventory(&self) {
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
@@ -6395,6 +6440,38 @@ impl NativeWindow {
         });
     }
 
+    unsafe fn quick_partition_compound_pe_ready(&self) -> Result<(), String> {
+        let handles = self
+            .handles
+            .ok_or_else(|| crate::tr!("未选择 PE 环境，无法扩容"))?;
+        let pe = self.available_pe();
+        let selected = usize::try_from(SendMessageW(handles.pe, 0x0147, WPARAM(0), LPARAM(0)).0)
+            .ok()
+            .or_else(|| (pe.len() == 1).then_some(0));
+        let pe = selected
+            .and_then(|index| pe.get(index))
+            .ok_or_else(|| crate::tr!("未选择 PE 环境，无法扩容"))?;
+        #[cfg(feature = "non-elevated-tests")]
+        {
+            let _ = pe;
+            Err(crate::tr!("未选择 PE 环境，无法扩容"))
+        }
+        #[cfg(not(feature = "non-elevated-tests"))]
+        {
+            match crate::core::pe::PeManager::check_cached_pe(
+                &pe.filename,
+                pe.sha256.as_deref(),
+                pe.md5.as_deref(),
+            ) {
+                Ok(lr_core::cached_artifact::CachedArtifactStatus::Ready { .. }) => Ok(()),
+                Ok(lr_core::cached_artifact::CachedArtifactStatus::Missing) => {
+                    Err(crate::tr!("所选 PE 文件不存在，请重新下载。"))
+                }
+                Err(error) => Err(crate::tr!("PE 文件安全校验失败：{}", error)),
+            }
+        }
+    }
+
     unsafe fn start_expand_c_execution(&mut self, _hwnd: HWND, request: ExpandCRequest) {
         let Some(handles) = self.handles else { return };
         self.expand_from_quick_partition =
@@ -6495,6 +6572,7 @@ impl NativeWindow {
             analyzed_no_move_max_mb: request.analyzed_no_move_max_mb,
             strict_analysis_snapshot: request.strict_analysis_snapshot,
             borrow_from_left: request.borrow_from_left,
+            donor_target_size_mb: request.donor_target_size_mb,
             minimum_free_mb: request.minimum_free_mb,
             wim_engine: self.app_config.wim_engine,
             pe,
@@ -7024,6 +7102,23 @@ impl NativeWindow {
                     }
                     self.start_quick_partition_inventory();
                 }
+                ToolWorkerMessage::QuickPartitionCompoundOfflinePrepared(result) => match result {
+                    Ok(request) => {
+                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                            dialog.set_operation_status(crate::tr!("正在准备扩容环境..."));
+                        }
+                        self.start_expand_c_execution(hwnd, request);
+                    }
+                    Err(error) => {
+                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                            dialog.set_operation_error(crate::tr!(
+                                "连续分区调整失败：{}。请刷新磁盘布局后再继续。",
+                                error
+                            ));
+                            dialog.show_modeless();
+                        }
+                    }
+                },
                 ToolWorkerMessage::BitLockerManageInventoryCompleted(result) => {
                     if let Some(dialog) = &mut self.bitlocker_manage_dialog {
                         dialog.set_inventory(result);
@@ -8165,20 +8260,22 @@ impl NativeWindow {
             }
             Some(QuickPartitionDialogIntent::ApplyPending(operations)) => {
                 let offline_expand = pending_offline_expand_request(&operations);
+                let compound_expand = pending_compound_offline_expand_preview(&operations);
                 let has_offline_expand = pending_requires_offline_expand(&operations);
-                if has_offline_expand && offline_expand.is_none() {
+                if has_offline_expand && offline_expand.is_none() && compound_expand.is_none() {
                     if let Some(dialog) = &mut self.quick_partition_dialog {
                         dialog.set_operation_error(crate::tr!(
-                            "需要移动后方分区的扩容不能与其他暂存操作同时应用；请只保留这一项后重试。"
+                            "暂存的连续分区调整无法形成安全、确定的执行顺序；请刷新磁盘布局后重新拖动。"
                         ));
                         dialog.show_modeless();
                     }
                     return;
                 }
+                let offline_preview = offline_expand.as_ref().or(compound_expand.as_ref());
                 let spec = DialogSpec {
                     window_title: crate::tr!("确认分区操作"),
                     title: crate::tr!("确认分区操作"),
-                    description: offline_expand.as_ref().map_or_else(
+                    description: offline_preview.map_or_else(
                         || {
                             crate::tr!(
                                 "将应用 {} 项暂存的分区修改。\n\n执行前会重新读取磁盘身份和分区布局，每一步完成后都会复核结果。此操作可能导致数据丢失。",
@@ -8218,6 +8315,21 @@ impl NativeWindow {
                                     dialog.set_operation_status(crate::tr!("正在准备扩容环境..."));
                                 }
                                 self.start_expand_c_execution(hwnd, request);
+                            } else if compound_expand.is_some() {
+                                if let Err(error) = self.quick_partition_compound_pe_ready() {
+                                    if let Some(dialog) = &mut self.quick_partition_dialog {
+                                        dialog.set_operation_error(error);
+                                        dialog.show_modeless();
+                                    }
+                                    return;
+                                }
+                                if let Some(dialog) = &mut self.quick_partition_dialog {
+                                    dialog.finish_pending_apply();
+                                    dialog.set_operation_status(crate::tr!(
+                                        "正在应用右侧分区扩容并复核磁盘布局..."
+                                    ));
+                                }
+                                self.start_quick_partition_compound_offline(operations);
                             } else {
                                 if let Some(dialog) = &mut self.quick_partition_dialog {
                                     dialog.finish_pending_apply();
@@ -8258,12 +8370,15 @@ impl NativeWindow {
                                 if !operations.is_empty() {
                                     let offline_expand =
                                         pending_offline_expand_request(&operations);
+                                    let compound_expand =
+                                        pending_compound_offline_expand_preview(&operations);
                                     if pending_requires_offline_expand(&operations)
                                         && offline_expand.is_none()
+                                        && compound_expand.is_none()
                                     {
                                         if let Some(dialog) = &mut self.quick_partition_dialog {
                                             dialog.set_operation_error(crate::tr!(
-                                                "需要离线移动分区的数据操作不能与其他暂存操作同时应用；请只保留这一项后重试。"
+                                                "暂存的连续分区调整无法形成安全、确定的执行顺序；请刷新磁盘布局后重新拖动。"
                                             ));
                                             dialog.show_modeless();
                                         }
@@ -8276,6 +8391,22 @@ impl NativeWindow {
                                             ));
                                         }
                                         self.start_expand_c_execution(hwnd, request);
+                                    } else if compound_expand.is_some() {
+                                        if let Err(error) = self.quick_partition_compound_pe_ready()
+                                        {
+                                            if let Some(dialog) = &mut self.quick_partition_dialog {
+                                                dialog.set_operation_error(error);
+                                                dialog.show_modeless();
+                                            }
+                                            return;
+                                        }
+                                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                                            dialog.finish_pending_apply();
+                                            dialog.set_operation_status(crate::tr!(
+                                                "正在应用右侧分区扩容并复核磁盘布局..."
+                                            ));
+                                        }
+                                        self.start_quick_partition_compound_offline(operations);
                                     } else {
                                         if let Some(dialog) = &mut self.quick_partition_dialog {
                                             dialog.finish_pending_apply();

@@ -593,11 +593,49 @@ fn journal(data_partition: &str, line: &str) {
     }
 }
 
-/// 编排：把分区 `letter` 无损扩大到 `target_size_mb`（0=尽量并入相邻未分配空间）。
+fn plan_right_donor_shrink(
+    target_current_bytes: u64,
+    target_final_bytes: u64,
+    gap_before_donor_bytes: u64,
+    donor_current_bytes: u64,
+    shift_bytes: u64,
+    free_after_donor_bytes: u64,
+    donor_target_bytes: u64,
+) -> Result<u64> {
+    let minimum_shrink = shift_bytes.saturating_sub(free_after_donor_bytes);
+    if donor_target_bytes == 0 {
+        return Ok(minimum_shrink);
+    }
+    if gap_before_donor_bytes != 0
+        || donor_target_bytes >= donor_current_bytes
+        || target_final_bytes.checked_add(donor_target_bytes)
+            != target_current_bytes.checked_add(donor_current_bytes)
+    {
+        bail!(
+            "{}",
+            tr!("相邻分区转移的目标/供体最终大小与当前布局不一致，拒绝写盘")
+        );
+    }
+    let exact_shrink = donor_current_bytes - donor_target_bytes;
+    if exact_shrink < minimum_shrink {
+        bail!(
+            "{}",
+            tr!("供体分区的计划收缩量不足以容纳移动后的分区，拒绝写盘")
+        );
+    }
+    Ok(exact_shrink)
+}
+
+/// 编排：把分区 `letter` 无损扩大到配置指定大小（0=尽量并入相邻未分配空间）。
 ///
 /// 优先 Case 1（WinAPI extend 并入相邻未分配空间）；不足时尝试 Case 2（移动紧邻的基础数据分区）。
 /// `data_partition` 仅用于写 journal。
-pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -> Result<String> {
+pub fn expand_c_drive(
+    letter: char,
+    config: &crate::core::config::ExpandConfig,
+    data_partition: &str,
+) -> Result<String> {
+    let target_size_mb = config.target_size_mb;
     // 0=尽量扩到相邻未分配空间最大 → 直接 Case 1。
     if target_size_mb == 0 {
         return DiskManager::expand_partition_lossless(letter, 0).map_err(|e| anyhow!(e));
@@ -619,6 +657,10 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
 
     // 找到 C 之后紧邻的分区 N（offset 最小且 > c_off）。
     let c_end = c_off + c_len;
+    let target_layout = parts
+        .iter()
+        .find(|partition| partition.offset == c_off && partition.length == c_len)
+        .ok_or_else(|| anyhow!("{}", tr!("磁盘布局中未找到目标分区，拒绝操作")))?;
     let next = parts
         .iter()
         .filter(|p| p.offset >= c_end)
@@ -629,7 +671,7 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     };
 
     // 相邻未分配空间已够 → Case 1。
-    if delta <= adj_unalloc {
+    if config.donor_target_size_mb == 0 && delta <= adj_unalloc {
         return DiskManager::expand_partition_lossless(letter, target_size_mb)
             .map_err(|e| anyhow!(e));
     }
@@ -646,6 +688,26 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     })?;
 
     // ===== 防呆校验（任一不满足，安全失败，不触碰磁盘）=====
+    if config.donor_target_size_mb > 0
+        && (config.expected_disk_number == 0
+            || config.expected_disk_size_bytes == 0
+            || config.expected_partition_number == 0
+            || config.expected_partition_offset_bytes == 0
+            || config.expected_partition_size_bytes == 0
+            || config.expected_donor_partition_number == 0
+            || config.expected_donor_offset_bytes == 0
+            || config.expected_donor_size_bytes == 0
+            || disk != config.expected_disk_number
+            || disk_size != config.expected_disk_size_bytes
+            || target_layout.number != config.expected_partition_number
+            || c_off != config.expected_partition_offset_bytes
+            || c_len != config.expected_partition_size_bytes
+            || n.number != config.expected_donor_partition_number
+            || n.offset != config.expected_donor_offset_bytes
+            || n.length != config.expected_donor_size_bytes)
+    {
+        bail!("{}", tr!("重启后磁盘或相邻分区身份/几何已变化，拒绝写盘"));
+    }
     if n.is_special {
         bail!(
             "{}",
@@ -677,8 +739,21 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
 
     // 需要把 N 右移 shift，使 C 之后间隙达到 delta。
     let shift = delta - adj_unalloc;
-    // N 右移 shift 后需要的尾部空间：若 free_after_n 不足，先 shrink N。
-    let shrink_by = shift.saturating_sub(free_after_n);
+    // 普通扩容只收缩放不下的部分；分区图的成对转移必须精确收缩到用户规划的
+    // 供体最终大小，不能优先吞掉供体后方原本应保留的未分配空间。
+    let donor_target_bytes = config
+        .donor_target_size_mb
+        .checked_mul(MIB)
+        .ok_or_else(|| anyhow!("{}", tr!("供体分区目标大小溢出")))?;
+    let shrink_by = plan_right_donor_shrink(
+        c_len,
+        target_bytes,
+        adj_unalloc,
+        n.length,
+        shift,
+        free_after_n,
+        donor_target_bytes,
+    )?;
 
     // 对齐校验（绝大多数真实分区 1 MiB 对齐；不对齐则拒绝以保证 WinAPI offset/size 精确）。
     for (name, v) in [
@@ -1124,6 +1199,43 @@ mod tests {
         assert_eq!(plan.donor_length_after_shrink, 140 * MIB);
         assert_eq!(plan.target_new_offset, 141 * MIB);
         assert_eq!(plan.target_new_offset + 140 * MIB, 281 * MIB);
+    }
+
+    #[test]
+    fn right_transfer_keeps_preexisting_trailing_free_space() {
+        let shrink = plan_right_donor_shrink(
+            100 * MIB,
+            125 * MIB,
+            0,
+            150 * MIB,
+            25 * MIB,
+            50 * MIB,
+            125 * MIB,
+        )
+        .unwrap();
+        assert_eq!(shrink, 25 * MIB);
+    }
+
+    #[test]
+    fn legacy_right_expansion_can_still_use_trailing_free_space() {
+        let shrink =
+            plan_right_donor_shrink(100 * MIB, 125 * MIB, 0, 150 * MIB, 25 * MIB, 50 * MIB, 0)
+                .unwrap();
+        assert_eq!(shrink, 0);
+    }
+
+    #[test]
+    fn exact_right_transfer_rejects_an_inconsistent_pair_total() {
+        assert!(plan_right_donor_shrink(
+            100 * MIB,
+            125 * MIB,
+            0,
+            150 * MIB,
+            25 * MIB,
+            50 * MIB,
+            120 * MIB,
+        )
+        .is_err());
     }
 
     #[test]
