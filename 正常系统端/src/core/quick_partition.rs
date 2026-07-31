@@ -1459,6 +1459,18 @@ pub fn get_unallocated_space_after_partition_with_disk(
     disk: &PhysicalDisk,
     partition_number: u32,
 ) -> u64 {
+    get_unallocated_space_after_partition_bytes_with_disk(disk, partition_number) / 1024 / 1024
+}
+
+/// Returns the exact byte extent immediately following a partition.
+///
+/// Resize planning keeps this byte precision until the final MiB conversion. Flooring the
+/// partition and the gap independently can lose one MiB and make a divider dragged to the end of
+/// a valid unallocated extent appear to snap back.
+pub fn get_unallocated_space_after_partition_bytes_with_disk(
+    disk: &PhysicalDisk,
+    partition_number: u32,
+) -> u64 {
     // 找到目标分区
     let target_partition = match disk
         .partitions
@@ -1490,13 +1502,10 @@ pub fn get_unallocated_space_after_partition_with_disk(
     }
 
     // 计算未分配空间
-    let unallocated = match next_partition_start {
+    match next_partition_start {
         Some(next_start) => next_start.saturating_sub(partition_end),
         None => disk.size_bytes.saturating_sub(partition_end),
-    };
-
-    // 转换为 MB
-    unallocated / 1024 / 1024
+    }
 }
 
 /// 获取磁盘上指定分区后面的未分配空间大小（MB）
@@ -1608,5 +1617,45 @@ mod tests {
         let next = get_next_available_drive_letter(&used);
         assert!(next.is_some());
         assert!(!used.contains(&next.unwrap()));
+    }
+
+    #[test]
+    fn adjacent_unallocated_bytes_are_not_floored_before_combining_with_partition_size() {
+        const MIB: u64 = 1024 * 1024;
+        let partition = DiskPartitionInfo {
+            partition_number: 1,
+            size_bytes: 100 * MIB + MIB / 2,
+            offset_bytes: MIB,
+            drive_letter: Some('D'),
+            label: String::new(),
+            file_system: "NTFS".into(),
+            is_esp: false,
+            is_msr: false,
+            is_recovery: false,
+            partition_type: "basic".into(),
+            used_bytes: 50 * MIB,
+            free_bytes: 50 * MIB + MIB / 2,
+            is_active: false,
+        };
+        let disk = PhysicalDisk {
+            disk_number: 7,
+            size_bytes: 102 * MIB,
+            model: "test".into(),
+            partition_style: PartitionStyle::GPT,
+            is_initialized: true,
+            partitions: vec![partition],
+            unallocated_bytes: MIB / 2,
+        };
+        assert_eq!(
+            get_unallocated_space_after_partition_bytes_with_disk(&disk, 1),
+            MIB / 2
+        );
+        assert_eq!(
+            (disk.partitions[0].size_bytes
+                + get_unallocated_space_after_partition_bytes_with_disk(&disk, 1))
+                / MIB,
+            101
+        );
+        assert_eq!(get_unallocated_space_after_partition_with_disk(&disk, 1), 0);
     }
 }

@@ -11,7 +11,7 @@ use super::native_quick_partition::{
     QuickPartitionRequest,
 };
 use super::quick_partition::{
-    get_unallocated_space_after_partition_with_disk, DiskPartitionInfo, PartitionLayout,
+    get_unallocated_space_after_partition_bytes_with_disk, DiskPartitionInfo, PartitionLayout,
     PhysicalDisk, ResizePartitionResult,
 };
 
@@ -1034,9 +1034,9 @@ impl QuickPartitionDialogState {
         validate_existing_resize_target(partition, self.system_drive)?;
         let min = (partition.used_gb() + 0.1).max(0.5);
         let current_size_mb = bytes_to_mib(partition.size_bytes);
-        let no_move_max_size_mb = current_size_mb.saturating_add(
-            get_unallocated_space_after_partition_with_disk(disk, partition.partition_number),
-        );
+        let no_move_max_size_mb = bytes_to_mib(partition.size_bytes.saturating_add(
+            get_unallocated_space_after_partition_bytes_with_disk(disk, partition.partition_number),
+        ));
         let move_max_size_mb = no_move_max_size_mb.saturating_add(
             following_partition_reclaimable_mib(disk, partition, self.system_drive),
         );
@@ -1185,9 +1185,9 @@ fn validate_resize_request_against_disk(
     }
     validate_existing_resize_target(partition, system_drive)
         .map_err(ExistingPartitionResizeError::InvalidRequest)?;
-    let adjacent_mb =
-        get_unallocated_space_after_partition_with_disk(disk, request.partition_number);
-    let no_move_maximum = current_size_mb.saturating_add(adjacent_mb);
+    let no_move_maximum = bytes_to_mib(partition.size_bytes.saturating_add(
+        get_unallocated_space_after_partition_bytes_with_disk(disk, request.partition_number),
+    ));
     let maximum = no_move_maximum.saturating_add(following_partition_reclaimable_mib(
         disk,
         partition,
@@ -1448,6 +1448,36 @@ mod tests {
         assert_eq!(request.partition_number, 7);
         assert_eq!(request.new_size_mb, 40 * 1024);
         assert_eq!(state.selected_disk().unwrap().partitions[0].size_gb(), 50.0);
+    }
+
+    #[test]
+    fn resize_to_end_of_unallocated_extent_keeps_combined_byte_precision() {
+        const MIB: u64 = 1024 * 1024;
+        let mut value = disk(9, true, PartitionStyle::GPT);
+        value.size_bytes = 602 * MIB;
+        value.partitions = vec![DiskPartitionInfo {
+            partition_number: 1,
+            size_bytes: 600 * MIB + MIB / 2,
+            offset_bytes: MIB,
+            drive_letter: Some('D'),
+            label: "Data".into(),
+            file_system: "NTFS".into(),
+            is_esp: false,
+            is_msr: false,
+            is_recovery: false,
+            partition_type: "basic".into(),
+            used_bytes: 100 * MIB,
+            free_bytes: 500 * MIB + MIB / 2,
+            is_active: false,
+        }];
+        value.unallocated_bytes = MIB / 2;
+        let mut state = QuickPartitionDialogState::new(PartitionStyle::GPT, vec![], 'C');
+        state.apply_inventory(Ok(vec![value]));
+
+        let request = state.existing_resize_request_mb(0, 601).unwrap();
+        assert_eq!(request.current_size_mb, 600);
+        assert_eq!(request.no_move_max_size_mb, 601);
+        assert_eq!(request.new_size_mb, 601);
     }
 
     #[test]

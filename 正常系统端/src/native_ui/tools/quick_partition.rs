@@ -5,14 +5,19 @@
 //! resize operation, refresh enumeration, or other host I/O is performed here.
 
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL,
+    DWM_WINDOW_CORNER_PREFERENCE,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
     IntersectClipRect, InvalidateRect, MapWindowPoints, RestoreDC, SaveDC, SelectClipRgn,
-    SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, HFONT, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    SelectObject, SetBkMode, SetTextColor, SetWindowRgn, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
+    DT_SINGLELINE, DT_VCENTER, HFONT, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Controls::{
     DRAWITEMSTRUCT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS,
     LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETBKCOLOR, LVM_SETCOLUMNWIDTH,
@@ -26,14 +31,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetParent, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, MoveWindow, PostMessageW, SendMessageW, SetMenuInfo,
-    SetWindowTextW, ShowWindow, TrackPopupMenu, BM_SETCHECK, BS_AUTORADIOBUTTON, BS_OWNERDRAW,
-    CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, ES_AUTOHSCROLL,
-    MENUINFO, MF_GRAYED, MF_OWNERDRAW, MF_POPUP, MIM_BACKGROUND, SW_HIDE, SW_SHOW, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_CAPTURECHANGED, WM_COMMAND, WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETFONT,
-    WS_BORDER, WS_TABSTOP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, EnumThreadWindows, GetClassNameW, GetClientRect,
+    GetParent, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, MoveWindow, PostMessageW,
+    SendMessageW, SetMenuInfo, SetWindowTextW, ShowWindow, TrackPopupMenu, BM_SETCHECK,
+    BS_AUTORADIOBUTTON, BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL,
+    CB_RESETCONTENT, CB_SETCURSEL, ES_AUTOHSCROLL, MENUINFO, MF_GRAYED, MF_OWNERDRAW, MF_POPUP,
+    MIM_BACKGROUND, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_CAPTURECHANGED,
+    WM_COMMAND, WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WS_BORDER, WS_TABSTOP,
 };
 
 use super::super::controls::fill_round_rect_antialiased;
@@ -123,11 +128,13 @@ struct PartitionMenuItem {
     palette: Palette,
     font: HFONT,
     dpi: u32,
+    width: i32,
     separator: bool,
     submenu: bool,
 }
 
 struct PartitionMenuBuilder {
+    owner: HWND,
     font: HFONT,
     palette: Palette,
     dpi: u32,
@@ -140,12 +147,14 @@ struct PartitionMenuBuilder {
 
 impl PartitionMenuBuilder {
     fn new(
+        owner: HWND,
         font: HFONT,
         palette: Palette,
         dpi: u32,
         background: windows::Win32::Graphics::Gdi::HBRUSH,
     ) -> Self {
         Self {
+            owner,
             font,
             palette,
             dpi,
@@ -166,6 +175,7 @@ impl PartitionMenuBuilder {
             palette: self.palette,
             font: self.font,
             dpi: self.dpi,
+            width: partition_menu_item_width(self.owner, self.font, text, false, self.dpi),
             separator: false,
             submenu: false,
         });
@@ -185,6 +195,7 @@ impl PartitionMenuBuilder {
             palette: self.palette,
             font: self.font,
             dpi: self.dpi,
+            width: 0,
             separator: true,
             submenu: false,
         });
@@ -221,6 +232,7 @@ impl PartitionMenuBuilder {
             palette: self.palette,
             font: self.font,
             dpi: self.dpi,
+            width: partition_menu_item_width(self.owner, self.font, title, true, self.dpi),
             separator: false,
             submenu: true,
         });
@@ -233,6 +245,113 @@ impl PartitionMenuBuilder {
             PCWSTR(data),
         );
     }
+}
+
+struct PartitionMenuWindowRounder {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PartitionMenuWindowRounder {
+    fn start(ui_thread_id: u32) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker = std::thread::spawn(move || unsafe {
+            let mut applied = Vec::<(isize, std::time::Instant, bool)>::new();
+            while !worker_stop.load(std::sync::atomic::Ordering::Acquire) {
+                let mut windows = Vec::<isize>::new();
+                let _ = EnumThreadWindows(
+                    ui_thread_id,
+                    Some(collect_popup_menu_window),
+                    LPARAM((&mut windows as *mut Vec<isize>) as isize),
+                );
+                for raw in windows {
+                    if applied.iter().any(|(existing, _, _)| *existing == raw) {
+                        continue;
+                    }
+                    let hwnd = HWND(raw as *mut core::ffi::c_void);
+                    if let Some((width, height)) = popup_menu_window_size(hwnd) {
+                        round_partition_menu_window(hwnd, width, height);
+                        applied.push((raw, std::time::Instant::now(), false));
+                    }
+                }
+                // USER32 may recreate the non-client frame just after showing the popup. A single
+                // delayed reapplication leaves the final region deterministic without polling or
+                // redrawing an already stable menu for the rest of its lifetime.
+                for (raw, first_apply, finalized) in &mut applied {
+                    if !*finalized && first_apply.elapsed() >= std::time::Duration::from_millis(40)
+                    {
+                        let hwnd = HWND(*raw as *mut core::ffi::c_void);
+                        if let Some((width, height)) = popup_menu_window_size(hwnd) {
+                            round_partition_menu_window(hwnd, width, height);
+                        }
+                        *finalized = true;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for PartitionMenuWindowRounder {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+unsafe extern "system" fn collect_popup_menu_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if is_popup_menu_window(hwnd) {
+        let windows = &mut *(lparam.0 as *mut Vec<isize>);
+        windows.push(hwnd.0 as isize);
+    }
+    true.into()
+}
+
+unsafe fn is_popup_menu_window(hwnd: HWND) -> bool {
+    let mut class_name = [0_u16; 16];
+    let length = GetClassNameW(hwnd, &mut class_name);
+    length > 0 && String::from_utf16_lossy(&class_name[..length as usize]) == "#32768"
+}
+
+unsafe fn popup_menu_window_size(hwnd: HWND) -> Option<(i32, i32)> {
+    let mut rect = RECT::default();
+    GetWindowRect(hwnd, &mut rect).ok()?;
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+unsafe fn round_partition_menu_window(hwnd: HWND, width: i32, height: i32) {
+    let preference = DWMWCP_ROUNDSMALL;
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        (&preference as *const DWM_WINDOW_CORNER_PREFERENCE).cast(),
+        std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+    );
+    // DWM provides antialiased corners where supported, while the region is the deterministic
+    // compatibility boundary for Win10 and WinPE and also clips USER32's square menu frame.
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let radius = scale(6, dpi).max(2);
+    let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+    if !region.is_invalid() && SetWindowRgn(hwnd, region, true) == 0 {
+        let _ = DeleteObject(region);
+    }
+}
+
+fn partition_menu_item_width(owner: HWND, font: HFONT, text: &str, submenu: bool, dpi: u32) -> i32 {
+    let measured = unsafe { measure_text(owner, font, text, None).width };
+    measured
+        .saturating_add(scale(if submenu { 48 } else { 36 }, dpi))
+        .max(scale(144, dpi))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -559,6 +678,11 @@ impl NativeQuickPartitionDialog {
                 } else if std::mem::take(&mut self.partition_map.growth_blocked_by_neighbor) {
                     self.state.message = crate::tr!("ℹ 分区后方无未分配空间，只能缩小");
                 }
+                // A drag changes only the staged geometry and status. Rebuilding the unchanged
+                // ListView here deletes and reinserts every row, which is both unnecessary and
+                // visibly flashes on repeated drags even with LVS_EX_DOUBLEBUFFER.
+                self.render_after_map_drag();
+                return None;
             }
             ID_MAP_SELECT => {
                 self.select_map_target(self.partition_map.selected);
@@ -624,6 +748,16 @@ impl NativeQuickPartitionDialog {
         }
         self.render_state();
         None
+    }
+
+    unsafe fn render_after_map_drag(&mut self) {
+        self.refresh_partition_map();
+        set_text(self.controls.status, &self.state.message);
+        let _ = EnableWindow(
+            self.controls.apply_pending,
+            !self.pending.is_empty() && !self.inventory_stale && !self.state.loading,
+        );
+        self.layout();
     }
 
     unsafe fn select_map_target(&mut self, target: Option<PartitionMapTarget>) {
@@ -1029,7 +1163,10 @@ impl NativeQuickPartitionDialog {
         }
         self.shell.fit_content_height(logical_height(y, dpi));
         self.layout_apply_button(dpi);
-        for (column, value) in partition_columns(width, dpi).into_iter().enumerate() {
+        let mut list_rect = RECT::default();
+        let _ = GetClientRect(self.controls.partitions, &mut list_rect);
+        let list_width = (list_rect.right - list_rect.left).max(0);
+        for (column, value) in partition_columns(list_width, dpi).into_iter().enumerate() {
             let _ = SendMessageW(
                 self.controls.partitions,
                 LVM_SETCOLUMNWIDTH,
@@ -1043,8 +1180,13 @@ impl NativeQuickPartitionDialog {
         let Some(refresh) = self.shell.command_button(DialogResult::Secondary) else {
             return;
         };
+        let Some(primary) = self.shell.command_button(DialogResult::Primary) else {
+            return;
+        };
         let mut refresh_rect = RECT::default();
+        let mut primary_rect = RECT::default();
         let _ = GetWindowRect(refresh, &mut refresh_rect);
+        let _ = GetWindowRect(primary, &mut primary_rect);
         let mut points = [
             POINT {
                 x: refresh_rect.left,
@@ -1056,6 +1198,17 @@ impl NativeQuickPartitionDialog {
             },
         ];
         let _ = MapWindowPoints(HWND::default(), self.shell.hwnd(), &mut points);
+        let mut primary_points = [
+            POINT {
+                x: primary_rect.left,
+                y: primary_rect.top,
+            },
+            POINT {
+                x: primary_rect.right,
+                y: primary_rect.bottom,
+            },
+        ];
+        let _ = MapWindowPoints(HWND::default(), self.shell.hwnd(), &mut primary_points);
         let gap = LayoutMetrics::for_dpi(dpi).control_gap;
         let width = measured_button_width(
             self.shell.hwnd(),
@@ -1066,16 +1219,12 @@ impl NativeQuickPartitionDialog {
         );
         let refresh_width = (points[1].x - points[0].x).max(1);
         let height = (points[1].y - points[0].y).max(1);
-        move_control(
-            refresh,
-            points[0].x - width - gap,
-            points[0].y,
-            refresh_width,
-            height,
-        );
+        let apply_x = primary_points[0].x - gap - width;
+        let refresh_x = apply_x - gap - refresh_width;
+        move_control(refresh, refresh_x, points[0].y, refresh_width, height);
         move_control(
             self.controls.apply_pending,
-            points[0].x,
+            apply_x,
             points[0].y,
             width,
             height,
@@ -1138,6 +1287,10 @@ impl NativeQuickPartitionDialog {
         );
         self.shell
             .set_primary_enabled(self.state.quick_partition_request().is_ok());
+        // Inventory arrives asynchronously. Recompute the row-count-based ListView and dialog
+        // heights after every full state replacement instead of leaving the three-row loading
+        // geometry in place for the lifetime of the dialog.
+        self.layout();
     }
 
     unsafe fn refresh_partition_map(&mut self) {
@@ -1639,9 +1792,9 @@ unsafe extern "system" fn partition_map_proc(
             let item = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
             if item.CtlType == ODT_MENU && item.itemData != 0 {
                 let visual = &*(item.itemData as *const PartitionMenuItem);
-                item.itemWidth = scale(218, visual.dpi).max(1) as u32;
+                item.itemWidth = visual.width.max(1) as u32;
                 item.itemHeight =
-                    scale(if visual.separator { 9 } else { 32 }, visual.dpi).max(1) as u32;
+                    scale(if visual.separator { 6 } else { 26 }, visual.dpi).max(1) as u32;
                 return LRESULT(1);
             }
             DefSubclassProc(hwnd, message, wparam, lparam)
@@ -2185,7 +2338,7 @@ unsafe fn show_partition_context_menu(hwnd: HWND, model: &PartitionMapModel, mut
     let dpi = GetDpiForWindow(hwnd).max(96);
     let menu_background = CreateSolidBrush(palette.window);
     apply_partition_menu_background(menu, menu_background);
-    let mut builder = PartitionMenuBuilder::new(model.font, palette, dpi, menu_background);
+    let mut builder = PartitionMenuBuilder::new(hwnd, model.font, palette, dpi, menu_background);
     match target {
         PartitionMapTarget::Existing(index) => {
             let Some(segment) = model
@@ -2279,6 +2432,7 @@ unsafe fn show_partition_context_menu(hwnd: HWND, model: &PartitionMapModel, mut
         }
     }
     let _ = ClientToScreen(hwnd, &mut point);
+    let _menu_window_rounder = PartitionMenuWindowRounder::start(GetCurrentThreadId());
     let command = TrackPopupMenu(
         menu,
         TPM_RETURNCMD | TPM_RIGHTBUTTON,
