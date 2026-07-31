@@ -49,6 +49,14 @@ pub enum PartitionKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GptPartitionMetadata {
+    /// In-memory GUID bytes as returned by `PARTITION_INFORMATION_GPT`.
+    pub partition_id: [u8; 16],
+    pub attributes: u64,
+    pub name: [u16; 36],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatePartitionRequest {
     pub disk_number: u32,
     /// Zero selects the first aligned free extent.
@@ -60,6 +68,9 @@ pub struct CreatePartitionRequest {
     pub label: String,
     pub drive_letter: Option<char>,
     pub active: bool,
+    /// Used only when recreating an existing GPT partition after an offline block move.
+    /// Ordinary partition creation must leave this as `None`.
+    pub preserve_gpt_metadata: Option<GptPartitionMetadata>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -882,7 +893,14 @@ mod platform {
         kind: PartitionKind,
         active: bool,
         label: &str,
+        preserved_gpt: Option<&GptPartitionMetadata>,
     ) -> Result<CREATE_PARTITION_PARAMETERS, StorageError> {
+        if preserved_gpt.is_some() && (style != VDS_PST_GPT || kind != PartitionKind::BasicData) {
+            return Err(StorageError::new(
+                "create partition",
+                "preserved GPT metadata is valid only for a GPT basic-data partition",
+            ));
+        }
         if style == VDS_PST_GPT {
             let partition_type = match kind {
                 PartitionKind::BasicData => GPT_BASIC_DATA,
@@ -890,19 +908,37 @@ mod platform {
                 PartitionKind::MicrosoftReserved => GPT_MSR,
                 PartitionKind::Recovery => GPT_RECOVERY,
             };
-            let mut name = [0_u16; 36];
-            for (target, value) in name.iter_mut().zip(label.encode_utf16()) {
-                *target = value;
-            }
-            let partition_id = CoCreateGuid()
-                .map_err(|error| api_error("create GPT partition identifier", error))?;
+            let (partition_id, attributes, name) = if let Some(metadata) = preserved_gpt {
+                let bytes = metadata.partition_id;
+                (
+                    GUID::from_values(
+                        u32::from_le_bytes(bytes[0..4].try_into().expect("GUID data1")),
+                        u16::from_le_bytes(bytes[4..6].try_into().expect("GUID data2")),
+                        u16::from_le_bytes(bytes[6..8].try_into().expect("GUID data3")),
+                        bytes[8..16].try_into().expect("GUID data4"),
+                    ),
+                    metadata.attributes,
+                    metadata.name,
+                )
+            } else {
+                let mut name = [0_u16; 36];
+                for (target, value) in name.iter_mut().zip(label.encode_utf16()) {
+                    *target = value;
+                }
+                (
+                    CoCreateGuid()
+                        .map_err(|error| api_error("create GPT partition identifier", error))?,
+                    0,
+                    name,
+                )
+            };
             return Ok(CREATE_PARTITION_PARAMETERS {
                 style,
                 Anonymous: CREATE_PARTITION_PARAMETERS_0 {
                     GptPartInfo: CREATE_PARTITION_PARAMETERS_0_0 {
                         partitionType: partition_type,
                         partitionId: partition_id,
-                        attributes: 0,
+                        attributes,
                         name,
                     },
                 },
@@ -1119,8 +1155,13 @@ mod platform {
         let extents = free_extents(&disk.disk)?;
         let (offset_bytes, size_bytes) =
             aligned_extent(&extents, request.offset_bytes, request.size_bytes)?;
-        let parameters =
-            create_parameters(disk.style, request.kind, request.active, &request.label)?;
+        let parameters = create_parameters(
+            disk.style,
+            request.kind,
+            request.active,
+            &request.label,
+            request.preserve_gpt_metadata.as_ref(),
+        )?;
         let creator = disk
             .disk
             .cast::<IVdsCreatePartitionEx>()
@@ -1448,6 +1489,36 @@ mod platform {
             );
             assert!(aligned_extent(&extents, ALIGNMENT, 3 * ALIGNMENT).is_err());
         }
+
+        #[test]
+        fn recreated_gpt_basic_partition_preserves_identity_attributes_and_name() {
+            let mut name = [0_u16; 36];
+            name[..4].copy_from_slice(&[b'D' as u16, b'a' as u16, b't' as u16, b'a' as u16]);
+            let metadata = GptPartitionMetadata {
+                partition_id: [
+                    0x78, 0x56, 0x34, 0x12, 0xbc, 0x9a, 0xf0, 0xde, 1, 2, 3, 4, 5, 6, 7, 8,
+                ],
+                attributes: 0x8000_0000_0000_0001,
+                name,
+            };
+            let parameters = unsafe {
+                create_parameters(
+                    VDS_PST_GPT,
+                    PartitionKind::BasicData,
+                    false,
+                    "",
+                    Some(&metadata),
+                )
+            }
+            .unwrap();
+            let actual = unsafe { parameters.Anonymous.GptPartInfo };
+            assert_eq!(actual.partitionId.data1, 0x1234_5678);
+            assert_eq!(actual.partitionId.data2, 0x9abc);
+            assert_eq!(actual.partitionId.data3, 0xdef0);
+            assert_eq!(actual.partitionId.data4, [1, 2, 3, 4, 5, 6, 7, 8]);
+            assert_eq!(actual.attributes, metadata.attributes);
+            assert_eq!(actual.name, metadata.name);
+        }
     }
 }
 
@@ -1587,6 +1658,7 @@ mod tests {
             label: "Data".into(),
             drive_letter: Some('D'),
             active: false,
+            preserve_gpt_metadata: None,
         }
     }
 

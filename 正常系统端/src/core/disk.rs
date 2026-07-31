@@ -703,6 +703,7 @@ impl DiskManager {
                 label: String::new(),
                 drive_letter: Some(target),
                 active: false,
+                preserve_gpt_metadata: None,
             },
         );
         match created {

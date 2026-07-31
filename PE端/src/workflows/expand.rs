@@ -48,7 +48,12 @@ pub(crate) fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
         config.target_size_mb
     );
 
-    match crate::core::expand_move::expand_c_drive(letter, config.target_size_mb, &data_partition) {
+    let expand_result = if config.borrow_from_left {
+        crate::core::expand_move::expand_from_left_donor(letter, &config, &data_partition)
+    } else {
+        crate::core::expand_move::expand_c_drive(letter, config.target_size_mb, &data_partition)
+    };
+    match expand_result {
         Ok(message) => {
             log::info!("[EXPAND] {}", message);
             let _ = tx.send(WorkerMessage::SetStatus(message));

@@ -9,9 +9,9 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, W
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
-    InvalidateRect, MapWindowPoints, SelectClipRgn, SelectObject, SetBkMode, SetTextColor,
-    DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HFONT, PAINTSTRUCT,
-    SRCCOPY, TRANSPARENT,
+    IntersectClipRect, InvalidateRect, MapWindowPoints, RestoreDC, SaveDC, SelectClipRgn,
+    SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, HFONT, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     DRAWITEMSTRUCT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS,
@@ -27,13 +27,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetClientRect, GetParent, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW, SetMenuInfo, SetWindowTextW,
-    ShowWindow, TrackPopupMenu, BM_SETCHECK, BS_AUTORADIOBUTTON, BS_OWNERDRAW, CBS_DROPDOWNLIST,
-    CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, ES_AUTOHSCROLL, MENUINFO, MF_GRAYED,
-    MF_OWNERDRAW, MF_POPUP, MIM_BACKGROUND, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WM_CAPTURECHANGED, WM_COMMAND, WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WS_BORDER,
-    WS_TABSTOP,
+    GetWindowTextLengthW, GetWindowTextW, MoveWindow, PostMessageW, SendMessageW, SetMenuInfo,
+    SetWindowTextW, ShowWindow, TrackPopupMenu, BM_SETCHECK, BS_AUTORADIOBUTTON, BS_OWNERDRAW,
+    CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, ES_AUTOHSCROLL,
+    MENUINFO, MF_GRAYED, MF_OWNERDRAW, MF_POPUP, MIM_BACKGROUND, SW_HIDE, SW_SHOW, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WM_CAPTURECHANGED, WM_COMMAND, WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SETFONT,
+    WS_BORDER, WS_TABSTOP,
 };
 
 use super::super::controls::fill_round_rect_antialiased;
@@ -49,8 +49,9 @@ use crate::core::native_quick_partition::{
     DiskFingerprint, DiskPartitionFingerprint, QuickPartitionRequest,
 };
 use crate::core::native_quick_partition_dialog::{
-    EditorRow, ExistingPartitionResizeRequest, PartitionManagementAction,
-    PartitionManagementRequest, PendingPartitionOperation, QuickPartitionDialogState,
+    AdjacentPartitionTransferRequest, EditorRow, ExistingPartitionResizeRequest,
+    PartitionManagementAction, PartitionManagementRequest, PendingPartitionOperation,
+    QuickPartitionDialogState,
 };
 use crate::core::quick_partition::{DiskPartitionInfo, PartitionLayout, PhysicalDisk};
 
@@ -113,6 +114,7 @@ struct PartitionMapModel {
     enabled: bool,
     drag: Option<PartitionMapDrag>,
     committed_resize: Option<(usize, u64)>,
+    committed_transfer: Option<(usize, usize, u64)>,
     growth_blocked_by_neighbor: bool,
 }
 
@@ -246,6 +248,7 @@ struct PartitionMapDrag {
     maximum_bytes: u64,
     right_is_unallocated: bool,
     right_is_borrowed_partition: bool,
+    right_partition_index: Option<usize>,
 }
 
 impl PartitionMapModel {
@@ -261,6 +264,7 @@ impl PartitionMapModel {
             enabled: false,
             drag: None,
             committed_resize: None,
+            committed_transfer: None,
             growth_blocked_by_neighbor: false,
         }
     }
@@ -330,7 +334,7 @@ impl NativeQuickPartitionDialog {
                 width: 780,
                 height: 650,
                 buttons: DialogButtons {
-                    primary: crate::tr!("一键分区"),
+                    primary: crate::tr!("清空整盘并分区"),
                     secondary: Some(crate::tr!("刷新")),
                     cancel: Some(crate::tr!("关闭")),
                 },
@@ -534,7 +538,20 @@ impl NativeQuickPartitionDialog {
                 }
             }
             ID_MAP_DRAG_COMMIT => {
-                if let Some((index, new_size_mb)) = self.partition_map.committed_resize.take() {
+                if let Some((left_index, right_index, left_new_size_mb)) =
+                    self.partition_map.committed_transfer.take()
+                {
+                    match self.state.adjacent_transfer_request_mb(
+                        left_index,
+                        right_index,
+                        left_new_size_mb,
+                    ) {
+                        Ok(request) => self.stage_transfer(request),
+                        Err(error) => self.state.message = error,
+                    }
+                } else if let Some((index, new_size_mb)) =
+                    self.partition_map.committed_resize.take()
+                {
                     match self.state.existing_resize_request_mb(index, new_size_mb) {
                         Ok(request) => self.stage_resize(request),
                         Err(error) => self.state.message = error,
@@ -670,6 +687,10 @@ impl NativeQuickPartitionDialog {
             PendingPartitionOperation::Resize(existing) => {
                 existing.partition_number != request.partition_number
             }
+            PendingPartitionOperation::Transfer(existing) => {
+                existing.left_partition.partition_number != request.partition_number
+                    && existing.right_partition.partition_number != request.partition_number
+            }
             PendingPartitionOperation::Manage(existing) => !matches!(
                 &existing.action,
                 PartitionManagementAction::Delete { partition }
@@ -682,6 +703,32 @@ impl NativeQuickPartitionDialog {
         }
         if !self.inventory_stale {
             self.state.message = crate::tr!("修改已暂存，点击“应用”后才会写入磁盘。");
+        }
+    }
+
+    fn stage_transfer(&mut self, request: AdjacentPartitionTransferRequest) {
+        let left = request.left_partition.partition_number;
+        let right = request.right_partition.partition_number;
+        self.pending.retain(|operation| match operation {
+            PendingPartitionOperation::Resize(existing) => {
+                existing.partition_number != left && existing.partition_number != right
+            }
+            PendingPartitionOperation::Transfer(existing) => ![
+                existing.left_partition.partition_number,
+                existing.right_partition.partition_number,
+            ]
+            .iter()
+            .any(|partition| matches!(*partition, value if value == left || value == right)),
+            PendingPartitionOperation::Manage(existing) => {
+                !management_targets_partition(&existing.action, left)
+                    && !management_targets_partition(&existing.action, right)
+            }
+        });
+        self.pending
+            .push(PendingPartitionOperation::Transfer(request));
+        if !self.inventory_stale {
+            self.state.message =
+                crate::tr!("相邻分区空间转移已暂存，点击“应用”后进入 WinPE 执行。");
         }
     }
 
@@ -712,6 +759,10 @@ impl NativeQuickPartitionDialog {
             }
             PendingPartitionOperation::Resize(existing) => {
                 deleting_partition != Some(existing.partition_number)
+            }
+            PendingPartitionOperation::Transfer(existing) => {
+                deleting_partition != Some(existing.left_partition.partition_number)
+                    && deleting_partition != Some(existing.right_partition.partition_number)
             }
         });
         self.pending
@@ -1139,7 +1190,7 @@ impl NativeQuickPartitionDialog {
                 special: partition.is_esp || partition.is_msr || partition.is_recovery,
                 protected: partition.drive_letter.is_some_and(|letter| {
                     letter.eq_ignore_ascii_case(&self.state.running_windows_drive())
-                }),
+                }) || !partition.file_system.trim().eq_ignore_ascii_case("NTFS"),
                 drive_letter: partition.drive_letter,
                 active: partition.is_active,
                 minimum_bytes: partition
@@ -1157,6 +1208,31 @@ impl NativeQuickPartitionDialog {
             );
         }
         for operation in &self.pending {
+            if let PendingPartitionOperation::Transfer(request) = operation {
+                let left_partition_index = disk.partitions.iter().position(|partition| {
+                    partition.partition_number == request.left_partition.partition_number
+                });
+                let right_partition_index = disk.partitions.iter().position(|partition| {
+                    partition.partition_number == request.right_partition.partition_number
+                });
+                let (Some(left_partition_index), Some(right_partition_index)) =
+                    (left_partition_index, right_partition_index)
+                else {
+                    continue;
+                };
+                for (partition_index, size_mb) in [
+                    (left_partition_index, request.left_new_size_mb),
+                    (right_partition_index, request.right_new_size_mb),
+                ] {
+                    if let Some(segment) = self.partition_map.segments.iter_mut().find(|segment| {
+                        segment.target == PartitionMapTarget::Existing(partition_index)
+                    }) {
+                        segment.weight = size_mb.saturating_mul(1024 * 1024);
+                        segment.size = format_capacity(segment.weight);
+                    }
+                }
+                continue;
+            }
             let PendingPartitionOperation::Resize(request) = operation else {
                 continue;
             };
@@ -1345,6 +1421,19 @@ fn management_partition_offset(action: &PartitionManagementAction) -> Option<u64
     }
 }
 
+fn management_targets_partition(action: &PartitionManagementAction, partition_number: u32) -> bool {
+    match action {
+        PartitionManagementAction::Delete { partition }
+        | PartitionManagementAction::Format { partition, .. }
+        | PartitionManagementAction::AssignDriveLetter { partition, .. }
+        | PartitionManagementAction::RemoveDriveLetter { partition }
+        | PartitionManagementAction::SetMbrActive { partition, .. } => {
+            partition.partition_number == partition_number
+        }
+        PartitionManagementAction::CreateNtfs { .. } => false,
+    }
+}
+
 fn selected_disk_contains_target(disk: Option<&PhysicalDisk>, target: PartitionMapTarget) -> bool {
     let Some(disk) = disk else {
         return false;
@@ -1453,6 +1542,8 @@ unsafe extern "system" fn partition_map_proc(
         WM_LBUTTONDOWN => {
             let point = point_from_lparam(lparam);
             if let Some(drag) = begin_partition_map_drag(hwnd, model, point) {
+                model.committed_resize = None;
+                model.committed_transfer = None;
                 model.drag = Some(drag);
                 let _ = SetCapture(hwnd);
                 let _ = InvalidateRect(hwnd, None, false);
@@ -1501,12 +1592,23 @@ unsafe extern "system" fn partition_map_proc(
                     && drag.current_x > drag.start_x
                     && target == drag.original_bytes;
                 let original_mib = drag.original_bytes / MIB;
-                model.committed_resize = (!model.growth_blocked_by_neighbor
-                    && aligned_mib != original_mib)
-                    .then_some((drag.partition_index, aligned_mib));
+                model.committed_resize = None;
+                model.committed_transfer = None;
+                if !model.growth_blocked_by_neighbor && aligned_mib != original_mib {
+                    if drag.right_is_borrowed_partition {
+                        model.committed_transfer = drag
+                            .right_partition_index
+                            .map(|right_index| (drag.partition_index, right_index, aligned_mib));
+                    } else {
+                        model.committed_resize = Some((drag.partition_index, aligned_mib));
+                    }
+                }
                 let _ = InvalidateRect(hwnd, None, false);
                 if let Ok(parent) = GetParent(hwnd) {
-                    let _ = SendMessageW(
+                    // Defer the commit until this subclass callback has returned. The parent
+                    // rerenders the map and mutates this model; doing that through SendMessageW
+                    // would re-enter while `model` is still exclusively borrowed here.
+                    let _ = PostMessageW(
                         parent,
                         WM_COMMAND,
                         WPARAM(ID_MAP_DRAG_COMMIT as usize),
@@ -1657,17 +1759,17 @@ fn partition_map_display_segments(model: &PartitionMapModel) -> Vec<PartitionMap
                 *size_bytes = remaining;
             }
         }
+    } else if drag.right_is_borrowed_partition {
+        if let Some(right) = segments.get_mut(drag.left_segment + 1) {
+            let combined = drag.scale_bytes;
+            right.weight = combined.saturating_sub(target).max(1);
+            right.size = format_capacity(right.weight);
+        }
     } else if target < drag.original_bytes {
         segments.insert(
             drag.left_segment + 1,
             unallocated_segment(0, drag.original_bytes - target),
         );
-    } else if drag.right_is_borrowed_partition && target > drag.original_bytes {
-        if let Some(right) = segments.get_mut(drag.left_segment + 1) {
-            let borrowed = target - drag.original_bytes;
-            right.weight = right.weight.saturating_sub(borrowed).max(1);
-            right.size = format_capacity(right.weight);
-        }
     }
     segments
 }
@@ -1796,8 +1898,9 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
         let _ = SelectClipRgn(dc, None);
         let _ = DeleteObject(clip);
     }
-    for (_, divider) in draggable_partition_map_dividers(&display_segments, &rects, margin) {
-        let handle_width = scale(8, dpi).max(6);
+    for (left_index, divider) in draggable_partition_map_dividers(&display_segments, &rects, margin)
+    {
+        let (handle_width, line_width) = partition_handle_widths(dpi);
         let handle_height = scale(24, dpi).min((outer.bottom - outer.top - scale(8, dpi)).max(8));
         let handle_center = divider.clamp(
             outer.left + handle_width / 2 + frame,
@@ -1809,18 +1912,42 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
             right: handle_center + (handle_width + 1) / 2,
             bottom: outer.top + (outer.bottom - outer.top + handle_height) / 2,
         };
-        fill_round_rect_antialiased(
-            dc,
-            handle,
-            scale(3, dpi),
-            palette.button_hot,
-            palette.border,
-            palette.window,
-        );
+        let right_index = left_index + 1;
+        for (clip_left, clip_right, background) in [
+            (
+                handle.left,
+                divider.min(handle.right),
+                segment_fill(&display_segments[left_index]),
+            ),
+            (
+                divider.max(handle.left),
+                handle.right,
+                segment_fill(&display_segments[right_index]),
+            ),
+        ] {
+            if clip_right <= clip_left {
+                continue;
+            }
+            let saved = SaveDC(dc);
+            if saved == 0 {
+                continue;
+            }
+            let _ = IntersectClipRect(dc, clip_left, handle.top, clip_right, handle.bottom);
+            fill_round_rect_antialiased(
+                dc,
+                handle,
+                scale(3, dpi),
+                palette.button_hot,
+                palette.border,
+                background,
+            );
+            let _ = RestoreDC(dc, saved);
+        }
+        let line_left = handle.left + (handle.right - handle.left - line_width) / 2;
         let line = RECT {
-            left: handle_center,
+            left: line_left,
             top: handle.top + scale(5, dpi),
-            right: handle_center + scale(1, dpi).max(1),
+            right: line_left + line_width,
             bottom: handle.bottom - scale(5, dpi),
         };
         let brush = CreateSolidBrush(palette.text_secondary);
@@ -1882,6 +2009,15 @@ unsafe fn paint_partition_map(hwnd: HWND, model: &PartitionMapModel) {
     let _ = EndPaint(hwnd, &paint);
 }
 
+fn partition_handle_widths(dpi: u32) -> (i32, i32) {
+    let line_width = scale(1, dpi).max(1);
+    let mut handle_width = scale(8, dpi).max(6);
+    if (handle_width - line_width) % 2 != 0 {
+        handle_width += 1;
+    }
+    (handle_width, line_width)
+}
+
 fn draggable_partition_map_dividers(
     segments: &[PartitionMapSegment],
     rects: &[(i32, i32)],
@@ -1924,7 +2060,6 @@ fn partition_segment_can_be_moved(segment: &PartitionMapSegment) -> bool {
         && !segment.protected
         && !segment.special
         && segment.drive_letter.is_some()
-        && segment.minimum_bytes < segment.weight
 }
 
 unsafe fn begin_partition_map_drag(
@@ -1961,6 +2096,10 @@ unsafe fn begin_partition_map_drag(
         let right_is_unallocated = right
             .is_some_and(|right| matches!(right.target, PartitionMapTarget::Unallocated { .. }));
         let right_is_borrowed_partition = right.is_some_and(partition_segment_can_be_moved);
+        let right_partition_index = right.and_then(|right| match right.target {
+            PartitionMapTarget::Existing(index) if right_is_borrowed_partition => Some(index),
+            _ => None,
+        });
         let (scale_width, scale_bytes, maximum_bytes) = if right_is_unallocated {
             let right = right?;
             (
@@ -1995,6 +2134,7 @@ unsafe fn begin_partition_map_drag(
             maximum_bytes,
             right_is_unallocated,
             right_is_borrowed_partition,
+            right_partition_index,
         });
     }
     None
@@ -2255,7 +2395,7 @@ unsafe fn create_controls(parent: HWND, command_parent: HWND) -> windows::core::
         apply_pending: child(
             command_parent,
             w!("BUTTON"),
-            &crate::tr!("应用"),
+            &crate::tr!("应用修改"),
             BS_OWNERDRAW | WS_TABSTOP.0 as i32,
             ID_APPLY_PENDING,
         )?,
@@ -2624,10 +2764,29 @@ mod tests {
             draggable_partition_map_dividers(&model.segments, &rects, 2),
             vec![(0, 102), (1, 202)]
         );
+
+        model.segments[0].minimum_bytes = 50;
+        model.segments[1].minimum_bytes = model.segments[1].weight;
+        assert_eq!(
+            draggable_partition_map_dividers(&model.segments, &rects, 2),
+            vec![(0, 102)]
+        );
     }
 
     #[test]
-    fn dragging_left_between_existing_partitions_previews_real_unallocated_space() {
+    fn handle_inner_line_is_pixel_centered_at_supported_dpi() {
+        for dpi in [96, 120, 144, 168, 192, 240, 288] {
+            let (handle_width, line_width) = partition_handle_widths(dpi);
+            assert!(handle_width > line_width);
+            assert_eq!((handle_width - line_width) % 2, 0, "dpi={dpi}");
+            let left_inset = (handle_width - line_width) / 2;
+            let right_inset = handle_width - line_width - left_inset;
+            assert_eq!(left_inset, right_inset, "dpi={dpi}");
+        }
+    }
+
+    #[test]
+    fn dragging_left_between_existing_partitions_transfers_space_to_right_partition() {
         let segment = |index, weight, minimum_bytes| PartitionMapSegment {
             target: PartitionMapTarget::Existing(index),
             label: format!("P{index}"),
@@ -2647,28 +2806,24 @@ mod tests {
             start_x: 100,
             current_x: 75,
             scale_width: 100,
-            scale_bytes: 100,
+            scale_bytes: 300,
             original_bytes: 100,
             minimum_bytes: 50,
-            maximum_bytes: 100,
+            maximum_bytes: 200,
             right_is_unallocated: false,
-            right_is_borrowed_partition: false,
+            right_is_borrowed_partition: true,
+            right_partition_index: Some(1),
         });
 
         let display = partition_map_display_segments(&model);
-        assert_eq!(display.len(), 3);
-        assert_eq!(display[0].weight, 75);
-        assert!(matches!(
-            display[1].target,
-            PartitionMapTarget::Unallocated { .. }
-        ));
-        assert_eq!(display[1].weight, 25);
-        assert_eq!(display[2].target, PartitionMapTarget::Existing(1));
-        assert_eq!(display[2].weight, 200);
+        assert_eq!(display.len(), 2);
+        assert_eq!(display[0].weight, 50);
+        assert_eq!(display[1].target, PartitionMapTarget::Existing(1));
+        assert_eq!(display[1].weight, 250);
     }
 
     #[test]
-    fn existing_neighbor_prevents_growth_but_not_shrink() {
+    fn nonmovable_neighbor_prevents_growth_but_not_shrink() {
         let drag = PartitionMapDrag {
             partition_index: 0,
             left_segment: 0,
@@ -2681,6 +2836,7 @@ mod tests {
             maximum_bytes: 100,
             right_is_unallocated: false,
             right_is_borrowed_partition: false,
+            right_partition_index: None,
         };
         assert_eq!(drag_target_bytes(drag), 100);
         assert_eq!(
@@ -2706,6 +2862,7 @@ mod tests {
             maximum_bytes: 220,
             right_is_unallocated: false,
             right_is_borrowed_partition: true,
+            right_partition_index: Some(1),
         };
         assert_eq!(drag_target_bytes(drag), 150);
 

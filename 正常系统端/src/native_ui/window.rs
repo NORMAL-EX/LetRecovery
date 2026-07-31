@@ -147,6 +147,94 @@ fn catalogue_status_message(state: &CatalogueState) -> String {
     }
 }
 
+fn pending_offline_expand_request(
+    operations: &[crate::core::native_quick_partition_dialog::PendingPartitionOperation],
+) -> Option<ExpandCRequest> {
+    use crate::core::native_quick_partition_dialog::PendingPartitionOperation;
+    match operations {
+        [PendingPartitionOperation::Resize(request)]
+            if request.new_size_mb > request.no_move_max_size_mb =>
+        {
+            Some(ExpandCRequest {
+                target_partition: request.drive_letter,
+                expected_disk: Some(request.disk.clone()),
+                expected_partition_number: Some(request.partition_number),
+                target_size_mb: request.new_size_mb,
+                use_maximum: false,
+                requires_partition_move: true,
+                borrow_from_left: false,
+                minimum_free_mb: 100,
+                analyzed_current_size_mb: request.current_size_mb,
+                analyzed_max_size_mb: request.move_max_size_mb,
+                analyzed_no_move_max_mb: request.no_move_max_size_mb,
+                strict_analysis_snapshot: false,
+            })
+        }
+        [PendingPartitionOperation::Transfer(request)] => {
+            let left_grows = request.left_new_size_mb > request.left_current_size_mb;
+            let (
+                target_partition,
+                expected_partition,
+                current_size_mb,
+                target_size_mb,
+                donor_current_size_mb,
+                donor_used_size_mb,
+                borrow_from_left,
+            ) = if left_grows {
+                (
+                    request.left_drive_letter,
+                    &request.left_partition,
+                    request.left_current_size_mb,
+                    request.left_new_size_mb,
+                    request.right_current_size_mb,
+                    request.right_used_size_mb,
+                    false,
+                )
+            } else {
+                (
+                    request.right_drive_letter,
+                    &request.right_partition,
+                    request.right_current_size_mb,
+                    request.right_new_size_mb,
+                    request.left_current_size_mb,
+                    request.left_used_size_mb,
+                    true,
+                )
+            };
+            Some(ExpandCRequest {
+                target_partition,
+                expected_disk: Some(request.disk.clone()),
+                expected_partition_number: Some(expected_partition.partition_number),
+                target_size_mb,
+                use_maximum: false,
+                requires_partition_move: true,
+                borrow_from_left,
+                minimum_free_mb: 100,
+                analyzed_current_size_mb: current_size_mb,
+                analyzed_max_size_mb: current_size_mb.saturating_add(
+                    donor_current_size_mb.saturating_sub(donor_used_size_mb.saturating_add(100)),
+                ),
+                analyzed_no_move_max_mb: current_size_mb,
+                strict_analysis_snapshot: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn pending_requires_offline_expand(
+    operations: &[crate::core::native_quick_partition_dialog::PendingPartitionOperation],
+) -> bool {
+    use crate::core::native_quick_partition_dialog::PendingPartitionOperation;
+    operations.iter().any(|operation| {
+        matches!(
+            operation,
+            PendingPartitionOperation::Resize(request)
+                if request.new_size_mb > request.no_move_max_size_mb
+        ) || matches!(operation, PendingPartitionOperation::Transfer(_))
+    })
+}
+
 // Keeps the longest English navigation caption readable at 100-200% DPI without leaving an
 // oversized empty rail beside the centred button captions.
 const NAV_WIDTH: i32 = 168;
@@ -431,7 +519,7 @@ fn quick_partition_visual_fixture() -> Vec<crate::core::quick_partition::Physica
         },
         DiskPartitionInfo {
             partition_number: 3,
-            size_bytes: 500 * GIB,
+            size_bytes: 400 * GIB,
             offset_bytes: 240 * GIB + 513 * MIB,
             drive_letter: Some('D'),
             label: "Data".into(),
@@ -441,7 +529,22 @@ fn quick_partition_visual_fixture() -> Vec<crate::core::quick_partition::Physica
             is_recovery: false,
             partition_type: "Basic data".into(),
             used_bytes: 310 * GIB,
-            free_bytes: 190 * GIB,
+            free_bytes: 90 * GIB,
+            is_active: false,
+        },
+        DiskPartitionInfo {
+            partition_number: 4,
+            size_bytes: 200 * GIB,
+            offset_bytes: 640 * GIB + 513 * MIB,
+            drive_letter: Some('E'),
+            label: "Archive".into(),
+            file_system: "NTFS".into(),
+            is_esp: false,
+            is_msr: false,
+            is_recovery: false,
+            partition_type: "Basic data".into(),
+            used_bytes: 100 * GIB,
+            free_bytes: 100 * GIB,
             is_active: false,
         },
     ];
@@ -6391,6 +6494,8 @@ impl NativeWindow {
             analyzed_max_size_mb: request.analyzed_max_size_mb,
             analyzed_no_move_max_mb: request.analyzed_no_move_max_mb,
             strict_analysis_snapshot: request.strict_analysis_snapshot,
+            borrow_from_left: request.borrow_from_left,
+            minimum_free_mb: request.minimum_free_mb,
             wim_engine: self.app_config.wim_engine,
             pe,
         };
@@ -8059,33 +8164,8 @@ impl NativeWindow {
                 }
             }
             Some(QuickPartitionDialogIntent::ApplyPending(operations)) => {
-                let offline_expand = match operations.as_slice() {
-                    [crate::core::native_quick_partition_dialog::PendingPartitionOperation::Resize(
-                        request,
-                    )] if request.new_size_mb > request.no_move_max_size_mb => {
-                        Some(ExpandCRequest {
-                            target_partition: request.drive_letter,
-                            expected_disk: Some(request.disk.clone()),
-                            expected_partition_number: Some(request.partition_number),
-                            target_size_mb: request.new_size_mb,
-                            use_maximum: false,
-                            requires_partition_move: true,
-                            analyzed_current_size_mb: request.current_size_mb,
-                            analyzed_max_size_mb: request.move_max_size_mb,
-                            analyzed_no_move_max_mb: request.no_move_max_size_mb,
-                            strict_analysis_snapshot: false,
-                        })
-                    }
-                    _ => None,
-                };
-                let has_offline_expand = operations.iter().any(|operation| {
-                    matches!(
-                        operation,
-                        crate::core::native_quick_partition_dialog::PendingPartitionOperation::Resize(
-                            request
-                        ) if request.new_size_mb > request.no_move_max_size_mb
-                    )
-                });
+                let offline_expand = pending_offline_expand_request(&operations);
+                let has_offline_expand = pending_requires_offline_expand(&operations);
                 if has_offline_expand && offline_expand.is_none() {
                     if let Some(dialog) = &mut self.quick_partition_dialog {
                         dialog.set_operation_error(crate::tr!(
@@ -8106,11 +8186,19 @@ impl NativeWindow {
                             )
                         },
                         |request| {
-                            crate::tr!(
-                                "将把分区 {}: 扩大到 {:.1} GB。需要先收缩并向右移动紧邻的后方分区；操作将在 WinPE 中执行并需要重启，请先备份重要数据。",
-                                request.target_partition,
-                                request.target_size_mb as f64 / 1024.0
-                            )
+                            if request.borrow_from_left {
+                                crate::tr!(
+                                    "将把分区 {}: 扩大到 {:.1} GB。需要先收缩左侧紧邻分区并向左移动目标分区；操作将在 WinPE 中执行并需要重启，请先备份重要数据。",
+                                    request.target_partition,
+                                    request.target_size_mb as f64 / 1024.0
+                                )
+                            } else {
+                                crate::tr!(
+                                    "将把分区 {}: 扩大到 {:.1} GB。需要先收缩并向右移动紧邻的后方分区；操作将在 WinPE 中执行并需要重启，请先备份重要数据。",
+                                    request.target_partition,
+                                    request.target_size_mb as f64 / 1024.0
+                                )
+                            }
                         },
                     ),
                     width: 620,
@@ -8168,10 +8256,32 @@ impl NativeWindow {
                                     .map(|dialog| dialog.pending_operations())
                                     .unwrap_or_default();
                                 if !operations.is_empty() {
-                                    if let Some(dialog) = &mut self.quick_partition_dialog {
-                                        dialog.finish_pending_apply();
+                                    let offline_expand =
+                                        pending_offline_expand_request(&operations);
+                                    if pending_requires_offline_expand(&operations)
+                                        && offline_expand.is_none()
+                                    {
+                                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                                            dialog.set_operation_error(crate::tr!(
+                                                "需要离线移动分区的数据操作不能与其他暂存操作同时应用；请只保留这一项后重试。"
+                                            ));
+                                            dialog.show_modeless();
+                                        }
+                                        return;
                                     }
-                                    self.start_quick_partition_pending(operations);
+                                    if let Some(request) = offline_expand {
+                                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                                            dialog.set_operation_status(crate::tr!(
+                                                "正在准备扩容环境..."
+                                            ));
+                                        }
+                                        self.start_expand_c_execution(hwnd, request);
+                                    } else {
+                                        if let Some(dialog) = &mut self.quick_partition_dialog {
+                                            dialog.finish_pending_apply();
+                                        }
+                                        self.start_quick_partition_pending(operations);
+                                    }
                                 }
                             }
                             DialogResult::Secondary => self.quick_partition_dialog = None,

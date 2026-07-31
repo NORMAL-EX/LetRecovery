@@ -30,8 +30,8 @@ use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, GetVolumeInformationW, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
     IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, PARTITION_STYLE_GPT,
@@ -49,17 +49,10 @@ const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
 const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
 const COPY_CHUNK: u64 = 4 * MIB;
 
-/// GPT 基础数据分区类型 GUID（小端字节序，与 PARTITION_INFORMATION_GPT 一致）。
-const ESP_GUID: [u8; 16] = [
-    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
+/// GPT 分区类型 GUID（小端字节序，与 PARTITION_INFORMATION_GPT 一致）。
+const BASIC_DATA_GUID: [u8; 16] = [
+    0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44, 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7,
 ];
-const MSR_GUID: [u8; 16] = [
-    0x16, 0xe3, 0xc9, 0xe3, 0x5c, 0x0b, 0xb8, 0x4d, 0x81, 0x7d, 0xf9, 0x2d, 0xf0, 0x02, 0x15, 0xae,
-];
-const RECOVERY_GUID: [u8; 16] = [
-    0xa4, 0xbb, 0x94, 0xde, 0xd1, 0x06, 0x40, 0x4d, 0xa1, 0x6a, 0xbf, 0xd5, 0x01, 0x79, 0xd6, 0xac,
-];
-
 #[repr(C)]
 #[derive(Default)]
 struct DiskGeometryEx {
@@ -87,6 +80,7 @@ struct PartEntry {
     is_special: bool, // ESP / MSR / 恢复 等不可随意移动的分区
     mbr_type: Option<u8>,
     mbr_active: bool,
+    gpt_metadata: Option<lr_core::windows_storage::GptPartitionMetadata>,
 }
 
 /// 读取卷所在物理磁盘号与起始偏移、长度（字节）。
@@ -229,14 +223,29 @@ unsafe fn read_disk_layout(disk_number: u32) -> Option<(PartitionStyle, u64, Vec
         }
         let mbr_type = (style == PartitionStyle::MBR).then_some(d[32]);
         let mbr_active = style == PartitionStyle::MBR && d[33] != 0;
-        let is_special = if style == PartitionStyle::GPT {
+        let (is_special, gpt_metadata) = if style == PartitionStyle::GPT {
             let mut g = [0u8; 16];
             g.copy_from_slice(&d[32..48]);
-            g == ESP_GUID || g == MSR_GUID || g == RECOVERY_GUID
+            let mut partition_id = [0u8; 16];
+            partition_id.copy_from_slice(&d[48..64]);
+            let attributes = u64::from_le_bytes(d[64..72].try_into().ok()?);
+            let mut name = [0u16; 36];
+            for (index, value) in name.iter_mut().enumerate() {
+                let offset = 72 + index * 2;
+                *value = u16::from_le_bytes(d[offset..offset + 2].try_into().ok()?);
+            }
+            (
+                g != BASIC_DATA_GUID,
+                Some(lr_core::windows_storage::GptPartitionMetadata {
+                    partition_id,
+                    attributes,
+                    name,
+                }),
+            )
         } else {
             // MBR：仅类型 0x07(NTFS/IFS) / 0x0B / 0x0C(FAT32) 视为普通数据，其余保守地当作特殊不移动。
             let t = d[32];
-            !(t == 0x07 || t == 0x0b || t == 0x0c)
+            (!(t == 0x07 || t == 0x0b || t == 0x0c), None)
         };
         parts.push(PartEntry {
             number,
@@ -245,6 +254,7 @@ unsafe fn read_disk_layout(disk_number: u32) -> Option<(PartitionStyle, u64, Vec
             is_special,
             mbr_type,
             mbr_active,
+            gpt_metadata,
         });
     }
     parts.sort_by_key(|p| p.offset);
@@ -348,6 +358,48 @@ unsafe fn raw_move_right(disk_number: u32, src: u64, len: u64, delta: u64) -> Re
     result
 }
 
+/// 在物理磁盘上把 `[src, src+len)` 整块向左搬移 `delta` 字节。
+///
+/// 目标区间起点低于源区间，重叠时必须从低地址向高地址正序复制。
+unsafe fn raw_move_left(disk_number: u32, src: u64, len: u64, delta: u64) -> Result<()> {
+    if delta == 0 || src < delta {
+        bail!("{}", tr!("向左搬移参数无效"));
+    }
+    let path = format!("\\\\.\\PhysicalDrive{}", disk_number);
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = CreateFileW(
+        PCWSTR::from_raw(wide.as_ptr()),
+        GENERIC_RW,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        None,
+        OPEN_EXISTING,
+        Default::default(),
+        None,
+    )
+    .map_err(|e| anyhow!("{}", tr!("打开物理磁盘 {} 失败: {}", disk_number, e)))?;
+    if handle == INVALID_HANDLE_VALUE {
+        bail!("{}", tr!("打开物理磁盘 {} 得到无效句柄", disk_number));
+    }
+
+    let result = (|| -> Result<()> {
+        let mut buffer = vec![0u8; COPY_CHUNK as usize];
+        let mut position = 0_u64;
+        while position < len {
+            let this = COPY_CHUNK.min(len - position);
+            seek(handle, (src + position) as i64)?;
+            read_exact(handle, &mut buffer[..this as usize])?;
+            seek(handle, (src - delta + position) as i64)?;
+            write_exact(handle, &buffer[..this as usize])?;
+            position += this;
+        }
+        windows::Win32::Storage::FileSystem::FlushFileBuffers(handle)
+            .map_err(|e| anyhow!("{}", tr!("刷盘失败: {}", e)))?;
+        Ok(())
+    })();
+    let _ = CloseHandle(handle);
+    result
+}
+
 unsafe fn seek(handle: HANDLE, offset: i64) -> Result<()> {
     SetFilePointerEx(handle, offset, None, FILE_BEGIN)
         .map_err(|e| anyhow!("{}", tr!("定位到 {} 失败: {}", offset, e)))
@@ -385,6 +437,108 @@ fn aligned(v: u64) -> bool {
     v.is_multiple_of(MIB)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LeftTransferPlan {
+    delta: u64,
+    gap_before_target: u64,
+    donor_shrink_by: u64,
+    donor_length_after_shrink: u64,
+    target_new_offset: u64,
+}
+
+fn plan_left_transfer(
+    donor_offset: u64,
+    donor_length: u64,
+    target_offset: u64,
+    target_length: u64,
+    requested_target_length: u64,
+) -> Result<LeftTransferPlan> {
+    let donor_end = donor_offset
+        .checked_add(donor_length)
+        .ok_or_else(|| anyhow!("donor geometry overflow"))?;
+    if donor_end > target_offset {
+        bail!("donor and target partitions overlap");
+    }
+    if requested_target_length <= target_length {
+        bail!("target length must grow");
+    }
+    let delta = requested_target_length - target_length;
+    let gap_before_target = target_offset - donor_end;
+    let donor_shrink_by = delta.saturating_sub(gap_before_target);
+    if donor_shrink_by >= donor_length || target_offset < delta {
+        bail!("insufficient geometry for left-side transfer");
+    }
+    let donor_length_after_shrink = donor_length - donor_shrink_by;
+    let target_new_offset = target_offset - delta;
+    for value in [
+        donor_offset,
+        donor_length,
+        target_offset,
+        target_length,
+        requested_target_length,
+        delta,
+        gap_before_target,
+        donor_shrink_by,
+        donor_length_after_shrink,
+        target_new_offset,
+    ] {
+        if !aligned(value) {
+            bail!("left-side transfer geometry is not 1 MiB aligned");
+        }
+    }
+    let donor_new_end = donor_offset
+        .checked_add(donor_length_after_shrink)
+        .ok_or_else(|| anyhow!("shrunken donor geometry overflow"))?;
+    if donor_new_end > target_new_offset {
+        bail!("shrunken donor still overlaps the relocated target");
+    }
+    Ok(LeftTransferPlan {
+        delta,
+        gap_before_target,
+        donor_shrink_by,
+        donor_length_after_shrink,
+        target_new_offset,
+    })
+}
+
+fn validate_left_transfer_identity(
+    config: &crate::core::config::ExpandConfig,
+    disk_number: u32,
+    disk_size: u64,
+    target: &PartEntry,
+    donor: &PartEntry,
+) -> Result<()> {
+    if config.expected_disk_size_bytes == 0
+        || config.expected_partition_number == 0
+        || config.expected_partition_offset_bytes == 0
+        || config.expected_partition_size_bytes == 0
+        || config.expected_donor_partition_number == 0
+        || config.expected_donor_offset_bytes == 0
+        || config.expected_donor_size_bytes == 0
+    {
+        bail!("{}", tr!("左侧空间转移配置缺少完整磁盘/分区身份，拒绝写盘"));
+    }
+    if disk_number != config.expected_disk_number
+        || disk_size != config.expected_disk_size_bytes
+        || target.number != config.expected_partition_number
+        || target.offset != config.expected_partition_offset_bytes
+        || target.length != config.expected_partition_size_bytes
+        || donor.number != config.expected_donor_partition_number
+        || donor.offset != config.expected_donor_offset_bytes
+        || donor.length != config.expected_donor_size_bytes
+    {
+        bail!("{}", tr!("重启后磁盘或左右分区身份/几何已变化，拒绝写盘"));
+    }
+    if donor
+        .offset
+        .checked_add(donor.length)
+        .is_none_or(|end| end != target.offset)
+    {
+        bail!("{}", tr!("左侧供体分区不再与目标分区直接相邻，拒绝写盘"));
+    }
+    Ok(())
+}
+
 /// 扫描 C..Z，找出位于指定磁盘且起始偏移匹配的卷盘符。
 fn letter_for(disk: u32, offset: u64) -> Option<char> {
     for l in b'C'..=b'Z' {
@@ -399,6 +553,29 @@ fn letter_for(disk: u32, offset: u64) -> Option<char> {
         }
     }
     None
+}
+
+fn volume_file_system(letter: char) -> Result<String> {
+    let root = format!("{}:\\", letter.to_ascii_uppercase());
+    let wide = root
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut file_system = [0_u16; 32];
+    unsafe {
+        GetVolumeInformationW(
+            PCWSTR(wide.as_ptr()),
+            None,
+            None,
+            None,
+            None,
+            Some(&mut file_system),
+        )
+        .map_err(|error| anyhow!("{}", tr!("读取分区 {}: 文件系统失败: {}", letter, error)))?;
+    }
+    Ok(String::from_utf16_lossy(&file_system)
+        .trim_end_matches('\0')
+        .to_string())
 }
 
 /// 写一行 journal 便于失败诊断（best-effort）。
@@ -641,6 +818,7 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
             label: String::new(),
             drive_letter: Some(n_letter),
             active: style == PartitionStyle::MBR && n.mbr_active,
+            preserve_gpt_metadata: n.gpt_metadata.clone(),
         },
     )
     .map_err(|error| {
@@ -671,4 +849,322 @@ pub fn expand_c_drive(letter: char, target_size_mb: u64, data_partition: &str) -
     })?;
     journal(data_partition, "DONE");
     Ok(tr!("已移动后方分区 {} 并{}", n_letter, msg))
+}
+
+/// 从目标分区左侧紧邻的普通数据分区转移容量。
+///
+/// 该路径只在 PE 中使用：先精确收缩左侧卷，再锁定并卸载目标卷，将目标卷原始字节
+/// 正序向左搬移，最后以保留的 GPT 元数据/MBR 活动状态重建表项并扩展尾部。
+pub fn expand_from_left_donor(
+    letter: char,
+    config: &crate::core::config::ExpandConfig,
+    data_partition: &str,
+) -> Result<String> {
+    let target_size_mb = config.target_size_mb;
+    if target_size_mb == 0 {
+        bail!("{}", tr!("从左侧转移空间必须指定明确的目标大小"));
+    }
+    let (disk, target_offset, target_length) = unsafe { volume_disk_and_offset(letter) }
+        .ok_or_else(|| anyhow!("{}", tr!("无法定位分区 {}: 所在磁盘/偏移", letter)))?;
+    let requested_target_length = target_size_mb
+        .checked_mul(MIB)
+        .ok_or_else(|| anyhow!("{}", tr!("目标分区大小溢出")))?;
+    if requested_target_length <= target_length {
+        return Ok(tr!("分区 {}: 当前已达到或超过目标大小，无需扩容", letter));
+    }
+
+    let (style, disk_size, parts) = unsafe { read_disk_layout(disk) }
+        .ok_or_else(|| anyhow!("{}", tr!("读取磁盘 {} 布局失败", disk)))?;
+    if style == PartitionStyle::Unknown {
+        bail!("{}", tr!("磁盘 {} 分区表类型未知，拒绝操作", disk));
+    }
+    let target = parts
+        .iter()
+        .find(|partition| partition.offset == target_offset && partition.length == target_length)
+        .ok_or_else(|| anyhow!("{}", tr!("分区表中未找到目标分区 {}:", letter)))?;
+    let donor = parts
+        .iter()
+        .filter(|partition| {
+            partition
+                .offset
+                .checked_add(partition.length)
+                .is_some_and(|end| end <= target_offset)
+        })
+        .max_by_key(|partition| partition.offset)
+        .ok_or_else(|| anyhow!("{}", tr!("目标分区左侧没有可转移空间的分区")))?;
+    validate_left_transfer_identity(config, disk, disk_size, target, donor)?;
+    if target.is_special || donor.is_special {
+        bail!(
+            "{}",
+            tr!("目标分区或左侧分区不是普通 GPT 基础数据/MBR NTFS 分区，拒绝移动")
+        );
+    }
+    if style == PartitionStyle::MBR
+        && (target.mbr_type != Some(0x07) || donor.mbr_type != Some(0x07))
+    {
+        bail!("{}", tr!("仅支持在 MBR 0x07 NTFS 基础数据分区之间转移空间"));
+    }
+    let donor_letter = letter_for(disk, donor.offset)
+        .ok_or_else(|| anyhow!("{}", tr!("左侧分区无盘符，无法安全收缩和复核")))?;
+    if !volume_file_system(letter)?.eq_ignore_ascii_case("NTFS")
+        || !volume_file_system(donor_letter)?.eq_ignore_ascii_case("NTFS")
+    {
+        bail!("{}", tr!("左右分区必须仍为 NTFS，拒绝收缩或搬移"));
+    }
+    let plan = plan_left_transfer(
+        donor.offset,
+        donor.length,
+        target.offset,
+        target.length,
+        requested_target_length,
+    )
+    .map_err(|error| anyhow!("{}", tr!("无法规划从左侧转移空间: {}", error)))?;
+
+    journal(
+        data_partition,
+        &format!(
+            "PLAN-LEFT disk={} donor#{}({}:)[{}+{}] target#{}({}:)[{}+{}] delta={} gap={} shrink={} new_target_off={}",
+            disk,
+            donor.number,
+            donor_letter,
+            donor.offset,
+            donor.length,
+            target.number,
+            letter,
+            target.offset,
+            target.length,
+            plan.delta,
+            plan.gap_before_target,
+            plan.donor_shrink_by,
+            plan.target_new_offset
+        ),
+    );
+
+    if plan.donor_shrink_by > 0 {
+        let reclaimed = lr_core::windows_storage::shrink_volume(
+            donor_letter,
+            plan.donor_shrink_by,
+            plan.donor_shrink_by,
+        )
+        .map_err(|error| {
+            anyhow!(
+                "{}",
+                tr!(
+                    "收缩左侧分区 {}: 失败，尚未移动目标分区数据：{}",
+                    donor_letter,
+                    error
+                )
+            )
+        })?;
+        if reclaimed != plan.donor_shrink_by {
+            bail!(
+                "{}",
+                tr!(
+                    "收缩左侧分区返回的空间不精确（期望 {} 字节，实际 {} 字节），尚未移动目标数据",
+                    plan.donor_shrink_by,
+                    reclaimed
+                )
+            );
+        }
+    }
+
+    let (_style_after_shrink, _size_after_shrink, fresh_parts) = unsafe { read_disk_layout(disk) }
+        .ok_or_else(|| anyhow!("{}", tr!("收缩后重读磁盘布局失败")))?;
+    let fresh_donor = fresh_parts
+        .iter()
+        .find(|partition| partition.number == donor.number && partition.offset == donor.offset)
+        .ok_or_else(|| {
+            anyhow!(
+                "{}",
+                tr!("收缩后未找到原左侧分区，已中止（未移动目标数据）")
+            )
+        })?;
+    let fresh_target = fresh_parts
+        .iter()
+        .find(|partition| {
+            partition.number == target.number
+                && partition.offset == target.offset
+                && partition.length == target.length
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "{}",
+                tr!("收缩后目标分区布局已变化，已中止（未移动目标数据）")
+            )
+        })?;
+    if fresh_donor.length != plan.donor_length_after_shrink
+        || fresh_donor
+            .offset
+            .checked_add(fresh_donor.length)
+            .is_none_or(|end| end > plan.target_new_offset)
+    {
+        bail!(
+            "{}",
+            tr!("收缩后左侧空间与计划不一致，已中止（未移动目标数据）")
+        );
+    }
+
+    journal(
+        data_partition,
+        &format!(
+            "MOVE-LEFT start target_off={} len={} delta={}",
+            fresh_target.offset, fresh_target.length, plan.delta
+        ),
+    );
+    let target_handle = unsafe { lock_dismount_volume(letter) }?;
+    let move_result =
+        unsafe { raw_move_left(disk, fresh_target.offset, fresh_target.length, plan.delta) };
+    unsafe {
+        let _ = CloseHandle(target_handle);
+    }
+    move_result.map_err(|error| {
+        journal(data_partition, &format!("MOVE-LEFT FAILED: {}", error));
+        anyhow!(
+            "{}",
+            tr!(
+                "向左搬移目标分区 {}: 数据失败；请保留 journal 并停止写盘：{}",
+                letter,
+                error
+            )
+        )
+    })?;
+    journal(data_partition, "MOVE-LEFT done");
+
+    lr_core::windows_storage::delete_partition(disk, fresh_target.offset, true).map_err(
+        |error| {
+            anyhow!(
+                "{}",
+                tr!(
+                    "目标数据已左移到 offset={}，但删除旧分区表项失败；请按 journal 修复：{}",
+                    plan.target_new_offset,
+                    error
+                )
+            )
+        },
+    )?;
+    let created = lr_core::windows_storage::create_partition(
+        &lr_core::windows_storage::CreatePartitionRequest {
+            disk_number: disk,
+            offset_bytes: plan.target_new_offset,
+            size_bytes: fresh_target.length,
+            kind: lr_core::windows_storage::PartitionKind::BasicData,
+            file_system: None,
+            label: String::new(),
+            drive_letter: Some(letter),
+            active: style == PartitionStyle::MBR && fresh_target.mbr_active,
+            preserve_gpt_metadata: fresh_target.gpt_metadata.clone(),
+        },
+    )
+    .map_err(|error| {
+        anyhow!(
+            "{}",
+            tr!(
+                "目标数据已左移到 offset={}，但重建分区表项失败；请按 journal 修复：{}",
+                plan.target_new_offset,
+                error
+            )
+        )
+    })?;
+    if created.offset_bytes != plan.target_new_offset || created.size_bytes != fresh_target.length {
+        bail!("{}", tr!("重建目标分区返回了非预期的偏移或大小"));
+    }
+
+    let message = DiskManager::expand_partition_lossless(letter, target_size_mb).map_err(
+        |error| {
+            anyhow!(
+                "{}",
+                tr!(
+                    "目标分区已成功左移，但最后扩展 {}: 失败；当前表项和数据仍可访问，可重试扩展：{}",
+                    letter,
+                    error
+                )
+            )
+        },
+    )?;
+    journal(data_partition, "DONE-LEFT");
+    Ok(tr!("已从左侧分区 {}: 转移空间并{}", donor_letter, message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_part(number: u32, offset: u64, length: u64) -> PartEntry {
+        PartEntry {
+            number,
+            offset,
+            length,
+            is_special: false,
+            mbr_type: None,
+            mbr_active: false,
+            gpt_metadata: None,
+        }
+    }
+
+    fn expected_left_config() -> crate::core::config::ExpandConfig {
+        crate::core::config::ExpandConfig {
+            expected_disk_number: 2,
+            expected_disk_size_bytes: 1_000 * MIB,
+            expected_partition_number: 4,
+            expected_partition_offset_bytes: 401 * MIB,
+            expected_partition_size_bytes: 200 * MIB,
+            expected_donor_partition_number: 3,
+            expected_donor_offset_bytes: MIB,
+            expected_donor_size_bytes: 400 * MIB,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn left_transfer_shrinks_adjacent_donor_and_keeps_original_target_end() {
+        let plan = plan_left_transfer(MIB, 200 * MIB, 201 * MIB, 80 * MIB, 140 * MIB)
+            .expect("valid adjacent transfer");
+        assert_eq!(plan.delta, 60 * MIB);
+        assert_eq!(plan.donor_shrink_by, 60 * MIB);
+        assert_eq!(plan.donor_length_after_shrink, 140 * MIB);
+        assert_eq!(plan.target_new_offset, 141 * MIB);
+        assert_eq!(plan.target_new_offset + 140 * MIB, 281 * MIB);
+    }
+
+    #[test]
+    fn left_transfer_consumes_existing_gap_before_shrinking_donor() {
+        let plan = plan_left_transfer(MIB, 100 * MIB, 121 * MIB, 80 * MIB, 130 * MIB)
+            .expect("valid transfer with a gap");
+        assert_eq!(plan.gap_before_target, 20 * MIB);
+        assert_eq!(plan.donor_shrink_by, 30 * MIB);
+        assert_eq!(plan.target_new_offset, 71 * MIB);
+    }
+
+    #[test]
+    fn left_transfer_rejects_overlap_and_unaligned_geometry() {
+        assert!(plan_left_transfer(MIB, 100 * MIB, 90 * MIB, 80 * MIB, 100 * MIB).is_err());
+        assert!(plan_left_transfer(MIB, 100 * MIB, 101 * MIB + 1, 80 * MIB, 100 * MIB).is_err());
+    }
+
+    #[test]
+    fn left_transfer_identity_requires_exact_adjacent_geometry() {
+        let config = expected_left_config();
+        let target = test_part(4, 401 * MIB, 200 * MIB);
+        let donor = test_part(3, MIB, 400 * MIB);
+        validate_left_transfer_identity(&config, 2, 1_000 * MIB, &target, &donor)
+            .expect("matching identity");
+
+        let mut changed_target = target.clone();
+        changed_target.offset += MIB;
+        assert!(
+            validate_left_transfer_identity(&config, 2, 1_000 * MIB, &changed_target, &donor)
+                .is_err()
+        );
+
+        let mut missing_identity = config;
+        missing_identity.expected_donor_size_bytes = 0;
+        assert!(validate_left_transfer_identity(
+            &missing_identity,
+            2,
+            1_000 * MIB,
+            &target,
+            &donor
+        )
+        .is_err());
+    }
 }

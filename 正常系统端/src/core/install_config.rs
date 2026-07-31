@@ -299,6 +299,17 @@ pub struct ExpandConfig {
     pub target_size_mb: u64,
     /// WIM 引擎选择（随重启传给 PE，保持与其它流程一致）：0=libwim，1=wimgapi。
     pub wim_engine: u8,
+    /// 从目标分区左侧的相邻数据分区让出空间，并把目标分区整体左移后扩展。
+    pub borrow_from_left: bool,
+    /// PE 写盘前必须重新匹配的物理磁盘与目标/供体几何；零表示旧配置未提供。
+    pub expected_disk_number: u32,
+    pub expected_disk_size_bytes: u64,
+    pub expected_partition_number: u32,
+    pub expected_partition_offset_bytes: u64,
+    pub expected_partition_size_bytes: u64,
+    pub expected_donor_partition_number: u32,
+    pub expected_donor_offset_bytes: u64,
+    pub expected_donor_size_bytes: u64,
 }
 
 /// 配置文件管理器
@@ -644,10 +655,19 @@ impl ConfigFileManager {
         };
 
         let content = format!(
-            "[Expand]\r\nTargetPartition={}\r\nTargetSizeMb={}\r\nWimEngine={}\r\nLanguage={}\r\n",
+            "[Expand]\r\nTargetPartition={}\r\nTargetSizeMb={}\r\nWimEngine={}\r\nBorrowFromLeft={}\r\nExpectedDiskNumber={}\r\nExpectedDiskSizeBytes={}\r\nExpectedPartitionNumber={}\r\nExpectedPartitionOffsetBytes={}\r\nExpectedPartitionSizeBytes={}\r\nExpectedDonorPartitionNumber={}\r\nExpectedDonorOffsetBytes={}\r\nExpectedDonorSizeBytes={}\r\nLanguage={}\r\n",
             config.target_partition,
             config.target_size_mb,
             config.wim_engine,
+            config.borrow_from_left,
+            config.expected_disk_number,
+            config.expected_disk_size_bytes,
+            config.expected_partition_number,
+            config.expected_partition_offset_bytes,
+            config.expected_partition_size_bytes,
+            config.expected_donor_partition_number,
+            config.expected_donor_offset_bytes,
+            config.expected_donor_size_bytes,
             crate::utils::i18n::current_language()
         );
         if let Err(error) = write_atomic_file(&config_path, content.as_bytes()) {
@@ -1324,11 +1344,27 @@ mod tests {
                 target_partition: "C:".to_owned(),
                 target_size_mb: 123_456,
                 wim_engine: 1,
+                borrow_from_left: true,
+                expected_disk_number: 2,
+                expected_disk_size_bytes: 1_000_000,
+                expected_partition_number: 4,
+                expected_partition_offset_bytes: 600_000,
+                expected_partition_size_bytes: 200_000,
+                expected_donor_partition_number: 3,
+                expected_donor_offset_bytes: 200_000,
+                expected_donor_size_bytes: 400_000,
             },
         )
         .unwrap();
         assert_ne!(std::fs::read(&marker).unwrap(), b"old marker");
         assert_ne!(std::fs::read(&config_path).unwrap(), b"old config");
+        assert!(std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("BorrowFromLeft=true"));
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("ExpectedDiskNumber=2"));
+        assert!(written.contains("ExpectedPartitionOffsetBytes=600000"));
+        assert!(written.contains("ExpectedDonorPartitionNumber=3"));
 
         transaction.rollback().unwrap();
         assert_eq!(std::fs::read(&marker).unwrap(), b"old marker");
@@ -1349,6 +1385,15 @@ mod tests {
                 target_partition: "C:".to_owned(),
                 target_size_mb: 0,
                 wim_engine: 0,
+                borrow_from_left: false,
+                expected_disk_number: 0,
+                expected_disk_size_bytes: 0,
+                expected_partition_number: 0,
+                expected_partition_offset_bytes: 0,
+                expected_partition_size_bytes: 0,
+                expected_donor_partition_number: 0,
+                expected_donor_offset_bytes: 0,
+                expected_donor_size_bytes: 0,
             },
         )
         .unwrap();

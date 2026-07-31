@@ -579,6 +579,31 @@ impl ConfigFileManager {
                     "TargetPartition" => config.target_partition = value.to_string(),
                     "TargetSizeMb" => config.target_size_mb = value.parse().unwrap_or(0),
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
+                    "BorrowFromLeft" => config.borrow_from_left = value.parse().unwrap_or(false),
+                    "ExpectedDiskNumber" => {
+                        config.expected_disk_number = value.parse().unwrap_or(0)
+                    }
+                    "ExpectedDiskSizeBytes" => {
+                        config.expected_disk_size_bytes = value.parse().unwrap_or(0)
+                    }
+                    "ExpectedPartitionNumber" => {
+                        config.expected_partition_number = value.parse().unwrap_or(0)
+                    }
+                    "ExpectedPartitionOffsetBytes" => {
+                        config.expected_partition_offset_bytes = value.parse().unwrap_or(0)
+                    }
+                    "ExpectedPartitionSizeBytes" => {
+                        config.expected_partition_size_bytes = value.parse().unwrap_or(0)
+                    }
+                    "ExpectedDonorPartitionNumber" => {
+                        config.expected_donor_partition_number = value.parse().unwrap_or(0)
+                    }
+                    "ExpectedDonorOffsetBytes" => {
+                        config.expected_donor_offset_bytes = value.parse().unwrap_or(0)
+                    }
+                    "ExpectedDonorSizeBytes" => {
+                        config.expected_donor_size_bytes = value.parse().unwrap_or(0)
+                    }
                     "Language" => config.language = value.to_string(),
                     _ => {}
                 }
@@ -958,6 +983,46 @@ pub struct ExpandConfig {
     pub target_size_mb: u64,
     /// WIM 引擎选择（与其它流程一致）：0=libwim，1=wimgapi。
     pub wim_engine: u8,
+    /// 是否从目标分区左侧相邻数据分区借用空间并左移目标分区。
+    pub borrow_from_left: bool,
+    /// 正常端在重启前保存的磁盘/分区几何；新左侧转移缺失任一字段时失败关闭。
+    pub expected_disk_number: u32,
+    pub expected_disk_size_bytes: u64,
+    pub expected_partition_number: u32,
+    pub expected_partition_offset_bytes: u64,
+    pub expected_partition_size_bytes: u64,
+    pub expected_donor_partition_number: u32,
+    pub expected_donor_offset_bytes: u64,
+    pub expected_donor_size_bytes: u64,
     /// 界面语言代码（如 "zh-TW"、"en-US"），由正常系统端随重启写入；空=简体中文。
     pub language: String,
+}
+
+#[cfg(test)]
+mod expand_config_tests {
+    use super::ConfigFileManager;
+
+    #[test]
+    fn legacy_expand_config_defaults_to_right_side_donor() {
+        let config = ConfigFileManager::deserialize_expand_config(
+            "[Expand]\nTargetPartition=C:\nTargetSizeMb=102400\nWimEngine=0\n",
+        )
+        .unwrap();
+        assert!(!config.borrow_from_left);
+        assert_eq!(config.expected_disk_number, 0);
+    }
+
+    #[test]
+    fn expand_config_reads_left_side_donor_flag() {
+        let config = ConfigFileManager::deserialize_expand_config(
+            "[Expand]\nTargetPartition=E:\nTargetSizeMb=204800\nBorrowFromLeft=true\nExpectedDiskNumber=2\nExpectedDiskSizeBytes=1000000\nExpectedPartitionNumber=4\nExpectedPartitionOffsetBytes=600000\nExpectedPartitionSizeBytes=200000\nExpectedDonorPartitionNumber=3\nExpectedDonorOffsetBytes=200000\nExpectedDonorSizeBytes=400000\n",
+        )
+        .unwrap();
+        assert!(config.borrow_from_left);
+        assert_eq!(config.expected_disk_number, 2);
+        assert_eq!(config.expected_partition_number, 4);
+        assert_eq!(config.expected_donor_partition_number, 3);
+        assert_eq!(config.expected_partition_offset_bytes, 600_000);
+        assert_eq!(config.expected_donor_size_bytes, 400_000);
+    }
 }

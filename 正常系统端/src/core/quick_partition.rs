@@ -912,6 +912,7 @@ pub(crate) fn execute_quick_partition_validated(
             label,
             drive_letter,
             active: false,
+            preserve_gpt_metadata: None,
         };
         match lr_core::windows_storage::create_partition(&request) {
             Ok(created) => {
@@ -1123,6 +1124,7 @@ pub fn create_single_partition(
             label: vol_label.to_string(),
             drive_letter: Some(letter),
             active: false,
+            preserve_gpt_metadata: None,
         },
     )?;
     verify_created_partition(
@@ -1146,6 +1148,7 @@ pub fn create_esp_partition(disk_number: u32, size_mb: u64) -> Result<String> {
             label: "EFI".to_string(),
             drive_letter: None,
             active: false,
+            preserve_gpt_metadata: None,
         },
     )?;
     verify_created_partition(disk_number, created.offset_bytes, created.size_bytes, None)?;

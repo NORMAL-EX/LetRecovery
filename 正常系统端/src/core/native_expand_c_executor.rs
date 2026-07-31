@@ -19,6 +19,8 @@ pub struct ExpandCHandoffRequest {
     pub analyzed_max_size_mb: u64,
     pub analyzed_no_move_max_mb: u64,
     pub strict_analysis_snapshot: bool,
+    pub borrow_from_left: bool,
+    pub minimum_free_mb: u64,
     pub wim_engine: u8,
     pub pe: OnlinePE,
 }
@@ -74,8 +76,12 @@ fn run_handoff(
         "正在重新确认分区 {}: 布局...",
         target_partition
     )));
-    let fresh = super::native_expand_c_controller::analyze_expand_partition(target_partition)
-        .map_err(|error| error.to_string())?;
+    let fresh = if request.borrow_from_left {
+        super::native_expand_c_controller::analyze_expand_partition_from_left(target_partition)
+    } else {
+        super::native_expand_c_controller::analyze_expand_partition(target_partition)
+    }
+    .map_err(|error| error.to_string())?;
     let strict_snapshot_changed = request.strict_analysis_snapshot
         && (fresh.max_size_mb != request.analyzed_max_size_mb
             || fresh.no_move_max_mb != request.analyzed_no_move_max_mb);
@@ -87,7 +93,7 @@ fn run_handoff(
             .expected_partition_number
             .is_some_and(|expected| fresh.partition_number != expected);
     if !fresh.found
-        || !fresh.can_expand
+        || fresh.max_size_mb <= fresh.current_size_mb
         || fresh.current_size_mb != request.analyzed_current_size_mb
         || strict_snapshot_changed
         || target_identity_changed
@@ -99,10 +105,34 @@ fn run_handoff(
     }
     let minimum = fresh
         .current_size_mb
-        .max(fresh.used_mb.saturating_add(1024));
+        .max(fresh.used_mb.saturating_add(request.minimum_free_mb));
     if request.target_size_mb < minimum || request.target_size_mb > fresh.max_size_mb {
         return Err(crate::tr!("目标大小已不在当前安全范围内，请重新分析。"));
     }
+    let disk = fresh.disk.as_ref().ok_or_else(|| {
+        crate::tr!(
+            "分区 {}: 缺少执行前磁盘身份，请重新分析。",
+            target_partition
+        )
+    })?;
+    let target_fingerprint = disk
+        .partitions
+        .iter()
+        .find(|partition| partition.partition_number == fresh.partition_number)
+        .ok_or_else(|| crate::tr!("执行前未能在磁盘指纹中定位目标分区。"))?;
+    let donor_fingerprint = if request.borrow_from_left {
+        Some(
+            disk.partitions
+                .iter()
+                .find(|partition| {
+                    partition.offset_bytes.checked_add(partition.size_bytes)
+                        == Some(target_fingerprint.offset_bytes)
+                })
+                .ok_or_else(|| crate::tr!("执行前未能在磁盘指纹中定位左侧相邻分区。"))?,
+        )
+    } else {
+        None
+    };
 
     let pe_path = match super::pe::PeManager::check_cached_pe(
         &request.pe.filename,
@@ -127,6 +157,17 @@ fn run_handoff(
             request.target_size_mb
         },
         wim_engine: request.wim_engine,
+        borrow_from_left: request.borrow_from_left,
+        expected_disk_number: disk.disk_number,
+        expected_disk_size_bytes: disk.size_bytes,
+        expected_partition_number: target_fingerprint.partition_number,
+        expected_partition_offset_bytes: target_fingerprint.offset_bytes,
+        expected_partition_size_bytes: target_fingerprint.size_bytes,
+        expected_donor_partition_number: donor_fingerprint
+            .map_or(0, |partition| partition.partition_number),
+        expected_donor_offset_bytes: donor_fingerprint
+            .map_or(0, |partition| partition.offset_bytes),
+        expected_donor_size_bytes: donor_fingerprint.map_or(0, |partition| partition.size_bytes),
     };
     let target = format!("{}:", target_partition);
     let transaction =
@@ -191,6 +232,8 @@ mod tests {
             analyzed_max_size_mb: 2,
             analyzed_no_move_max_mb: 2,
             strict_analysis_snapshot: true,
+            borrow_from_left: false,
+            minimum_free_mb: 1024,
             wim_engine: 0,
             pe: OnlinePE {
                 download_url: "https://example.invalid/pe.wim".to_owned(),
@@ -227,6 +270,15 @@ mod tests {
                 target_partition: "C:".to_owned(),
                 target_size_mb: 0,
                 wim_engine: 0,
+                borrow_from_left: false,
+                expected_disk_number: 0,
+                expected_disk_size_bytes: 0,
+                expected_partition_number: 0,
+                expected_partition_offset_bytes: 0,
+                expected_partition_size_bytes: 0,
+                expected_donor_partition_number: 0,
+                expected_donor_offset_bytes: 0,
+                expected_donor_size_bytes: 0,
             },
         )
         .unwrap();

@@ -34,6 +34,21 @@ pub struct ExistingPartitionResizeRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdjacentPartitionTransferRequest {
+    pub disk: DiskFingerprint,
+    pub left_partition: DiskPartitionFingerprint,
+    pub left_drive_letter: char,
+    pub left_current_size_mb: u64,
+    pub left_new_size_mb: u64,
+    pub left_used_size_mb: u64,
+    pub right_partition: DiskPartitionFingerprint,
+    pub right_drive_letter: char,
+    pub right_current_size_mb: u64,
+    pub right_new_size_mb: u64,
+    pub right_used_size_mb: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PartitionManagementAction {
     Delete {
         partition: DiskPartitionFingerprint,
@@ -70,6 +85,7 @@ pub struct PartitionManagementRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PendingPartitionOperation {
     Resize(ExistingPartitionResizeRequest),
+    Transfer(AdjacentPartitionTransferRequest),
     Manage(PartitionManagementRequest),
 }
 
@@ -98,11 +114,13 @@ fn execute_pending_partition_operations_production(
 ) -> Result<String, ExistingPartitionResizeError> {
     let expected_disk = match &operations[0] {
         PendingPartitionOperation::Resize(request) => &request.disk,
+        PendingPartitionOperation::Transfer(request) => &request.disk,
         PendingPartitionOperation::Manage(request) => &request.disk,
     };
     if operations.iter().any(|operation| {
         let disk = match operation {
             PendingPartitionOperation::Resize(request) => &request.disk,
+            PendingPartitionOperation::Transfer(request) => &request.disk,
             PendingPartitionOperation::Manage(request) => &request.disk,
         };
         disk != expected_disk
@@ -153,6 +171,11 @@ fn execute_pending_partition_operations_production(
                     move_max_size_mb: original.move_max_size_mb,
                 };
                 messages.push(execute_existing_partition_resize(&request)?.message);
+            }
+            PendingPartitionOperation::Transfer(_) => {
+                return Err(ExistingPartitionResizeError::InvalidRequest(
+                    "adjacent partition transfer requires the typed WinPE handoff".into(),
+                ));
             }
             PendingPartitionOperation::Manage(original) => {
                 let action = rebase_management_action(&original.action, disk)?;
@@ -393,6 +416,7 @@ fn execute_partition_management_production(
                     label: crate::tr!("新加卷"),
                     drive_letter: Some(*drive_letter),
                     active: false,
+                    preserve_gpt_metadata: None,
                 },
             )
             .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
@@ -942,6 +966,59 @@ impl QuickPartitionDialogState {
         self.existing_resize_request(index, new_size_mb as f64 / 1024.0)
     }
 
+    pub fn adjacent_transfer_request_mb(
+        &self,
+        left_index: usize,
+        right_index: usize,
+        left_new_size_mb: u64,
+    ) -> Result<AdjacentPartitionTransferRequest, String> {
+        let disk = self
+            .selected_disk()
+            .ok_or_else(|| crate::tr!("请先选择要分区的磁盘"))?;
+        if right_index != left_index.saturating_add(1) {
+            return Err(crate::tr!("相邻分区信息不可用"));
+        }
+        let left = disk
+            .partitions
+            .get(left_index)
+            .ok_or_else(|| crate::tr!("分区信息不可用"))?;
+        let right = disk
+            .partitions
+            .get(right_index)
+            .ok_or_else(|| crate::tr!("分区信息不可用"))?;
+        validate_existing_resize_target(left, self.system_drive)?;
+        validate_existing_resize_target(right, self.system_drive)?;
+        let left_end = left.offset_bytes.saturating_add(left.size_bytes);
+        if right.offset_bytes != left_end {
+            return Err(crate::tr!("只能在两个紧邻分区之间转移空间"));
+        }
+        let left_current_size_mb = bytes_to_mib(left.size_bytes);
+        let right_current_size_mb = bytes_to_mib(right.size_bytes);
+        let total_size_mb = left_current_size_mb.saturating_add(right_current_size_mb);
+        if left_new_size_mb == left_current_size_mb || left_new_size_mb >= total_size_mb {
+            return Err(crate::tr!("分区大小没有变化"));
+        }
+        let right_new_size_mb = total_size_mb - left_new_size_mb;
+        let left_minimum = bytes_to_mib(left.used_bytes).saturating_add(100);
+        let right_minimum = bytes_to_mib(right.used_bytes).saturating_add(100);
+        if left_new_size_mb < left_minimum || right_new_size_mb < right_minimum {
+            return Err(crate::tr!("调整后的分区空间不足以容纳现有数据"));
+        }
+        Ok(AdjacentPartitionTransferRequest {
+            disk: DiskFingerprint::from(disk),
+            left_partition: DiskPartitionFingerprint::from(left),
+            left_drive_letter: left.drive_letter.expect("validated drive letter"),
+            left_current_size_mb,
+            left_new_size_mb,
+            left_used_size_mb: bytes_to_mib(left.used_bytes),
+            right_partition: DiskPartitionFingerprint::from(right),
+            right_drive_letter: right.drive_letter.expect("validated drive letter"),
+            right_current_size_mb,
+            right_new_size_mb,
+            right_used_size_mb: bytes_to_mib(right.used_bytes),
+        })
+    }
+
     fn existing_resize_request(
         &self,
         index: usize,
@@ -1168,6 +1245,9 @@ fn validate_existing_resize_target(
         .ok_or_else(|| crate::tr!("分区没有盘符，无法调整大小"))?;
     if letter.eq_ignore_ascii_case(&system_drive) {
         return Err(crate::tr!("无法调整当前系统分区大小"));
+    }
+    if !partition.file_system.trim().eq_ignore_ascii_case("NTFS") {
+        return Err(crate::tr!("仅支持调整 NTFS 分区大小"));
     }
     Ok(())
 }
@@ -1414,6 +1494,73 @@ mod tests {
         assert_eq!(request.no_move_max_size_mb, 200 * 1024);
         assert!(request.move_max_size_mb >= 300 * 1024);
         assert!(request.new_size_mb > request.no_move_max_size_mb);
+    }
+
+    #[test]
+    fn adjacent_transfer_preserves_total_capacity_and_binds_both_partitions() {
+        let mut value = disk(8, true, PartitionStyle::GPT);
+        value.size_bytes = 601 * GIB as u64;
+        value.partitions = vec![
+            DiskPartitionInfo {
+                partition_number: 1,
+                size_bytes: 200 * GIB as u64,
+                offset_bytes: GIB as u64,
+                drive_letter: Some('D'),
+                label: "Data".into(),
+                file_system: "NTFS".into(),
+                is_esp: false,
+                is_msr: false,
+                is_recovery: false,
+                partition_type: "basic".into(),
+                used_bytes: 100 * GIB as u64,
+                free_bytes: 100 * GIB as u64,
+                is_active: false,
+            },
+            DiskPartitionInfo {
+                partition_number: 2,
+                size_bytes: 400 * GIB as u64,
+                offset_bytes: 201 * GIB as u64,
+                drive_letter: Some('E'),
+                label: "More data".into(),
+                file_system: "NTFS".into(),
+                is_esp: false,
+                is_msr: false,
+                is_recovery: false,
+                partition_type: "basic".into(),
+                used_bytes: 150 * GIB as u64,
+                free_bytes: 250 * GIB as u64,
+                is_active: false,
+            },
+        ];
+        let mut state = QuickPartitionDialogState::new(PartitionStyle::GPT, vec![], 'C');
+        state.apply_inventory(Ok(vec![value]));
+        let request = state
+            .adjacent_transfer_request_mb(0, 1, 150 * 1024)
+            .unwrap();
+        assert_eq!(request.left_new_size_mb, 150 * 1024);
+        assert_eq!(request.right_new_size_mb, 450 * 1024);
+        assert_eq!(
+            request.left_new_size_mb + request.right_new_size_mb,
+            request.left_current_size_mb + request.right_current_size_mb
+        );
+        assert_eq!(request.left_partition.partition_number, 1);
+        assert_eq!(request.right_partition.partition_number, 2);
+    }
+
+    #[test]
+    fn adjacent_transfer_rejects_a_gap_between_partitions() {
+        let mut value = resizable_disk();
+        let mut second = value.partitions[0].clone();
+        second.partition_number = 8;
+        second.drive_letter = Some('E');
+        second.offset_bytes = value.partitions[0]
+            .offset_bytes
+            .saturating_add(value.partitions[0].size_bytes)
+            .saturating_add(GIB as u64);
+        value.partitions.push(second);
+        let mut state = QuickPartitionDialogState::new(PartitionStyle::GPT, vec![], 'C');
+        state.apply_inventory(Ok(vec![value]));
+        assert!(state.adjacent_transfer_request_mb(0, 1, 40 * 1024).is_err());
     }
 
     #[test]
