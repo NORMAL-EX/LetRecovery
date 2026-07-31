@@ -1158,9 +1158,12 @@ impl ProductionInstallBackend {
             if !Self::directory_has_inf(&source) {
                 continue;
             }
-            if let Err(error) = Self::copy_directory(&source, &root.join(version)) {
-                log::warn!("[NATIVE INSTALL] staging user drivers {version} failed: {error}");
-            }
+            Self::copy_directory(&source, &root.join(version)).map_err(|error| {
+                Self::error(
+                    "stage_versioned_user_drivers",
+                    format!("{version}: {error}"),
+                )
+            })?;
         }
         Ok(())
     }
@@ -1448,6 +1451,33 @@ impl ProductionInstallBackend {
         (&intent.options.advanced_options).into()
     }
 
+    fn verify_storage_driver_preflight(
+        intent: &StartInstallIntent,
+    ) -> Result<(), InstallBackendError> {
+        if !intent
+            .options
+            .advanced_options
+            .import_storage_controller_drivers
+        {
+            return Ok(());
+        }
+        let hardware_ids = lr_core::driver::list_present_hardware_ids()
+            .map_err(|error| Self::error("storage_driver_hardware_enumeration", error))?;
+        let packages = lr_core::storage_driver_match::select_builtin_storage_driver_packages(
+            hardware_ids.iter().map(String::as_str),
+        )
+        .map_err(|error| Self::error("storage_driver_selection", error))?;
+        let root = crate::utils::path::get_drivers_dir().join("storage_controller");
+        for package in packages {
+            let directory = root.join(package.directory_name());
+            lr_core::storage_driver_match::verify_builtin_storage_driver_package(
+                package, &directory,
+            )
+            .map_err(|error| Self::error("storage_driver_package_verification", error))?;
+        }
+        Ok(())
+    }
+
     fn copy_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(destination)?;
         for entry in std::fs::read_dir(source)? {
@@ -1481,6 +1511,11 @@ impl ProductionInstallBackend {
                 super::dism::Dism::new()
                     .add_drivers_offline(&format!("{}\\", self.target), &backup)
                     .map_err(|error| Self::error("import_preserved_drivers", error))?;
+                lr_core::driver::verify_offline_storage_driver_requirements(
+                    Path::new(&self.target),
+                    &self.driver_backup,
+                )
+                .map_err(|error| Self::error("verify_preserved_storage_drivers", error))?;
                 std::fs::remove_dir_all(&self.driver_backup)
                     .map_err(|error| Self::error("clear_imported_driver_backup", error))?;
             }
@@ -1592,9 +1627,9 @@ impl ProductionInstallBackend {
         }
     }
 
-    fn inject_versioned_user_drivers(&self, is_xp: bool) {
+    fn inject_versioned_user_drivers(&self, is_xp: bool) -> Result<(), InstallBackendError> {
         if is_xp {
-            return;
+            return Ok(());
         }
         let ntdll = Path::new(&self.target)
             .join("Windows")
@@ -1602,24 +1637,22 @@ impl ProductionInstallBackend {
             .join("ntdll.dll");
         let Some((major, minor, build, _)) = super::system_utils::get_file_version(&ntdll) else {
             log::warn!("[NATIVE INSTALL] cannot identify target version for user drivers");
-            return;
+            return Ok(());
         };
         let family = native_install_compat::classify_windows_version(major, minor, build);
         let Some(source) = native_install_compat::user_driver_source(
             &crate::utils::path::get_drivers_dir(),
             family,
         ) else {
-            return;
+            return Ok(());
         };
         if !Self::directory_has_inf(&source) {
-            return;
+            return Ok(());
         }
-        if let Err(error) = super::dism::Dism::new()
+        super::dism::Dism::new()
             .add_drivers_offline(&format!("{}\\", self.target), &source.to_string_lossy())
-        {
-            // This remains best effort exactly as in the old progress worker.
-            log::warn!("[NATIVE INSTALL] versioned user driver injection failed: {error}");
-        }
+            .map_err(|error| Self::error("inject_versioned_user_drivers", error))?;
+        Ok(())
     }
 
     fn write_unattend(&self, intent: &StartInstallIntent) -> Result<(), InstallBackendError> {
@@ -1796,6 +1829,7 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                     self.await_bitlocker_fallback_decryption(reporter, cancellation)
                 }
                 InstallExecutionPhase::VerifyPcaBeforeDiskWrite => {
+                    Self::verify_storage_driver_preflight(intent)?;
                     let may_use_uefi = intent.options.boot_mode != BootModeSelection::Legacy;
                     self.pca_package = super::pca_preflight::verify_before_disk_write(
                         &intent.image_path,
@@ -1867,13 +1901,19 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                     let is_xp = intent.options.is_xp
                         || !Path::new(&format!("{}\\Windows\\Boot", self.target)).exists();
                     if let Err(error) = advanced.apply_to_system(&self.target, is_xp) {
-                        if intent.options.advanced_options.disable_windows_defender {
-                            return Err(Self::error("remove_defender_antivirus_engine", error));
+                        if intent.options.advanced_options.disable_windows_defender
+                            || intent
+                                .options
+                                .advanced_options
+                                .import_storage_controller_drivers
+                            || intent.options.advanced_options.import_custom_drivers
+                        {
+                            return Err(Self::error("apply_required_advanced_option", error));
                         }
                         // Preserve legacy best-effort semantics for other post-deployment tweaks.
                         log::error!("[NATIVE INSTALL] advanced options failed: {error}");
                     }
-                    self.inject_versioned_user_drivers(is_xp);
+                    self.inject_versioned_user_drivers(is_xp)?;
                     if intent.options.unattended_install {
                         if let Err(error) = self.write_unattend(intent) {
                             log::warn!(

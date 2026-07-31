@@ -88,7 +88,7 @@ LetRecovery 是具有管理员权限的 Windows 系统安装、备份和磁盘�
 - 正常系统端和 PE 端已有配置格式需要向后兼容；新字段应有安全默认值，并为旧配置增加解析测试。
 - 内置 Administrator 高级选项只允许在 Windows 7 及以上 WIM/ESD/SWM 的内置无人值守路径启用；不得与自定义无人值守文件、普通“自定义用户名”、GHO/GHS 或 XP/2003 路径并用。账户改名必须按 RID-500 身份定位，不能依赖本地化账户显示名；密码只允许存在于当前安装会话配置和 Windows Setup 无人值守文件中，持久化用户偏好、调试输出和日志必须脱敏，安装清理仍需删除会话文件。
 - 历史配置字段 `disable_windows_defender` 的用户语义固定为“仅深度移除 Microsoft Defender Antivirus 杀毒引擎”。实现只能处理 `WinDefend`、`WdBoot`、`WdFilter`、`WdNisDrv`、`WdNisSvc` 及同目录下随引擎演进的 `WdAiNisDrv`、`WdDevFlt`、`KslD`，以及 Defender 引擎目录、驱动目录和 Defender 自身计划任务；必须保留 `SecurityHealthService`、`wscsvc`、`mpssvc`、UAC、VBS、SmartScreen、System Guard、Web Threat Defense、Pluton 和 Microsoft Defender for Endpoint (`Sense`)。两端必须复用 `lr-core::defender_removal`，仅允许对完整离线 Windows 目标执行；目标盘、控制集、任务 GUID、重解析点、ACL 修改和删除后状态都要严格验证，所选操作任何一步失败时安装流程必须失败关闭，不能再把旧策略键写入或删除失败伪装成成功。
-- 随包存储控制器驱动只允许来自已记录 SHA-256 和 Microsoft Windows Hardware Compatibility Publisher 签名的 Microsoft Update Catalog 包；正常端、PE 端和存储驱动工具必须先通过 SetupAPI 获取当前机器 PCI 硬件 ID，再由 `lr-core::storage_driver_match` 选择唯一匹配目录，禁止对 `bin/drivers/storage_controller` 做整目录递归注入。PE 启动后必须在 BitLocker、标记和分区扫描之前用微软支持的 `drvload.exe <匹配 INF>` 把同一包只加载到当前 WinPE 会话，使 VMD 后的磁盘可见；不得把驱动持久注入 PE WIM。当前 `9A0B/09AB` 使用 20.2.4.1019 兼容包，`467F/A77F/7D0B/AD0B` 使用 20.2.12.1036；AMD、Apple、VirtIO、仅凭机型名称或无法唯一确认时必须跳过或拒绝。旧通用目录和 Windows 7 UefiSeven/USB3/NVMe 发布资源不得恢复；XP/2003 专用驱动边界保持独立。
+- 随包存储控制器驱动只允许来自已记录 SHA-256 和 Microsoft Windows Hardware Compatibility Publisher 签名的 Microsoft Update Catalog 包；全部发布文件、大小、SHA-256、控制器 ID 和签名主体由 `docs/STORAGE_CONTROLLER_DRIVERS.lock.json` 固定，Release 必须先验证底包、同步到 PE WIM，再只读挂载最终 WIM 复核，禁止依赖底包碰巧带有正确版本。正常端、PE 端和存储驱动工具必须先通过 SetupAPI 获取当前机器完整 `REG_MULTI_SZ` PCI 硬件 ID，再由 `lr-core::storage_driver_match` 选择唯一匹配目录，禁止对 `bin/drivers/storage_controller` 做整目录递归注入。PE 启动后必须在 BitLocker、标记和分区扫描之前校验锁定包并用微软支持的 `drvload.exe <匹配 INF>` 把同一包只加载到当前 WinPE 会话，使 VMD 后的磁盘可见；枚举、包校验或 `drvload` 任一步失败必须在磁盘扫描前停止。当前 `9A0B` 使用 20.2.4.1019 兼容包，`467F/A77F/7D0B/AD0B` 使用 20.2.12.1036；`09AB` 只是 managed/dummy function，单独出现时不得猜测代际。正常端导出当前系统驱动时必须保存已绑定 OEM 启动存储驱动清单，PE 导入后必须回读离线 DriverStore 逐项确认覆盖；缺目录、缺清单、DISM 失败或回读不匹配全部失败关闭。AMD、Apple、VirtIO、仅凭机型名称或无法唯一确认时必须跳过或拒绝。旧通用目录和 Windows 7 UefiSeven/USB3/NVMe 发布资源不得恢复；XP/2003 专用驱动边界保持独立。
 - PCA2011/PCA2023、BIOS/UEFI、MBR/GPT、BitLocker 和 XP/2003 路径都是兼容性边界，不得根据单一新系统环境简化掉旧路径。
 - UEFI 安装在固件已撤销 PCA2011 或用户明确选择签名代际时，必须在分区、格式化等目标盘写操作前验证所选镜像卷内存在有效的对应 EFI 引导文件。无法安全预检的 GHO 等不透明格式必须失败关闭；不得把某台机器 ESP、Insider 构建或未经支持矩阵验证的 `bootmgfw.efi` 当作通用升级文件。
 - PCA2023 自动升级使用发布包内固定的 x86/x64 离线资源族，不允许安装时联网下载或回退到其他架构。资源 WIM 只可注入 `Windows\Boot\EFI_EX`、`Windows\Boot\FONTS_EX` 和 `Windows\Boot\EFI\boot.stl`；必须验证包大小、普通文件属性、BootEx 微软签名、PE 架构和正常端到 PE 暂存副本的 SHA-256。缺包或验证失败应在写盘前停止。制作、支持矩阵和回滚流程见 `docs/PCA2023_COMPAT_PACKAGES.md`。
@@ -231,7 +231,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `lr-core/src/defender_removal.rs`：两端共享的离线 Microsoft Defender Antivirus 引擎白名单移除边界；验证目标系统、活动控制集和计划任务 GUID，使用 Windows 安全 API 获取仅限目标文件树的删除权限，拒绝重解析点，删除后逐项复核，并显式排除安全中心、防火墙、SmartScreen、UAC、VBS 和 Defender for Endpoint 等保留组件。
 - `lr-core/src/diskpart.rs`：已停用任意 DiskPart/批处理脚本的配置兼容守卫；缺失或空目录安全跳过，发现 `.txt/.cmd/.bat` 时列出文件并失败关闭，严禁重新启动 `diskpart.exe`、`cmd.exe` 或把任意脚本文本伪装成可等价转换的 WinAPI 操作。
 - `lr-core/src/download_integrity.rs`：MD5/SHA-256 选择策略、哈希验证、HTTPS/HTTP URL 策略和下载文件名验证。
-- `lr-core/src/driver.rs`：SetupAPI 驱动枚举、导出、导入及离线驱动安装的共享 Windows 实现；已绑定驱动的 INF 名称必须读取 `DEVPKEY_Device_DriverInfPath`，禁止把 `SPDRP_UI_NUMBER (0x10)` 当作 INF 路径；另提供不依赖已绑定 INF 的当前设备硬件 ID 枚举，使 WinPE 能识别尚未装驱动的 VMD 控制器并进入纯匹配策略。
+- `lr-core/src/driver.rs`：SetupAPI 驱动枚举、严格导出、在线导入及 DISM 离线驱动服务的共享 Windows 实现；按官方两次调用契约读取完整 `REG_MULTI_SZ`，设备信息集由 RAII 保证所有错误路径都释放，设备枚举只有 `ERROR_NO_MORE_ITEMS` 可正常结束。已绑定驱动的 INF 名称必须读取 `DEVPKEY_Device_DriverInfPath`，禁止把 `SPDRP_UI_NUMBER (0x10)` 当作 INF 路径；`DiInstallDriverW` 只能传 `0` 或 `DIIRFLAG_FORCE_INF`，真实安装失败不得用仅暂存 INF 的回退伪装成功。在线 OEM 导出失败不得伪装成部分成功，离线导入/导出统一调用 DISM，禁止手工拼装 DriverStore、猜服务注册表或按 FileRepository 目录名猜测第三方包；另负责原子生成当前 OEM 启动存储驱动清单，并在 PE 导入后回读离线 DriverStore 逐硬件 ID 验证覆盖。
 - `lr-core/src/encoding.rs`：Windows GBK 与 UTF-8 转换。
 - `lr-core/src/format_command.rs`：共享格式化请求的盘符、文件系统和卷标纯验证；只描述意图，不构造或执行 `format.com`，实际格式化统一进入 `windows_storage`。
 - `lr-core/src/fveapi.rs`：动态加载 FVEAPI 的 BitLocker 卷访问、状态、解锁和恢复密钥格式处理。
@@ -249,7 +249,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `lr-core/src/registry.rs`：通过参数化 Win32 Registry API 管理在线/离线注册表配置单元、键和值，提供带类型校验的字符串/DWORD/二进制/递归只读查询、子键枚举、键存在性判断及删除后复核；装卸 hive 必须启用并核对备份/还原权限，只有 `.reg` 文件导入保留受限的 `reg.exe import` 兼容边界。
 - `lr-core/src/sam.rs`：复用共享 Win32 Registry 边界完成离线 SAM 账户枚举、清空密码和启用账户，包含严格边界检查的二进制结构解析。
 - `lr-core/src/scoped_temp_file.rs`：碰撞安全临时普通文件和目录、名称验证、Drop 清理、显式所有权移交，以及同目录原子替换工具；固定临时脚本、备份暂存和驱动解包目录不得绕过本模块自行拼接易冲突路径。
-- `lr-core/src/storage_driver_match.rs`：把 SetupAPI 当前 PCI 硬件 ID 纯函数映射到第 11 代或当前 Intel VMD 随包目录；严格匹配 `VEN/DEV` 边界，AMD、Apple、VirtIO、相似前缀和未知控制器返回空选择。
+- `lr-core/src/storage_driver_match.rs`：把 SetupAPI 当前 PCI 硬件 ID 纯函数映射到第 11 代或当前 Intel VMD 随包目录；`09AB` 单独出现时报歧义而不猜包，严格匹配 `VEN/DEV` 边界，AMD、Apple、VirtIO、相似前缀和未知控制器返回空选择；同时按固定大小和 SHA-256 验证两套发布包，并提供有界 INF 树硬件 ID 覆盖检查供导出、离线注入和工具箱回读复核。
 - `lr-core/src/traditional_chinese.rs`：正常端与 PE 端共享的 Windows NLS 简体转繁体转换和繁體中文常用界面术语归一；保留 ASCII 占位符，NLS 失败时返回明确的繁体错误文案，不得回退显示简体源文案。
 - `lr-core/src/windows_accounts.rs`：通过 NetAPI `NetUserEnum`/`NetUserGetInfo`/`NetUserSetInfo` 枚举当前本机普通账户、清空指定账户密码并仅清除禁用标志；逐缓冲释放，保留“密码已清空但启用失败”的部分完成状态，不解析 `net.exe` 输出。
 - `lr-core/src/windows_cabinet.rs`：两端共享的 SetupAPI CAB 枚举与解压边界；严格按通知类型返回 `FILEOP_*` 或 Win32 错误码，拒绝非普通 CAB、路径穿越、绝对/UNC 条目、重解析目标和分卷包，并在返回成功前核对请求数、解压数及每个输出文件。
@@ -329,9 +329,9 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `正常系统端/src/core/cabinet.rs`：兼容再导出共享 `lr-core::windows_cabinet`，正常端不得另建 `expand.exe` 或本地化输出解析路径。
 - `正常系统端/src/core/cli_install.rs`：解析命令行无人值守安装配置并启动与 GUI 相同的安装入口。
 - `正常系统端/src/core/disk.rs`：分区枚举、样式和磁盘关系查询、SSD/HDD 与内外置介质探测、ViaPE 暂存策略接入，以及通过共享 WinAPI 边界缩小/创建/删除/回收暂存与恢复分区；当前运行 Windows 卷必须由共享 `GetWindowsDirectoryW` 边界确定，禁止读取可能陈旧的 `SystemDrive` 或回退写死 `C:`/`X:`。ViaPE 暂存可在固定存储不足时回退到可写外置存储，但必须在候选入口排除光驱、网络盘、RAM 盘和只读卷；自动缩卷前必须复核当前启动会话内的物理磁盘和分区身份，创建失败时只允许按已验证的实际回收量回滚扩容。
-- `正常系统端/src/core/dism.rs`：正常端高层镜像查询、释放、捕获和进度模型，完整透传版本、Build、架构元数据并接入统一 WIM 引擎，同时把安装执行器持有的原子取消标记传递到可取消的镜像应用入口；在线/离线驱动导出统一走受支持的 DISM 命令边界并验证非零 INF，失败时才回退 SetupAPI/DriverStore。
-- `正常系统端/src/core/dism_cmd.rs`：DISM.exe 参数封装、进度解析、在线/离线驱动导出、离线驱动和更新包操作；优先使用当前 Windows/WinPE 自带 DISM，仅在不可用时回退随包兼容副本；离线驱动边界拒绝 `/ForceUnsigned`，避免把部署期签名错误推迟成 Secure Boot 启动失败。
-- `正常系统端/src/core/driver.rs`：共享驱动实现的兼容再导出，以及 DISM 优先的离线驱动导入策略。
+- `正常系统端/src/core/dism.rs`：正常端高层镜像查询、释放、捕获和进度模型，完整透传版本、Build、架构元数据并接入统一 WIM 引擎，同时把安装执行器持有的原子取消标记传递到可取消的镜像应用入口；在线驱动导出优先走受支持的 DISM 命令并验证非零 INF，失败时才严格回退 SetupAPI，离线导出只允许 DISM 且不得回退手工复制 DriverStore。
+- `正常系统端/src/core/dism_cmd.rs`：DISM.exe 参数封装、进度解析、在线/离线驱动导出、离线驱动和更新包操作；优先使用当前 Windows/WinPE 自带 DISM，仅在不可用时回退随包兼容副本；驱动源目录枚举拒绝重解析根并传播遍历错误，INF/CAB 混合目录或多 CAB 处理只要任一子操作失败就整体返回失败，禁止部分成功伪装成导入完成；离线驱动边界拒绝 `/ForceUnsigned`，避免把部署期签名错误推迟成 Secure Boot 启动失败。
+- `正常系统端/src/core/driver.rs`：共享驱动实现的兼容再导出，以及只允许 DISM、任何失败均停止的离线驱动导入策略。
 - `正常系统端/src/core/ghost.rs`：Ghost 镜像信息、备份、还原、进度、取消和错误分类。
 - `正常系统端/src/core/gho_password.rs`：读取和解码多种 GHO 头部中的密码信息。
 - `正常系统端/src/core/hardware_info.rs`：使用 WinAPI/WMI 收集 CPU、内存、主板、BIOS、磁盘、GPU、网络、电池和系统信息；物理磁盘容量使用长度查询并以扩展几何查询安全回退，分区布局查询同时保留真实分区数；诊断日志按制造商与机型识别常见 VMware、Hyper-V、VirtualBox、QEMU/KVM、Parallels 和 Xen，未知指纹只能写“可能为实体机”，不得断言为实体机。
@@ -413,9 +413,9 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 ### PE 端入口与核心
 
 - `PE端/build.rs`：生成 PE 程序资源、清单、图标和可复现构建版本；日期版本随 PE 源码、清单和 `SOURCE_DATE_EPOCH` 重新求值，避免新二进制复用旧关于页版本；release 禁止测试权限 feature。
-- `PE端/src/main.rs`：PE 进程入口、文件日志、panic 记录、语言检测、BitLocker 密钥透传解锁、CLI、工作流模块声明和原生 Win32 窗口启动；PE 日志开头必须同时记录构建日期版本、Cargo 包版本、架构，以及只读固件探测得到的 Secure Boot/PCA 状态或明确的未知与探测错误；在任何卷、BitLocker 或任务标记扫描前枚举包括未绑定 INF 设备在内的当前 PCI 硬件 ID，只对匹配 Intel VMD 包调用一次受控 `drvload.exe`，失败保留诊断且不得尝试其它控制器包；CLI 与 GUI 共用安全暂存路径解析、XML 转义无人值守生成、配置卷标和旧分区脚本拒绝守卫，原版 XP 目录源在格式化前复验并调用共享文本模式引擎；安装临时分区必须先成功删除并把空间扩展回目标卷，才能删除 marker/配置并报告完成或重启，禁止把清理失败降级为警告；安装、备份、扩容 GUI 只路由到原生进度页，不再编译或接受 egui/eframe/OpenGL 兼容回退参数，窗口启动或消息循环失败时必须记录并停止，禁止重复启动 worker；`non-elevated-tests` 独有的 `--ui-progress-preview` 必须在驱动加载、BitLocker、任务发现和 worker 之前进入无副作用预览，release 不得包含该分支。
+- `PE端/src/main.rs`：PE 进程入口、文件日志、panic 记录、语言检测、BitLocker 密钥透传解锁、CLI、工作流模块声明和原生 Win32 窗口启动；PE 日志开头必须同时记录构建日期版本、Cargo 包版本、架构，以及只读固件探测得到的 Secure Boot/PCA 状态或明确的未知与探测错误；在任何卷、BitLocker 或任务标记扫描前枚举包括未绑定 INF 设备在内的当前 PCI 硬件 ID，只对每个唯一匹配且已通过锁定哈希验证的 Intel VMD 包调用一次受控 `drvload.exe`，枚举、选择、包校验或加载失败必须保留诊断并在磁盘扫描前停止；CLI 与 GUI 共用安全暂存路径解析、XML 转义无人值守生成、配置卷标和旧分区脚本拒绝守卫，原版 XP 目录源在格式化前复验并调用共享文本模式引擎；安装临时分区必须先成功删除并把空间扩展回目标卷，才能删除 marker/配置并报告完成或重启，禁止把清理失败降级为警告；安装、备份、扩容 GUI 只路由到原生进度页，不再编译或接受 egui/eframe/OpenGL 兼容回退参数，窗口启动或消息循环失败时必须记录并停止，禁止重复启动 worker；`non-elevated-tests` 独有的 `--ui-progress-preview` 必须在驱动加载、BitLocker、任务发现和 worker 之前进入无副作用预览，release 不得包含该分支。
 - `PE端/src/app.rs`：PE 安装主工作流、对用户名等动态值执行 XML 转义的共享无人值守生成和共享 `WorkflowSession`；内置 Administrator 的启用、RID-500 改名、密码与可选自动登录片段复用 `lr-core::unattend_account`，日志只能记录“密码已设置”而不能记录值；读取安装配置后必须在写盘前记录目标卷、镜像安全文件名、分卷索引、格式、引导模式、启动签名及可用的目标 build/架构，不得记录密码、恢复密钥或其他敏感配置；Windows 10/11 内置无人值守必须读取已释放镜像的 UI 语言、系统/用户区域、键盘和时区并完整写入 `oobeSystem`，不得使用只对 Server 生效的 `HideLocalAccountScreen` 或已弃用的 SkipOOBE 项；镜像与自定义无人值守文件只能由配置数据目录和经安全文件名校验的相对文件名解析，XP 目录型源必须额外校验会话根和 I386/AMD64 子目录并在格式化前复验关键文件，禁止绝对路径或目录穿越；XP 文本模式部署完成后跳过不适用的 WIM 驱动、PCA、BCDBoot 和 Vista+ 无人值守阶段；内置/自定义无人值守生成和安装临时分区回收失败必须进入失败终态，不得继续报告完成或重启；该会话集中持有单一 worker 启动门、消息接收器、进度状态、只读恢复摘要、可查询完成状态并仅在完成后回收的 worker 句柄及持久化工作流观察器，只由原生 Win32 进度页消费且不得由渲染层另行启动工作流；UI 线程的单次消息轮询必须同时受消息数和短时间片约束，持续镜像进度洪峰不得无限清空队列而饿死 16ms 动画时钟；收到完成/失败消息只代表展示终态，不能在清理、延迟或重启等 worker 尾部退出前关闭进程；消息通道在未收到终态时断开必须合成本地化失败并记录 journal，避免把 worker 崩溃伪装成成功。
-- `PE端/src/workflow_journal.rs`：把 PE 安装/备份/扩容消息映射到原子检查点，识别上次中断，并在失败时生成脱敏支持包；向原生恢复页只暴露状态、步骤、修订号、中断标记和支持摘要可用性，不暴露保存路径或业务敏感值；记录失败不阻断原流程。
+- `PE端/src/workflow_journal.rs`：把 PE 安装/备份/扩容消息映射到原子检查点，识别上次中断，并在失败时生成脱敏支持包；成功终态在删除检查点前把内存盘运行日志原子保存为数据分区根目录 `LetRecoveryPE-last.log`，使首次启动存储故障仍可追溯；向原生恢复页只暴露状态、步骤、修订号、中断标记和支持摘要可用性，不暴露保存路径或业务敏感值；诊断日志保存失败只记录警告，不改变已经完成的安装结果。
 - `PE端/src/workflows/mod.rs`：PE worker 工作流模块边界和受限再导出。
 - `PE端/src/workflows/backup.rs`：PE 备份配置读取、WIM/ESD/SWM/GHO 分发、进度转发、产物验证、引导清理和重启协调。
 - `PE端/src/workflows/expand.rs`：PE 无损扩容配置与标记定位、扩容调用、成功/失败共用清理和重启协调。

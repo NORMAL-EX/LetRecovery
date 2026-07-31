@@ -643,22 +643,28 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         });
 
         let dism = Dism::new();
-        match dism.add_drivers_offline_with_progress(
+        let import_result = dism.add_drivers_offline_with_progress(
             &apply_dir,
             &driver_path,
             Some(driver_progress_tx),
-        ) {
-            Ok(_) => {
-                log::info!("驱动导入成功");
-            }
-            Err(e) => {
-                log::warn!("导入驱动失败: {}", e);
-                // 不中断安装流程，继续执行
-            }
-        }
+        );
 
         // 等待进度监控线程结束
         let _ = driver_progress_handle.join();
+        if let Err(error) = import_result {
+            log::error!("导入驱动失败，安装停止: {}", error);
+            let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
+            return;
+        }
+        if let Err(error) = lr_core::driver::verify_offline_storage_driver_requirements(
+            Path::new(&apply_dir),
+            Path::new(&driver_path),
+        ) {
+            log::error!("启动存储驱动导入后验证失败，安装停止: {}", error);
+            let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
+            return;
+        }
+        log::info!("驱动导入成功，启动存储驱动覆盖验证通过");
 
         // 同时检查驱动目录中是否有 CAB 文件并安装
         let cab_files_in_driver_dir = find_cab_files_in_directory(&driver_path);
@@ -704,8 +710,12 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             let _ = cab_progress_handle.join();
         }
     } else if config.should_import_drivers() && !driver_path_exists {
-        log::info!("驱动目录不存在，跳过驱动导入: {}", driver_path);
-        let _ = tx.send(WorkerMessage::SetStatus(tr!("跳过驱动导入（目录不存在）")));
+        log::error!("请求自动导入驱动，但驱动目录不存在: {}", driver_path);
+        let _ = tx.send(WorkerMessage::Failed(tr!(
+            "驱动路径不存在: {}",
+            driver_path
+        )));
+        return;
     } else if config.has_driver_data() {
         // SaveOnly 模式：驱动已保存但不导入
         let _ = tx.send(WorkerMessage::SetStatus(tr!("跳过驱动导入（仅保存模式）")));

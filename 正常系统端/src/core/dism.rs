@@ -547,15 +547,44 @@ impl Dism {
     pub fn export_drivers(&self, destination: &str) -> Result<usize> {
         std::fs::create_dir_all(destination)?;
 
+        let destination_path = Path::new(destination);
+        let manifest_path =
+            destination_path.join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE);
+        if manifest_path.exists() {
+            std::fs::remove_file(&manifest_path)
+                .with_context(|| format!("无法清理旧存储驱动清单: {}", manifest_path.display()))?;
+        }
+        let storage_requirements = lr_core::driver::list_present_oem_storage_driver_requirements()
+            .context("无法枚举当前系统已绑定的启动存储控制器驱动，已拒绝继续导出")?;
+        log::info!(
+            "[Dism] 导出前确认 {} 个已绑定 OEM 启动存储驱动包",
+            storage_requirements.len()
+        );
+
         if self.is_pe {
             anyhow::bail!("{}", tr!("PE环境下无法导出当前系统驱动，请使用 export_drivers_from_system 并指定目标系统分区"));
         }
 
         match DismCmd::new().and_then(|dism| dism.export_drivers_online(destination, None)) {
-            Ok(()) => match Self::require_exported_drivers(Path::new(destination)) {
+            Ok(()) => match Self::require_exported_drivers(destination_path) {
                 Ok(count) => {
-                    log::info!("[Dism] DISM 在线导出完成，共 {} 个 INF", count);
-                    return Ok(count);
+                    match lr_core::driver::write_storage_driver_requirements(
+                        destination_path,
+                        &storage_requirements,
+                    ) {
+                        Ok(()) => {
+                            log::info!(
+                                "[Dism] DISM 在线导出完成，共 {} 个 INF；启动存储驱动覆盖验证通过",
+                                count
+                            );
+                            return Ok(count);
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "[Dism] DISM 导出缺少当前启动存储驱动覆盖: {error}，回退 SetupAPI"
+                            );
+                        }
+                    }
                 }
                 Err(error) => {
                     log::warn!("[Dism] DISM 在线导出返回空目录: {error}，回退 SetupAPI");
@@ -576,12 +605,15 @@ impl Dism {
         if count == 0 {
             anyhow::bail!("{}", tr!("未找到可导出的第三方驱动"));
         }
+        lr_core::driver::write_storage_driver_requirements(destination_path, &storage_requirements)
+            .context("SetupAPI 导出完成，但启动存储驱动覆盖验证失败")?;
         log::info!("[Dism] 成功导出 {} 个驱动", count);
         Ok(count)
     }
 
-    /// 从指定系统分区导出驱动 (PE/正常环境均可)
-    /// 优先使用受支持的 DISM `/Export-Driver`，失败回退手工遍历 DriverStore。
+    /// 从指定系统分区导出驱动 (PE/正常环境均可)。
+    /// 在线系统允许回退到 SetupAPI；离线系统只能使用 DISM 的受支持导出边界，禁止按
+    /// FileRepository 目录名猜测第三方包。
     pub fn export_drivers_from_system(
         &self,
         system_partition: &str,
@@ -601,42 +633,15 @@ impl Dism {
         let is_online_target =
             !self.is_pe && target_drive.is_some_and(|drive| drive == system_drive);
 
-        let dism_result = DismCmd::new().and_then(|dism| {
-            if is_online_target {
-                dism.export_drivers_online(destination, None)
-            } else {
-                dism.export_drivers_offline(system_partition, destination, None)
-            }
-        });
-        match dism_result {
-            Ok(()) => match Self::require_exported_drivers(Path::new(destination)) {
-                Ok(count) => {
-                    log::info!("[Dism] DISM 驱动导出完成，共 {} 个 INF", count);
-                    return Ok(count);
-                }
-                Err(error) => {
-                    log::warn!("[Dism] DISM 驱动导出返回空目录: {error}，回退手工导出");
-                }
-            },
-            Err(error) => {
-                log::warn!("[Dism] DISM 驱动导出失败: {error}，回退手工导出");
-            }
+        if is_online_target {
+            return self.export_drivers(destination);
         }
 
-        // 回退：手工遍历 FileRepository
-        log::info!(
-            "[Dism] 使用 Windows API 从 {} 导出驱动到: {}",
-            system_partition,
-            destination
-        );
-        let manager = DriverManager::new()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("驱动管理器初始化失败: {}", e)))?;
-        let count = manager
-            .export_drivers_from_system(Path::new(system_partition), Path::new(destination))?;
-        if count == 0 {
-            anyhow::bail!("{}", tr!("未找到可导出的第三方驱动"));
-        }
-        log::info!("[Dism] 成功导出 {} 个驱动", count);
+        DismCmd::new()
+            .and_then(|dism| dism.export_drivers_offline(system_partition, destination, None))
+            .context("DISM 离线驱动导出失败，已拒绝使用不完整的手工 DriverStore 回退")?;
+        let count = Self::require_exported_drivers(Path::new(destination))?;
+        log::info!("[Dism] DISM 离线驱动导出完成，共 {} 个 INF", count);
         Ok(count)
     }
 
@@ -677,8 +682,11 @@ impl Dism {
             need_reboot
         );
 
-        if success == 0 {
-            anyhow::bail!("{}", tr!("所有驱动导入失败"));
+        if success == 0 || fail != 0 {
+            anyhow::bail!(
+                "{}",
+                tr!("驱动导入未完整成功：成功 {}，失败 {}", success, fail)
+            );
         }
         Ok(())
     }
@@ -704,34 +712,11 @@ impl Dism {
             .map_err(|e| anyhow::anyhow!("{}", tr!("DISM 命令行初始化失败: {}", e)))?;
 
         // 智能导入：自动识别并处理驱动文件和 CAB 包
-        match dism_cmd.import_drivers_smart(image_path_clean, driver_path, None) {
-            Ok(_) => {
-                log::info!("[Dism] 离线驱动注入完成");
-                Ok(())
-            }
-            Err(e) => {
-                log::warn!("[Dism] dism.exe 导入失败: {}", e);
-
-                // 尝试回退到 DriverManager（仅当 DISM 完全失败时）
-                log::info!("[Dism] 尝试使用备用方法（DriverManager）...");
-
-                let manager = DriverManager::new()
-                    .map_err(|e| anyhow::anyhow!("{}", tr!("驱动管理器初始化失败: {}", e)))?;
-
-                let (success, fail) = crate::core::driver::import_drivers_offline_dism_first(
-                    &manager,
-                    Path::new(image_path_clean),
-                    Path::new(driver_path),
-                )?;
-
-                log::info!("[Dism] 备用方法完成: 成功 {}, 失败 {}", success, fail);
-
-                if success == 0 {
-                    anyhow::bail!("{}", tr!("所有驱动导入失败"));
-                }
-                Ok(())
-            }
-        }
+        dism_cmd
+            .import_drivers_smart(image_path_clean, driver_path, None)
+            .context("DISM 离线驱动导入失败，已拒绝不完整的手工注册表回退")?;
+        log::info!("[Dism] 离线驱动注入完成");
+        Ok(())
     }
 
     // ========================================================================

@@ -16,6 +16,7 @@ use crate::ui::progress::{BackupStep, InstallStep};
 
 const CHECKPOINT_FILE: &str = "LetRecovery.operation.json";
 const SUPPORT_FILE: &str = "LetRecovery-support.json";
+const LAST_RUNTIME_LOG_FILE: &str = "LetRecoveryPE-last.log";
 
 pub(crate) struct PeWorkflowJournal {
     journal: OperationJournal,
@@ -104,6 +105,9 @@ impl PeWorkflowJournal {
 
     pub(crate) fn complete(&mut self) -> Result<(), OperationError> {
         self.journal.complete(unix_time_millis())?;
+        if let Err(error) = persist_runtime_log(&self.data_partition) {
+            log::warn!("failed to persist final PE runtime log: {error}");
+        }
         self.journal.remove()
     }
 
@@ -253,6 +257,22 @@ fn pe_log_path() -> Option<PathBuf> {
         path.parent()
             .map(|directory| directory.join("LetRecoveryPE.log"))
     })
+}
+
+fn persist_runtime_log(data_partition: &str) -> Result<(), OperationError> {
+    let Some(source) = pe_log_path().filter(|path| path.is_file()) else {
+        return Ok(());
+    };
+    let destination = partition_root(data_partition)?.join(LAST_RUNTIME_LOG_FILE);
+    let temporary = destination.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::copy(&source, &temporary)
+        .map_err(|error| OperationError::io("copy_pe_runtime_log", &error))?;
+    if destination.exists() {
+        std::fs::remove_file(&destination)
+            .map_err(|error| OperationError::io("replace_pe_runtime_log", &error))?;
+    }
+    std::fs::rename(&temporary, &destination)
+        .map_err(|error| OperationError::io("publish_pe_runtime_log", &error))
 }
 
 #[cfg(test)]

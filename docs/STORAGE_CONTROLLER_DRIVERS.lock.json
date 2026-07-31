@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "directory": "intel-vmd-11th",
+      "version": "20.2.4.1019",
+      "catalog_update_id": "d4c52691-b507-4a37-bce7-b018cd40b4d9",
+      "source_cab_sha256": "913a94e9e292ea984f9150d093456ff8595e6cf4aea3943801a5f2801781e00d",
+      "controller_ids": ["PCI\\VEN_8086&DEV_9A0B"],
+      "files": [
+        { "name": "iaStorVD.cat", "size": 12670, "sha256": "7b5494a139f756aeefcbfffcc27f190625f629cf49d57ef15a198d687586f039", "signer_contains": "Microsoft Windows Hardware Compatibility Publisher" },
+        { "name": "iaStorVD.inf", "size": 28852, "sha256": "7186258dde0c9b4f5c78c93b571c5314394e01ee376bde6d89370a88df246038" },
+        { "name": "iaStorVD.sys", "size": 1623632, "sha256": "3dd035a3669b735b707be0fc2ba6840675090337062758d734458ceb4b55eef2", "signer_contains": "Intel Corporation" },
+        { "name": "NOTICE.txt", "size": 1290, "sha256": "b2295bbe4f544ba60b3c1651fd67145821b4a4d25814f262ba993aacdea3cf7c" },
+        { "name": "RstMwEventLogMsg.dll", "size": 30800, "sha256": "e4e91da33405ded01dc716d1c1e7ba0842ff0a244617f62078e3e3267c45e797" },
+        { "name": "RstMwService.exe", "size": 2065488, "sha256": "064a6b48b0cb5fe5e5adf3fe66d7570c20c2eacf662d36a3943b37bdc406bce3" }
+      ]
+    },
+    {
+      "directory": "intel-vmd-current",
+      "version": "20.2.12.1036",
+      "catalog_update_id": "d3ccf9fc-2543-4b7b-9ff0-369264a693be",
+      "source_cab_sha256": "a5dce6b59b3775d2f0519eeca69a5ef8754b0ab147474377c2684c6d9e8b47d9",
+      "controller_ids": [
+        "PCI\\VEN_8086&DEV_467F",
+        "PCI\\VEN_8086&DEV_A77F",
+        "PCI\\VEN_8086&DEV_7D0B",
+        "PCI\\VEN_8086&DEV_AD0B"
+      ],
+      "files": [
+        { "name": "iaStorVD.cat", "size": 12577, "sha256": "cf1ccddf06d502162fced96f11a0664ab36ea1b167cb795d14f410d4737df2ab", "signer_contains": "Microsoft Windows Hardware Compatibility Publisher" },
+        { "name": "iaStorVD.inf", "size": 28570, "sha256": "fde7e9089c5eafda7ad6b3cea83f46f65dae21ede6ea50960fe7a923ad4a80a7" },
+        { "name": "iaStorVD.sys", "size": 1624192, "sha256": "0d4017cb74827b6fd39365628829f54c9cf675891e6a511f2a23a2ace2ca9b8a", "signer_contains": "Intel Corporation" },
+        { "name": "NOTICE.txt", "size": 1307, "sha256": "fe8622638d08ef8572c72fdbe428c328ab06b351160ea2cbd3d524405bec8b4a" },
+        { "name": "RstMwEventLogMsg.dll", "size": 30848, "sha256": "a3de1a8fb790bfc3e7bf126ec6aec20c56c165bfc49af55b93a84e12236b3585" },
+        { "name": "RstMwService.exe", "size": 2066560, "sha256": "826ccc62ecfe4121df5db73382fd32c57384abbf8b6280ad0f6a5c54af87485d" }
+      ]
+    }
+  ]
+}

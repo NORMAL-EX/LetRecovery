@@ -405,10 +405,10 @@ impl DismCmd {
             failed_packages.len()
         );
 
-        if success_count == 0 && !cab_files.is_empty() {
+        if !failed_packages.is_empty() {
             bail!(
                 "{}",
-                tr!("所有 CAB 包添加失败: {}", format!("{:?}", failed_packages))
+                tr!("CAB 包未完整添加: {}", format!("{:?}", failed_packages))
             );
         }
 
@@ -501,12 +501,15 @@ impl DismCmd {
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
         let source_path = Path::new(source_dir);
-        if !source_path.exists() {
-            bail!("{}", tr!("源目录不存在: {}", source_dir));
+        let source_metadata = source_path
+            .symlink_metadata()
+            .with_context(|| tr!("源目录不存在: {}", source_dir))?;
+        if !source_metadata.file_type().is_dir() || source_metadata.file_type().is_symlink() {
+            bail!("{}", tr!("源路径不是普通目录: {}", source_dir));
         }
 
         // 分析目录内容
-        let (has_inf_files, has_cab_files) = Self::analyze_directory(source_path);
+        let (has_inf_files, has_cab_files) = Self::analyze_directory(source_path)?;
 
         log::info!(
             "[DismCmd] 目录分析: INF={}, CAB={}",
@@ -543,21 +546,15 @@ impl DismCmd {
             }
         }
 
-        Self::send_progress(&progress_tx, 100, &tr!("导入完成"));
-
-        // 如果两个操作都失败了，返回错误
         if !has_inf_files && !has_cab_files {
             bail!("{}", tr!("目录中没有找到驱动文件（.inf）或 CAB 包（.cab）"));
         }
 
         if let Some(e) = last_error {
-            // 如果有部分成功，只打印警告
-            if has_inf_files && has_cab_files {
-                log::warn!("[DismCmd] 部分导入失败: {}", e);
-                return Ok(());
-            }
             return Err(e);
         }
+
+        Self::send_progress(&progress_tx, 100, &tr!("导入完成"));
 
         Ok(())
     }
@@ -861,38 +858,26 @@ impl DismCmd {
     }
 
     /// 分析目录内容（检查是否包含 INF 和 CAB 文件）
-    fn analyze_directory(dir: &Path) -> (bool, bool) {
+    fn analyze_directory(dir: &Path) -> Result<(bool, bool)> {
         let mut has_inf = false;
         let mut has_cab = false;
 
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        let ext_lower = ext.to_string_lossy().to_lowercase();
-                        match ext_lower.as_str() {
-                            "inf" => has_inf = true,
-                            "cab" => has_cab = true,
-                            _ => {}
-                        }
-                    }
-                } else if path.is_dir() {
-                    // 递归检查子目录
-                    let (sub_inf, sub_cab) = Self::analyze_directory(&path);
-                    has_inf = has_inf || sub_inf;
-                    has_cab = has_cab || sub_cab;
-                }
-
-                // 如果两种都找到了，可以提前返回
-                if has_inf && has_cab {
-                    break;
+        for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+            let entry =
+                entry.with_context(|| tr!("枚举驱动目录失败: {}", dir.to_string_lossy()))?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if let Some(extension) = entry.path().extension() {
+                if extension.eq_ignore_ascii_case("inf") {
+                    has_inf = true;
+                } else if extension.eq_ignore_ascii_case("cab") {
+                    has_cab = true;
                 }
             }
         }
 
-        (has_inf, has_cab)
+        Ok((has_inf, has_cab))
     }
 }
 

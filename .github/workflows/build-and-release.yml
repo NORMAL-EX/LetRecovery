@@ -151,6 +151,15 @@ jobs:
             Write-Host "Validated PCA2023 resource: $name"
           }
 
+      - name: Validate bundled storage-controller drivers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & ".github\scripts\test-storage-controller-drivers.ps1" `
+            -Root "pkg\bin\drivers\storage_controller" `
+            -LockFile "docs\STORAGE_CONTROLLER_DRIVERS.lock.json" `
+            -VerifySignatures
+
       - name: Relocate system-side lang/diskpart into bin
         shell: bash
         run: |
@@ -286,6 +295,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path $languageDestination | Out-Null
           Copy-Item -Path (Join-Path $languageSource "*.json") -Destination $languageDestination -Force
           Write-Host "Injected release language catalogs: $languageDestination"
+          $storageSource = "pkg\bin\drivers\storage_controller"
+          $storageDestination = Join-Path $mount "Program Files\LetRecoveryPE\drivers\storage_controller"
+          if (Test-Path -LiteralPath $storageDestination) {
+            Remove-Item -LiteralPath $storageDestination -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $storageDestination | Out-Null
+          Copy-Item -Path (Join-Path $storageSource "*") -Destination $storageDestination -Recurse -Force
+          & ".github\scripts\test-storage-controller-drivers.ps1" `
+            -Root $storageDestination `
+            -LockFile "docs\STORAGE_CONTROLLER_DRIVERS.lock.json"
+          Write-Host "Injected locked storage-controller drivers: $storageDestination"
           # DISM falls back to the current user's %TEMP% when /ScratchDir is omitted.
           # The base PE image declares X:\Users\Default\AppData\Local\Temp but may not
           # contain that directory, which makes Apply-Image fail immediately with error 3.
@@ -315,6 +335,41 @@ jobs:
           Move-Item -Force $tmp $wim
           Write-Host "=== WIM info AFTER clean ==="
           dism /Get-WimInfo /WimFile:"$wim" /Index:1
+
+      - name: Verify storage-controller drivers in final WIM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $wim = (Resolve-Path -LiteralPath "pkg\bin\pe\LetRecovery_PE.wim").Path
+          $mount = Join-Path $env:RUNNER_TEMP ("wim-storage-audit-" + [guid]::NewGuid().ToString("N"))
+          $audit = Join-Path $env:RUNNER_TEMP ("wim-storage-files-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $mount | Out-Null
+          New-Item -ItemType Directory -Path $audit | Out-Null
+          $mounted = $false
+          try {
+            dism /Mount-Image /ImageFile:"$wim" /Index:1 /MountDir:"$mount" /ReadOnly
+            if ($LASTEXITCODE -ne 0) { throw "DISM read-only mount failed" }
+            $mounted = $true
+            $storageRoot = Join-Path $mount "Program Files\LetRecoveryPE\drivers\storage_controller"
+            # DISM exposes files in a mounted WIM through reparse-point projections.
+            # Copy the bytes out before applying the release-tree no-reparse policy.
+            Copy-Item -Path (Join-Path $storageRoot "*") -Destination $audit -Recurse -Force
+            & ".github\scripts\test-storage-controller-drivers.ps1" `
+              -Root $audit `
+              -LockFile "docs\STORAGE_CONTROLLER_DRIVERS.lock.json" `
+              -VerifySignatures
+          } finally {
+            if ($mounted) {
+              dism /Unmount-Image /MountDir:"$mount" /Discard
+              if ($LASTEXITCODE -ne 0) { throw "DISM read-only unmount failed" }
+            }
+            if (Test-Path -LiteralPath $mount) {
+              Remove-Item -LiteralPath $mount -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path -LiteralPath $audit) {
+              Remove-Item -LiteralPath $audit -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
 
       - name: Update WIM MD5 in config.json
         shell: bash

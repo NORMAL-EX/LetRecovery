@@ -6061,19 +6061,22 @@ impl NativeWindow {
                 let packages =
                     lr_core::storage_driver_match::select_builtin_storage_driver_packages(
                         hardware_ids.iter().map(String::as_str),
-                    );
+                    )
+                    .map_err(|error| error.to_string())?;
                 let [package] = packages.as_slice() else {
                     return Err(crate::tr!(
                         "未检测到唯一匹配的 Intel VMD 控制器，已拒绝导入随包存储驱动。"
                     ));
                 };
                 let directory = plan.driver_directory().join(package.directory_name());
-                if !directory.is_dir() {
-                    return Err(crate::tr!("匹配的 Intel VMD 驱动包不存在。"));
-                }
+                let verified =
+                    lr_core::storage_driver_match::verify_builtin_storage_driver_package(
+                        *package, &directory,
+                    )
+                    .map_err(|error| error.to_string())?;
                 Ok(
                     super::tool_dialogs_mutating::MutatingToolIntent::ImportStorageDriver {
-                        directory: directory.to_string_lossy().into_owned(),
+                        directory: verified.directory().to_string_lossy().into_owned(),
                         offline_root: plan.target().to_owned(),
                         recursive: false,
                     },

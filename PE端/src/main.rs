@@ -97,60 +97,49 @@ fn install_panic_hook() {
 
 /// Loads a hardware-matched Intel VMD package into the running WinPE before any volume scan.
 /// Drvload is the Microsoft-supported runtime path; this does not persist a driver in the PE WIM.
-fn load_matching_vmd_driver_into_running_pe() {
-    let hardware_ids = match lr_core::driver::list_present_hardware_ids() {
-        Ok(hardware_ids) => hardware_ids,
-        Err(error) => {
-            log::warn!("[VMD/PE] present-device enumeration failed: {error}");
-            return;
-        }
-    };
+fn load_matching_vmd_driver_into_running_pe() -> anyhow::Result<()> {
+    let hardware_ids = lr_core::driver::list_present_hardware_ids()
+        .map_err(|error| anyhow::anyhow!("present-device enumeration failed: {error}"))?;
     let packages = lr_core::storage_driver_match::select_builtin_storage_driver_packages(
         hardware_ids.iter().map(String::as_str),
-    );
+    )
+    .map_err(anyhow::Error::new)?;
     if packages.is_empty() {
         log::info!("[VMD/PE] no supported Intel VMD controller is present");
-        return;
+        return Ok(());
     }
 
     let package_root = utils::path::get_exe_dir()
         .join("drivers")
         .join("storage_controller");
     for package in packages {
-        let inf = package_root
-            .join(package.directory_name())
-            .join("iaStorVD.inf");
-        let is_regular_file = inf
-            .symlink_metadata()
-            .map(|metadata| metadata.file_type().is_file())
-            .unwrap_or(false);
-        if !is_regular_file {
-            log::error!("[VMD/PE] matched VMD INF is unavailable: {}", inf.display());
-            continue;
-        }
+        let directory = package_root.join(package.directory_name());
+        let verified = lr_core::storage_driver_match::verify_builtin_storage_driver_package(
+            package, &directory,
+        )?;
+        let inf = verified.inf_path();
 
-        let request = lr_core::command::CommandRequest::new("drvload.exe").arg(&inf);
+        let request = lr_core::command::CommandRequest::new("drvload.exe").arg(inf);
         match lr_core::command::execute_request(&lr_core::command::SystemCommandExecutor, &request)
         {
             Ok(outcome) if outcome.succeeded() => {
                 log::info!("[VMD/PE] runtime VMD driver loaded: {}", inf.display());
             }
             Ok(outcome) => {
-                log::error!(
-                    "[VMD/PE] drvload rejected {} (exit {:?}): {}",
+                anyhow::bail!(
+                    "drvload rejected {} (exit {:?}): stdout={} stderr={}",
                     inf.display(),
                     outcome.exit_code(),
+                    String::from_utf8_lossy(outcome.stdout()).trim(),
                     String::from_utf8_lossy(outcome.stderr()).trim()
                 );
             }
             Err(error) => {
-                log::error!(
-                    "[VMD/PE] failed to start drvload for {}: {error}",
-                    inf.display()
-                );
+                anyhow::bail!("failed to start drvload for {}: {error}", inf.display());
             }
         }
     }
+    Ok(())
 }
 
 /// 探测界面语言：从（正常系统端随重启写入的）配置文件读取 Language 字段。
@@ -233,7 +222,14 @@ fn main() -> anyhow::Result<()> {
     // VMD storage must be visible before BitLocker passthrough, marker discovery or any partition
     // inventory. A matched package is loaded into this booted PE only; offline Windows receives
     // the same package later through the signed DISM boundary.
-    load_matching_vmd_driver_into_running_pe();
+    if let Err(error) = load_matching_vmd_driver_into_running_pe() {
+        log::error!("[VMD/PE] boot-critical storage driver preparation failed: {error:#}");
+        show_error_message(&tr!(
+            "无法安全加载当前 Intel VMD 存储控制器驱动，已停止启动，未扫描或修改磁盘。\n\n{}",
+            format_args!("{error:#}")
+        ));
+        return Ok(());
+    }
 
     // 检查命令行参数
     log::info!("命令行参数: {:?}", args);
@@ -700,13 +696,22 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
 
         if config.should_import_drivers() && driver_path_exists {
             let dism = Dism::new();
-            match dism.add_drivers_offline_with_progress(&apply_dir, &driver_path, None) {
-                Ok(_) => log::info!("[PE INSTALL] 驱动导入成功"),
-                Err(e) => {
-                    log::warn!("[PE INSTALL] 警告: 驱动导入失败: {} (继续安装)", e);
-                    log::warn!("驱动导入失败: {}", e);
-                }
+            if let Err(error) =
+                dism.add_drivers_offline_with_progress(&apply_dir, &driver_path, None)
+            {
+                log::error!("[PE INSTALL] 驱动导入失败，安装停止: {error}");
+                show_error_message(&tr!("离线驱动导入失败: {}", error));
+                return Ok(());
             }
+            if let Err(error) = lr_core::driver::verify_offline_storage_driver_requirements(
+                std::path::Path::new(&apply_dir),
+                std::path::Path::new(&driver_path),
+            ) {
+                log::error!("[PE INSTALL] 启动存储驱动导入后验证失败: {error}");
+                show_error_message(&tr!("离线驱动导入失败: {}", error));
+                return Ok(());
+            }
+            log::info!("[PE INSTALL] 驱动导入成功，启动存储驱动覆盖验证通过");
 
             // 同时检查驱动目录中是否有 CAB 文件并安装
             let cab_files = find_cab_files_in_dir(&driver_path);
@@ -733,7 +738,9 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
                 }
             }
         } else if config.should_import_drivers() && !driver_path_exists {
-            log::info!("[PE INSTALL] 驱动目录不存在，跳过驱动导入");
+            log::error!("[PE INSTALL] 请求自动导入驱动，但驱动目录不存在: {driver_path}");
+            show_error_message(&tr!("驱动路径不存在: {}", driver_path));
+            return Ok(());
         } else {
             log::info!("[PE INSTALL] 跳过驱动导入");
         }

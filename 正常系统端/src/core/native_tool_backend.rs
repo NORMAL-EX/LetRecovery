@@ -408,8 +408,43 @@ impl NativeToolBackend {
                 ) => {
                     validate_offline_target(target)?;
                     validate_directory(driver_directory)?;
+                    let hardware_ids = lr_core::driver::list_present_hardware_ids()
+                        .map_err(|error| NativeToolBackendError::Execution(error.to_string()))?;
+                    let packages =
+                        lr_core::storage_driver_match::select_builtin_storage_driver_packages(
+                            hardware_ids.iter().map(String::as_str),
+                        )
+                        .map_err(|error| NativeToolBackendError::Execution(error.to_string()))?;
+                    let [package] = packages.as_slice() else {
+                        return Err(NativeToolBackendError::Execution(
+                            "no unique Intel VMD package matches the current hardware".into(),
+                        ));
+                    };
+                    let verified =
+                        lr_core::storage_driver_match::verify_builtin_storage_driver_package(
+                            *package,
+                            std::path::Path::new(driver_directory),
+                        )
+                        .map_err(|error| NativeToolBackendError::Execution(error.to_string()))?;
                     legacy_driver::import_drivers_offline(target, driver_directory)
                         .map_err(NativeToolBackendError::Execution)?;
+                    let driver_store = std::path::Path::new(target)
+                        .join("Windows")
+                        .join("System32")
+                        .join("DriverStore")
+                        .join("FileRepository");
+                    for hardware_id in verified.package().controller_hardware_ids() {
+                        let present = lr_core::storage_driver_match::inf_tree_contains_hardware_id(
+                            &driver_store,
+                            hardware_id,
+                        )
+                        .map_err(|error| NativeToolBackendError::Execution(error.to_string()))?;
+                        if !present {
+                            return Err(NativeToolBackendError::Execution(format!(
+                                "offline DriverStore did not retain {hardware_id}"
+                            )));
+                        }
+                    }
                     Ok(completed("storage drivers imported"))
                 }
                 (

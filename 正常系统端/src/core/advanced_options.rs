@@ -401,7 +401,8 @@ log=0
                 default_loaded,
                 &software_hive,
                 &system_hive,
-            );
+                &default_hive,
+            )?;
         }
 
         // 13. 导入磁盘控制器驱动（Win10/Win11 x64）
@@ -411,7 +412,8 @@ log=0
                 default_loaded,
                 &software_hive,
                 &system_hive,
-            );
+                &default_hive,
+            )?;
         }
 
         // 14. 导入注册表文件 - 实际导入到离线注册表
@@ -670,27 +672,34 @@ log=0
         default_loaded: bool,
         software_hive: &str,
         system_hive: &str,
-    ) {
+        default_hive: &str,
+    ) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 导入自定义驱动: {}", self.custom_drivers_path);
 
         // 先卸载注册表，因为 DISM 可能需要独占访问
-        let _ = OfflineRegistry::unload_hive("pc-soft");
-        let _ = OfflineRegistry::unload_hive("pc-sys");
+        OfflineRegistry::unload_hive("pc-soft")?;
+        OfflineRegistry::unload_hive("pc-sys")?;
         if default_loaded {
-            let _ = OfflineRegistry::unload_hive("pc-default");
+            OfflineRegistry::unload_hive("pc-default")?;
         }
 
         // 使用 DISM 添加驱动
         let dism = crate::core::dism::Dism::new();
         let image_path = format!("{}\\", target_partition);
-        match dism.add_drivers_offline(&image_path, &self.custom_drivers_path) {
-            Ok(_) => log::info!("[ADVANCED] 自定义驱动导入成功"),
-            Err(e) => log::error!("[ADVANCED] 自定义驱动导入失败: {} (继续执行)", e),
-        }
+        let import_result = dism.add_drivers_offline(&image_path, &self.custom_drivers_path);
 
-        // 重新加载注册表
-        let _ = OfflineRegistry::load_hive("pc-soft", software_hive);
-        let _ = OfflineRegistry::load_hive("pc-sys", system_hive);
+        let reload_result = (|| -> anyhow::Result<()> {
+            OfflineRegistry::load_hive("pc-soft", software_hive)?;
+            OfflineRegistry::load_hive("pc-sys", system_hive)?;
+            if default_loaded {
+                OfflineRegistry::load_hive("pc-default", default_hive)?;
+            }
+            Ok(())
+        })();
+        import_result?;
+        reload_result?;
+        log::info!("[ADVANCED] 自定义驱动导入成功");
+        Ok(())
     }
 
     /// 13. 导入磁盘控制器驱动（Win10/Win11 x64）
@@ -700,73 +709,84 @@ log=0
         default_loaded: bool,
         software_hive: &str,
         system_hive: &str,
-    ) {
-        let hardware_ids = match lr_core::driver::list_present_hardware_ids() {
-            Ok(hardware_ids) => hardware_ids,
-            Err(error) => {
-                log::warn!(
-                    "[ADVANCED] storage-controller hardware enumeration failed; skipping built-in drivers: {error}"
-                );
-                return;
-            }
-        };
+        default_hive: &str,
+    ) -> anyhow::Result<()> {
+        let hardware_ids = lr_core::driver::list_present_hardware_ids().map_err(|error| {
+            anyhow::anyhow!("storage-controller hardware enumeration failed: {error}")
+        })?;
         let packages = lr_core::storage_driver_match::select_builtin_storage_driver_packages(
             hardware_ids.iter().map(String::as_str),
-        );
+        )
+        .map_err(anyhow::Error::new)?;
         if packages.is_empty() {
             log::info!(
                 "[ADVANCED] no supported Intel VMD controller is present; built-in storage drivers were not staged"
             );
-            return;
+            return Ok(());
         }
 
         let storage_drivers_dir = crate::utils::path::get_drivers_dir().join("storage_controller");
-        let package_dirs = packages
+        let verified_packages = packages
             .into_iter()
-            .map(|package| storage_drivers_dir.join(package.directory_name()))
-            .filter(|directory| {
-                if directory.is_dir() {
-                    true
-                } else {
-                    log::warn!(
-                        "[ADVANCED] matched storage-controller package is unavailable: {}",
-                        directory.display()
-                    );
-                    false
-                }
+            .map(|package| {
+                let directory = storage_drivers_dir.join(package.directory_name());
+                lr_core::storage_driver_match::verify_builtin_storage_driver_package(
+                    package, &directory,
+                )
             })
-            .collect::<Vec<_>>();
-        if package_dirs.is_empty() {
-            return;
-        }
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         log::info!(
             "[ADVANCED] staging {} hardware-matched Intel VMD package(s)",
-            package_dirs.len()
+            verified_packages.len()
         );
-        let _ = OfflineRegistry::unload_hive("pc-soft");
-        let _ = OfflineRegistry::unload_hive("pc-sys");
+        OfflineRegistry::unload_hive("pc-soft")?;
+        OfflineRegistry::unload_hive("pc-sys")?;
         if default_loaded {
-            let _ = OfflineRegistry::unload_hive("pc-default");
+            OfflineRegistry::unload_hive("pc-default")?;
         }
 
         let dism = crate::core::dism::Dism::new();
         let image_path = format!("{}\\", target_partition);
-        for package_dir in package_dirs {
-            match dism.add_drivers_offline(&image_path, &package_dir.to_string_lossy()) {
-                Ok(_) => log::info!(
+        let driver_store = std::path::Path::new(target_partition)
+            .join("Windows")
+            .join("System32")
+            .join("DriverStore")
+            .join("FileRepository");
+        let stage_result = (|| -> anyhow::Result<()> {
+            for verified in &verified_packages {
+                dism.add_drivers_offline(&image_path, &verified.directory().to_string_lossy())?;
+                for hardware_id in verified.package().controller_hardware_ids() {
+                    if !lr_core::storage_driver_match::inf_tree_contains_hardware_id(
+                        &driver_store,
+                        hardware_id,
+                    )? {
+                        anyhow::bail!(
+                            "offline DriverStore did not retain {} for {}",
+                            hardware_id,
+                            verified.directory().display()
+                        );
+                    }
+                }
+                log::info!(
                     "[ADVANCED] hardware-matched storage driver staged: {}",
-                    package_dir.display()
-                ),
-                Err(error) => log::error!(
-                    "[ADVANCED] matched storage driver staging failed for {}: {error}",
-                    package_dir.display()
-                ),
+                    verified.directory().display()
+                );
             }
-        }
+            Ok(())
+        })();
 
-        let _ = OfflineRegistry::load_hive("pc-soft", software_hive);
-        let _ = OfflineRegistry::load_hive("pc-sys", system_hive);
+        let reload_result = (|| -> anyhow::Result<()> {
+            OfflineRegistry::load_hive("pc-soft", software_hive)?;
+            OfflineRegistry::load_hive("pc-sys", system_hive)?;
+            if default_loaded {
+                OfflineRegistry::load_hive("pc-default", default_hive)?;
+            }
+            Ok(())
+        })();
+        stage_result?;
+        reload_result?;
+        Ok(())
     }
 
     /// 14. 导入注册表文件 - 实际导入到离线注册表

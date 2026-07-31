@@ -1,7 +1,7 @@
 //! Windows 驱动管理模块（核心实现已移入共享库 lr-core，此处再导出以保持调用方不变）。
 //!
-//! 正常系统端专属：离线驱动导入优先使用 dism.exe 命令行，失败再回退到
-//! lr-core 的传统 Windows API 方法（`DriverManager::import_drivers_offline`）。
+//! 正常系统端专属：离线驱动导入只使用微软支持的 DISM 边界。传统的手工离线
+//! DriverStore/注册表回退不能证明驱动包完整安装，已禁止使用。
 
 use std::path::Path;
 
@@ -14,10 +14,9 @@ use crate::tr;
 #[allow(unused_imports)]
 pub use lr_core::driver::{DriverInfo, DriverManager};
 
-/// 离线驱动导入：优先使用 dism.exe，失败再回退到 lr-core 的传统方法。
+/// 离线驱动导入：使用 dism.exe，任何失败直接返回。
 ///
-/// 正常系统端专属逻辑。`manager` 用于在 dism 失败时回退调用
-/// `manager.import_drivers_offline(...)`（lr-core 的传统 Windows API 实现）。
+/// `manager` 仅为保持现有调用接口兼容；不得用于手工离线回退。
 ///
 /// # 参数
 /// - `offline_root`: 离线系统根目录 (如 "D:\\")
@@ -26,7 +25,7 @@ pub use lr_core::driver::{DriverInfo, DriverManager};
 /// # 返回
 /// - (成功数, 失败数)
 pub fn import_drivers_offline_dism_first(
-    manager: &DriverManager,
+    _manager: &DriverManager,
     offline_root: &Path,
     source_dir: &Path,
 ) -> Result<(usize, usize)> {
@@ -51,21 +50,15 @@ pub fn import_drivers_offline_dism_first(
     let inf_count = DriverManager::find_inf_files(source_dir)?.len();
 
     // 使用智能导入（支持 INF 和 CAB）
-    match dism_cmd.import_drivers_smart(&image_path, &driver_path, None) {
-        Ok(_) => {
-            log::info!("[DriverManager] dism.exe 离线驱动导入成功");
-            // DISM 成功时假设所有驱动都导入成功
-            Ok((inf_count.max(1), 0))
-        }
-        Err(e) => {
-            log::warn!("[DriverManager] dism.exe 导入失败: {}, 尝试备用方法", e);
-            // 回退到传统方法（lr-core 的 Windows API 实现）
-            manager.import_drivers_offline(offline_root, source_dir)
-        }
+    if inf_count == 0 {
+        anyhow::bail!("驱动目录中没有可导入的 INF 文件");
     }
+    dism_cmd.import_drivers_smart(&image_path, &driver_path, None)?;
+    log::info!("[DriverManager] dism.exe 离线驱动导入成功");
+    Ok((inf_count, 0))
 }
 
-/// 导入驱动到离线系统（正常系统端：dism 优先，失败回退）。
+/// 导入驱动到离线系统（正常系统端：仅 DISM）。
 ///
 /// # 参数
 /// - `offline_root`: 离线系统根目录 (如 "D:\\")

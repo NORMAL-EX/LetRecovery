@@ -80,7 +80,9 @@ The release package contains two Microsoft Update Catalog driver packages under
 `pkg/bin/drivers/storage_controller/`. LetRecovery never recursively stages the
 whole directory: `lr-core::storage_driver_match` selects a package only when
 SetupAPI reports a matching Intel PCI hardware ID. AMD, Apple, VirtIO and
-unknown controllers select nothing.
+unknown controllers select nothing. The managed/dummy `8086:09AB` function is
+not generation-defining and is rejected when no primary VMD controller ID is
+visible; it is never used to guess a package.
 
 | Package path | Version | Microsoft Catalog update ID | Covered primary IDs | Source CAB SHA-256 |
 | --- | --- | --- | --- | --- |
@@ -92,6 +94,12 @@ Intel license links are retained in each package's `NOTICE.txt`. The CAT and SYS
 files were verified as `Valid` and issued by Microsoft Windows Hardware
 Compatibility Publisher before packaging. The INF itself is catalog-signed and
 therefore does not carry a standalone Authenticode signature.
+
+`docs/STORAGE_CONTROLLER_DRIVERS.lock.json` is the machine-readable release
+lock for every packaged file, size, SHA-256, supported primary controller ID and
+expected signer. Release validation rejects missing, extra or modified files,
+synchronizes the locked tree into the PE WIM and then mounts the final cleaned
+WIM read-only to repeat the same hash and signature checks.
 
 The retired blanket package directories (`18`, `19`, `20`, `AMD`, `Applessd`,
 `iastorE` and `viostor`) must not be restored. Windows 7 UefiSeven, USB3 and NVMe
