@@ -8,7 +8,7 @@
 //! "其他用户"（需手动输入用户名+密码）。
 //!
 //! 这里分两层兜底：
-//! 1) 零风险策略层（reg.exe load/unload，不动 SAM 二进制）：
+//! 1) 零风险策略层（Win32 注册表 hive load/unload，不动 SAM 二进制）：
 //!    - SYSTEM：`Control\Lsa\LimitBlankPasswordUse = 0`，允许空密码账户用于
 //!      自动登录/非控制台登录（默认被限制为 1）。
 //!    - SOFTWARE：在已知目标用户名时配置 Winlogon 自动登录（空密码）。

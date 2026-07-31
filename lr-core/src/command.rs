@@ -205,13 +205,13 @@ mod tests {
 
     #[test]
     fn keeps_program_name() {
-        let cmd = new_command("reg.exe");
-        assert_eq!(cmd.get_program(), OsStr::new("reg.exe"));
+        let cmd = new_command("example-tool.exe");
+        assert_eq!(cmd.get_program(), OsStr::new("example-tool.exe"));
     }
 
     #[test]
     fn request_keeps_spaces_unicode_and_metacharacters_as_one_argument() {
-        let request = CommandRequest::new("format.com").args([
+        let request = CommandRequest::new("example-tool.exe").args([
             "D:",
             "/FS:NTFS",
             "/V:数据 & ^ % !",
@@ -219,7 +219,7 @@ mod tests {
             "/Y",
         ]);
 
-        assert_eq!(request.program(), OsStr::new("format.com"));
+        assert_eq!(request.program(), OsStr::new("example-tool.exe"));
         assert_eq!(request.arguments().len(), 5);
         assert_eq!(request.arguments()[2], OsStr::new("/V:数据 & ^ % !"));
         assert!(request.preview().contains("数据 & ^ % !"));
@@ -245,7 +245,7 @@ mod tests {
         ));
 
         let outcome = executor
-            .execute(&CommandRequest::new("format.com"))
+            .execute(&CommandRequest::new("example-tool.exe"))
             .unwrap();
 
         assert!(!outcome.succeeded());

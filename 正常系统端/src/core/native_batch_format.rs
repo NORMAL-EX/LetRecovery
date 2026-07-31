@@ -1,20 +1,12 @@
 //! Validated batch-format boundary for the native desktop UI.
 //!
 //! Validation always works from a fresh fixed-volume inventory. Execution
-//! receives only a validated plan and keeps every `format.com` argument
-//! separate through `CommandRequest`.
+//! receives only a validated plan and formats each volume through the shared
+//! parameterized VDS/WinAPI boundary.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
 
-use lr_core::command::CommandExecutor;
-#[cfg(not(feature = "non-elevated-tests"))]
-use lr_core::command::SystemCommandExecutor;
-#[cfg(not(feature = "non-elevated-tests"))]
-use lr_core::format_command::system_format_executable;
 use lr_core::format_command::FormatCommandSpec;
-#[cfg(any(test, not(feature = "non-elevated-tests")))]
-use lr_core::format_command::{output_indicates_error, output_indicates_success};
 
 use super::disk::DiskManager;
 
@@ -44,13 +36,18 @@ pub fn inventory_current() -> Result<Vec<BatchFormatInventoryVolume>, BatchForma
         use windows::core::PCWSTR;
         use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
 
+        let running_windows_drive = lr_core::windows_storage::current_windows_drive_letter()
+            .map_err(|error| BatchFormatError::Inventory(error.to_string()))?;
         let partitions = DiskManager::get_partitions()
             .map_err(|error| BatchFormatError::Inventory(error.to_string()))?;
         let mut volumes = Vec::new();
         for partition in partitions.into_iter().filter(|partition| {
             !partition.is_system_partition
-                && !partition.letter.eq_ignore_ascii_case("C:")
-                && !partition.letter.eq_ignore_ascii_case("X:")
+                && !partition
+                    .letter
+                    .chars()
+                    .next()
+                    .is_some_and(|letter| letter.eq_ignore_ascii_case(&running_windows_drive))
         }) {
             let root = format!("{}\\", partition.letter);
             let root: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
@@ -160,7 +157,11 @@ pub fn validate_current(
         .iter()
         .filter(|partition| !partition.is_system_partition)
         .map(|partition| partition.letter.as_str());
-    let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    let system_drive = format!(
+        "{}:",
+        lr_core::windows_storage::current_windows_drive_letter()
+            .map_err(|error| BatchFormatError::Inventory(error.to_string()))?
+    );
     validate_against_inventory(request, allowed, &system_drive)
 }
 
@@ -190,9 +191,7 @@ fn validate_against_inventory<'a>(
         .map_err(|error| BatchFormatError::InvalidParameter(error.to_string()))?;
         let drive = spec.drive().to_string();
 
-        // C: and X: stay forbidden even when environment variables are stale
-        // or the process is running from another Windows volume.
-        if drive == "C:" || drive == "X:" || drive == system_drive {
+        if drive == system_drive {
             return Err(BatchFormatError::ProtectedDrive(drive));
         }
         if !allowed.contains(&drive) {
@@ -225,70 +224,62 @@ pub fn execute(
     }
     #[cfg(not(feature = "non-elevated-tests"))]
     {
-        execute_with(plan, &SystemCommandExecutor, system_format_executable())
+        Ok(execute_with_formatter(plan, &WinApiVolumeFormatter))
     }
 }
 
-/// Injectable execution entry. In development-test builds it rejects before
-/// invoking even the supplied executor, so an accidental system executor can
-/// never start `format.com`.
-pub fn execute_with<E, P>(
-    plan: &ValidatedBatchFormatPlan,
-    executor: &E,
-    program: P,
-) -> Result<BatchFormatExecutionResult, BatchFormatError>
-where
-    E: CommandExecutor + ?Sized,
-    P: AsRef<OsStr>,
-{
-    #[cfg(feature = "non-elevated-tests")]
-    {
-        let _ = (plan, executor, program.as_ref());
-        Err(BatchFormatError::DevelopmentBuildDenied)
-    }
+trait VolumeFormatter {
+    fn format(&self, spec: &FormatCommandSpec) -> Result<(), String>;
+}
 
-    #[cfg(not(feature = "non-elevated-tests"))]
-    {
-        Ok(execute_with_executor(plan, executor, program.as_ref()))
+#[cfg(not(feature = "non-elevated-tests"))]
+struct WinApiVolumeFormatter;
+
+#[cfg(not(feature = "non-elevated-tests"))]
+impl VolumeFormatter for WinApiVolumeFormatter {
+    fn format(&self, spec: &FormatCommandSpec) -> Result<(), String> {
+        let drive_letter = spec
+            .drive()
+            .chars()
+            .next()
+            .ok_or_else(|| "validated volume is missing a drive letter".to_owned())?;
+        let file_system = match spec.file_system() {
+            lr_core::format_command::FileSystem::Ntfs => lr_core::windows_storage::FileSystem::Ntfs,
+            lr_core::format_command::FileSystem::Fat => lr_core::windows_storage::FileSystem::Fat,
+            lr_core::format_command::FileSystem::Fat32 => {
+                lr_core::windows_storage::FileSystem::Fat32
+            }
+            lr_core::format_command::FileSystem::ExFat => {
+                lr_core::windows_storage::FileSystem::ExFat
+            }
+        };
+        lr_core::windows_storage::format_drive(
+            drive_letter,
+            file_system,
+            spec.volume_label().unwrap_or_default(),
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
 #[cfg(any(test, not(feature = "non-elevated-tests")))]
-fn execute_with_executor<E: CommandExecutor + ?Sized>(
+fn execute_with_formatter<F: VolumeFormatter + ?Sized>(
     plan: &ValidatedBatchFormatPlan,
-    executor: &E,
-    program: &OsStr,
+    formatter: &F,
 ) -> BatchFormatExecutionResult {
     let mut volumes = Vec::with_capacity(plan.specs.len());
     for spec in &plan.specs {
-        let request = spec.command_request(program);
-        let result = match executor.execute(&request) {
-            Ok(outcome) => {
-                let stdout = lr_core::encoding::gbk_to_utf8(outcome.stdout());
-                let stderr = lr_core::encoding::gbk_to_utf8(outcome.stderr());
-                let has_error = output_indicates_error(outcome.succeeded(), &stdout, &stderr);
-                let success =
-                    (outcome.succeeded() || output_indicates_success(&stdout)) && !has_error;
-                let message = if success {
-                    "format completed".to_string()
-                } else if !stderr.trim().is_empty() {
-                    stderr.trim().to_string()
-                } else if !stdout.trim().is_empty() {
-                    stdout.trim().to_string()
-                } else {
-                    "format failed without diagnostic output".to_string()
-                };
-                BatchFormatVolumeResult {
-                    drive: spec.drive().to_string(),
-                    success,
-                    message,
-                    exit_code: outcome.exit_code(),
-                }
-            }
+        let result = match formatter.format(spec) {
+            Ok(()) => BatchFormatVolumeResult {
+                drive: spec.drive().to_string(),
+                success: true,
+                message: "format completed".to_owned(),
+                exit_code: None,
+            },
             Err(error) => BatchFormatVolumeResult {
                 drive: spec.drive().to_string(),
                 success: false,
-                message: format!("failed to start format.com: {error}"),
+                message: error,
                 exit_code: None,
             },
         };
@@ -305,10 +296,7 @@ fn execute_with_executor<E: CommandExecutor + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use std::io;
     use std::sync::Mutex;
-
-    use lr_core::command::{CommandOutcome, CommandRequest};
 
     use super::*;
 
@@ -327,12 +315,8 @@ mod tests {
             BatchFormatError::EmptySelection
         );
         assert!(matches!(
-            validate_against_inventory(&request(&["C:"]), ["C:", "D:"], "C:"),
-            Err(BatchFormatError::ProtectedDrive(drive)) if drive == "C:"
-        ));
-        assert!(matches!(
-            validate_against_inventory(&request(&["X:"]), ["X:"], "D:"),
-            Err(BatchFormatError::ProtectedDrive(drive)) if drive == "X:"
+            validate_against_inventory(&request(&["D:"]), ["C:", "D:"], "D:"),
+            Err(BatchFormatError::ProtectedDrive(drive)) if drive == "D:"
         ));
         assert!(matches!(
             validate_against_inventory(&request(&["E:"]), ["D:"], "C:"),
@@ -364,60 +348,46 @@ mod tests {
         ));
     }
 
-    struct SequencedExecutor {
-        outcomes: Mutex<Vec<io::Result<CommandOutcome>>>,
-        requests: Mutex<Vec<CommandRequest>>,
+    struct SequencedFormatter {
+        outcomes: Mutex<Vec<Result<(), String>>>,
+        drives: Mutex<Vec<String>>,
     }
 
-    impl CommandExecutor for SequencedExecutor {
-        fn execute(&self, request: &CommandRequest) -> io::Result<CommandOutcome> {
-            self.requests.lock().unwrap().push(request.clone());
+    impl VolumeFormatter for SequencedFormatter {
+        fn format(&self, spec: &FormatCommandSpec) -> Result<(), String> {
+            self.drives.lock().unwrap().push(spec.drive().to_owned());
             self.outcomes.lock().unwrap().remove(0)
         }
     }
 
-    #[cfg(not(feature = "non-elevated-tests"))]
     #[test]
-    fn injected_executor_preserves_per_volume_success_and_failure() {
+    fn injected_formatter_preserves_per_volume_success_and_failure() {
         let plan = validate_against_inventory(&request(&["D:", "E:"]), ["D:", "E:"], "C:").unwrap();
-        let executor = SequencedExecutor {
-            outcomes: Mutex::new(vec![
-                Ok(CommandOutcome::success()),
-                Ok(CommandOutcome::new(
-                    Some(5),
-                    Vec::new(),
-                    b"access denied".to_vec(),
-                )),
-            ]),
-            requests: Mutex::new(Vec::new()),
+        let formatter = SequencedFormatter {
+            outcomes: Mutex::new(vec![Ok(()), Err("access denied".to_owned())]),
+            drives: Mutex::new(Vec::new()),
         };
 
-        let result = execute_with(&plan, &executor, "format.com").unwrap();
+        let result = execute_with_formatter(&plan, &formatter);
         assert_eq!(result.success_count, 1);
         assert_eq!(result.fail_count, 1);
         assert_eq!(result.volumes[0].drive, "D:");
         assert!(result.volumes[0].success);
         assert_eq!(result.volumes[1].drive, "E:");
         assert!(!result.volumes[1].success);
-        let requests = executor.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].arguments()[0], "D:");
-        assert_eq!(requests[1].arguments()[0], "E:");
+        assert_eq!(
+            *formatter.drives.lock().unwrap(),
+            vec!["D:".to_owned(), "E:".to_owned()]
+        );
     }
 
     #[cfg(feature = "non-elevated-tests")]
     #[test]
-    fn development_feature_denies_before_calling_injected_executor() {
+    fn development_feature_denies_before_any_format_api_call() {
         let plan = validate_against_inventory(&request(&["D:"]), ["D:"], "C:").unwrap();
-        let executor = SequencedExecutor {
-            outcomes: Mutex::new(vec![Ok(CommandOutcome::success())]),
-            requests: Mutex::new(Vec::new()),
-        };
-
         assert_eq!(
-            execute_with(&plan, &executor, "format.com").unwrap_err(),
+            execute(&plan).unwrap_err(),
             BatchFormatError::DevelopmentBuildDenied
         );
-        assert!(executor.requests.lock().unwrap().is_empty());
     }
 }

@@ -657,9 +657,13 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             }
             ConfigFileManager::cleanup_all(&data_partition, &target_partition);
             if config.auto_reboot {
-                let _ = utils::command::new_command("shutdown")
-                    .args(["/r", "/t", "10", "/c", "LetRecovery XP/2003 setup is ready"])
-                    .spawn();
+                if let Err(error) = lr_core::windows_shutdown::schedule_restart(
+                    10,
+                    "LetRecovery XP/2003 setup is ready",
+                ) {
+                    log::error!("[PE INSTALL/XP TEXTMODE] schedule restart failed: {error}");
+                    show_error_message(&tr!("安排重启失败: {}", error));
+                }
             } else {
                 show_success_message(&tr!(
                     "XP/2003 文本模式安装已准备完成，请重启计算机继续安装。"
@@ -890,15 +894,13 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
 
         if config.auto_reboot {
             log::info!("[PE INSTALL] 即将重启...");
-            let _ = utils::command::new_command("shutdown")
-                .args([
-                    "/r",
-                    "/t",
-                    "10",
-                    "/c",
-                    "LetRecovery 系统安装完成，即将重启...",
-                ])
-                .spawn();
+            if let Err(error) = lr_core::windows_shutdown::schedule_restart(
+                10,
+                "LetRecovery 系统安装完成，即将重启...",
+            ) {
+                log::error!("[PE INSTALL] schedule restart failed: {error}");
+                show_error_message(&tr!("安排重启失败: {}", error));
+            }
         } else {
             show_success_message(&tr!("系统安装完成！请手动重启计算机。"));
         }
@@ -1045,15 +1047,12 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         show_success_message(&tr!("系统备份完成！\n保存位置: {}", config.save_path));
 
         // 自动重启
-        let _ = utils::command::new_command("shutdown")
-            .args([
-                "/r",
-                "/t",
-                "10",
-                "/c",
-                "LetRecovery 系统备份完成，即将重启...",
-            ])
-            .spawn();
+        if let Err(error) =
+            lr_core::windows_shutdown::schedule_restart(10, "LetRecovery 系统备份完成，即将重启...")
+        {
+            log::error!("[PE BACKUP] schedule restart failed: {error}");
+            show_error_message(&tr!("安排重启失败: {}", error));
+        }
     }
 
     Ok(())

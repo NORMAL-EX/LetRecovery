@@ -43,8 +43,8 @@ pub fn run_scripts_in_dir(dir: &Path) -> Result<String, String> {
         .collect::<Vec<_>>()
         .join(", ");
     Err(format!(
-        "检测到已停用的任意分区脚本：{names}。LetRecovery 已改用参数化 WinAPI 存储操作，\
-         无法安全、等价地自动转换任意 .txt/.cmd/.bat 脚本；请移除这些脚本并改用内置分区功能。"
+        "检测到已停用的任意分区脚本：{names}。LetRecovery 已改用参数化 WinAPI 存储操作；\
+         无法安全、等价地自动转换任意 .txt/.cmd/.bat 脚本，请移除这些脚本并改用内置分区功能。"
     ))
 }
 

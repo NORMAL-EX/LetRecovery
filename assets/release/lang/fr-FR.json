@@ -1,6 +1,7 @@
 {
     "Administrator 账户名": "Nom du compte Administrateur",
     "Administrator 密码": "Mot de passe Administrateur",
+    "安排重启失败: {}": "Échec de la planification du redémarrage : {}",
     "“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。": "« Nom d’utilisateur personnalisé » et « Activer le compte Administrateur intégré » ne peuvent pas être activés simultanément.",
     "内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。": "Le nom du compte Administrateur intégré n’est pas valide. Il ne peut pas être vide, dépasser 20 caractères ni contenir des caractères interdits par Windows.",
     "内置 Administrator 账户选项仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。": "L’option du compte Administrateur intégré prend uniquement en charge les images WIM, ESD et SWM de Windows 7 ou version ultérieure.",
@@ -453,7 +454,7 @@
     "密码已清空，但启动账户命令无法运行: {}": "Le mot de passe a été effacé, mais la commande d'activation du compte n'a pas pu être lancée : {}",
     "密码已清空，但启用账户失败: {}": "Le mot de passe a été effacé, mais l'activation du compte a échoué : {}",
     "固定操作：清空所选账户密码，并启用该账户。": "Opération fixe : effacez le mot de passe du compte sélectionné et activez ce compte.",
-    "仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 net user。": "Utilisez cette fonction uniquement sur vos propres systèmes ou avec une autorisation explicite. Pour un système hors ligne, la ruche SAM est sauvegardée avant modification ; pour le système actuel, la commande net user est utilisée.",
+  "仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 Windows NetAPI。": "Utilisez cette fonction uniquement sur vos propres systèmes ou avec une autorisation explicite. Pour un système hors ligne, la ruche SAM est sauvegardée avant modification ; pour le système actuel, Windows NetAPI est utilisé.",
     "开发测试构建禁止读取或修改宿主账户": "Les versions de test de développement ne peuvent pas lire ou modifier les comptes hôtes",
     "无效的密码重置目标: {}": "Cible de réinitialisation de mot de passe non valide : {}",
     "无效的本地账户名": "Nom de compte local invalide",

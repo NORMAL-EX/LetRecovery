@@ -13,8 +13,6 @@ use windows::Win32::System::Ioctl::{
 use windows::Win32::System::IO::DeviceIoControl;
 
 use crate::tr;
-use crate::utils::command::new_command;
-use crate::utils::encoding::gbk_to_utf8;
 
 const DRIVE_FIXED: u32 = 3;
 const MAX_ADJACENCY_GAP_BYTES: u64 = 1024 * 1024;
@@ -197,10 +195,12 @@ impl DiskManager {
     /// 获取所有固定磁盘分区列表
     pub fn get_partitions() -> Result<Vec<Partition>> {
         let mut partitions = Vec::new();
+        let running_windows_drive = lr_core::windows_storage::current_windows_drive_letter()
+            .map_err(anyhow::Error::from)?;
 
         for letter in b'A'..=b'Z' {
             let drive = format!("{}:", letter as char);
-            if let Ok(info) = Self::get_partition_info(&drive) {
+            if let Ok(info) = Self::get_partition_info(&drive, running_windows_drive) {
                 log::debug!(
                     "Partition {} label=\"{}\" total={}MB free={}MB system={} windows={} style={}",
                     info.letter.as_str(),
@@ -218,7 +218,7 @@ impl DiskManager {
         Ok(partitions)
     }
 
-    fn get_partition_info(drive: &str) -> Result<Partition> {
+    fn get_partition_info(drive: &str, running_windows_drive: char) -> Result<Partition> {
         let path = format!("{}\\", drive);
         let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -258,9 +258,10 @@ impl DiskManager {
             .trim_end_matches('\0')
             .to_string();
 
-        // PE环境下排除 X: 盘
-        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "X:".to_string());
-        let is_current_system = drive.eq_ignore_ascii_case(&system_drive);
+        let is_current_system = drive
+            .chars()
+            .next()
+            .is_some_and(|letter| letter.eq_ignore_ascii_case(&running_windows_drive));
 
         // 检查是否包含 Windows 系统
         let windows_path = format!("{}\\Windows\\System32", drive);
@@ -356,27 +357,10 @@ impl DiskManager {
 
     /// 检测是否为UEFI模式
     pub fn detect_uefi_mode() -> bool {
-        // 检查EFI系统分区
-        for letter in ['S', 'T', 'U', 'V', 'W', 'Y', 'Z'] {
-            let efi_path = format!("{}:\\EFI\\Microsoft\\Boot", letter);
-            if Path::new(&efi_path).exists() {
-                return true;
-            }
-        }
-
-        // 检查固件类型
-        let output = new_command("cmd")
-            .args(["/c", "bcdedit /enum firmware"])
-            .output();
-
-        if let Ok(output) = output {
-            let stdout = gbk_to_utf8(&output.stdout);
-            if stdout.contains("firmware") || stdout.contains("UEFI") {
-                return true;
-            }
-        }
-
-        false
+        matches!(
+            lr_core::windows_firmware::detect_firmware_type(),
+            Ok(lr_core::windows_firmware::FirmwareType::Uefi)
+        )
     }
 
     /// Resolve the install boot mode against the selected target disk.

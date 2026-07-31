@@ -106,23 +106,11 @@ pub fn get_windows_version() -> WindowsVersion {
         }
     }
 
-    // 尝试从注册表获取更详细的信息
-    if let Ok(output) = std::process::Command::new("reg")
-        .args([
-            "query",
-            r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
-            "/v",
-            "ProductName",
-        ])
-        .output()
-    {
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        if let Some(line) = output_str.lines().find(|l| l.contains("ProductName")) {
-            if let Some(value) = line.split("REG_SZ").nth(1) {
-                version.product_name = value.trim().to_string();
-            }
-        }
-    }
+    version.product_name = lr_core::registry::OfflineRegistry::query_string(
+        r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        "ProductName",
+    )
+    .unwrap_or_default();
 
     version.version_string = format!("{}.{}.{}", version.major, version.minor, version.build);
 
@@ -151,50 +139,19 @@ pub fn get_offline_windows_version(system_root: &Path) -> Option<WindowsVersion>
         return None;
     }
 
-    // 尝试使用 PowerShell 获取版本信息
-    let ps_script = format!(
-        "(Get-Item '{}').VersionInfo | ConvertTo-Json",
-        kernel_path.to_string_lossy()
-    );
-
-    if let Ok(output) = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps_script])
-        .output()
-    {
-        let output_str = String::from_utf8_lossy(&output.stdout);
-
-        // 简单解析 JSON
-        let mut version = WindowsVersion::default();
-
-        for line in output_str.lines() {
-            let line = line.trim();
-            if line.contains("\"FileMajorPart\"") {
-                if let Some(val) = extract_json_number(line) {
-                    version.major = val;
-                }
-            } else if line.contains("\"FileMinorPart\"") {
-                if let Some(val) = extract_json_number(line) {
-                    version.minor = val;
-                }
-            } else if line.contains("\"FileBuildPart\"") {
-                if let Some(val) = extract_json_number(line) {
-                    version.build = val;
-                }
-            } else if line.contains("\"ProductName\"") {
-                if let Some(val) = extract_json_string(line) {
-                    version.product_name = val;
-                }
-            }
-        }
-
-        if version.major > 0 {
-            version.version_string =
-                format!("{}.{}.{}", version.major, version.minor, version.build);
-            return Some(version);
-        }
-    }
-
-    None
+    let file_version = lr_core::windows_file_version::query_file_version(&kernel_path).ok()?;
+    let mut version = WindowsVersion {
+        major: u32::from(file_version.major),
+        minor: u32::from(file_version.minor),
+        build: u32::from(file_version.build),
+        version_string: format!(
+            "{}.{}.{}",
+            file_version.major, file_version.minor, file_version.build
+        ),
+        product_name: String::new(),
+    };
+    version.product_name = version.short_name().to_owned();
+    Some(version)
 }
 
 /// 获取文件的版本信息
@@ -204,43 +161,17 @@ pub fn get_offline_windows_version(system_root: &Path) -> Option<WindowsVersion>
 /// # 参数
 /// - `path`: 文件路径
 pub fn get_file_version(path: &Path) -> Option<(u32, u32, u32, u32)> {
-    // 方法1: 尝试使用 PowerShell 获取文件版本
-    if let Some(version) = get_file_version_via_powershell(path) {
-        return Some(version);
-    }
-
-    // 方法2: 直接从 PE 资源段读取版本信息
-    get_file_version_from_pe(path)
-}
-
-/// 通过 PowerShell 获取文件版本
-fn get_file_version_via_powershell(path: &Path) -> Option<(u32, u32, u32, u32)> {
-    let ps_script = format!(
-        "$v = (Get-Item '{}' -ErrorAction SilentlyContinue).VersionInfo; if($v) {{ Write-Output \"$($v.FileMajorPart),$($v.FileMinorPart),$($v.FileBuildPart),$($v.FilePrivatePart)\" }}",
-        path.to_string_lossy().replace('\'', "''")
-    );
-
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = output_str.trim().split(',').collect();
-
-    if parts.len() == 4 {
-        let major = parts[0].parse().ok()?;
-        let minor = parts[1].parse().ok()?;
-        let build = parts[2].parse().ok()?;
-        let revision = parts[3].parse().ok()?;
-        return Some((major, minor, build, revision));
-    }
-
-    None
+    lr_core::windows_file_version::query_file_version(path)
+        .ok()
+        .map(|version| {
+            (
+                u32::from(version.major),
+                u32::from(version.minor),
+                u32::from(version.build),
+                u32::from(version.revision),
+            )
+        })
+        .or_else(|| get_file_version_from_pe(path))
 }
 
 /// 从 PE 文件资源段直接读取版本信息

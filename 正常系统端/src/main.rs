@@ -75,7 +75,6 @@ fn main() -> anyhow::Result<()> {
              bin/bcdedit.exe\n\
              bin/bcdboot.exe\n\
              bin/bootsect.exe\n\
-             bin/format.com\n\
              bin/aria2c.exe\n\
              bin/ghost/ghost64.exe\n\n\
              请重新下载完整安装包或修复程序文件。",
@@ -336,7 +335,6 @@ fn check_dependencies() -> Result<(), Vec<String>> {
         "bin/bcdedit.exe",
         "bin/bcdboot.exe",
         "bin/bootsect.exe",
-        "bin/format.com",
         "bin/aria2c.exe",
         "bin/ghost/ghost64.exe",
     ];
@@ -575,15 +573,13 @@ fn run_pe_install() -> anyhow::Result<()> {
             log::info!("[PE INSTALL] 安装完成!");
             if config.auto_reboot {
                 log::info!("[PE INSTALL] 即将重启...");
-                let _ = utils::cmd::create_command("shutdown")
-                    .args([
-                        "/r",
-                        "/t",
-                        "10",
-                        "/c",
-                        "LetRecovery 系统安装完成，即将重启...",
-                    ])
-                    .spawn();
+                if let Err(error) = lr_core::windows_shutdown::schedule_restart(
+                    10,
+                    "LetRecovery 系统安装完成，即将重启...",
+                ) {
+                    log::error!("[PE INSTALL] 安排重启失败: {error}");
+                    show_error_message(&format!("安排重启失败: {error}"));
+                }
             } else {
                 show_success_message("系统安装完成！请手动重启计算机。");
             }
@@ -662,7 +658,6 @@ fn execute_pe_install(
     data_dir: &str,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
-    use lr_core::command::{CommandExecutor, CommandRequest, SystemCommandExecutor};
 
     log::info!("[PE INSTALL] Step 0: 格式化前校验镜像");
     let verification = core::image_verify::ImageVerifier::new().verify(image_path, None);
@@ -671,29 +666,19 @@ fn execute_pe_install(
     }
 
     log::info!("[PE INSTALL] Step 1: 格式化分区");
-    // 格式化目标分区
-    let spec = lr_core::format_command::FormatCommandSpec::new(target_partition, "NTFS", None)
+    lr_core::format_command::FormatCommandSpec::new(target_partition, "NTFS", None)
         .map_err(|error| anyhow::anyhow!("无效的格式化参数: {error}"))?;
-    let args = spec.args();
-    let mut cmd_args = vec!["/d", "/s", "/c", "format.com"];
-    cmd_args.extend(args.iter().map(String::as_str));
-    // WinPE compatibility path: retain cmd.exe because some PE format.com builds
-    // do not exit when invoked directly with CREATE_NO_WINDOW.
-    let request = CommandRequest::new("cmd").args(&cmd_args);
-    let output = SystemCommandExecutor
-        .execute(&request)
-        .context("执行格式化命令失败")?;
-    let stdout = utils::encoding::gbk_to_utf8(output.stdout());
-    let stderr = utils::encoding::gbk_to_utf8(output.stderr());
-
-    if lr_core::format_command::output_indicates_error(output.succeeded(), &stdout, &stderr) {
-        let detail = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
-        anyhow::bail!("格式化分区失败: {detail}");
-    }
+    let drive_letter = target_partition
+        .trim()
+        .chars()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("格式化目标缺少盘符"))?;
+    lr_core::windows_storage::format_drive(
+        drive_letter,
+        lr_core::windows_storage::FileSystem::Ntfs,
+        "",
+    )
+    .map_err(|error| anyhow::anyhow!("格式化分区失败: {error}"))?;
 
     log::info!("[PE INSTALL] Step 2: 释放镜像");
     // 释放镜像

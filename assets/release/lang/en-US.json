@@ -1,6 +1,7 @@
 {
     "Administrator 账户名": "Administrator account name",
     "Administrator 密码": "Administrator password",
+    "安排重启失败: {}": "Failed to schedule restart: {}",
     "“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。": "\"Custom Username\" and \"Enable built-in Administrator account\" cannot be enabled at the same time.",
     "内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。": "The built-in Administrator account name is invalid. It cannot be empty, exceed 20 characters, or contain characters prohibited by Windows.",
     "内置 Administrator 账户选项仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。": "The built-in Administrator account option supports only Windows 7 or later WIM, ESD, and SWM images.",
@@ -453,7 +454,7 @@
     "密码已清空，但启动账户命令无法运行: {}": "The password was cleared, but the account-enable command could not be started: {}",
     "密码已清空，但启用账户失败: {}": "The password was cleared, but enabling the account failed: {}",
     "固定操作：清空所选账户密码，并启用该账户。": "Fixed operation: clear the selected account's password and enable that account.",
-    "仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 net user。": "Use only on systems you own or are authorized to manage. Offline Windows modifies its SAM after creating a backup; the current system uses net user.",
+  "仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 Windows NetAPI。": "Use only on systems you own or are authorized to manage. Offline Windows modifies its SAM after creating a backup; the current system uses Windows NetAPI.",
     "开发测试构建禁止读取或修改宿主账户": "Development-test builds cannot read or modify host accounts",
     "无效的密码重置目标: {}": "Invalid password-reset target: {}",
     "无效的本地账户名": "Invalid local account name",

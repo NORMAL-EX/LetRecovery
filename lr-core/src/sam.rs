@@ -1,6 +1,6 @@
 //! 离线 SAM 账户操作（两端共享）：清除指定账户密码、启用被禁用账户。
 //!
-//! 通过 `reg.exe load/unload` 挂载离线 SAM 配置单元，按 chntpw 思路把目标账户
+//! 通过共享 Win32 注册表边界挂载离线 SAM 配置单元，按 chntpw 思路把目标账户
 //! 在 SAM `V` 结构中的 NT/LM hash **长度字段**清零（等效空密码），并清除 `F`
 //! 结构里的 `ACB_DISABLED` 位（启用账户）。
 //!
@@ -12,8 +12,6 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::command::new_command;
-use crate::encoding::gbk_to_utf8;
 use crate::registry::OfflineRegistry;
 
 /// 离线清除目标系统中指定账户的密码（把 SAM 中该用户 V 结构的 NT/LM hash 长度清零）。
@@ -184,72 +182,22 @@ pub fn list_accounts(target_partition: &str) -> Result<Vec<SamAccount>> {
 
 /// 枚举 `Users` 键下的用户 RID 子键（8 位十六进制，如 000001F4）。
 fn list_user_rids(users_key: &str) -> Result<Vec<String>> {
-    let out = new_command("reg.exe").args(["query", users_key]).output()?;
-    if !out.status.success() {
-        anyhow::bail!("枚举 SAM 用户失败: {}", gbk_to_utf8(&out.stderr));
-    }
-    let text = gbk_to_utf8(&out.stdout);
-    let mut rids = Vec::new();
-    for line in text.lines() {
-        if let Some(name) = line.trim().rsplit('\\').next() {
-            if name.len() == 8 && name.chars().all(|c| c.is_ascii_hexdigit()) {
-                rids.push(name.to_string());
-            }
-        }
-    }
-    Ok(rids)
+    OfflineRegistry::subkey_names(users_key).map(|names| {
+        names
+            .into_iter()
+            .filter(|name| name.len() == 8 && name.chars().all(|c| c.is_ascii_hexdigit()))
+            .collect()
+    })
 }
 
 /// 读取注册表 REG_BINARY 值为字节数组。
 fn reg_read_binary(key: &str, value: &str) -> Result<Vec<u8>> {
-    let out = new_command("reg.exe")
-        .args(["query", key, "/v", value])
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!("reg query 失败: {}", gbk_to_utf8(&out.stderr));
-    }
-    let text = gbk_to_utf8(&out.stdout);
-    for line in text.lines() {
-        if let Some(pos) = line.find("REG_BINARY") {
-            let hex = line[pos + "REG_BINARY".len()..].trim();
-            return hex_to_bytes(hex);
-        }
-    }
-    anyhow::bail!("未找到 {} 的 REG_BINARY 值", value);
+    OfflineRegistry::query_binary(key, value)
 }
 
 /// 写入注册表 REG_BINARY 值。
 fn reg_write_binary(key: &str, value: &str, data: &[u8]) -> Result<()> {
-    let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
-    let out = new_command("reg.exe")
-        .args([
-            "add",
-            key,
-            "/v",
-            value,
-            "/t",
-            "REG_BINARY",
-            "/d",
-            &hex,
-            "/f",
-        ])
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!("reg add 失败: {}", gbk_to_utf8(&out.stderr));
-    }
-    Ok(())
-}
-
-fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
-    let hex: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
-    if !hex.len().is_multiple_of(2) {
-        anyhow::bail!("十六进制长度异常");
-    }
-    let val = |c: u8| (c as char).to_digit(16).unwrap() as u8;
-    Ok(hex
-        .chunks_exact(2)
-        .map(|c| (val(c[0]) << 4) | val(c[1]))
-        .collect())
+    OfflineRegistry::set_binary(key, value, data)
 }
 
 fn read_u32_le(b: &[u8], off: usize) -> Option<u32> {
@@ -337,20 +285,6 @@ mod tests {
         let mut f = vec![0u8; 0x40];
         f[0x38..0x3a].copy_from_slice(&flags.to_le_bytes());
         f
-    }
-
-    #[test]
-    fn hex_to_bytes_works() {
-        assert_eq!(
-            hex_to_bytes("dEadBeef").unwrap(),
-            vec![0xde, 0xad, 0xbe, 0xef]
-        );
-        assert_eq!(
-            hex_to_bytes("de ad\tbe ef").unwrap(),
-            vec![0xde, 0xad, 0xbe, 0xef]
-        );
-        assert!(hex_to_bytes("abc").is_err());
-        assert_eq!(hex_to_bytes("").unwrap(), Vec::<u8>::new());
     }
 
     #[test]

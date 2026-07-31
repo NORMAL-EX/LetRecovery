@@ -2,7 +2,6 @@
 //!
 //! 提供对离线Windows分区的精确版本检测
 
-use crate::utils::cmd::create_command;
 use std::path::Path;
 
 /// Windows版本详细信息
@@ -183,181 +182,64 @@ fn read_version_from_registry(partition: &str) -> Option<WindowsVersionInfo> {
     let temp_key = format!("LR_VER_{}_{}", partition_id, timestamp % 10000);
     let reg_path = format!("HKLM\\{}\\Microsoft\\Windows NT\\CurrentVersion", temp_key);
 
-    // 尝试加载注册表
-    let load_result = create_command("reg.exe")
-        .args(["load", &format!("HKLM\\{}", temp_key), &software_hive])
-        .output();
-
-    if load_result.is_err() {
+    if let Err(error) = lr_core::registry::OfflineRegistry::load_hive(&temp_key, &software_hive) {
+        log::warn!(
+            "[WindowsVersionDetect] RegLoadKeyW failed for {}: {}",
+            software_hive,
+            error
+        );
         return None;
     }
 
-    let load_output = load_result.unwrap();
-    if !load_output.status.success() {
-        // 注册表可能已被加载，尝试先卸载再加载
-        let _ = create_command("reg.exe")
-            .args(["unload", &format!("HKLM\\{}", temp_key)])
-            .output();
-
-        // 重试加载
-        let retry_load = create_command("reg.exe")
-            .args(["load", &format!("HKLM\\{}", temp_key), &software_hive])
-            .output();
-
-        if retry_load.is_err() || !retry_load.unwrap().status.success() {
-            return None;
-        }
+    let query = |name: &str| lr_core::registry::OfflineRegistry::query_string(&reg_path, name).ok();
+    let result = WindowsVersionInfo {
+        product_name: query("ProductName").unwrap_or_else(|| "Windows".to_owned()),
+        display_version: query("DisplayVersion"),
+        current_build: query("CurrentBuild").or_else(|| query("CurrentBuildNumber")),
+        edition_id: query("EditionID"),
+    };
+    if let Err(error) = lr_core::registry::OfflineRegistry::unload_hive(&temp_key) {
+        log::warn!(
+            "[WindowsVersionDetect] RegUnLoadKeyW failed for {}: {}",
+            temp_key,
+            error
+        );
+        return None;
     }
-
-    // 查询注册表值
-    let product_name =
-        query_reg_value(&reg_path, "ProductName").unwrap_or_else(|| "Windows".to_string());
-    let display_version = query_reg_value(&reg_path, "DisplayVersion");
-    let current_build = query_reg_value(&reg_path, "CurrentBuild")
-        .or_else(|| query_reg_value(&reg_path, "CurrentBuildNumber"));
-    let edition_id = query_reg_value(&reg_path, "EditionID");
-
-    // 卸载注册表
-    let _ = create_command("reg.exe")
-        .args(["unload", &format!("HKLM\\{}", temp_key)])
-        .output();
-
-    Some(WindowsVersionInfo {
-        product_name,
-        display_version,
-        current_build,
-        edition_id,
-    })
+    Some(result)
 }
 
 /// 从kernel32.dll读取版本信息
 fn read_version_from_kernel32(partition: &str) -> Option<WindowsVersionInfo> {
-    #[cfg(windows)]
-    {
-        let kernel32_path = format!("{}\\Windows\\System32\\kernel32.dll", partition);
+    let kernel32_path = format!("{}\\Windows\\System32\\kernel32.dll", partition);
+    let version =
+        lr_core::windows_file_version::query_file_version(Path::new(&kernel32_path)).ok()?;
+    let major = u32::from(version.major);
+    let minor = u32::from(version.minor);
+    let build = u32::from(version.build);
 
-        if !Path::new(&kernel32_path).exists() {
-            return None;
-        }
+    let product_name = if major == 10 && build >= 22000 {
+        "Windows 11".to_string()
+    } else if major == 10 {
+        "Windows 10".to_string()
+    } else if major == 6 && minor == 3 {
+        "Windows 8.1".to_string()
+    } else if major == 6 && minor == 2 {
+        "Windows 8".to_string()
+    } else if major == 6 && minor == 1 {
+        "Windows 7".to_string()
+    } else if major == 6 && minor == 0 {
+        "Windows Vista".to_string()
+    } else {
+        format!("Windows {}.{}", major, minor)
+    };
 
-        // 使用PowerShell获取文件版本信息
-        let ps_script = format!(
-            r#"
-            $file = '{}'
-            if (Test-Path $file) {{
-                $ver = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($file)
-                Write-Output "$($ver.FileMajorPart).$($ver.FileMinorPart).$($ver.FileBuildPart).$($ver.FilePrivatePart)"
-            }}
-            "#,
-            kernel32_path.replace('\'', "''")
-        );
-
-        let output = create_command("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                &ps_script,
-            ])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let parts: Vec<&str> = version_str.split('.').collect();
-
-        if parts.len() >= 3 {
-            let major: u32 = parts[0].parse().unwrap_or(0);
-            let minor: u32 = parts[1].parse().unwrap_or(0);
-            let build: u32 = parts[2].parse().unwrap_or(0);
-
-            // 根据主版本号和Build号确定Windows版本
-            let product_name = if major == 10 && build >= 22000 {
-                "Windows 11".to_string()
-            } else if major == 10 {
-                "Windows 10".to_string()
-            } else if major == 6 && minor == 3 {
-                "Windows 8.1".to_string()
-            } else if major == 6 && minor == 2 {
-                "Windows 8".to_string()
-            } else if major == 6 && minor == 1 {
-                "Windows 7".to_string()
-            } else if major == 6 && minor == 0 {
-                "Windows Vista".to_string()
-            } else {
-                format!("Windows {}.{}", major, minor)
-            };
-
-            return Some(WindowsVersionInfo {
-                product_name,
-                display_version: None,
-                current_build: Some(build.to_string()),
-                edition_id: None,
-            });
-        }
-    }
-
-    None
-}
-
-/// 查询注册表值
-fn query_reg_value(key_path: &str, value_name: &str) -> Option<String> {
-    let output = create_command("reg.exe")
-        .args(["query", key_path, "/v", value_name])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = crate::utils::encoding::gbk_to_utf8(&output.stdout);
-
-    // 解析输出，格式类似：
-    //     ProductName    REG_SZ    Windows 11 Pro
-    for line in stdout.lines() {
-        let line_upper = line.to_uppercase();
-        let value_upper = value_name.to_uppercase();
-
-        if line_upper.contains(&value_upper) && line_upper.contains("REG_SZ") {
-            // 找到REG_SZ后面的值
-            if let Some(pos) = line.to_uppercase().find("REG_SZ") {
-                let value_start = pos + 6; // "REG_SZ"的长度
-                if value_start < line.len() {
-                    let value = line[value_start..].trim();
-                    if !value.is_empty() {
-                        return Some(value.to_string());
-                    }
-                }
-            }
-        }
-
-        // 也处理REG_DWORD的情况（对于某些数值）
-        if line_upper.contains(&value_upper) && line_upper.contains("REG_DWORD") {
-            if let Some(pos) = line.to_uppercase().find("REG_DWORD") {
-                let value_start = pos + 9; // "REG_DWORD"的长度
-                if value_start < line.len() {
-                    let value = line[value_start..].trim();
-                    // 转换十六进制值
-                    if let Some(hex_val) = value.strip_prefix("0x") {
-                        if let Ok(num) = u32::from_str_radix(hex_val, 16) {
-                            return Some(num.to_string());
-                        }
-                    }
-                    if !value.is_empty() {
-                        return Some(value.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    None
+    Some(WindowsVersionInfo {
+        product_name,
+        display_version: None,
+        current_build: Some(build.to_string()),
+        edition_id: None,
+    })
 }
 
 /// 从文件系统检测Windows版本

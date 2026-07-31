@@ -1,11 +1,11 @@
-//! Read-only discovery and ephemeral capture of the currently connected Wi-Fi profile.
+//! Read-only discovery and in-memory capture of the currently connected Wi-Fi profile.
 //!
-//! The exported XML contains a clear-text key. It is returned only in memory and the temporary
-//! export directory is removed by a guard on every exit path.
+//! The profile XML can contain a clear-text key. It is never written to a
+//! temporary file and is returned only to the existing installation-session
+//! configuration boundary.
 
+#[cfg(feature = "non-elevated-tests")]
 use anyhow::bail;
-#[cfg(not(feature = "non-elevated-tests"))]
-use anyhow::{anyhow, Context};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedWifiProfile {
@@ -14,42 +14,186 @@ pub struct CapturedWifiProfile {
 }
 
 #[cfg(not(feature = "non-elevated-tests"))]
-fn netsh_output(args: &[&str]) -> anyhow::Result<std::process::Output> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("netsh")
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .context("failed to start netsh")
-}
+mod native {
+    use std::ffi::c_void;
+    use std::slice;
 
-fn decode_console(bytes: &[u8]) -> String {
-    match String::from_utf8(bytes.to_vec()) {
-        Ok(value)
-            if value
-                .chars()
-                .filter(|character| *character == '\u{fffd}')
-                .count()
-                < 3 =>
-        {
-            value
+    use anyhow::{bail, Context};
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+    use windows::Win32::NetworkManagement::WiFi::{
+        wlan_interface_state_connected, wlan_intf_opcode_current_connection, WlanCloseHandle,
+        WlanEnumInterfaces, WlanFreeMemory, WlanGetProfile, WlanOpenHandle, WlanQueryInterface,
+        WLAN_API_VERSION_2_0, WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO,
+        WLAN_INTERFACE_INFO_LIST, WLAN_PROFILE_GET_PLAINTEXT_KEY,
+    };
+
+    use super::CapturedWifiProfile;
+
+    struct WlanClient(HANDLE);
+
+    impl Drop for WlanClient {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = WlanCloseHandle(self.0, None);
+            }
         }
-        _ => encoding_rs::GBK.decode(bytes).0.into_owned(),
     }
-}
 
-fn connected_ssid(text: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        let line = line.trim();
-        if line.starts_with("BSSID") {
-            return None;
+    struct WlanMemory(*mut c_void);
+
+    impl Drop for WlanMemory {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    WlanFreeMemory(self.0);
+                }
+            }
         }
-        let rest = line.strip_prefix("SSID")?;
-        let (_, value) = rest.split_once(':')?;
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_owned())
-    })
+    }
+
+    fn status_error(operation: &str, status: u32) -> anyhow::Error {
+        anyhow::anyhow!(
+            "{operation} failed with Win32 error {status}: {}",
+            std::io::Error::from_raw_os_error(status as i32)
+        )
+    }
+
+    fn open_client() -> anyhow::Result<WlanClient> {
+        let mut negotiated_version = 0_u32;
+        let mut handle = HANDLE::default();
+        let status = unsafe {
+            WlanOpenHandle(
+                WLAN_API_VERSION_2_0,
+                None,
+                &mut negotiated_version,
+                &mut handle,
+            )
+        };
+        if status != ERROR_SUCCESS.0 {
+            return Err(status_error("WlanOpenHandle", status));
+        }
+        if handle.is_invalid() {
+            bail!("WlanOpenHandle returned an invalid handle");
+        }
+        Ok(WlanClient(handle))
+    }
+
+    fn connected_interfaces(client: &WlanClient) -> anyhow::Result<Vec<WLAN_INTERFACE_INFO>> {
+        let mut raw = std::ptr::null_mut::<WLAN_INTERFACE_INFO_LIST>();
+        let status = unsafe { WlanEnumInterfaces(client.0, None, &mut raw) };
+        if status != ERROR_SUCCESS.0 {
+            return Err(status_error("WlanEnumInterfaces", status));
+        }
+        let memory = WlanMemory(raw.cast::<c_void>());
+        if memory.0.is_null() {
+            bail!("WlanEnumInterfaces returned a null list");
+        }
+        let list = unsafe { &*raw };
+        let count = list.dwNumberOfItems as usize;
+        let interfaces = unsafe { slice::from_raw_parts(list.InterfaceInfo.as_ptr(), count) };
+        Ok(interfaces
+            .iter()
+            .copied()
+            .filter(|interface| interface.isState == wlan_interface_state_connected)
+            .collect())
+    }
+
+    unsafe fn connection_attributes(
+        client: &WlanClient,
+        interface: &WLAN_INTERFACE_INFO,
+    ) -> anyhow::Result<(WlanMemory, WLAN_CONNECTION_ATTRIBUTES)> {
+        let mut size = 0_u32;
+        let mut raw = std::ptr::null_mut::<c_void>();
+        let status = WlanQueryInterface(
+            client.0,
+            &interface.InterfaceGuid,
+            wlan_intf_opcode_current_connection,
+            None,
+            &mut size,
+            &mut raw,
+            None,
+        );
+        if status != ERROR_SUCCESS.0 {
+            return Err(status_error(
+                "WlanQueryInterface(current connection)",
+                status,
+            ));
+        }
+        let memory = WlanMemory(raw);
+        if memory.0.is_null() || size < std::mem::size_of::<WLAN_CONNECTION_ATTRIBUTES>() as u32 {
+            bail!("WlanQueryInterface returned invalid connection attributes");
+        }
+        Ok((memory, *raw.cast::<WLAN_CONNECTION_ATTRIBUTES>()))
+    }
+
+    fn utf16_array(array: &[u16]) -> anyhow::Result<String> {
+        let length = array
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(array.len());
+        String::from_utf16(&array[..length]).context("Wi-Fi profile name is invalid UTF-16")
+    }
+
+    pub fn connected_wifi_available() -> anyhow::Result<bool> {
+        let client = open_client()?;
+        Ok(!connected_interfaces(&client)?.is_empty())
+    }
+
+    pub fn capture_connected_wifi() -> anyhow::Result<CapturedWifiProfile> {
+        let client = open_client()?;
+        let interfaces = connected_interfaces(&client)?;
+        let interface = interfaces
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no connected Wi-Fi interface was found"))?;
+        let (_attributes_memory, attributes) =
+            unsafe { connection_attributes(&client, interface)? };
+        let profile_name = utf16_array(&attributes.strProfileName)?;
+        if profile_name.is_empty() {
+            bail!("connected Wi-Fi has no saved profile name");
+        }
+        let ssid_length = attributes
+            .wlanAssociationAttributes
+            .dot11Ssid
+            .uSSIDLength
+            .min(32) as usize;
+        let ssid = String::from_utf8_lossy(
+            &attributes.wlanAssociationAttributes.dot11Ssid.ucSSID[..ssid_length],
+        )
+        .into_owned();
+
+        let profile_name_wide: Vec<u16> = profile_name.encode_utf16().chain(Some(0)).collect();
+        let mut xml_pointer = PWSTR::null();
+        let mut flags = WLAN_PROFILE_GET_PLAINTEXT_KEY;
+        let mut granted_access = 0_u32;
+        let status = unsafe {
+            WlanGetProfile(
+                client.0,
+                &interface.InterfaceGuid,
+                PCWSTR(profile_name_wide.as_ptr()),
+                None,
+                &mut xml_pointer,
+                Some(&mut flags),
+                Some(&mut granted_access),
+            )
+        };
+        if status != ERROR_SUCCESS.0 {
+            return Err(status_error(
+                "WlanGetProfile(plaintext key requested)",
+                status,
+            ));
+        }
+        let xml_memory = WlanMemory(xml_pointer.0.cast::<c_void>());
+        if xml_memory.0.is_null() {
+            bail!("WlanGetProfile returned null profile XML");
+        }
+        let xml =
+            unsafe { xml_pointer.to_string() }.context("Wi-Fi profile XML is invalid UTF-16")?;
+        if xml.is_empty() {
+            bail!("WlanGetProfile returned empty profile XML");
+        }
+        Ok(CapturedWifiProfile { ssid, xml })
+    }
 }
 
 #[cfg(feature = "non-elevated-tests")]
@@ -58,44 +202,7 @@ pub fn connected_wifi_available() -> anyhow::Result<bool> {
 }
 
 #[cfg(not(feature = "non-elevated-tests"))]
-pub fn connected_wifi_available() -> anyhow::Result<bool> {
-    let output = netsh_output(&["wlan", "show", "interfaces"])?;
-    if !output.status.success() {
-        bail!("netsh wlan show interfaces returned {}", output.status);
-    }
-    Ok(connected_ssid(&decode_console(&output.stdout)).is_some())
-}
-
-struct TempProfileDirectory(std::path::PathBuf);
-
-impl Drop for TempProfileDirectory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-#[cfg(not(feature = "non-elevated-tests"))]
-fn temp_profile_directory() -> anyhow::Result<TempProfileDirectory> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    for _ in 0..32 {
-        let suffix = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "LetRecovery-wifi-{}-{}-{suffix}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        match std::fs::create_dir(&path) {
-            Ok(()) => return Ok(TempProfileDirectory(path)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error).context("failed to create Wi-Fi export directory"),
-        }
-    }
-    bail!("failed to allocate a unique Wi-Fi export directory")
-}
+pub use native::connected_wifi_available;
 
 #[cfg(feature = "non-elevated-tests")]
 pub fn capture_connected_wifi() -> anyhow::Result<CapturedWifiProfile> {
@@ -103,54 +210,19 @@ pub fn capture_connected_wifi() -> anyhow::Result<CapturedWifiProfile> {
 }
 
 #[cfg(not(feature = "non-elevated-tests"))]
-pub fn capture_connected_wifi() -> anyhow::Result<CapturedWifiProfile> {
-    let interfaces = netsh_output(&["wlan", "show", "interfaces"])?;
-    if !interfaces.status.success() {
-        bail!("netsh wlan show interfaces returned {}", interfaces.status);
-    }
-    let ssid = connected_ssid(&decode_console(&interfaces.stdout))
-        .ok_or_else(|| anyhow!("no connected Wi-Fi profile was found"))?;
-    let directory = temp_profile_directory()?;
-    let folder = directory.0.to_string_lossy().into_owned();
-    let profile = format!("name={ssid}");
-    let folder_argument = format!("folder={folder}");
-    let exported = netsh_output(&[
-        "wlan",
-        "export",
-        "profile",
-        &profile,
-        "key=clear",
-        &folder_argument,
-    ])?;
-    if !exported.status.success() {
-        bail!("netsh wlan export profile returned {}", exported.status);
-    }
-    let xml_path = std::fs::read_dir(&directory.0)
-        .context("failed to read Wi-Fi export directory")?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
-        })
-        .ok_or_else(|| anyhow!("netsh did not produce a Wi-Fi profile XML"))?;
-    let xml = std::fs::read_to_string(xml_path).context("failed to read Wi-Fi profile XML")?;
-    Ok(CapturedWifiProfile { ssid, xml })
-}
+pub use native::capture_connected_wifi;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::CapturedWifiProfile;
 
     #[test]
-    fn parses_ssid_without_confusing_bssid() {
-        let text = "    BSSID : aa:bb:cc\r\n    SSID : Test Network\r\n";
-        assert_eq!(connected_ssid(text).as_deref(), Some("Test Network"));
-    }
-
-    #[test]
-    fn missing_ssid_is_not_connected() {
-        assert_eq!(connected_ssid("State : disconnected"), None);
+    fn captured_profile_keeps_ssid_and_xml_separate() {
+        let profile = CapturedWifiProfile {
+            ssid: "Test Network".to_owned(),
+            xml: "<WLANProfile />".to_owned(),
+        };
+        assert_eq!(profile.ssid, "Test Network");
+        assert_eq!(profile.xml, "<WLANProfile />");
     }
 }

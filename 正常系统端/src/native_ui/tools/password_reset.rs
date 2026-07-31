@@ -358,7 +358,7 @@ impl NativePasswordResetDialog {
         let warning_height = measure_text(
             self.shell.hwnd(),
             self.font,
-            &crate::tr!("仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 net user。"),
+            &crate::tr!("仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 Windows NetAPI。"),
             Some(width),
         )
         .height
@@ -448,7 +448,7 @@ impl NativePasswordResetDialog {
         let warning_height = measure_text(
             self.shell.hwnd(),
             self.font,
-            &crate::tr!("仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 net user。"),
+            &crate::tr!("仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 Windows NetAPI。"),
             Some(width),
         )
         .height
@@ -600,7 +600,7 @@ unsafe fn create_controls(parent: HWND) -> windows::core::Result<Controls> {
             parent,
             w!("STATIC"),
             &crate::tr!(
-                "仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 net user。"
+            "仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 Windows NetAPI。"
             ),
             0,
             64_725,

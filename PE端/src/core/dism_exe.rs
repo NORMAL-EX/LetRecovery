@@ -18,6 +18,8 @@ use lr_core::registry::OfflineRegistry;
 
 #[cfg(windows)]
 use windows::Win32::Globalization::LCIDToLocaleName;
+#[cfg(windows)]
+use windows::{core::w, Win32::Storage::FileSystem::SearchPathW};
 
 use crate::tr;
 use crate::utils::encoding::gbk_to_utf8;
@@ -27,6 +29,44 @@ use crate::utils::encoding::gbk_to_utf8;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 static OFFLINE_INTL_HIVE_SEQUENCE: AtomicU32 = AtomicU32::new(1);
+
+#[cfg(windows)]
+fn search_path_for_dism() -> Result<Option<PathBuf>> {
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let length = unsafe {
+            SearchPathW(
+                None,
+                w!("dism.exe"),
+                None,
+                Some(buffer.as_mut_slice()),
+                None,
+            )
+        };
+        if length == 0 {
+            return Ok(None);
+        }
+        if length < buffer.len() as u32 {
+            buffer.truncate(length as usize);
+            let path = PathBuf::from(
+                String::from_utf16(&buffer)
+                    .context("SearchPathW 为 dism.exe 返回了无效的 UTF-16 路径")?,
+            );
+            return Ok(path.is_file().then_some(path));
+        }
+        // SearchPathW returns the required size including the terminating NUL.
+        let required = length as usize;
+        let next_size = if required <= buffer.len() {
+            buffer.len().saturating_mul(2)
+        } else {
+            required
+        };
+        if next_size <= buffer.len() {
+            bail!("SearchPathW 为 dism.exe 返回了无法扩展的路径长度");
+        }
+        buffer.resize(next_size, 0);
+    }
+}
 
 /// DISM 操作进度
 #[derive(Debug, Clone)]
@@ -360,28 +400,10 @@ impl DismExe {
             }
         }
 
-        // 最后尝试通过 PATH 查找（使用隐藏窗口）
-        let where_result = {
-            let mut cmd = Command::new("where");
-            cmd.arg("dism.exe");
-
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
-
-            cmd.output()
-        };
-
-        if let Ok(output) = where_result {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(first_line) = stdout.lines().next() {
-                let path = PathBuf::from(first_line.trim());
-                if path.exists() {
-                    return Ok(path);
-                }
-            }
+        // 最后使用 Win32 的进程搜索路径查找，避免启动 where.exe 并解析本地化输出。
+        #[cfg(windows)]
+        if let Some(path) = search_path_for_dism()? {
+            return Ok(path);
         }
 
         bail!(

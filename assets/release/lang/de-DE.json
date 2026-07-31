@@ -1,6 +1,7 @@
 {
     "Administrator 账户名": "Administrator-Kontoname",
     "Administrator 密码": "Administrator-Kennwort",
+    "安排重启失败: {}": "Neustart konnte nicht geplant werden: {}",
     "“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。": "„Benutzerdefinierter Benutzername“ und „Integriertes Administratorkonto aktivieren“ können nicht gleichzeitig aktiviert werden.",
     "内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。": "Der Name des integrierten Administratorkontos ist ungültig. Er darf nicht leer sein, 20 Zeichen überschreiten oder unter Windows unzulässige Zeichen enthalten.",
     "内置 Administrator 账户选项仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。": "Die Option für das integrierte Administratorkonto unterstützt nur WIM-, ESD- und SWM-Images ab Windows 7.",
@@ -453,7 +454,7 @@
     "密码已清空，但启动账户命令无法运行: {}": "Das Passwort wurde gelöscht, aber der Befehl zur Kontoaktivierung konnte nicht gestartet werden: {}",
     "密码已清空，但启用账户失败: {}": "Das Passwort wurde gelöscht, aber die Aktivierung des Kontos ist fehlgeschlagen: {}",
     "固定操作：清空所选账户密码，并启用该账户。": "Festgelegter Vorgang: Das Kennwort des ausgewählten Kontos wird entfernt und das Konto aktiviert.",
-    "仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 net user。": "Nur auf eigenen Systemen oder in ausdrücklich autorisierten Umgebungen verwenden. Bei einem Offline-Windows wird die SAM vor der Änderung gesichert; beim aktuellen System wird net user verwendet.",
+  "仅用于自己的系统或已获授权的场景。离线系统会修改 SAM，并在修改前创建备份；当前系统使用 Windows NetAPI。": "Nur auf eigenen Systemen oder in ausdrücklich autorisierten Umgebungen verwenden. Bei einem Offline-Windows wird die SAM vor der Änderung gesichert; beim aktuellen System wird Windows NetAPI verwendet.",
     "开发测试构建禁止读取或修改宿主账户": "Entwicklungstest-Builds können keine Hostkonten lesen oder ändern",
     "无效的密码重置目标: {}": "Ungültiges Passwort-Reset-Ziel: {}",
     "无效的本地账户名": "Ungültiger lokaler Kontoname",

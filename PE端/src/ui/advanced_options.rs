@@ -614,7 +614,7 @@ pub fn apply_advanced_options(
     // ============ Windows XP 专用：离线注入存储/USB3 驱动 ============
     // XP(NT 5.x) 不能用 DISM 离线注入；这里走「拷贝 .sys/.inf + 在已加载的 SYSTEM
     // 配置单元(pc-sys)登记 boot-start 服务 + 写 CriticalDeviceDatabase」。
-    // AHCI 始终注入；NVMe/USB3 按勾选。因为直接写已加载的 pc-sys（reg.exe），
+    // AHCI 始终注入；NVMe/USB3 按勾选。因为直接写已加载的 pc-sys（Win32 注册表 API），
     // 不需要 Win7 那套 DISM 前的卸载/重载。
     // XP 判定：配置标记 或 释放后系统缺少 \Windows\Boot（仅 Vista+ 才有），与引导步骤一致，
     // 使 CLI 安装（config.is_xp 可能为 false）也能触发注入。

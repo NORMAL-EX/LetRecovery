@@ -274,15 +274,11 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
     // 9) 重启（如启用）
     if spec.auto_reboot {
         log::info!("[CLI INSTALL] 即将重启进入 PE 完成安装...");
-        let _ = crate::utils::cmd::create_command("shutdown")
-            .args([
-                "/r",
-                "/t",
-                "5",
-                "/c",
-                "LetRecovery 即将重启进入 PE 完成系统安装...",
-            ])
-            .spawn();
+        lr_core::windows_shutdown::schedule_restart(
+            5,
+            "LetRecovery 即将重启进入 PE 完成系统安装...",
+        )
+        .map_err(|error| anyhow!("安排重启失败: {error}"))?;
     } else {
         log::info!("[CLI INSTALL] 未启用自动重启，请手动重启进入 PE 完成安装。");
     }

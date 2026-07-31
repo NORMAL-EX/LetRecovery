@@ -518,9 +518,11 @@ impl PeManager {
     /// 重启系统
     pub fn reboot() {
         log::info!("[PE] 执行重启");
-        let _ = create_command("shutdown")
-            .args(["/r", "/t", "3", "/c", "LetRecovery 正在重启到 PE 环境..."])
-            .spawn();
+        if let Err(error) =
+            lr_core::windows_shutdown::schedule_restart(3, "LetRecovery 正在重启到 PE 环境...")
+        {
+            log::error!("[PE] 安排重启失败: {error}");
+        }
     }
 
     /// 从bcdedit输出中提取GUID

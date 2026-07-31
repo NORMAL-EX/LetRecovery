@@ -27,6 +27,17 @@ use std::time::Duration;
 use crate::command::new_command;
 use crate::encoding::gbk_to_utf8;
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use windows::{
+    core::PCWSTR,
+    Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
+        FILE_ATTRIBUTE_SYSTEM, FILE_FLAGS_AND_ATTRIBUTES, INVALID_FILE_ATTRIBUTES,
+    },
+};
+
 /// `$WIN_NT$.~BT` 引导文件清单（编译期嵌入，照搬 DSI nt5\NT5.txt）。
 const NT5_BOOTFILES: &str = include_str!("xp_nt5_bootfiles.txt");
 
@@ -178,34 +189,17 @@ pub fn install_from_i386(
     let ls_src = format!("{win}\\$WIN_NT$.~LS\\{src_sub_name}");
     log.push_str(&format!("复制 {src_sub_name} 源到 {ls_src} ...\n"));
     create_dir_all_retry(&ls_src).map_err(|e| format!("创建 {ls_src} 失败: {e}"))?;
-    let src = i386_src.to_string_lossy().to_string();
-    // /C：单个文件出错（被占用/锁定等）也继续拷其余文件，不因一个非关键文件失败就整盘中止
-    //    （照搬 DSI 的容错——它直接忽略 xcopy 退出码）。但比 DSI 更稳：拷完后在【目标】里复测核心
-    //    文件是否到位，而不是去猜「xcopy 加 /C 后非 0 退出」到底是部分跳过还是整体失败。
-    let out = new_command("xcopy")
-        .args([
-            src.as_str(),
-            ls_src.as_str(),
-            "/E",
-            "/I",
-            "/H",
-            "/C",
-            "/R",
-            "/Y",
-            "/Q",
-        ])
-        .output()
-        .map_err(|e| format!("xcopy 执行失败: {e}"))?;
-    log.push_str(&gbk_to_utf8(&out.stdout));
-    if !out.status.success() {
-        // 有 /C 时非 0 退出多半是「部分文件被占用已跳过」而非整体失败；不直接判错，交给下面的
-        // 「目标核心文件实测」定夺，但记下来便于排查。
-        log.push_str(&format!(
-            "警告: xcopy 返回非 0（已用 /C 跳过出错文件继续）：{}\n",
-            gbk_to_utf8(&out.stderr).trim()
-        ));
+    // 单个文件出错时继续复制其余文件，再用下方核心文件复核决定是否允许继续。
+    let copy_report = crate::windows_file_copy::copy_tree(i386_src, Path::new(&ls_src), true)
+        .map_err(|error| format!("CopyFileExW 复制本地源失败: {error}"))?;
+    log.push_str(&format!(
+        "已通过 CopyFileExW 复制 {} 个本地源文件\n",
+        copy_report.files_copied
+    ));
+    for error in copy_report.errors {
+        log.push_str(&format!("警告: 本地源文件复制失败并已继续: {error}\n"));
     }
-    // 拷贝结果硬校验（真正权威的成功判据，不依赖 xcopy 退出码）：核心文件必须真的落进了本地源目录。
+    // 拷贝结果硬校验（真正权威的成功判据）：核心文件必须真的落进了本地源目录。
     // 若因被占用/中断导致核心文件没拷过去，文本安装必然蓝屏，这里就要拦下。
     let ls_path = Path::new(&ls_src);
     let missing_dst: Vec<String> = REQUIRED_FILES
@@ -220,27 +214,25 @@ pub fn install_from_i386(
         ));
     }
 
-    // 1.4) XP x64 / Server 2003 x64：本地源要【两份都拷】——照搬 DSI（§四 同时 xcopy AMD64 与 I386）。
+    // 1.4) XP x64 / Server 2003 x64：本地源要【两份都拷】——保留 DSI 的 AMD64 与 I386 双源语义。
     //      x64 介质的 \I386 是 32 位 WoW 组件目录（残缺、非可引导源），GUI 安装阶段装 WoW64（32 位
     //      子系统）要从 LS\I386 取文件；只拷 \AMD64 会导致图形阶段缺 32 位组件。引导/BT 仍只用 AMD64。
     if src_sub_name == "AMD64" {
         if let Some(sib_i386) = i386_src.parent().map(|p| p.join("I386")) {
             if sib_i386.exists() {
-                let s = sib_i386.to_string_lossy().to_string();
                 let d = format!("{win}\\$WIN_NT$.~LS\\I386");
                 let _ = create_dir_all_retry(&d);
-                match new_command("xcopy")
-                    .args([s.as_str(), d.as_str(), "/E", "/I", "/H", "/R", "/Y", "/Q"])
-                    .output()
-                {
-                    Ok(o) if o.status.success() => {
-                        log.push_str("已并拷同级 \\I386（32 位 WoW64 组件）→ $WIN_NT$.~LS\\I386\n")
-                    }
-                    Ok(o) => log.push_str(&format!(
-                        "警告: 并拷 \\I386（WoW64）非 0：{}；XP x64 图形阶段可能缺 32 位组件\n",
-                        gbk_to_utf8(&o.stderr)
+                match crate::windows_file_copy::copy_tree(&sib_i386, Path::new(&d), true) {
+                    Ok(report) if report.errors.is_empty() => log.push_str(
+                        "已并拷同级 \\I386（32 位 WoW64 组件）→ $WIN_NT$.~LS\\I386\n",
+                    ),
+                    Ok(report) => log.push_str(&format!(
+                        "警告: 并拷 \\I386（WoW64）有 {} 个文件失败；XP x64 图形阶段可能缺 32 位组件\n",
+                        report.errors.len()
                     )),
-                    Err(e) => log.push_str(&format!("警告: 并拷 \\I386（WoW64）失败：{e}\n")),
+                    Err(error) => {
+                        log.push_str(&format!("警告: 并拷 \\I386（WoW64）失败：{error}\n"))
+                    }
                 }
             }
         }
@@ -262,18 +254,15 @@ pub fn install_from_i386(
     create_dir_all_retry(&bt).map_err(|e| format!("创建 {bt} 失败: {e}"))?;
     let sys32_src = i386_src.join("SYSTEM32");
     if sys32_src.exists() {
-        let s = sys32_src.to_string_lossy().to_string();
         let d = format!("{bt}\\SYSTEM32");
-        let o = new_command("xcopy")
-            .args([s.as_str(), d.as_str(), "/E", "/I", "/H", "/R", "/Y", "/Q"])
-            .output()
-            .map_err(|e| format!("拷 SYSTEM32 → $WIN_NT$.~BT 失败: {e}"))?;
-        if o.status.success() {
-            log.push_str("已复制 <源>\\SYSTEM32 → $WIN_NT$.~BT\\SYSTEM32\n");
+        let report = crate::windows_file_copy::copy_tree(&sys32_src, Path::new(&d), true)
+            .map_err(|error| format!("拷 SYSTEM32 → $WIN_NT$.~BT 失败: {error}"))?;
+        if report.errors.is_empty() {
+            log.push_str("已通过 CopyFileExW 复制 <源>\\SYSTEM32 → $WIN_NT$.~BT\\SYSTEM32\n");
         } else {
             log.push_str(&format!(
-                "警告: 拷 SYSTEM32 → $WIN_NT$.~BT 非 0：{}\n",
-                gbk_to_utf8(&o.stderr)
+                "警告: 拷 SYSTEM32 → $WIN_NT$.~BT 时有 {} 个文件失败\n",
+                report.errors.len()
             ));
         }
     } else {
@@ -479,11 +468,30 @@ pub fn install_from_i386(
 /// 清掉目标文件的 只读/系统/隐藏 属性（若存在）。重装/修过引导的盘上根引导文件常带这些属性，
 /// 不清会让 `std::fs::copy`/`write` 抛 os error 5（拒绝访问）。失败忽略（文件不存在或本就无属性）。
 fn clear_file_attrs(path: &str) {
-    if Path::new(path).exists() {
-        let _ = new_command("attrib")
-            .args(["-R", "-S", "-H", path])
-            .output();
+    #[cfg(windows)]
+    {
+        let wide: Vec<u16> = std::ffi::OsStr::new(path)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let attributes = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+        if attributes == INVALID_FILE_ATTRIBUTES {
+            return;
+        }
+        let mut cleared = attributes
+            & !(FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_SYSTEM.0 | FILE_ATTRIBUTE_HIDDEN.0);
+        if cleared == 0 {
+            cleared = windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL.0;
+        }
+        if cleared != attributes {
+            let _ = unsafe {
+                SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(cleared))
+            };
+        }
     }
+
+    #[cfg(not(windows))]
+    let _ = path;
 }
 
 /// 先清属性再复制（应对目标带 +r+s+h）。

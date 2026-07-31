@@ -3,9 +3,6 @@
 #[cfg(not(feature = "non-elevated-tests"))]
 use super::windows_version_detect as version_detect;
 
-#[cfg(not(feature = "non-elevated-tests"))]
-use lr_core::command::{CommandExecutor, CommandRequest, SystemCommandExecutor};
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InventoryEntry {
     pub value: String,
@@ -210,26 +207,10 @@ fn current_target(target: &str) -> bool {
 #[cfg(not(feature = "non-elevated-tests"))]
 fn load_accounts(target: &str) -> Result<Vec<InventoryEntry>, NativeToolInventoryError> {
     let accounts = if current_target(target) {
-        let request = CommandRequest::new("powershell.exe").args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-LocalUser | ForEach-Object { \"$($_.Name)|$($_.Enabled)\" }",
-        ]);
-        let outcome = SystemCommandExecutor
-            .execute(&request)
-            .map_err(|error| NativeToolInventoryError::Read(error.to_string()))?;
-        if !outcome.succeeded() {
-            return Err(NativeToolInventoryError::Read(
-                String::from_utf8_lossy(outcome.stderr()).trim().to_string(),
-            ));
-        }
-        String::from_utf8_lossy(outcome.stdout())
-            .lines()
-            .filter_map(|line| {
-                let (name, enabled) = line.trim().split_once('|')?;
-                (!name.is_empty()).then(|| (name.to_string(), enabled.eq_ignore_ascii_case("true")))
-            })
+        lr_core::windows_accounts::list_local_accounts()
+            .map_err(|error| NativeToolInventoryError::Read(error.to_string()))?
+            .into_iter()
+            .map(|account| (account.name, !account.disabled))
             .collect::<Vec<_>>()
     } else {
         validate_drive(target)?;

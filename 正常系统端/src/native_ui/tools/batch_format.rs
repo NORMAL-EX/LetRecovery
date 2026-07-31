@@ -2,7 +2,7 @@
 //!
 //! This module only presents a caller-supplied inventory of already-filtered safe fixed volumes
 //! and returns the existing typed [`MutatingToolIntent::BatchFormat`] intent. It never enumerates
-//! disks, validates against the host again, starts `format.com`, or formats a volume. The host must
+//! disks, validates against the host again, or formats a volume through VDS/WinAPI. The host must
 //! refresh the inventory through the existing read-only boundary, show its destructive-operation
 //! confirmation, and pass the intent through the existing typed executor.
 
@@ -188,8 +188,7 @@ fn sanitize_inventory(volumes: Vec<BatchFormatVolume>) -> Vec<BatchFormatVolume>
         .into_iter()
         .filter_map(|mut volume| {
             volume.drive = normalize_drive(&volume.drive)?;
-            let protected = matches!(volume.drive.as_str(), "C:" | "X:");
-            (!protected && seen.insert(volume.drive.clone())).then_some(volume)
+            seen.insert(volume.drive.clone()).then_some(volume)
         })
         .collect()
 }
@@ -844,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_filters_protected_invalid_and_duplicate_drives() {
+    fn inventory_normalizes_and_filters_invalid_and_duplicate_drives() {
         let mut input = volumes();
         input.push(BatchFormatVolume::new("c", "System", "NTFS", 10, 5));
         input.push(BatchFormatVolume::new("X:\\", "PE", "NTFS", 10, 5));
@@ -855,7 +854,7 @@ mod tests {
                 .into_iter()
                 .map(|volume| volume.drive)
                 .collect::<Vec<_>>(),
-            ["D:", "E:"]
+            ["D:", "E:", "C:", "X:"]
         );
     }
 

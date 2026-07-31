@@ -4,10 +4,6 @@
 //! or one offline Windows partition. Its operation is fixed: clear that account's password and
 //! enable the account. No batch or password-only mode is represented by these types.
 
-#[cfg(not(feature = "non-elevated-tests"))]
-use lr_core::command::SystemCommandExecutor;
-use lr_core::command::{CommandExecutor, CommandRequest};
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PasswordResetTarget {
     CurrentSystem,
@@ -79,7 +75,7 @@ pub fn load_password_reset_accounts(
 ) -> Result<Vec<PasswordResetAccount>, NativePasswordResetError> {
     validate_target(target)?;
     match target {
-        PasswordResetTarget::CurrentSystem => load_current_accounts_with(&SystemCommandExecutor),
+        PasswordResetTarget::CurrentSystem => load_current_accounts_with(),
         PasswordResetTarget::OfflineWindows(partition) => lr_core::sam::list_accounts(partition)
             .map_err(|error| NativePasswordResetError::Inventory(error.to_string()))
             .map(|accounts| {
@@ -119,7 +115,7 @@ pub fn execute_password_reset(
 
     match &request.target {
         PasswordResetTarget::CurrentSystem => {
-            clear_and_enable_current_account_with(&SystemCommandExecutor, account)?;
+            clear_and_enable_current_account(account)?;
         }
         PasswordResetTarget::OfflineWindows(partition) => {
             let changed = lr_core::sam::clear_account_password(partition, account)
@@ -162,81 +158,24 @@ fn validate_account_name(account: &str) -> Result<(), NativePasswordResetError> 
 }
 
 #[cfg(not(feature = "non-elevated-tests"))]
-fn load_current_accounts_with(
-    executor: &dyn CommandExecutor,
-) -> Result<Vec<PasswordResetAccount>, NativePasswordResetError> {
-    let request = CommandRequest::new("powershell.exe").args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-LocalUser | ForEach-Object { \"$($_.Name)|$($_.Enabled)\" }",
-    ]);
-    let outcome = executor
-        .execute(&request)
-        .map_err(|error| NativePasswordResetError::Inventory(error.to_string()))?;
-    if !outcome.succeeded() {
-        return Err(NativePasswordResetError::Inventory(command_error(&outcome)));
-    }
-    parse_current_accounts(outcome.stdout())
-}
-
-fn clear_and_enable_current_account_with(
-    executor: &dyn CommandExecutor,
-    account: &str,
-) -> Result<(), NativePasswordResetError> {
-    let clear = CommandRequest::new("net.exe").args(["user", account, ""]);
-    let clear_outcome = executor
-        .execute(&clear)
-        .map_err(|error| NativePasswordResetError::Execution(error.to_string()))?;
-    if !clear_outcome.succeeded() {
-        return Err(NativePasswordResetError::Execution(command_error(
-            &clear_outcome,
-        )));
-    }
-
-    let enable = CommandRequest::new("net.exe").args(["user", account, "/active:yes"]);
-    let enable_outcome = executor.execute(&enable).map_err(|error| {
-        NativePasswordResetError::Execution(crate::tr!(
-            "密码已清空，但启动账户命令无法运行: {}",
-            error
-        ))
-    })?;
-    if !enable_outcome.succeeded() {
-        return Err(NativePasswordResetError::Execution(crate::tr!(
-            "密码已清空，但启用账户失败: {}",
-            command_error(&enable_outcome)
-        )));
-    }
-    Ok(())
-}
-
-fn parse_current_accounts(
-    stdout: &[u8],
-) -> Result<Vec<PasswordResetAccount>, NativePasswordResetError> {
-    let text = String::from_utf8(stdout.to_vec())
-        .map_err(|error| NativePasswordResetError::Inventory(error.to_string()))?;
-    Ok(text
-        .lines()
-        .filter_map(|line| {
-            let (username, enabled) = line.trim().split_once('|')?;
-            let username = username.trim();
-            (!username.is_empty()).then(|| PasswordResetAccount {
-                username: username.to_owned(),
-                disabled: enabled.trim().eq_ignore_ascii_case("false"),
-            })
+fn load_current_accounts_with() -> Result<Vec<PasswordResetAccount>, NativePasswordResetError> {
+    lr_core::windows_accounts::list_local_accounts()
+        .map_err(|error| NativePasswordResetError::Inventory(error.to_string()))
+        .map(|accounts| {
+            accounts
+                .into_iter()
+                .map(|account| PasswordResetAccount {
+                    username: account.name,
+                    disabled: account.disabled,
+                })
+                .collect()
         })
-        .collect())
 }
 
-fn command_error(outcome: &lr_core::command::CommandOutcome) -> String {
-    let stderr = lr_core::encoding::gbk_to_utf8(outcome.stderr());
-    if stderr.trim().is_empty() {
-        lr_core::encoding::gbk_to_utf8(outcome.stdout())
-            .trim()
-            .to_owned()
-    } else {
-        stderr.trim().to_owned()
-    }
+#[cfg(not(feature = "non-elevated-tests"))]
+fn clear_and_enable_current_account(account: &str) -> Result<(), NativePasswordResetError> {
+    lr_core::windows_accounts::clear_password_and_enable(account)
+        .map_err(|error| NativePasswordResetError::Execution(error.to_string()))
 }
 
 #[cfg(test)]
@@ -287,47 +226,6 @@ mod tests {
         assert_eq!(
             execute_password_reset(&request),
             Err(NativePasswordResetError::DevelopmentBuildDenied)
-        );
-    }
-
-    #[test]
-    fn current_account_parser_preserves_single_account_status() {
-        let accounts = parse_current_accounts(b"Administrator|False\r\nUser One|True\r\n").unwrap();
-        assert_eq!(
-            accounts,
-            vec![
-                PasswordResetAccount {
-                    username: "Administrator".to_owned(),
-                    disabled: true,
-                },
-                PasswordResetAccount {
-                    username: "User One".to_owned(),
-                    disabled: false,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn current_system_request_uses_two_separate_fixed_net_user_operations() {
-        use lr_core::command::{CommandOutcome, DryRunCommandExecutor};
-
-        let executor = DryRunCommandExecutor::new(CommandOutcome::success());
-        clear_and_enable_current_account_with(&executor, "User One").unwrap();
-        let requests = executor.requests().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].program(), std::ffi::OsStr::new("net.exe"));
-        assert_eq!(
-            requests[0].arguments(),
-            ["user", "User One", ""]
-                .map(std::ffi::OsString::from)
-                .as_slice()
-        );
-        assert_eq!(
-            requests[1].arguments(),
-            ["user", "User One", "/active:yes"]
-                .map(std::ffi::OsString::from)
-                .as_slice()
         );
     }
 }

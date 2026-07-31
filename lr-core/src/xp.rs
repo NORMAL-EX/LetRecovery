@@ -15,7 +15,7 @@
 //!    CriticalDeviceDatabase（CDDB）让内核在 PnP 之前就认出启动盘。
 //!
 //! 设计约束：
-//! - 注册表操作复用 [`crate::registry::OfflineRegistry`]（reg.exe 封装）。
+//! - 注册表操作复用 [`crate::registry::OfflineRegistry`]（Win32 注册表 API 封装）。
 //! - SYSTEM 配置单元由**调用方预先加载**（如 PE 端 `apply_advanced_options` 已把它
 //!   加载为 `pc-sys`），本模块只在已加载的 hive 键上写，避免「同一 hive 文件二次加载」冲突。
 //! - 驱动文件运行时从 `bin\drivers\xp\{ahci,nvme,usb3}\` 读取（调用方传入该根目录）。

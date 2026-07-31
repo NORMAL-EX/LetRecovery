@@ -17,7 +17,9 @@ use crate::tr;
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LUID};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, SetLastError, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS, HANDLE, LUID,
+};
 #[cfg(windows)]
 use windows::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
@@ -34,6 +36,41 @@ use windows::Win32::System::Registry::{
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+#[cfg(windows)]
+struct ComApartment {
+    uninitialize: bool,
+}
+
+#[cfg(windows)]
+impl ComApartment {
+    fn initialize() -> Result<Self> {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if result.is_ok() {
+            // S_OK and S_FALSE both increment COM's per-thread initialization count.
+            return Ok(Self { uninitialize: true });
+        }
+        if result == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
+            // COM is already initialized on this thread with another apartment model.
+            // The existing apartment remains valid and must not be uninitialized here.
+            return Ok(Self {
+                uninitialize: false,
+            });
+        }
+        Err(windows::core::Error::from(result).into())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.uninitialize {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
 
 // ============================================================================
 // 常量定义
@@ -295,7 +332,10 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
             }],
         };
 
-        // AdjustTokenPrivileges 返回 Result
+        // Microsoft documents that a successful call can still report
+        // ERROR_NOT_ALL_ASSIGNED. Clear last-error first and fail closed when
+        // the process token does not actually contain the requested privilege.
+        SetLastError(ERROR_SUCCESS);
         if let Err(e) = AdjustTokenPrivileges(token_handle, false, Some(&tp), 0, None, None) {
             let _ = CloseHandle(token_handle);
             bail!("{}", tr!("AdjustTokenPrivileges 失败: {}", e));
@@ -305,11 +345,13 @@ fn enable_privilege(privilege_name: &str) -> Result<()> {
         let last_error = GetLastError();
         let _ = CloseHandle(token_handle);
 
-        if last_error.0 != 0 && last_error.0 != 1300 {
-            // 1300 = ERROR_NOT_ALL_ASSIGNED，表示部分权限未能分配，可以忽略
-            log::warn!(
-                "[SystemUtils] AdjustTokenPrivileges 警告: 错误码 {}",
-                last_error.0
+        if last_error == ERROR_NOT_ALL_ASSIGNED {
+            bail!("{}", tr!("当前进程令牌不包含所需权限: {}", privilege_name));
+        }
+        if last_error != ERROR_SUCCESS {
+            bail!(
+                "{}",
+                tr!("AdjustTokenPrivileges 返回错误码 {}", last_error.0)
             );
         }
     }
@@ -518,44 +560,29 @@ pub fn get_offline_system_edition(system_root: &str) -> Result<String> {
 /// 这是 Microsoft 推荐的清理方式
 #[cfg(windows)]
 pub fn cleanup_component_store() -> Result<()> {
-    use std::process::Command;
+    use anyhow::Context;
+    use windows::core::{BSTR, VARIANT};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::System::TaskScheduler::{ITaskService, TaskScheduler};
 
     log::info!("[SystemUtils] 触发组件存储清理任务...");
 
-    // 方法1: 使用 schtasks.exe 触发已有任务
-    let output = Command::new("schtasks.exe")
-        .args([
-            "/Run",
-            "/TN",
-            "\\Microsoft\\Windows\\Servicing\\StartComponentCleanup",
-        ])
-        .output();
+    let _apartment = ComApartment::initialize().context("初始化 COM 失败")?;
+    let service: ITaskService =
+        unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }
+            .context("创建 Task Scheduler 服务对象失败")?;
+    let empty = VARIANT::default();
+    unsafe { service.Connect(&empty, &empty, &empty, &empty) }
+        .context("连接 Task Scheduler 服务失败")?;
+    let folder = unsafe { service.GetFolder(&BSTR::from(r"\Microsoft\Windows\Servicing")) }
+        .context("打开 Servicing 计划任务目录失败")?;
+    let task = unsafe { folder.GetTask(&BSTR::from("StartComponentCleanup")) }
+        .context("找不到 StartComponentCleanup 计划任务")?;
+    let _running_task =
+        unsafe { task.Run(&VARIANT::default()) }.context("启动组件存储清理计划任务失败")?;
 
-    match output {
-        Ok(result) if result.status.success() => {
-            log::info!("[SystemUtils] 组件清理任务已触发");
-            return Ok(());
-        }
-        _ => {
-            log::warn!("[SystemUtils] schtasks 触发失败，尝试 cleanmgr...");
-        }
-    }
-
-    // 方法2: 使用 cleanmgr.exe
-    // /sagerun:1 使用预设配置
-    let output = Command::new("cleanmgr.exe")
-        .args(["/d", "C:", "/VERYLOWDISK"])
-        .spawn();
-
-    match output {
-        Ok(_) => {
-            log::info!("[SystemUtils] cleanmgr 已启动");
-            Ok(())
-        }
-        Err(e) => {
-            bail!("{}", tr!("无法启动清理工具: {}", e));
-        }
-    }
+    log::info!("[SystemUtils] 组件清理任务已通过 Task Scheduler API 触发");
+    Ok(())
 }
 
 #[cfg(not(windows))]

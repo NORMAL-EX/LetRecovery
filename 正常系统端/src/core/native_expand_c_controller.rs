@@ -22,6 +22,8 @@ pub struct NativeExpandCAnalysis {
 pub enum NativeExpandCAnalysisError {
     #[error("开发测试构建禁止读取宿主磁盘扩容布局")]
     DisabledInDevelopment,
+    #[error("无法确定当前运行的 Windows 卷: {0}")]
+    CurrentWindowsVolume(String),
 }
 
 /// Reads the current disk inventory and computes the established expand-C safety limits.
@@ -48,7 +50,9 @@ pub fn analyze_expand_partition_from_left(
 
 #[cfg(not(feature = "non-elevated-tests"))]
 pub fn analyze_expand_c() -> Result<NativeExpandCAnalysis, NativeExpandCAnalysisError> {
-    analyze_expand_partition('C')
+    let drive = lr_core::windows_storage::current_windows_drive_letter()
+        .map_err(|error| NativeExpandCAnalysisError::CurrentWindowsVolume(error.to_string()))?;
+    analyze_expand_partition(drive)
 }
 
 #[cfg(not(feature = "non-elevated-tests"))]
@@ -95,16 +99,14 @@ pub fn analyze_expand_partition(
     let unallocated_after_mb = unallocated_after_bytes / BYTES_PER_MB;
     let mut next_shrinkable_mb = 0;
     if let Some(next) = following.first() {
-        let system_letter = std::env::var("SystemDrive")
-            .ok()
-            .and_then(|value| value.chars().next())
-            .map(|letter| letter.to_ascii_uppercase());
+        let system_letter = lr_core::windows_storage::current_windows_drive_letter()
+            .map_err(|error| NativeExpandCAnalysisError::CurrentWindowsVolume(error.to_string()))?;
         let movable = !next.is_esp
             && !next.is_msr
             && !next.is_recovery
             && next
                 .drive_letter
-                .is_some_and(|letter| Some(letter.to_ascii_uppercase()) != system_letter);
+                .is_some_and(|letter| !letter.eq_ignore_ascii_case(&system_letter));
         if movable {
             if let Some(letter) = next.drive_letter {
                 if let Ok(value) = query_shrink_max(letter) {
@@ -177,17 +179,15 @@ pub fn analyze_expand_partition_from_left(
     let previous = disk.partitions.iter().find(|partition| {
         partition.offset_bytes.checked_add(partition.size_bytes) == Some(target.offset_bytes)
     });
-    let system_letter = std::env::var("SystemDrive")
-        .ok()
-        .and_then(|value| value.chars().next())
-        .map(|letter| letter.to_ascii_uppercase());
+    let system_letter = lr_core::windows_storage::current_windows_drive_letter()
+        .map_err(|error| NativeExpandCAnalysisError::CurrentWindowsVolume(error.to_string()))?;
     let target_movable = !target.is_esp
         && !target.is_msr
         && !target.is_recovery
         && target.file_system.trim().eq_ignore_ascii_case("NTFS")
         && target
             .drive_letter
-            .is_some_and(|letter| Some(letter.to_ascii_uppercase()) != system_letter);
+            .is_some_and(|letter| !letter.eq_ignore_ascii_case(&system_letter));
     let previous_movable = previous.is_some_and(|partition| {
         !partition.is_esp
             && !partition.is_msr
@@ -195,7 +195,7 @@ pub fn analyze_expand_partition_from_left(
             && partition.file_system.trim().eq_ignore_ascii_case("NTFS")
             && partition
                 .drive_letter
-                .is_some_and(|letter| Some(letter.to_ascii_uppercase()) != system_letter)
+                .is_some_and(|letter| !letter.eq_ignore_ascii_case(&system_letter))
     });
     let previous_shrinkable_mb = if target_movable && previous_movable {
         previous

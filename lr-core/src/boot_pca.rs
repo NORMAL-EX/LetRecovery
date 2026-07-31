@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::command::{new_command, CommandExecutor, CommandRequest, SystemCommandExecutor};
+use crate::command::{CommandExecutor, CommandRequest, SystemCommandExecutor};
 use crate::encoding::gbk_to_utf8;
 
 /// Pick an unused drive letter for a temporary ESP mount.
@@ -48,22 +48,8 @@ pub fn unmount_esp(esp_letter: &str) -> Result<(), String> {
     let letter = normalize_drive_letter(esp_letter)
         .ok_or_else(|| format!("无效的 ESP 盘符: {esp_letter}"))?;
     let mounted = format!("{letter}:");
-    let output = new_command("mountvol")
-        .args([mounted.as_str(), "/d"])
-        .output()
-        .map_err(|error| format!("卸载 ESP {mounted} 失败: {error}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stdout = gbk_to_utf8(&output.stdout);
-    let stderr = gbk_to_utf8(&output.stderr);
-    Err(format!(
-        "卸载 ESP {mounted} 失败，退出码 {:?}: {}{}",
-        output.status.code(),
-        stdout.trim(),
-        stderr.trim()
-    ))
+    crate::windows_storage::remove_drive_letter(letter)
+        .map_err(|error| format!("卸载 ESP {mounted} 失败: {error}"))
 }
 
 /// Owns a temporary ESP drive-letter mount and removes it on every exit path.

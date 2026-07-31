@@ -1,9 +1,6 @@
 use crate::core::bitlocker::{BitLockerManager, VolumeStatus};
 use crate::tr;
-use crate::utils::encoding::gbk_to_utf8;
-use crate::utils::path::get_bin_dir;
 use anyhow::Result;
-use lr_core::command::{CommandExecutor, SystemCommandExecutor};
 use lr_core::data_staging::{
     select_staging_plan, ShrinkCandidate, StagingCandidate, StagingPlan, StorageAttachment,
     StorageMedia,
@@ -147,39 +144,22 @@ struct StorageDeviceDescriptor {
 
 pub struct DiskManager;
 
-fn build_staging_shrink_script(
-    disk_number: u32,
-    partition_number: u32,
-    size_mb: u64,
-    new_letter: char,
-) -> String {
-    format!(
-        "select disk {}\n\
-         select partition {}\n\
-         shrink desired={} minimum={}\n\
-         create partition primary\n\
-         format fs=ntfs quick label=\"LetRecovery\"\n\
-         assign letter={}",
-        disk_number,
-        partition_number,
-        size_mb,
-        size_mb,
-        new_letter.to_ascii_uppercase()
-    )
-}
-
 impl DiskManager {
     /// 获取所有固定磁盘分区列表
     pub fn get_partitions() -> Result<Vec<Partition>> {
         let mut partitions = Vec::new();
         let is_pe = Self::is_pe_environment();
+        let running_windows_drive = lr_core::windows_storage::current_windows_drive_letter()
+            .map_err(anyhow::Error::from)?;
 
         // 预先创建 BitLockerManager 实例，避免重复创建
         let bitlocker_manager = BitLockerManager::new();
 
         for letter in b'A'..=b'Z' {
             let drive = format!("{}:", letter as char);
-            if let Ok(info) = Self::get_partition_info(&drive, is_pe, &bitlocker_manager) {
+            if let Ok(info) =
+                Self::get_partition_info(&drive, is_pe, running_windows_drive, &bitlocker_manager)
+            {
                 partitions.push(info);
             }
         }
@@ -190,15 +170,23 @@ impl DiskManager {
     fn get_partition_info(
         drive: &str,
         is_pe: bool,
+        running_windows_drive: char,
         bitlocker_manager: &BitLockerManager,
     ) -> Result<Partition> {
-        Self::get_partition_info_for_staging(drive, is_pe, bitlocker_manager, false)
-            .map(|(partition, _)| partition)
+        Self::get_partition_info_for_staging(
+            drive,
+            is_pe,
+            running_windows_drive,
+            bitlocker_manager,
+            false,
+        )
+        .map(|(partition, _)| partition)
     }
 
     fn get_partition_info_for_staging(
         drive: &str,
         is_pe: bool,
+        running_windows_drive: char,
         bitlocker_manager: &BitLockerManager,
         include_removable: bool,
     ) -> Result<(Partition, StagingDriveKind)> {
@@ -257,8 +245,10 @@ impl DiskManager {
             .to_string();
 
         // 检查是否为当前系统分区
-        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
-        let is_current_system = drive.eq_ignore_ascii_case(&system_drive);
+        let is_current_system = drive
+            .chars()
+            .next()
+            .is_some_and(|letter| letter.eq_ignore_ascii_case(&running_windows_drive));
 
         // 检查是否包含 Windows 系统
         let windows_path = format!("{}\\Windows\\System32", drive);
@@ -524,14 +514,20 @@ impl DiskManager {
     fn get_staging_partitions() -> Result<Vec<(Partition, StagingDriveKind)>> {
         let mut partitions = Vec::new();
         let is_pe = Self::is_pe_environment();
+        let running_windows_drive = lr_core::windows_storage::current_windows_drive_letter()
+            .map_err(anyhow::Error::from)?;
         let bitlocker_manager = BitLockerManager::new();
 
         for letter in b'A'..=b'Z' {
             let letter = letter as char;
             let drive = format!("{letter}:");
-            let Ok((partition, drive_kind)) =
-                Self::get_partition_info_for_staging(&drive, is_pe, &bitlocker_manager, true)
-            else {
+            let Ok((partition, drive_kind)) = Self::get_partition_info_for_staging(
+                &drive,
+                is_pe,
+                running_windows_drive,
+                &bitlocker_manager,
+                true,
+            ) else {
                 continue;
             };
             if !Self::volume_is_writable(letter) {
@@ -643,31 +639,20 @@ impl DiskManager {
 
     /// 格式化指定分区
     pub fn format_partition(partition: &str) -> Result<String> {
-        let spec = lr_core::format_command::FormatCommandSpec::new(partition, "NTFS", None)
+        lr_core::format_command::FormatCommandSpec::new(partition, "NTFS", None)
             .map_err(|error| anyhow::anyhow!("无效的格式化参数: {error}"))?;
-        let bin_dir = get_bin_dir();
-        let format_exe = if Self::is_pe_environment() {
-            bin_dir.join("format.com")
-        } else {
-            lr_core::format_command::system_format_executable()
-        };
-
-        let request = spec.command_request(&format_exe);
-        log::info!("执行格式化命令: {}", request.preview());
-        let output = SystemCommandExecutor.execute(&request)?;
-        let stdout = gbk_to_utf8(output.stdout());
-        let stderr = gbk_to_utf8(output.stderr());
-
-        if lr_core::format_command::output_indicates_error(output.succeeded(), &stdout, &stderr) {
-            let detail = if stderr.trim().is_empty() {
-                stdout.trim()
-            } else {
-                stderr.trim()
-            };
-            anyhow::bail!("格式化分区失败: {detail}");
-        }
-
-        Ok(stdout)
+        let drive_letter = partition
+            .trim()
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("格式化目标缺少盘符"))?;
+        lr_core::windows_storage::format_drive(
+            drive_letter,
+            lr_core::windows_storage::FileSystem::Ntfs,
+            "",
+        )
+        .map_err(|error| anyhow::anyhow!("格式化分区失败: {error}"))?;
+        Ok("format completed".to_owned())
     }
 
     /// 从指定分区缩小并创建新分区
@@ -1472,8 +1457,8 @@ impl DiskManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_staging_shrink_script, classify_staging_drive_type, StagingDriveKind, DRIVE_CDROM,
-        DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOTE, DRIVE_REMOVABLE,
+        classify_staging_drive_type, StagingDriveKind, DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK,
+        DRIVE_REMOTE, DRIVE_REMOVABLE,
     };
 
     #[test]
@@ -1489,20 +1474,5 @@ mod tests {
         assert_eq!(classify_staging_drive_type(DRIVE_CDROM), None);
         assert_eq!(classify_staging_drive_type(DRIVE_REMOTE), None);
         assert_eq!(classify_staging_drive_type(DRIVE_RAMDISK), None);
-    }
-
-    #[test]
-    fn staging_shrink_script_pins_disk_partition_and_exact_size() {
-        let script = build_staging_shrink_script(1, 4, 12_345, 'y');
-        assert_eq!(
-            script,
-            "select disk 1\n\
-             select partition 4\n\
-             shrink desired=12345 minimum=12345\n\
-             create partition primary\n\
-             format fs=ntfs quick label=\"LetRecovery\"\n\
-             assign letter=Y"
-        );
-        assert!(!script.contains("select volume"));
     }
 }

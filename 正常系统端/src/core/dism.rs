@@ -589,19 +589,17 @@ impl Dism {
     ) -> Result<usize> {
         std::fs::create_dir_all(destination)?;
 
-        // 判断目标是否就是“当前运行系统”：非 PE 且盘符等于 %SystemDrive% → 用在线映像，
+        // 判断目标是否就是“当前运行系统”：非 PE 且盘符等于 GetWindowsDirectoryW 所在卷 → 用在线映像，
         // 否则按离线映像（PE 下对已部署系统，或对另一块系统盘）导出。
         let target_drive = system_partition
             .trim()
             .chars()
             .next()
             .map(|c| c.to_ascii_uppercase());
-        let system_drive = std::env::var("SystemDrive")
-            .ok()
-            .and_then(|s| s.trim().chars().next())
-            .map(|c| c.to_ascii_uppercase());
+        let system_drive = lr_core::windows_storage::current_windows_drive_letter()
+            .map_err(anyhow::Error::from)?;
         let is_online_target =
-            !self.is_pe && target_drive.is_some() && target_drive == system_drive;
+            !self.is_pe && target_drive.is_some_and(|drive| drive == system_drive);
 
         let dism_result = DismCmd::new().and_then(|dism| {
             if is_online_target {

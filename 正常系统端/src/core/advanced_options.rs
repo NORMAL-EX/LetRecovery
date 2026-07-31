@@ -266,36 +266,7 @@ log=0
     /// 虚拟机/无无线网卡/未连接 WiFi 时返回 false（用于隐藏“迁移 WiFi”选项）。
     #[cfg(windows)]
     fn system_has_wifi() -> bool {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        let out = match Command::new("netsh")
-            .args(["wlan", "show", "interfaces"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            Ok(o) => o,
-            Err(_) => return false,
-        };
-        let text = match String::from_utf8(out.stdout.clone()) {
-            Ok(s) if s.chars().filter(|&c| c == '\u{FFFD}').count() < 3 => s,
-            _ => encoding_rs::GBK.decode(&out.stdout).0.into_owned(),
-        };
-        for line in text.lines() {
-            let t = line.trim();
-            if t.starts_with("BSSID") {
-                continue;
-            }
-            if let Some(rest) = t.strip_prefix("SSID") {
-                if let Some(idx) = rest.find(':') {
-                    if !rest[idx + 1..].trim().is_empty() {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        super::native_wifi::connected_wifi_available().unwrap_or(false)
     }
 
     #[cfg(not(windows))]
@@ -304,69 +275,9 @@ log=0
     }
 
     fn read_current_wifi() -> Option<(String, String)> {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        let decode = |b: &[u8]| -> String {
-            match String::from_utf8(b.to_vec()) {
-                Ok(s) if s.chars().filter(|&c| c == '\u{FFFD}').count() < 3 => s,
-                _ => {
-                    let (c, _, _) = encoding_rs::GBK.decode(b);
-                    c.into_owned()
-                }
-            }
-        };
-
-        // 1) 当前连接的 SSID（排除 BSSID 行）
-        let out = Command::new("netsh")
-            .args(["wlan", "show", "interfaces"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .ok()?;
-        let text = decode(&out.stdout);
-        let mut ssid = String::new();
-        for line in text.lines() {
-            let t = line.trim();
-            if t.starts_with("BSSID") {
-                continue;
-            }
-            if let Some(rest) = t.strip_prefix("SSID") {
-                if let Some(idx) = rest.find(':') {
-                    let v = rest[idx + 1..].trim();
-                    if !v.is_empty() {
-                        ssid = v.to_string();
-                        break;
-                    }
-                }
-            }
-        }
-        if ssid.is_empty() {
-            return None;
-        }
-
-        // 2) 导出该 profile（key=clear 含明文密钥）到临时目录，读出唯一 xml
-        let tmp = std::env::temp_dir().join(format!("lr_wifi_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&tmp);
-        let _ = Command::new("netsh")
-            .args(["wlan", "export", "profile"])
-            .arg(format!("name={}", ssid))
-            .arg("key=clear")
-            .arg(format!("folder={}", tmp.display()))
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        let xml = std::fs::read_dir(&tmp)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .find(|e| {
-                e.path()
-                    .extension()
-                    .map(|x| x.eq_ignore_ascii_case("xml"))
-                    .unwrap_or(false)
-            })
-            .and_then(|e| std::fs::read_to_string(e.path()).ok());
-        let _ = std::fs::remove_dir_all(&tmp);
-        xml.map(|x| (ssid, x))
+        super::native_wifi::capture_connected_wifi()
+            .ok()
+            .map(|profile| (profile.ssid, profile.xml))
     }
 
     pub fn apply_to_system(&self, target_partition: &str, is_xp: bool) -> anyhow::Result<()> {

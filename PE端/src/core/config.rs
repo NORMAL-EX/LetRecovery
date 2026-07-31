@@ -236,17 +236,10 @@ impl ConfigFileManager {
     const DATA_DIR: &'static str = "LetRecovery_Data";
 
     fn scan_letters() -> impl Iterator<Item = char> {
-        let system_drive = std::env::var("SystemDrive")
-            .ok()
-            .and_then(|value| {
-                value
-                    .chars()
-                    .find(|character| character.is_ascii_alphabetic())
-            })
-            .map(|character| character.to_ascii_uppercase());
+        let system_drive = lr_core::windows_storage::current_windows_drive_letter().ok();
         (b'A'..=b'Z')
             .map(char::from)
-            .filter(move |letter| Some(*letter) != system_drive)
+            .filter(move |letter| system_drive.is_some_and(|system| *letter != system))
     }
 
     /// Resolve a file staged by the desktop client without allowing an INI value to escape the

@@ -31,7 +31,10 @@ impl BootManager {
             .output()?;
 
         let stdout = gbk_to_utf8(&output.stdout);
-        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        let system_drive = format!(
+            "{}:",
+            lr_core::windows_storage::current_windows_drive_letter()?
+        );
 
         let mut current_guid = String::new();
         for line in stdout.lines() {
@@ -138,23 +141,8 @@ impl BootManager {
 
         let mount_letter = lr_core::boot_pca::find_available_drive_letter()
             .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
-        let mounted = format!("{}:", mount_letter);
-        let mount_root = format!("{}\\", mounted);
 
-        // 方法1: 使用 mountvol /s 挂载当前系统 ESP。
-        log::info!("[BOOT] 尝试使用 mountvol /s 挂载 ESP 到 {}", mounted);
-        let output = create_command("mountvol")
-            .args([mounted.as_str(), "/s"])
-            .output();
-        if output.is_ok() {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if Path::new(&mount_root).exists() {
-                log::info!("[BOOT] ESP 已通过 mountvol 挂载到 {}", mounted);
-                return Ok(mounted);
-            }
-        }
-
-        // 方法2: 通过 IOCTL 枚举全部物理磁盘上的 ESP。
+        // 通过 IOCTL/VDS 枚举全部物理磁盘上的 ESP 并分配访问路径。
         self.find_esp_with_windows_api(mount_letter)
     }
 

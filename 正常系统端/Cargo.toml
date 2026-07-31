@@ -40,6 +40,8 @@ roxmltree = "0.20"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_WiFi",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Nvme",
     "Win32_Storage_Vhd",
@@ -69,6 +71,7 @@ windows = { version = "0.58", features = [
     # WMI COM 支持 (替代 wmic 命令行)
     "Win32_System_Com",
     "Win32_System_Ole",
+    "Win32_System_TaskScheduler",
     "Win32_System_Variant",
     "Win32_System_Wmi",
     # Windows Runtime - APPX包管理

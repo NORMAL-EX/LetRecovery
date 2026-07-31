@@ -37,20 +37,6 @@ impl std::fmt::Display for BootMode {
     }
 }
 
-/// 直接调用 kernel32.dll 的 GetFirmwareEnvironmentVariableW
-#[cfg(windows)]
-mod kernel32 {
-    #[link(name = "kernel32")]
-    extern "system" {
-        pub fn GetFirmwareEnvironmentVariableW(
-            lpName: *const u16,
-            lpGuid: *const u16,
-            pBuffer: *mut u8,
-            nSize: u32,
-        ) -> u32;
-    }
-}
-
 impl SystemInfo {
     pub fn collect() -> Result<Self> {
         let is_pe = Self::check_pe_environment();
@@ -73,40 +59,9 @@ impl SystemInfo {
     /// 使用 Windows API 检测启动模式
     #[cfg(windows)]
     fn get_boot_mode() -> Result<BootMode> {
-        // 使用 GetFirmwareEnvironmentVariableW API 检测
-        // 这个 API 在 Legacy BIOS 下会返回 ERROR_INVALID_FUNCTION (1)
-        // 在 UEFI 模式下会返回 ERROR_NOACCESS (998) 或其他错误（因为我们查询的是空变量）
-        unsafe {
-            let name: Vec<u16> = "".encode_utf16().chain(std::iter::once(0)).collect();
-            let guid: Vec<u16> = "{00000000-0000-0000-0000-000000000000}"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            let mut buffer = [0u8; 1];
-
-            let result = kernel32::GetFirmwareEnvironmentVariableW(
-                name.as_ptr(),
-                guid.as_ptr(),
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
-            );
-
-            // 如果返回 0，检查错误码
-            if result == 0 {
-                let error = std::io::Error::last_os_error();
-                let raw_error = error.raw_os_error().unwrap_or(0) as u32;
-
-                // ERROR_INVALID_FUNCTION (1) 表示是 Legacy BIOS
-                // 这是最可靠的判断方式
-                if raw_error == 1 {
-                    return Ok(BootMode::Legacy);
-                }
-                // 其他错误（如 ERROR_NOACCESS 998, ERROR_ENVVAR_NOT_FOUND 203）表示是 UEFI
-                return Ok(BootMode::UEFI);
-            }
-
-            // 如果调用成功（不太可能发生，因为我们查询的是空变量），说明是 UEFI
-            Ok(BootMode::UEFI)
+        match lr_core::windows_firmware::detect_firmware_type()? {
+            lr_core::windows_firmware::FirmwareType::Uefi => Ok(BootMode::UEFI),
+            lr_core::windows_firmware::FirmwareType::Bios => Ok(BootMode::Legacy),
         }
     }
 

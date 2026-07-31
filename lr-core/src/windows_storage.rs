@@ -17,6 +17,7 @@ pub enum DiskStyle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileSystem {
     Ntfs,
+    Fat,
     Fat32,
     ExFat,
 }
@@ -34,6 +35,7 @@ impl FileSystem {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Ntfs => "NTFS",
+            Self::Fat => "FAT",
             Self::Fat32 => "FAT32",
             Self::ExFat => "EXFAT",
         }
@@ -201,8 +203,9 @@ mod platform {
         CREATE_PARTITION_PARAMETERS_0_0, CREATE_PARTITION_PARAMETERS_0_1, VDS_ASYNCOUT_CLEAN,
         VDS_ASYNCOUT_CREATEPARTITION, VDS_ASYNCOUT_EXTENDVOLUME, VDS_ASYNCOUT_FORMAT,
         VDS_ASYNCOUT_SHRINKVOLUME, VDS_ASYNC_OUTPUT, VDS_DET_FREE, VDS_DISK_EXTENT, VDS_DISK_PROP,
-        VDS_DRIVE_LETTER_PROP, VDS_FST_EXFAT, VDS_FST_FAT32, VDS_FST_NTFS, VDS_INPUT_DISK,
-        VDS_OT_VOLUME, VDS_PARTITION_STYLE, VDS_PST_GPT, VDS_PST_MBR, VDS_QUERY_SOFTWARE_PROVIDERS,
+        VDS_DRIVE_LETTER_PROP, VDS_FST_EXFAT, VDS_FST_FAT, VDS_FST_FAT32, VDS_FST_NTFS,
+        VDS_INPUT_DISK, VDS_OT_VOLUME, VDS_PARTITION_STYLE, VDS_PST_GPT, VDS_PST_MBR,
+        VDS_QUERY_SOFTWARE_PROVIDERS,
     };
     use windows::Win32::System::Com::{
         CoCreateGuid, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -1003,6 +1006,7 @@ mod platform {
             .map_err(|error| api_error("open VDS volume formatter", error))?;
         let fs = match options.file_system {
             FileSystem::Ntfs => VDS_FST_NTFS,
+            FileSystem::Fat => VDS_FST_FAT,
             FileSystem::Fat32 => VDS_FST_FAT32,
             FileSystem::ExFat => VDS_FST_EXFAT,
         };
