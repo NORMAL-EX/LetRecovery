@@ -7,6 +7,60 @@ use crate::core::registry::OfflineRegistry;
 use lr_core::unattend_account::BuiltInAdministratorOptions;
 use std::path::PathBuf;
 
+struct OfflineHiveCleanup(Vec<&'static str>);
+
+impl OfflineHiveCleanup {
+    fn unload_all(&mut self) -> anyhow::Result<()> {
+        for hive in self.0.iter().rev() {
+            OfflineRegistry::unload_hive(hive)?;
+        }
+        self.0.clear();
+        Ok(())
+    }
+}
+
+impl Drop for OfflineHiveCleanup {
+    fn drop(&mut self) {
+        for hive in self.0.iter().rev() {
+            if let Err(error) = OfflineRegistry::unload_hive(hive) {
+                log::error!("[ADVANCED] emergency unload of offline hive {hive} failed: {error}");
+            }
+        }
+    }
+}
+
+fn with_offline_hives_unloaded<T>(
+    default_loaded: bool,
+    software_hive: &str,
+    system_hive: &str,
+    default_hive: &str,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if default_loaded {
+        OfflineRegistry::unload_hive("pc-default")?;
+    }
+    OfflineRegistry::unload_hive("pc-sys")?;
+    OfflineRegistry::unload_hive("pc-soft")?;
+
+    let operation_result = operation();
+    let reload_result = (|| -> anyhow::Result<()> {
+        OfflineRegistry::load_hive("pc-soft", software_hive)?;
+        OfflineRegistry::load_hive("pc-sys", system_hive)?;
+        if default_loaded {
+            OfflineRegistry::load_hive("pc-default", default_hive)?;
+        }
+        Ok(())
+    })();
+    match (operation_result, reload_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(reload_error)) => anyhow::bail!(
+            "offline operation failed: {operation_error}; additionally failed to reload registry hives: {reload_error}"
+        ),
+    }
+}
+
 /// 系统安装高级选项
 ///
 /// 容器级 `#[serde(default)]`：命令行安装允许只写需要的字段，缺省项自动取默认值。
@@ -295,9 +349,14 @@ log=0
         // 加载离线注册表
         log::info!("[ADVANCED] 加载离线注册表...");
         OfflineRegistry::load_hive("pc-soft", &software_hive)?;
+        let mut hive_cleanup = OfflineHiveCleanup(vec!["pc-soft"]);
         OfflineRegistry::load_hive("pc-sys", &system_hive)?;
+        hive_cleanup.0.push("pc-sys");
         // DEFAULT 用于设置默认用户配置（如经典右键菜单）
         let default_loaded = OfflineRegistry::load_hive("pc-default", &default_hive).is_ok();
+        if default_loaded {
+            hive_cleanup.0.push("pc-default");
+        }
 
         // 创建脚本目录（用于存放自定义脚本）
         let scripts_dir = format!("{}\\{}", target_partition, Self::SCRIPTS_DIR);
@@ -342,14 +401,7 @@ log=0
                     report.deleted_task_records,
                     report.deleted_engine_software_key
                 ),
-                Err(error) => {
-                    let _ = OfflineRegistry::unload_hive("pc-soft");
-                    let _ = OfflineRegistry::unload_hive("pc-sys");
-                    if default_loaded {
-                        let _ = OfflineRegistry::unload_hive("pc-default");
-                    }
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             }
         }
 
@@ -446,6 +498,7 @@ log=0
                 default_loaded,
                 &software_hive,
                 &system_hive,
+                &default_hive,
             )?;
         }
 
@@ -457,6 +510,7 @@ log=0
                 default_loaded,
                 &software_hive,
                 &system_hive,
+                &default_hive,
             )?;
         }
 
@@ -479,11 +533,7 @@ log=0
 
         // 卸载注册表
         log::info!("[ADVANCED] 卸载离线注册表...");
-        let _ = OfflineRegistry::unload_hive("pc-soft");
-        let _ = OfflineRegistry::unload_hive("pc-sys");
-        if default_loaded {
-            let _ = OfflineRegistry::unload_hive("pc-default");
-        }
+        hive_cleanup.unload_all()?;
 
         log::info!("[ADVANCED] 高级选项应用完成");
         Ok(())
@@ -849,6 +899,7 @@ log=0
         default_loaded: bool,
         software_hive: &str,
         system_hive: &str,
+        default_hive: &str,
     ) -> anyhow::Result<()> {
         let usb3_path = if !self.win7_usb3_driver_path.is_empty() {
             Some(PathBuf::from(&self.win7_usb3_driver_path))
@@ -859,54 +910,33 @@ log=0
 
         let usb3_path = match usb3_path {
             Some(p) if p.exists() => p,
-            Some(p) => {
-                log::warn!(
-                    "[ADVANCED] Win7 USB3驱动目录不存在，跳过: {}",
-                    p.to_string_lossy()
-                );
-                PathBuf::new()
-            }
-            None => {
-                log::warn!("[ADVANCED] 无法获取 Win7 USB3驱动目录，跳过");
-                PathBuf::new()
-            }
+            Some(p) => anyhow::bail!("Win7 USB3驱动目录不存在: {}", p.display()),
+            None => anyhow::bail!("无法获取 Win7 USB3驱动目录"),
         };
 
-        if usb3_path.as_os_str().is_empty() {
-            // 目录不可用，直接跳过
-        } else {
-            log::info!(
-                "[ADVANCED] Win7: 处理USB3驱动目录: {}",
-                usb3_path.to_string_lossy()
-            );
-
-            // 先卸载注册表
-            let _ = OfflineRegistry::unload_hive("pc-soft");
-            let _ = OfflineRegistry::unload_hive("pc-sys");
-            if default_loaded {
-                let _ = OfflineRegistry::unload_hive("pc-default");
-            }
-
-            // 处理目录中的驱动（包括 .cab 文件）
-            let processed_path = Self::prepare_win7_drivers(&usb3_path)?;
-
-            let dism = crate::core::dism::Dism::new();
-            let image_path = format!("{}\\", target_partition);
-            match dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy()) {
-                Ok(_) => log::info!("[ADVANCED] Win7 USB3驱动注入成功"),
-                Err(e) => log::error!("[ADVANCED] Win7 USB3驱动注入失败: {} (继续执行)", e),
-            }
-
-            // 清理临时目录（如果使用了临时目录）
-            if processed_path != usb3_path {
-                let _ = std::fs::remove_dir_all(&processed_path);
-            }
-
-            // 重新加载注册表
-            let _ = OfflineRegistry::load_hive("pc-soft", software_hive);
-            let _ = OfflineRegistry::load_hive("pc-sys", system_hive);
-        }
-        Ok(())
+        log::info!(
+            "[ADVANCED] Win7: 处理USB3驱动目录: {}",
+            usb3_path.to_string_lossy()
+        );
+        with_offline_hives_unloaded(
+            default_loaded,
+            software_hive,
+            system_hive,
+            default_hive,
+            || {
+                let processed_path = Self::prepare_win7_drivers(&usb3_path)?;
+                let dism = crate::core::dism::Dism::new();
+                let image_path = format!("{}\\", target_partition);
+                let import_result =
+                    dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy());
+                if processed_path != usb3_path {
+                    let _ = std::fs::remove_dir_all(&processed_path);
+                }
+                import_result?;
+                log::info!("[ADVANCED] Win7 USB3驱动注入成功");
+                Ok(())
+            },
+        )
     }
 
     /// 19. Win7 注入 NVMe 驱动（固定读取程序运行目录下的 drivers\\nvme）
@@ -918,6 +948,7 @@ log=0
         default_loaded: bool,
         software_hive: &str,
         system_hive: &str,
+        default_hive: &str,
     ) -> anyhow::Result<()> {
         let nvme_path = if !self.win7_nvme_driver_path.is_empty() {
             Some(PathBuf::from(&self.win7_nvme_driver_path))
@@ -928,54 +959,33 @@ log=0
 
         let nvme_path = match nvme_path {
             Some(p) if p.exists() => p,
-            Some(p) => {
-                log::warn!(
-                    "[ADVANCED] Win7 NVMe驱动目录不存在，跳过: {}",
-                    p.to_string_lossy()
-                );
-                PathBuf::new()
-            }
-            None => {
-                log::warn!("[ADVANCED] 无法获取 Win7 NVMe驱动目录，跳过");
-                PathBuf::new()
-            }
+            Some(p) => anyhow::bail!("Win7 NVMe驱动目录不存在: {}", p.display()),
+            None => anyhow::bail!("无法获取 Win7 NVMe驱动目录"),
         };
 
-        if nvme_path.as_os_str().is_empty() {
-            // 目录不可用，直接跳过
-        } else {
-            log::info!(
-                "[ADVANCED] Win7: 处理NVMe驱动目录: {}",
-                nvme_path.to_string_lossy()
-            );
-
-            // 先卸载注册表
-            let _ = OfflineRegistry::unload_hive("pc-soft");
-            let _ = OfflineRegistry::unload_hive("pc-sys");
-            if default_loaded {
-                let _ = OfflineRegistry::unload_hive("pc-default");
-            }
-
-            // 处理目录中的驱动（包括 .cab 文件）
-            let processed_path = Self::prepare_win7_drivers(&nvme_path)?;
-
-            let dism = crate::core::dism::Dism::new();
-            let image_path = format!("{}\\", target_partition);
-            match dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy()) {
-                Ok(_) => log::info!("[ADVANCED] Win7 NVMe驱动注入成功"),
-                Err(e) => log::error!("[ADVANCED] Win7 NVMe驱动注入失败: {} (继续执行)", e),
-            }
-
-            // 清理临时目录（如果使用了临时目录）
-            if processed_path != nvme_path {
-                let _ = std::fs::remove_dir_all(&processed_path);
-            }
-
-            // 重新加载注册表
-            let _ = OfflineRegistry::load_hive("pc-soft", software_hive);
-            let _ = OfflineRegistry::load_hive("pc-sys", system_hive);
-        }
-        Ok(())
+        log::info!(
+            "[ADVANCED] Win7: 处理NVMe驱动目录: {}",
+            nvme_path.to_string_lossy()
+        );
+        with_offline_hives_unloaded(
+            default_loaded,
+            software_hive,
+            system_hive,
+            default_hive,
+            || {
+                let processed_path = Self::prepare_win7_drivers(&nvme_path)?;
+                let dism = crate::core::dism::Dism::new();
+                let image_path = format!("{}\\", target_partition);
+                let import_result =
+                    dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy());
+                if processed_path != nvme_path {
+                    let _ = std::fs::remove_dir_all(&processed_path);
+                }
+                import_result?;
+                log::info!("[ADVANCED] Win7 NVMe驱动注入成功");
+                Ok(())
+            },
+        )
     }
 
     /// 20. Win7 修复 ACPI_BIOS_ERROR (0xA5) 蓝屏
@@ -1383,22 +1393,12 @@ Write-Host "UWP应用清理完成"
 
         log::info!("[ADVANCED] 发现 {} 个 .cab 文件，开始解压", cab_files.len());
 
-        // 尝试创建 Cabinet 解压器
-        let extractor = match CabinetExtractor::new() {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("[ADVANCED] 无法创建 Cabinet 解压器: {} (将使用原目录)", e);
-                return Ok(driver_dir.clone());
-            }
-        };
-
-        // 创建临时目录
-        let temp_dir =
-            std::env::temp_dir().join(format!("LetRecovery_Win7Drivers_{}", std::process::id()));
-        std::fs::create_dir_all(&temp_dir)?;
-
-        // 解压所有 .cab 文件
-        let mut extract_success_count = 0;
+        let extractor = CabinetExtractor::new()?;
+        let staging = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-win7-drivers",
+        )?;
+        let temp_dir = staging.path();
 
         for cab_path in &cab_files {
             let cab_name = cab_path
@@ -1414,22 +1414,8 @@ Write-Host "UWP应用清理完成"
                 extract_dir.display()
             );
 
-            match extractor.extract(cab_path, &extract_dir) {
-                Ok(files) => {
-                    log::info!("[ADVANCED] 成功解压 {} 个文件", files.len());
-                    extract_success_count += 1;
-                }
-                Err(e) => {
-                    log::warn!("[ADVANCED] 解压 {} 失败: {} (跳过)", cab_path.display(), e);
-                }
-            }
-        }
-
-        // 如果所有 cab 文件都解压失败，清理临时目录并返回原目录
-        if extract_success_count == 0 {
-            log::warn!("[ADVANCED] 所有 .cab 文件解压失败，使用原目录");
-            let _ = std::fs::remove_dir_all(&temp_dir);
-            return Ok(driver_dir.clone());
+            let files = extractor.extract(cab_path, &extract_dir)?;
+            log::info!("[ADVANCED] 成功解压 {} 个文件", files.len());
         }
 
         // 如果原目录有普通驱动文件或子目录，也复制到临时目录
@@ -1464,7 +1450,7 @@ Write-Host "UWP应用清理完成"
 
         log::info!("[ADVANCED] Win7 驱动准备完成: {}", temp_dir.display());
 
-        Ok(temp_dir)
+        Ok(staging.into_path())
     }
 
     /// 递归复制目录

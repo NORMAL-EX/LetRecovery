@@ -23,6 +23,32 @@ use crate::utils::command::new_command;
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::get_exe_dir;
 
+const MAX_DISM_ERROR_OUTPUT_BYTES: usize = 256 * 1024;
+
+fn decode_dism_output_line(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(line) => line.to_owned(),
+        Err(_) => gbk_to_utf8(bytes),
+    }
+}
+
+fn append_bounded_output(output: &mut String, line: &str) {
+    if output.len() >= MAX_DISM_ERROR_OUTPUT_BYTES {
+        return;
+    }
+    let remaining = MAX_DISM_ERROR_OUTPUT_BYTES - output.len();
+    let mut end = line.len().min(remaining);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&line[..end]);
+    if output.len() < MAX_DISM_ERROR_OUTPUT_BYTES {
+        output.push('\n');
+    }
+}
+
 /// DISM 操作进度
 #[derive(Debug, Clone)]
 pub struct DismCmdProgress {
@@ -676,26 +702,31 @@ impl DismCmd {
         let mut child = cmd.spawn().context(tr!("启动 DISM 进程失败"))?;
 
         // 读取并处理输出
-        let result = self.process_output(&mut child, &progress_tx, operation_name);
+        let output_result = self.process_output(&mut child, &progress_tx, operation_name);
 
         // 等待进程结束
         let status = child.wait().context(tr!("等待 DISM 进程失败"))?;
 
         // 处理结果
-        match result {
-            Ok(_) => {
+        match output_result {
+            Ok(error_output) => {
                 if status.success() {
                     Self::send_progress(&progress_tx, 100, &tr!("{}完成", operation_name));
                     Ok(())
                 } else {
+                    let exit_code = format!("{:?}", status.code());
+                    if error_output.trim().is_empty() {
+                        bail!("{}", tr!("{}失败，退出代码: {}", operation_name, exit_code));
+                    }
                     bail!(
                         "{}",
                         tr!(
-                            "{}失败，退出代码: {}",
+                            "{}失败，退出代码: {}，详情: {}",
                             operation_name,
-                            format!("{:?}", status.code())
+                            exit_code,
+                            error_output.trim()
                         )
-                    )
+                    );
                 }
             }
             Err(e) => Err(e),
@@ -708,71 +739,84 @@ impl DismCmd {
         child: &mut Child,
         progress_tx: &Option<Sender<DismCmdProgress>>,
         operation_name: &str,
-    ) -> Result<()> {
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+    ) -> Result<String> {
+        let stdout = child.stdout.take().context(tr!("无法获取 DISM stdout"))?;
+        let stderr = child.stderr.take().context(tr!("无法获取 DISM stderr"))?;
+        let progress_tx = progress_tx.clone();
+        let operation_name = operation_name.to_owned();
 
-        let mut error_output = String::new();
-        let mut last_progress: u8 = 0;
-
-        // 处理 stdout
-        if let Some(stdout) = stdout {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                // 尝试转换编码
-                let decoded_line = if line.is_ascii() {
-                    line
-                } else {
-                    gbk_to_utf8(line.as_bytes())
-                };
-
-                // 解析进度
+        // Both pipes must be drained concurrently. Reading stdout to EOF before touching stderr
+        // can deadlock when DISM fills the stderr pipe while it is still running.
+        let stdout_thread = std::thread::spawn(move || -> Result<String> {
+            let mut reader = BufReader::new(stdout);
+            let mut bytes = Vec::new();
+            let mut error_output = String::new();
+            let mut last_progress = None;
+            loop {
+                bytes.clear();
+                if reader
+                    .read_until(b'\n', &mut bytes)
+                    .context("failed to read DISM stdout")?
+                    == 0
+                {
+                    break;
+                }
+                let decoded_line = decode_dism_output_line(&bytes);
                 if let Some(pct) = Self::parse_progress_line(&decoded_line) {
-                    if pct != last_progress {
-                        last_progress = pct;
+                    if last_progress != Some(pct) {
+                        last_progress = Some(pct);
                         Self::send_progress(
-                            progress_tx,
+                            &progress_tx,
                             pct,
                             &tr!("{}中... {}%", operation_name, pct),
                         );
                     }
                 }
-
-                // 检测错误信息
                 if decoded_line.contains("Error")
                     || decoded_line.contains("错误")
                     || decoded_line.contains("失败")
                 {
-                    error_output.push_str(&decoded_line);
-                    error_output.push('\n');
+                    append_bounded_output(&mut error_output, &decoded_line);
                 }
-
-                // 打印日志
                 if !decoded_line.trim().is_empty() {
                     log::trace!("[DISM] {}", decoded_line);
                 }
             }
-        }
+            Ok(error_output)
+        });
 
-        // 处理 stderr
-        if let Some(stderr) = stderr {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                let decoded_line = if line.is_ascii() {
-                    line
-                } else {
-                    gbk_to_utf8(line.as_bytes())
-                };
-
+        let stderr_thread = std::thread::spawn(move || -> Result<String> {
+            let mut reader = BufReader::new(stderr);
+            let mut bytes = Vec::new();
+            let mut error_output = String::new();
+            loop {
+                bytes.clear();
+                if reader
+                    .read_until(b'\n', &mut bytes)
+                    .context("failed to read DISM stderr")?
+                    == 0
+                {
+                    break;
+                }
+                let decoded_line = decode_dism_output_line(&bytes);
                 if !decoded_line.trim().is_empty() {
-                    error_output.push_str(&decoded_line);
-                    error_output.push('\n');
+                    append_bounded_output(&mut error_output, &decoded_line);
                     log::trace!("[DISM ERR] {}", decoded_line);
                 }
             }
-        }
+            Ok(error_output)
+        });
 
-        Ok(())
+        let mut error_output = stdout_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("DISM stdout reader thread panicked"))??;
+        let stderr_output = stderr_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("DISM stderr reader thread panicked"))??;
+        for line in stderr_output.lines() {
+            append_bounded_output(&mut error_output, line);
+        }
+        Ok(error_output)
     }
 
     /// 从 DISM 输出中提取错误信息
@@ -950,6 +994,26 @@ mod tests {
         assert_eq!(DismCmd::parse_progress_line("Processing: 75%"), Some(75));
         assert_eq!(DismCmd::parse_progress_line("完成 100.0%"), Some(100));
         assert_eq!(DismCmd::parse_progress_line("No progress here"), None);
+    }
+
+    #[test]
+    fn dism_output_decoder_accepts_utf8_and_gbk_without_losing_line_boundaries() {
+        assert_eq!(decode_dism_output_line("错误\r\n".as_bytes()), "错误");
+        assert_eq!(
+            decode_dism_output_line(&[0xB4, 0xED, 0xCE, 0xF3, b'\r', b'\n']),
+            "错误"
+        );
+    }
+
+    #[test]
+    fn dism_error_output_is_bounded_on_a_utf8_boundary() {
+        let mut output = String::new();
+        append_bounded_output(&mut output, &"错".repeat(MAX_DISM_ERROR_OUTPUT_BYTES));
+        assert!(output.len() <= MAX_DISM_ERROR_OUTPUT_BYTES);
+        assert!(std::str::from_utf8(output.as_bytes()).is_ok());
+        let length = output.len();
+        append_bounded_output(&mut output, "ignored");
+        assert_eq!(output.len(), length);
     }
 
     #[test]

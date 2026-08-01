@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,31 +11,6 @@ use crate::ui::progress::{BackupStep, InstallStep, ProgressState};
 use crate::utils::reboot_pe;
 use crate::workflow_journal::PeWorkflowJournal;
 use crate::workflow_journal::RecoveryCheckpointSnapshot;
-
-/// 递归查找目录中的所有 CAB 文件
-fn find_cab_files_in_directory(dir: &str) -> Vec<PathBuf> {
-    let mut cab_files = Vec::new();
-    find_cab_files_recursive(Path::new(dir), &mut cab_files);
-    cab_files
-}
-
-/// 递归搜索 CAB 文件的辅助函数
-fn find_cab_files_recursive(dir: &Path, cab_files: &mut Vec<PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if ext.to_string_lossy().to_lowercase() == "cab" {
-                        cab_files.push(path);
-                    }
-                }
-            } else if path.is_dir() {
-                find_cab_files_recursive(&path, cab_files);
-            }
-        }
-    }
-}
 
 /// 工作线程消息
 #[derive(Debug, Clone)]
@@ -666,48 +641,37 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         }
         log::info!("驱动导入成功，启动存储驱动覆盖验证通过");
 
-        // 同时检查驱动目录中是否有 CAB 文件并安装
-        let cab_files_in_driver_dir = find_cab_files_in_directory(&driver_path);
-        if !cab_files_in_driver_dir.is_empty() {
-            log::info!(
-                "在驱动目录中发现 {} 个 CAB 文件，将一并安装",
-                cab_files_in_driver_dir.len()
-            );
-            let _ = tx.send(WorkerMessage::SetStatus(tr!(
-                "正在安装驱动目录中的 {} 个 CAB 更新包...",
-                cab_files_in_driver_dir.len()
-            )));
-
-            // 创建进度通道
-            let (cab_progress_tx, cab_progress_rx) = channel::<DismProgress>();
-            let tx_cab = tx.clone();
-
-            // 启动进度监控线程
-            let cab_progress_handle = thread::spawn(move || {
-                while let Ok(progress) = cab_progress_rx.recv() {
-                    let _ = tx_cab.send(WorkerMessage::SetProgress(progress.percentage));
-                    let _ = tx_cab.send(WorkerMessage::SetStatus(tr!(
-                        "安装CAB: {}",
-                        progress.status
-                    )));
-                }
-            });
-
-            let dism = Dism::new();
-            match dism.add_packages_offline_from_dir(
-                &apply_dir,
-                &driver_path,
-                Some(cab_progress_tx),
-            ) {
-                Ok((success, fail)) => {
-                    log::info!("驱动目录中的CAB安装完成: {} 成功, {} 失败", success, fail);
-                }
-                Err(e) => {
-                    log::warn!("驱动目录中的CAB安装失败: {}", e);
-                }
+        // The DISM boundary performs the only recursive CAB scan. It rejects reparse roots,
+        // propagates enumeration failures, and returns zero cleanly when this driver tree has no
+        // CAB packages.
+        let (cab_progress_tx, cab_progress_rx) = channel::<DismProgress>();
+        let tx_cab = tx.clone();
+        let cab_progress_handle = thread::spawn(move || {
+            while let Ok(progress) = cab_progress_rx.recv() {
+                let _ = tx_cab.send(WorkerMessage::SetProgress(progress.percentage));
+                let _ = tx_cab.send(WorkerMessage::SetStatus(tr!(
+                    "安装CAB: {}",
+                    progress.status
+                )));
             }
-
-            let _ = cab_progress_handle.join();
+        });
+        let dism = Dism::new();
+        let cab_result =
+            dism.add_packages_offline_from_dir(&apply_dir, &driver_path, Some(cab_progress_tx));
+        let _ = cab_progress_handle.join();
+        match cab_result {
+            Ok((success, _)) if success > 0 => {
+                log::info!("驱动目录中的CAB安装完成: {} 成功", success);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::error!("驱动目录中的CAB安装失败，安装停止: {error}");
+                let _ = tx.send(WorkerMessage::Failed(tr!(
+                    "批量 CAB 更新包安装失败: {}",
+                    error
+                )));
+                return;
+            }
         }
     } else if config.should_import_drivers() && !driver_path_exists {
         log::error!("请求自动导入驱动，但驱动目录不存在: {}", driver_path);
@@ -752,28 +716,38 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             });
 
             let dism = Dism::new();
-            match dism.add_packages_offline_from_dir(&apply_dir, &cab_path, Some(cab_progress_tx)) {
-                Ok((success, fail)) => {
-                    log::info!("CAB更新包安装完成: {} 成功, {} 失败", success, fail);
+            let cab_result =
+                dism.add_packages_offline_from_dir(&apply_dir, &cab_path, Some(cab_progress_tx));
+            let _ = cab_progress_handle.join();
+            match cab_result {
+                Ok((success, _)) if success > 0 => {
+                    log::info!("CAB更新包安装完成: {} 成功", success);
                     let _ = tx.send(WorkerMessage::SetStatus(tr!(
                         "更新包安装完成: {} 成功, {} 失败",
                         success,
-                        fail
+                        0
                     )));
                 }
-                Err(e) => {
-                    log::warn!("CAB更新包安装失败: {}", e);
-                    // 不中断安装流程，继续执行
+                Ok(_) => {
+                    let error = tr!("目录中没有找到驱动文件（.inf）或 CAB 包（.cab）");
+                    log::error!("{error}: {cab_path}");
+                    let _ = tx.send(WorkerMessage::Failed(error));
+                    return;
+                }
+                Err(error) => {
+                    log::error!("CAB更新包安装失败，安装停止: {error}");
+                    let _ = tx.send(WorkerMessage::Failed(tr!(
+                        "批量 CAB 更新包安装失败: {}",
+                        error
+                    )));
+                    return;
                 }
             }
-
-            // 等待进度监控线程结束
-            let _ = cab_progress_handle.join();
         } else {
-            log::info!("更新包目录不存在，跳过CAB安装: {}", cab_path);
-            let _ = tx.send(WorkerMessage::SetStatus(tr!(
-                "跳过更新包安装（目录不存在）"
-            )));
+            let error = tr!("包目录不存在: {}", cab_path);
+            log::error!("{error}");
+            let _ = tx.send(WorkerMessage::Failed(error));
+            return;
         }
     } else {
         let _ = tx.send(WorkerMessage::SetStatus(tr!("跳过更新包安装")));

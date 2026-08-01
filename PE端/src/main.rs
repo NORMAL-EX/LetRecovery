@@ -458,29 +458,6 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
     use core::ghost::Ghost;
     use ui::advanced_options::apply_advanced_options;
 
-    /// 递归查找目录中的所有 CAB 文件
-    fn find_cab_files_in_dir(dir: &str) -> Vec<std::path::PathBuf> {
-        fn find_recursive(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Some(ext) = path.extension() {
-                            if ext.to_string_lossy().to_lowercase() == "cab" {
-                                files.push(path);
-                            }
-                        }
-                    } else if path.is_dir() {
-                        find_recursive(&path, files);
-                    }
-                }
-            }
-        }
-        let mut files = Vec::new();
-        find_recursive(std::path::Path::new(dir), &mut files);
-        files
-    }
-
     if is_install {
         log::info!("[PE INSTALL] ========== PE自动安装模式 ==========");
         // 注：BitLocker 透传解锁已在 main() 最前面统一执行，这里不再重复。
@@ -713,28 +690,15 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             }
             log::info!("[PE INSTALL] 驱动导入成功，启动存储驱动覆盖验证通过");
 
-            // 同时检查驱动目录中是否有 CAB 文件并安装
-            let cab_files = find_cab_files_in_dir(&driver_path);
-            if !cab_files.is_empty() {
-                log::info!(
-                    "[PE INSTALL] 在驱动目录中发现 {} 个 CAB 文件，一并安装",
-                    cab_files.len()
-                );
-                match dism.add_packages_offline_from_dir(&apply_dir, &driver_path, None) {
-                    Ok((success, fail)) => {
-                        log::info!(
-                            "[PE INSTALL] 驱动目录中的CAB安装完成: {} 成功, {} 失败",
-                            success,
-                            fail
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[PE INSTALL] 警告: 驱动目录中的CAB安装失败: {} (继续安装)",
-                            e
-                        );
-                        log::warn!("驱动目录中的CAB安装失败: {}", e);
-                    }
+            match dism.add_packages_offline_from_dir(&apply_dir, &driver_path, None) {
+                Ok((success, _)) if success > 0 => {
+                    log::info!("[PE INSTALL] 驱动目录中的CAB安装完成: {success} 成功");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::error!("[PE INSTALL] 驱动目录中的CAB安装失败: {error}");
+                    show_error_message(&tr!("批量 CAB 更新包安装失败: {}", error));
+                    return Ok(());
                 }
             }
         } else if config.should_import_drivers() && !driver_path_exists {
@@ -752,20 +716,23 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             if std::path::Path::new(&cab_path).exists() {
                 let dism = Dism::new();
                 match dism.add_packages_offline_from_dir(&apply_dir, &cab_path, None) {
-                    Ok((success, fail)) => {
-                        log::info!(
-                            "[PE INSTALL] CAB更新包安装完成: {} 成功, {} 失败",
-                            success,
-                            fail
-                        );
+                    Ok((success, _)) if success > 0 => {
+                        log::info!("[PE INSTALL] CAB更新包安装完成: {success} 成功");
                     }
-                    Err(e) => {
-                        log::warn!("[PE INSTALL] 警告: CAB更新包安装失败: {} (继续安装)", e);
-                        log::warn!("CAB更新包安装失败: {}", e);
+                    Ok(_) => {
+                        show_error_message(&tr!("目录中没有找到驱动文件（.inf）或 CAB 包（.cab）"));
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        log::error!("[PE INSTALL] CAB更新包安装失败: {error}");
+                        show_error_message(&tr!("批量 CAB 更新包安装失败: {}", error));
+                        return Ok(());
                     }
                 }
             } else {
-                log::info!("[PE INSTALL] 更新包目录不存在，跳过CAB安装");
+                log::error!("[PE INSTALL] 更新包目录不存在: {cab_path}");
+                show_error_message(&tr!("包目录不存在: {}", cab_path));
+                return Ok(());
             }
         } else {
             log::info!("[PE INSTALL] 跳过CAB更新包安装");

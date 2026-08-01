@@ -21,6 +21,7 @@ use walkdir::WalkDir;
 use windows::{
     core::GUID,
     Win32::Foundation::{GetLastError, BOOL, HWND},
+    Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOEXW},
 };
 
 // ============================================================================
@@ -191,6 +192,48 @@ fn wide_to_string(wide: &[u16]) -> String {
         .into_owned()
 }
 
+/// Allocates an aligned UTF-16 buffer for a SetupAPI byte count.
+///
+/// SetupAPI reports string-property sizes in bytes even though the payload is UTF-16.  A
+/// `Vec<u8>` cannot be cast to `u16` safely because Rust does not promise two-byte alignment.
+fn aligned_utf16_buffer(byte_count: u32, property_name: &str) -> Result<Vec<u16>> {
+    if byte_count == 0 || !byte_count.is_multiple_of(2) {
+        bail!("invalid UTF-16 byte size for {property_name}: {byte_count}");
+    }
+    Ok(vec![0u16; byte_count as usize / std::mem::size_of::<u16>()])
+}
+
+fn utf16_payload<'a>(buffer: &'a [u16], byte_count: u32, property_name: &str) -> Result<&'a [u16]> {
+    if !byte_count.is_multiple_of(2) {
+        bail!("odd UTF-16 byte size returned for {property_name}: {byte_count}");
+    }
+    let unit_count = byte_count as usize / std::mem::size_of::<u16>();
+    if unit_count > buffer.len() {
+        bail!(
+            "oversized UTF-16 payload returned for {property_name}: {byte_count} bytes exceeds {}",
+            std::mem::size_of_val(buffer)
+        );
+    }
+    Ok(&buffer[..unit_count])
+}
+
+#[cfg(windows)]
+fn current_windows_is_pre_vista() -> Result<bool> {
+    let mut version = OSVERSIONINFOEXW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOEXW>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        GetVersionExW((&mut version as *mut OSVERSIONINFOEXW).cast())
+            .context("GetVersionExW failed while selecting the driver installation API")?;
+    }
+    Ok(newdev_fallback_allowed_for_major(version.dwMajorVersion))
+}
+
+const fn newdev_fallback_allowed_for_major(major_version: u32) -> bool {
+    major_version < 6
+}
+
 /// 获取最后的 Win32 错误码
 #[cfg(windows)]
 fn get_last_error() -> u32 {
@@ -339,15 +382,15 @@ impl SetupApi {
             bail!("invalid SetupAPI property size: {required_size}");
         }
 
-        let mut buffer = vec![0u8; required_size as usize];
+        let mut buffer = aligned_utf16_buffer(required_size, "SetupAPI registry property")?;
         let result = unsafe {
             (self.get_device_registry_property)(
                 dev_info,
                 dev_info_data,
                 property,
                 &mut reg_type,
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * std::mem::size_of::<u16>()) as u32,
                 &mut required_size,
             )
         };
@@ -361,12 +404,7 @@ impl SetupApi {
             bail!("unexpected SetupAPI registry property type: {reg_type}");
         }
 
-        let wide_slice = unsafe {
-            std::slice::from_raw_parts(
-                buffer.as_ptr() as *const u16,
-                (required_size as usize / 2).min(buffer.len() / 2),
-            )
-        };
+        let wide_slice = utf16_payload(&buffer, required_size, "SetupAPI registry property")?;
         Ok(wide_slice
             .split(|value| *value == 0)
             .take_while(|value| !value.is_empty())
@@ -415,15 +453,15 @@ impl SetupApi {
         if !(2..=1024 * 1024).contains(&required_size) {
             bail!("invalid driver INF-path property size: {required_size}");
         }
-        let mut buffer = vec![0u8; required_size as usize];
+        let mut buffer = aligned_utf16_buffer(required_size, "driver INF-path property")?;
         let result = unsafe {
             get_device_property(
                 dev_info,
                 dev_info_data,
                 &DEVPKEY_DEVICE_DRIVER_INF_PATH,
                 &mut property_type,
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * std::mem::size_of::<u16>()) as u32,
                 &mut required_size,
                 0,
             )
@@ -437,12 +475,7 @@ impl SetupApi {
         if property_type != DEVPROP_TYPE_STRING {
             bail!("unexpected driver INF-path property type: {property_type}");
         }
-        let wide_slice = unsafe {
-            std::slice::from_raw_parts(
-                buffer.as_ptr() as *const u16,
-                (required_size as usize / 2).min(buffer.len() / 2),
-            )
-        };
+        let wide_slice = utf16_payload(&buffer, required_size, "driver INF-path property")?;
         let value = wide_to_string(wide_slice);
         Ok((!value.trim().is_empty()).then_some(value))
     }
@@ -698,7 +731,20 @@ impl DriverManager {
     /// 创建驱动管理器实例
     pub fn new() -> Result<Self> {
         let setup_api = SetupApi::new()?;
-        let newdev_api = NewDevApi::new().ok();
+        let newdev_api = match NewDevApi::new() {
+            Ok(api) => Some(api),
+            Err(error) if current_windows_is_pre_vista()? => {
+                log::warn!(
+                    "[DriverManager] DiInstallDriverW is unavailable on this pre-Vista system; using SetupCopyOEMInfW staging compatibility: {error}"
+                );
+                None
+            }
+            Err(error) => {
+                return Err(error.context(
+                    "DiInstallDriverW is required on Windows Vista and newer; refusing to report package staging as driver installation",
+                ));
+            }
+        };
 
         Ok(Self {
             setup_api,
@@ -1449,6 +1495,23 @@ mod tests {
         network.device_class = "Net".into();
         network.hardware_ids = vec!["PCI\\VEN_1234&DEV_5678".into()];
         assert!(!is_boot_storage_driver(&network));
+    }
+
+    #[test]
+    fn setupapi_utf16_buffers_are_aligned_and_byte_bounded() {
+        let buffer = aligned_utf16_buffer(6, "test property").unwrap();
+        assert_eq!(buffer.len(), 3);
+        assert_eq!((buffer.as_ptr() as usize) % std::mem::align_of::<u16>(), 0);
+        assert_eq!(utf16_payload(&buffer, 4, "test property").unwrap().len(), 2);
+        assert!(aligned_utf16_buffer(3, "test property").is_err());
+        assert!(utf16_payload(&buffer, 8, "test property").is_err());
+    }
+
+    #[test]
+    fn newdev_staging_fallback_is_limited_to_pre_vista_versions() {
+        assert!(newdev_fallback_allowed_for_major(5));
+        assert!(!newdev_fallback_allowed_for_major(6));
+        assert!(!newdev_fallback_allowed_for_major(10));
     }
 
     #[test]

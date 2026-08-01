@@ -3,11 +3,22 @@ use crate::core::dism::Dism;
 use crate::core::registry::OfflineRegistry;
 use crate::utils::path;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 /// 脚本目录名称（统一路径，与正常系统端保持一致）
 const SCRIPTS_DIR: &str = "LetRecovery_Scripts";
 
 struct OfflineHiveCleanup(Vec<&'static str>);
+
+impl OfflineHiveCleanup {
+    fn unload_all(&mut self) -> anyhow::Result<()> {
+        for hive in self.0.iter().rev() {
+            OfflineRegistry::unload_hive(hive)?;
+        }
+        self.0.clear();
+        Ok(())
+    }
+}
 
 impl Drop for OfflineHiveCleanup {
     fn drop(&mut self) {
@@ -16,6 +27,39 @@ impl Drop for OfflineHiveCleanup {
                 log::error!("[ADVANCED] emergency unload of offline hive {hive} failed: {error}");
             }
         }
+    }
+}
+
+fn with_offline_hives_unloaded<T>(
+    default_loaded: bool,
+    software_hive: &str,
+    system_hive: &str,
+    default_hive: &str,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if default_loaded {
+        OfflineRegistry::unload_hive("pc-default")?;
+    }
+    OfflineRegistry::unload_hive("pc-sys")?;
+    OfflineRegistry::unload_hive("pc-soft")?;
+
+    let operation_result = operation();
+    let reload_result = (|| -> anyhow::Result<()> {
+        OfflineRegistry::load_hive("pc-soft", software_hive)?;
+        OfflineRegistry::load_hive("pc-sys", system_hive)?;
+        if default_loaded {
+            OfflineRegistry::load_hive("pc-default", default_hive)?;
+        }
+        Ok(())
+    })();
+
+    match (operation_result, reload_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(reload_error)) => anyhow::bail!(
+            "offline operation failed: {operation_error}; additionally failed to reload registry hives: {reload_error}"
+        ),
     }
 }
 
@@ -275,11 +319,11 @@ pub fn apply_advanced_options(
                 verified_packages.len()
             );
 
-            OfflineRegistry::unload_hive("pc-soft")?;
-            OfflineRegistry::unload_hive("pc-sys")?;
             if default_loaded {
                 OfflineRegistry::unload_hive("pc-default")?;
             }
+            OfflineRegistry::unload_hive("pc-sys")?;
+            OfflineRegistry::unload_hive("pc-soft")?;
             hive_cleanup.0.clear();
 
             let dism = Dism::new();
@@ -342,41 +386,29 @@ pub fn apply_advanced_options(
         log::info!("[ADVANCED] Win7: 开始注入USB3驱动");
         let usb3_dir = path::get_exe_dir().join("drivers").join("usb3");
 
-        if usb3_dir.is_dir() {
-            // 先卸载注册表
-            let _ = OfflineRegistry::unload_hive("pc-soft");
-            let _ = OfflineRegistry::unload_hive("pc-sys");
-            if default_loaded {
-                let _ = OfflineRegistry::unload_hive("pc-default");
-            }
-
-            // 处理驱动（包括解压.cab文件）
-            match prepare_win7_drivers(&usb3_dir) {
-                Ok(processed_path) => {
+        if !usb3_dir.is_dir() {
+            anyhow::bail!("Win7 USB3驱动目录不存在: {}", usb3_dir.display());
+        }
+        with_offline_hives_unloaded(
+            default_loaded,
+            &software_hive,
+            &system_hive,
+            &default_hive,
+            || {
+                let processed_path = prepare_win7_drivers(&usb3_dir)?;
+                let import_result = (|| -> anyhow::Result<()> {
                     let dism = Dism::new();
                     let image_path = format!("{}\\", target_partition);
-                    match dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy()) {
-                        Ok(_) => log::info!("[ADVANCED] Win7 USB3驱动注入成功"),
-                        Err(e) => log::warn!("[ADVANCED] Win7 USB3驱动注入失败: {} (继续执行)", e),
-                    }
-
-                    // 清理临时目录
-                    if processed_path != usb3_dir {
-                        let _ = std::fs::remove_dir_all(&processed_path);
-                    }
+                    dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy())?;
+                    log::info!("[ADVANCED] Win7 USB3驱动注入成功");
+                    Ok(())
+                })();
+                if processed_path != usb3_dir {
+                    let _ = std::fs::remove_dir_all(&processed_path);
                 }
-                Err(e) => log::warn!("[ADVANCED] Win7 USB3驱动准备失败: {}", e),
-            }
-
-            // 重新加载注册表
-            let _ = OfflineRegistry::load_hive("pc-soft", &software_hive);
-            let _ = OfflineRegistry::load_hive("pc-sys", &system_hive);
-            if default_loaded {
-                let _ = OfflineRegistry::load_hive("pc-default", &default_hive);
-            }
-        } else {
-            log::warn!("[ADVANCED] Win7 USB3驱动目录不存在: {}", usb3_dir.display());
-        }
+                import_result
+            },
+        )?;
     }
 
     // 13. Win7 注入 NVMe 驱动
@@ -384,29 +416,17 @@ pub fn apply_advanced_options(
         log::info!("[ADVANCED] Win7: 开始注入NVMe驱动");
         let nvme_dir = path::get_exe_dir().join("drivers").join("nvme");
 
-        if nvme_dir.is_dir() {
-            // 先卸载注册表
-            let _ = OfflineRegistry::unload_hive("pc-soft");
-            let _ = OfflineRegistry::unload_hive("pc-sys");
-            if default_loaded {
-                let _ = OfflineRegistry::unload_hive("pc-default");
-            }
-
-            // 使用新的处理函数
-            match install_win7_nvme_drivers(&nvme_dir, target_partition) {
-                Ok(_) => log::info!("[ADVANCED] Win7 NVMe驱动注入成功"),
-                Err(e) => log::warn!("[ADVANCED] Win7 NVMe驱动注入失败: {} (继续执行)", e),
-            }
-
-            // 重新加载注册表
-            let _ = OfflineRegistry::load_hive("pc-soft", &software_hive);
-            let _ = OfflineRegistry::load_hive("pc-sys", &system_hive);
-            if default_loaded {
-                let _ = OfflineRegistry::load_hive("pc-default", &default_hive);
-            }
-        } else {
-            log::warn!("[ADVANCED] Win7 NVMe驱动目录不存在: {}", nvme_dir.display());
+        if !nvme_dir.is_dir() {
+            anyhow::bail!("Win7 NVMe驱动目录不存在: {}", nvme_dir.display());
         }
+        with_offline_hives_unloaded(
+            default_loaded,
+            &software_hive,
+            &system_hive,
+            &default_hive,
+            || install_win7_nvme_drivers(&nvme_dir, target_partition),
+        )?;
+        log::info!("[ADVANCED] Win7 NVMe驱动注入成功");
     }
 
     // 14. Win7 修复 ACPI_BIOS_ERROR (0xA5) 蓝屏
@@ -667,12 +687,7 @@ pub fn apply_advanced_options(
     // 卸载注册表（确保正确卸载）
     log::info!("[ADVANCED] 卸载离线注册表...");
     std::thread::sleep(std::time::Duration::from_millis(500));
-    OfflineRegistry::unload_hive("pc-soft")?;
-    OfflineRegistry::unload_hive("pc-sys")?;
-    if default_loaded {
-        OfflineRegistry::unload_hive("pc-default")?;
-    }
-    std::mem::forget(hive_cleanup);
+    hive_cleanup.unload_all()?;
 
     log::info!("[ADVANCED] 高级选项应用完成");
     Ok(())
@@ -730,7 +745,7 @@ fn install_win7_nvme_drivers(nvme_dir: &Path, target_partition: &str) -> anyhow:
         log::info!("[NVME] 处理CAB文件: {}", cab_path.display());
 
         // 检测CAB类型
-        let cab_type = detect_cab_type(cab_path);
+        let cab_type = detect_cab_type(cab_path)?;
 
         match cab_type {
             CabType::WindowsUpdate => {
@@ -749,13 +764,7 @@ fn install_win7_nvme_drivers(nvme_dir: &Path, target_partition: &str) -> anyhow:
                             cab_path.display(),
                             e
                         );
-                        // 尝试备用方法：解压并手动复制驱动文件
-                        if install_cab_as_driver_fallback(cab_path, target_partition).is_ok() {
-                            log::info!("[NVME] 备用方法安装成功");
-                            success_count += 1;
-                        } else {
-                            fail_count += 1;
-                        }
+                        fail_count += 1;
                     }
                 }
             }
@@ -819,8 +828,11 @@ fn install_win7_nvme_drivers(nvme_dir: &Path, target_partition: &str) -> anyhow:
         fail_count
     );
 
-    if success_count == 0 && fail_count > 0 {
-        anyhow::bail!("所有NVMe驱动安装失败");
+    if fail_count > 0 {
+        anyhow::bail!("{} 个NVMe驱动包安装失败", fail_count);
+    }
+    if success_count == 0 {
+        anyhow::bail!("NVMe驱动目录中没有可安装的受支持驱动包");
     }
 
     Ok(())
@@ -838,7 +850,7 @@ enum CabType {
 }
 
 /// 检测CAB文件类型
-fn detect_cab_type(cab_path: &Path) -> CabType {
+fn detect_cab_type(cab_path: &Path) -> anyhow::Result<CabType> {
     use crate::core::cabinet::CabinetExtractor;
 
     // 先根据文件名判断
@@ -854,63 +866,34 @@ fn detect_cab_type(cab_path: &Path) -> CabType {
         || file_name.contains("windows8")
         || file_name.contains("windows10")
     {
-        return CabType::WindowsUpdate;
+        return Ok(CabType::WindowsUpdate);
     }
 
-    // 尝试解压并检查内容
-    let temp_dir =
-        std::env::temp_dir().join(format!("LetRecovery_CabDetect_{}", std::process::id()));
-
-    if std::fs::create_dir_all(&temp_dir).is_err() {
-        return CabType::Unknown;
-    }
-
-    let extractor = match CabinetExtractor::new() {
-        Ok(e) => e,
-        Err(_) => return CabType::Unknown,
-    };
-
-    // 只解压少量文件来检测
-    match extractor.extract(cab_path, &temp_dir) {
-        Ok(files) => {
-            // 检查是否包含manifest文件（Windows Update特征）
-            let has_manifest = files.iter().any(|p| {
-                let name = p.to_string_lossy().to_lowercase();
-                name.ends_with(".manifest") || name.ends_with(".mum") || name.contains("update.mum")
-            });
-
-            // 检查是否包含INF文件（驱动包特征）
-            let has_inf = files.iter().any(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("inf"))
-                    .unwrap_or(false)
-            });
-
-            // 检查是否包含嵌套cab
-            let has_nested_cab = files.iter().any(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("cab"))
-                    .unwrap_or(false)
-            });
-
-            // 清理临时目录
-            let _ = std::fs::remove_dir_all(&temp_dir);
-
-            if has_manifest || has_nested_cab {
-                CabType::WindowsUpdate
-            } else if has_inf {
-                CabType::DriverPackage
-            } else {
-                CabType::Unknown
-            }
-        }
-        Err(_) => {
-            let _ = std::fs::remove_dir_all(&temp_dir);
-            CabType::Unknown
-        }
-    }
+    let staging = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+        &std::env::temp_dir(),
+        "lr-cab-detect",
+    )?;
+    let extractor = CabinetExtractor::new()?;
+    let files = extractor.extract(cab_path, staging.path())?;
+    let has_manifest = files.iter().any(|path| {
+        let name = path.to_string_lossy().to_lowercase();
+        name.ends_with(".manifest") || name.ends_with(".mum") || name.contains("update.mum")
+    });
+    let has_inf = files.iter().any(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("inf"))
+    });
+    let has_nested_cab = files.iter().any(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
+    });
+    Ok(if has_manifest || has_nested_cab {
+        CabType::WindowsUpdate
+    } else if has_inf {
+        CabType::DriverPackage
+    } else {
+        CabType::Unknown
+    })
 }
 
 /// 将CAB作为驱动包安装（解压后导入INF）
@@ -919,24 +902,21 @@ fn install_cab_as_driver(cab_path: &Path, target_partition: &str) -> anyhow::Res
 
     log::info!("[NVME] 解压驱动CAB: {}", cab_path.display());
 
-    let temp_dir = std::env::temp_dir().join(format!("LetRecovery_Driver_{}", std::process::id()));
-    std::fs::create_dir_all(&temp_dir)?;
-
+    let staging = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+        &std::env::temp_dir(),
+        "lr-cab-driver",
+    )?;
+    let temp_dir = staging.path();
     let extractor = CabinetExtractor::new()?;
-    let _files = extractor.extract(cab_path, &temp_dir)?;
+    let _files = extractor.extract(cab_path, temp_dir)?;
 
     // 检查是否有嵌套cab
-    process_nested_cabs_for_drivers(&temp_dir)?;
+    process_nested_cabs_for_drivers(temp_dir)?;
 
     // 使用Dism导入驱动
     let dism = Dism::new();
     let image_path = format!("{}\\", target_partition);
-    let result = dism.add_drivers_offline(&image_path, &temp_dir.to_string_lossy());
-
-    // 清理
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    result
+    dism.add_drivers_offline(&image_path, &temp_dir.to_string_lossy())
 }
 
 /// 处理嵌套的CAB文件
@@ -944,8 +924,7 @@ fn process_nested_cabs_for_drivers(dir: &Path) -> anyhow::Result<()> {
     use crate::core::cabinet::CabinetExtractor;
 
     // 查找嵌套cab
-    let mut nested_cabs = Vec::new();
-    find_nested_cabs(dir, &mut nested_cabs);
+    let nested_cabs = find_nested_cabs(dir)?;
 
     if nested_cabs.is_empty() {
         return Ok(());
@@ -965,181 +944,25 @@ fn process_nested_cabs_for_drivers(dir: &Path) -> anyhow::Result<()> {
 }
 
 /// 递归查找嵌套CAB
-fn find_nested_cabs(dir: &Path, cabs: &mut Vec<PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                find_nested_cabs(&path, cabs);
-            } else if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if ext.to_string_lossy().to_lowercase() == "cab" {
-                        cabs.push(path);
-                    }
-                }
-            }
-        }
+fn find_nested_cabs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let metadata = dir.symlink_metadata()?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        anyhow::bail!("嵌套 CAB 根目录不是普通目录: {}", dir.display());
     }
-}
-
-/// 备用方法：直接复制驱动文件
-fn install_cab_as_driver_fallback(cab_path: &Path, target_partition: &str) -> anyhow::Result<()> {
-    use crate::core::cabinet::CabinetExtractor;
-
-    log::info!("[NVME] 使用备用方法处理: {}", cab_path.display());
-
-    let temp_dir =
-        std::env::temp_dir().join(format!("LetRecovery_Fallback_{}", std::process::id()));
-    std::fs::create_dir_all(&temp_dir)?;
-
-    let extractor = CabinetExtractor::new()?;
-    let _ = extractor.extract(cab_path, &temp_dir)?;
-
-    // 处理嵌套cab
-    process_nested_cabs_for_drivers(&temp_dir)?;
-
-    // 目标目录
-    let system32_drivers = PathBuf::from(target_partition)
-        .join("Windows")
-        .join("System32")
-        .join("drivers");
-    let inf_dir = PathBuf::from(target_partition).join("Windows").join("INF");
-
-    std::fs::create_dir_all(&system32_drivers)?;
-    std::fs::create_dir_all(&inf_dir)?;
-
-    // 复制所有驱动文件
-    copy_driver_files_recursive(&temp_dir, &system32_drivers, &inf_dir)?;
-
-    // 注册驱动服务
-    register_nvme_driver_services(target_partition)?;
-
-    // 清理
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    Ok(())
-}
-
-/// 递归复制驱动文件
-fn copy_driver_files_recursive(
-    source: &Path,
-    drivers_dir: &Path,
-    inf_dir: &Path,
-) -> anyhow::Result<usize> {
-    let mut count = 0;
-
-    for entry in std::fs::read_dir(source)? {
+    let mut cabs = Vec::new();
+    for entry in WalkDir::new(dir).follow_links(false) {
         let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            count += copy_driver_files_recursive(&path, drivers_dir, inf_dir)?;
-        } else if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let ext_lower = ext.to_lowercase();
-                let file_name = entry.file_name();
-
-                match ext_lower.as_str() {
-                    "sys" => {
-                        let dest = drivers_dir.join(&file_name);
-                        if !dest.exists() {
-                            std::fs::copy(&path, &dest)?;
-                            log::info!("[NVME] 复制驱动: {:?}", file_name);
-                            count += 1;
-                        }
-                    }
-                    "inf" => {
-                        let dest = inf_dir.join(&file_name);
-                        if !dest.exists() {
-                            std::fs::copy(&path, &dest)?;
-                            log::info!("[NVME] 复制INF: {:?}", file_name);
-                            count += 1;
-                        }
-                    }
-                    "cat" => {
-                        let dest = inf_dir.join(&file_name);
-                        if !dest.exists() {
-                            std::fs::copy(&path, &dest)?;
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        if entry.file_type().is_file()
+            && entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
+        {
+            cabs.push(entry.into_path());
         }
     }
-
-    Ok(count)
-}
-
-/// 注册NVMe驱动服务到离线注册表
-fn register_nvme_driver_services(target_partition: &str) -> anyhow::Result<()> {
-    let system_hive = format!("{}\\Windows\\System32\\config\\SYSTEM", target_partition);
-
-    if !std::path::Path::new(&system_hive).exists() {
-        anyhow::bail!("[NVME] SYSTEM hive不存在，无法注册服务: {}", system_hive);
-    }
-
-    let hive_key = format!("nvme_drv_{}", std::process::id());
-
-    OfflineRegistry::load_hive(&hive_key, &system_hive)?;
-
-    // 注册stornvme服务（NVMe标准驱动）
-    let services = [
-        ("stornvme", "stornvme.sys", 0u32, 0u32), // Boot start
-        ("storahci", "storahci.sys", 0, 0),
-        ("msahci", "msahci.sys", 0, 0),
-    ];
-
-    let write_result: anyhow::Result<()> = (|| {
-        for (service_name, binary, service_type, start_type) in &services {
-            let key_path = format!(
-                "HKLM\\{}\\ControlSet001\\Services\\{}",
-                hive_key, service_name
-            );
-
-            OfflineRegistry::create_key(&key_path)?;
-            OfflineRegistry::set_dword(&key_path, "Type", *service_type)?;
-            OfflineRegistry::set_dword(&key_path, "Start", *start_type)?;
-            OfflineRegistry::set_dword(&key_path, "ErrorControl", 1)?;
-            OfflineRegistry::set_expand_string(
-                &key_path,
-                "ImagePath",
-                &format!("System32\\drivers\\{}", binary),
-            )?;
-
-            // 同时设置ControlSet002
-            let key_path2 = format!(
-                "HKLM\\{}\\ControlSet002\\Services\\{}",
-                hive_key, service_name
-            );
-            OfflineRegistry::create_key(&key_path2)?;
-            OfflineRegistry::set_dword(&key_path2, "Type", *service_type)?;
-            OfflineRegistry::set_dword(&key_path2, "Start", *start_type)?;
-            OfflineRegistry::set_dword(&key_path2, "ErrorControl", 1)?;
-            OfflineRegistry::set_expand_string(
-                &key_path2,
-                "ImagePath",
-                &format!("System32\\drivers\\{}", binary),
-            )?;
-        }
-        Ok(())
-    })();
-
-    let unload_result = OfflineRegistry::unload_hive(&hive_key);
-    match (write_result, unload_result) {
-        (Ok(()), Ok(())) => {}
-        (Err(write_error), Ok(())) => return Err(write_error),
-        (Ok(()), Err(unload_error)) => return Err(unload_error),
-        (Err(write_error), Err(unload_error)) => anyhow::bail!(
-            "NVMe driver service registration failed: {}; additionally failed to unload hive {}: {}",
-            write_error,
-            hive_key,
-            unload_error
-        ),
-    }
-
-    log::info!("[NVME] NVMe服务注册完成");
-    Ok(())
+    cabs.sort();
+    Ok(cabs)
 }
 
 /// 准备 Win7 驱动目录

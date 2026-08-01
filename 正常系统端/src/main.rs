@@ -703,10 +703,15 @@ fn execute_pe_install(
     // 导入驱动
     if config.restore_drivers {
         let driver_path = format!("{}\\drivers", data_dir);
-        if std::path::Path::new(&driver_path).exists() {
-            let dism = core::dism::Dism::new();
-            let _ = dism.add_drivers_offline(&apply_dir, &driver_path);
+        if !std::path::Path::new(&driver_path).is_dir() {
+            anyhow::bail!("请求恢复驱动，但驱动目录不存在: {}", driver_path);
         }
+        let dism = core::dism::Dism::new();
+        dism.add_drivers_offline(&apply_dir, &driver_path)?;
+        lr_core::driver::verify_offline_storage_driver_requirements(
+            std::path::Path::new(&apply_dir),
+            std::path::Path::new(&driver_path),
+        )?;
     }
 
     log::info!("[PE INSTALL] Step 4: 修复引导");

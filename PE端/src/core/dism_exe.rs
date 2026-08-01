@@ -15,6 +15,7 @@ use std::sync::mpsc::Sender;
 
 use anyhow::{bail, Context, Result};
 use lr_core::registry::OfflineRegistry;
+use walkdir::WalkDir;
 
 #[cfg(windows)]
 use windows::Win32::Globalization::LCIDToLocaleName;
@@ -845,7 +846,7 @@ impl DismExe {
     ) -> Result<(usize, usize)> {
         let total = package_paths.len();
         let mut success_count = 0;
-        let mut fail_count = 0;
+        let mut failed_packages = Vec::new();
 
         for (index, package_path) in package_paths.iter().enumerate() {
             // 发送当前进度
@@ -864,7 +865,7 @@ impl DismExe {
                     log::info!("[DISM.EXE] 更新包安装成功: {}", package_path.display());
                 }
                 Err(e) => {
-                    fail_count += 1;
+                    failed_packages.push(format!("{}: {e}", package_path.display()));
                     log::warn!(
                         "[DISM.EXE] 更新包安装失败: {} - {}",
                         package_path.display(),
@@ -878,17 +879,28 @@ impl DismExe {
         if let Some(ref tx) = progress_tx {
             let _ = tx.send(DismExeProgress {
                 percentage: 100,
-                status: tr!("完成: {} 成功, {} 失败", success_count, fail_count),
+                status: tr!(
+                    "完成: {} 成功, {} 失败",
+                    success_count,
+                    failed_packages.len()
+                ),
             });
         }
 
         log::info!(
             "[DISM.EXE] 批量更新包安装完成: 成功 {}, 失败 {}",
             success_count,
-            fail_count
+            failed_packages.len()
         );
 
-        Ok((success_count, fail_count))
+        if !failed_packages.is_empty() {
+            bail!(
+                "{} CAB package(s) failed; first failure: {}",
+                failed_packages.len(),
+                failed_packages[0]
+            );
+        }
+        Ok((success_count, 0))
     }
 
     /// 搜索目录中的所有 CAB 文件并安装
@@ -907,7 +919,7 @@ impl DismExe {
         progress_tx: Option<Sender<DismExeProgress>>,
     ) -> Result<(usize, usize)> {
         // 收集所有 CAB 文件
-        let cab_files = Self::find_cab_files(cab_dir);
+        let cab_files = Self::find_cab_files(cab_dir)?;
 
         if cab_files.is_empty() {
             log::info!("[DISM.EXE] 目录中没有找到 CAB 文件: {}", cab_dir.display());
@@ -924,26 +936,28 @@ impl DismExe {
     }
 
     /// 递归查找目录中的所有 CAB 文件
-    fn find_cab_files(dir: &Path) -> Vec<PathBuf> {
+    fn find_cab_files(dir: &Path) -> Result<Vec<PathBuf>> {
+        let metadata = dir
+            .symlink_metadata()
+            .with_context(|| format!("CAB directory is unavailable: {}", dir.display()))?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            bail!("CAB source is not a regular directory: {}", dir.display());
+        }
         let mut cab_files = Vec::new();
-
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext.to_string_lossy().to_lowercase() == "cab" {
-                            cab_files.push(path);
-                        }
-                    }
-                } else if path.is_dir() {
-                    // 递归搜索子目录
-                    cab_files.extend(Self::find_cab_files(&path));
-                }
+        for entry in WalkDir::new(dir).follow_links(false) {
+            let entry = entry
+                .with_context(|| format!("failed to enumerate CAB directory: {}", dir.display()))?;
+            if entry.file_type().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
+            {
+                cab_files.push(entry.into_path());
             }
         }
-
-        cab_files
+        cab_files.sort();
+        Ok(cab_files)
     }
 }
 
@@ -1025,6 +1039,32 @@ Keyboard layered driver : Not installed.
         assert!(locale_id_from_registry("not-a-lcid").is_err());
         assert!(input_locale_from_keyboard_layout("804").is_err());
         assert!(input_locale_from_keyboard_layout("0000080Z").is_err());
+    }
+
+    #[test]
+    fn cab_inventory_is_recursive_case_insensitive_and_sorted() {
+        let staging = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-dism-cab-test",
+        )
+        .unwrap();
+        let nested = staging.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(staging.path().join("b.CAB"), b"cab").unwrap();
+        std::fs::write(nested.join("a.cab"), b"cab").unwrap();
+        std::fs::write(nested.join("ignored.txt"), b"text").unwrap();
+
+        let files = DismExe::find_cab_files(staging.path()).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files[0] < files[1]);
+        assert!(files.iter().all(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
+        }));
+
+        let regular_file = staging.path().join("not-a-directory");
+        std::fs::write(&regular_file, b"file").unwrap();
+        assert!(DismExe::find_cab_files(&regular_file).is_err());
     }
 
     #[test]
