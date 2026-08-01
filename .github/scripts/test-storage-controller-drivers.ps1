@@ -58,13 +58,15 @@ foreach ($package in $manifest.packages) {
         if (-not $hash.Equals([string]$file.sha256, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Driver package member SHA-256 mismatch: $relative"
         }
-        if ($VerifySignatures -and $file.signer_contains) {
+        $signerProperty = $file.PSObject.Properties["signer_contains"]
+        $signerContains = if ($null -ne $signerProperty) { [string]$signerProperty.Value } else { "" }
+        if ($VerifySignatures -and -not [string]::IsNullOrWhiteSpace($signerContains)) {
             $signature = Get-AuthenticodeSignature -LiteralPath $path
             if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
                 throw "Driver package signature is not valid: $relative ($($signature.Status))"
             }
             $subject = [string]$signature.SignerCertificate.Subject
-            if ($subject.IndexOf([string]$file.signer_contains, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            if ($subject.IndexOf($signerContains, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
                 throw "Unexpected driver signer for $relative`: $subject"
             }
         }
