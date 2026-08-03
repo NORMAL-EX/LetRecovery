@@ -10,6 +10,34 @@ use lr_core::boot_pca::BootPcaMode;
 
 static ESP_MOUNT_LOCK: Mutex<()> = Mutex::new(());
 
+fn ensure_legacy_bootsect_success(
+    success: bool,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> Result<()> {
+    if success {
+        return Ok(());
+    }
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    anyhow::bail!(
+        "{}",
+        tr!(
+            "bootsect 写入 Legacy 引导失败（退出码 {}）：{}",
+            format!("{:?}", exit_code),
+            detail
+        )
+    )
+}
+
+fn require_legacy_active_partition(result: Result<()>) -> Result<()> {
+    result.map_err(|error| anyhow::anyhow!("{}", tr!("设置 Legacy 活动分区失败：{}", error)))
+}
+
 pub struct BootManager {
     bcdedit_path: String,
     bcdboot_path: String,
@@ -515,6 +543,18 @@ impl BootManager {
                 boot_part
             );
 
+            // Bootsect 是后续承重步骤，先确认依赖存在，避免 BCDBoot 已改盘后才发现无法完成。
+            let bootsect_path = get_bin_dir().join("bootsect.exe");
+            if !bootsect_path.is_file() {
+                anyhow::bail!(
+                    "{}",
+                    tr!(
+                        "Legacy 引导修复缺少 bootsect.exe：{}",
+                        bootsect_path.display()
+                    )
+                );
+            }
+
             // 1) bcdboot W:\Windows /s <引导分区> /f BIOS /l zh-cn（/s 指定系统分区——关键差异）
             let out = create_command(&self.bcdboot_path)
                 .args([
@@ -553,29 +593,32 @@ impl BootManager {
             }
 
             // 2) bootsect /nt60 <引导分区> /force /mbr（写【引导分区】的引导扇区 + MBR 引导码）
-            let bootsect_path = get_bin_dir().join("bootsect.exe");
-            if bootsect_path.exists() {
-                let out = create_command(&bootsect_path)
-                    .args(["/nt60", boot_letter.as_str(), "/force", "/mbr"])
-                    .output()?;
-                log::info!(
-                    "[BOOT] bootsect /nt60 {} /force /mbr: {}",
-                    boot_letter,
-                    gbk_to_utf8(&out.stdout)
-                );
-            }
+            let out = create_command(&bootsect_path)
+                .args(["/nt60", boot_letter.as_str(), "/force", "/mbr"])
+                .output()?;
+            let bootsect_stdout = gbk_to_utf8(&out.stdout);
+            let bootsect_stderr = gbk_to_utf8(&out.stderr);
+            log::info!(
+                "[BOOT] bootsect /nt60 {} /force /mbr: stdout={} stderr={}",
+                boot_letter,
+                bootsect_stdout,
+                bootsect_stderr
+            );
+            ensure_legacy_bootsect_success(
+                out.status.success(),
+                out.status.code(),
+                &bootsect_stdout,
+                &bootsect_stderr,
+            )?;
 
             // 3) 把引导分区设为活动（DSI 的 PART *a）——Legacy/MBR 开机的承重步骤，两条路径都要做。
             //    有磁盘:分区号就按号设；走了回退(boot_part==0、磁盘/分区号未知)则按引导盘符兜底设活动，
             //    避免"clean 后新建分区从未设活动 → 写完引导文件磁盘仍无活动分区 → BIOS 找不到引导设备 0x7B"。
-            let active_res = if boot_part > 0 {
+            require_legacy_active_partition(if boot_part > 0 {
                 self.set_partition_active(boot_disk, boot_part)
             } else {
                 self.set_partition_active_by_letter(&boot_letter)
-            };
-            if let Err(e) = active_res {
-                log::warn!("[BOOT] 设活动分区失败（忽略）: {}", e);
-            }
+            })?;
 
             log::info!("[BOOT] Legacy 引导修复成功");
         }
@@ -630,5 +673,35 @@ impl BootManager {
 impl Default for BootManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_bootsect_nonzero_exit_fails_closed_with_stderr() {
+        let error = ensure_legacy_bootsect_success(false, Some(5), "partial", "access denied")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Some(5)"));
+        assert!(error.contains("access denied"));
+        assert!(!error.contains("partial"));
+    }
+
+    #[test]
+    fn legacy_bootsect_success_is_accepted() {
+        ensure_legacy_bootsect_success(true, Some(0), "ok", "").unwrap();
+    }
+
+    #[test]
+    fn legacy_active_partition_failure_is_propagated() {
+        let error = require_legacy_active_partition(Err(anyhow::anyhow!("modeled failure")))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("modeled failure"));
     }
 }

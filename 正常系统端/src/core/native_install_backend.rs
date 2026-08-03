@@ -31,6 +31,124 @@ use super::ui_state::{BootModeSelection, DriverAction};
 
 const UNSUPPORTED_PENDING: &str = "unsupported_pending";
 
+fn partition_matches_stable_identity(
+    partition: &Partition,
+    identity: super::native_install_executor::StableTargetIdentity,
+) -> bool {
+    identity.matches_components(
+        partition.disk_number,
+        partition.partition_number,
+        partition.disk_size_bytes,
+        partition.partition_offset_bytes,
+        partition.partition_size_bytes,
+    )
+}
+
+/// Resolve the boot mode for a direct install without collapsing an unknown
+/// target layout into Legacy.  The injected probe keeps the decision testable
+/// and lets production use the shared, documented firmware API boundary.
+fn resolve_direct_install_uefi_mode_with<E, F>(
+    requested: BootModeSelection,
+    target_style: PartitionStyle,
+    detect_current_firmware: F,
+) -> Result<bool, E>
+where
+    F: FnOnce() -> Result<bool, E>,
+{
+    match requested {
+        BootModeSelection::UEFI => Ok(true),
+        BootModeSelection::Legacy => Ok(false),
+        BootModeSelection::Auto => match target_style {
+            PartitionStyle::GPT => Ok(true),
+            PartitionStyle::MBR => Ok(false),
+            PartitionStyle::Unknown => detect_current_firmware(),
+        },
+    }
+}
+
+/// NT5 is a property of the validated install intent, not something that can
+/// be inferred from a missing directory after image application.  For modern
+/// Windows, a missing boot-assets directory is an incomplete target and must
+/// stop before any boot or PCA files are written.
+fn validate_direct_boot_assets(
+    validated_is_nt5: bool,
+    modern_boot_assets_present: bool,
+) -> Result<(), &'static str> {
+    if !validated_is_nt5 && !modern_boot_assets_present {
+        return Err(
+            "the validated image is not NT5, but the applied Windows directory is missing Windows\\Boot",
+        );
+    }
+    Ok(())
+}
+
+/// Validate payloads for explicitly selected Direct advanced options and
+/// report whether the offline advanced-options transaction is actually
+/// needed. Disabled options must not load offline hives or create files.
+fn validate_direct_advanced_request(
+    options: &super::advanced_options::AdvancedOptions,
+    validated_is_nt5: bool,
+) -> Result<bool, &'static str> {
+    if options.migrate_wifi && options.wifi_profile_xml.trim().is_empty() {
+        return Err("Wi-Fi migration was selected without a captured profile");
+    }
+    if options.run_script_during_deploy && options.deploy_script_path.trim().is_empty() {
+        return Err("deployment script execution was selected without a script path");
+    }
+    if options.run_script_first_login && options.first_login_script_path.trim().is_empty() {
+        return Err("first-login script execution was selected without a script path");
+    }
+    if options.import_custom_drivers && options.custom_drivers_path.trim().is_empty() {
+        return Err("custom driver import was selected without a source path");
+    }
+    if options.import_registry_file && options.registry_file_path.trim().is_empty() {
+        return Err("registry import was selected without a .reg path");
+    }
+    if options.import_custom_files && options.custom_files_path.trim().is_empty() {
+        return Err("custom file import was selected without a source path");
+    }
+    if options.custom_username && options.username.trim().is_empty() {
+        return Err("custom user name was selected without a user name");
+    }
+    if options.custom_volume_label && options.volume_label.trim().is_empty() {
+        return Err("custom volume label was selected without a volume label");
+    }
+
+    Ok(validated_is_nt5
+        || options.remove_shortcut_arrow
+        || options.restore_classic_context_menu
+        || options.bypass_nro
+        || options.disable_windows_update
+        || options.disable_windows_defender
+        || options.disable_reserved_storage
+        || options.disable_uac
+        || options.disable_device_encryption
+        || options.remove_uwp_apps
+        || options.migrate_wifi
+        || options.run_script_during_deploy
+        || options.run_script_first_login
+        || options.import_custom_drivers
+        || options.import_storage_controller_drivers
+        || options.import_registry_file
+        || options.import_custom_files
+        || options.custom_username
+        || options.custom_volume_label
+        || options.win7_inject_usb3_driver
+        || options.win7_inject_nvme_driver
+        || options.win7_fix_acpi_bsod
+        || options.win7_fix_storage_bsod)
+}
+
+fn run_requested_direct_operation<E, F>(requested: bool, operation: F) -> Result<(), E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    if requested {
+        operation()?;
+    }
+    Ok(())
+}
+
 /// Stateful backend used for one executor run.
 ///
 /// Target identity is resolved again from `disk:partition` before every write
@@ -275,10 +393,9 @@ impl ProductionInstallBackend {
         let partitions = DiskManager::get_partitions()
             .map_err(|error| Self::error("bitlocker_inventory", error))?;
         let target = if let Some(identity) = context.stable_target {
-            partitions.iter().find(|partition| {
-                partition.disk_number == Some(identity.disk_number)
-                    && partition.partition_number == Some(identity.partition_number)
-            })
+            partitions
+                .iter()
+                .find(|partition| partition_matches_stable_identity(partition, identity))
         } else {
             partitions.iter().find(|partition| {
                 partition
@@ -1208,10 +1325,7 @@ impl ProductionInstallBackend {
             .map_err(|error| Self::error("enumerate_partitions", error))?;
         let target = partitions
             .iter()
-            .find(|partition| {
-                partition.disk_number == Some(identity.disk_number)
-                    && partition.partition_number == Some(identity.partition_number)
-            })
+            .find(|partition| partition_matches_stable_identity(partition, identity))
             .ok_or_else(|| {
                 InstallBackendError::new(
                     "target_identity_changed",
@@ -1723,19 +1837,40 @@ impl ProductionInstallBackend {
     }
 
     fn repair_boot(&mut self, intent: &StartInstallIntent) -> Result<(), InstallBackendError> {
+        let is_xp = intent.options.is_xp || intent.options.is_xp_i386;
+        let modern_boot_assets_present = Path::new(&self.target)
+            .join("Windows")
+            .join("Boot")
+            .is_dir();
+        validate_direct_boot_assets(is_xp, modern_boot_assets_present)
+            .map_err(|error| Self::error("missing_modern_boot_assets", error))?;
+
+        let use_uefi = resolve_direct_install_uefi_mode_with(
+            intent.options.boot_mode,
+            self.target_style,
+            || {
+                let firmware = lr_core::windows_firmware::detect_firmware_type()
+                    .map_err(|error| Self::error("detect_firmware_mode", error))?;
+                Ok(matches!(
+                    firmware,
+                    lr_core::windows_firmware::FirmwareType::Uefi
+                ))
+            },
+        )?;
+        if intent.options.boot_mode == BootModeSelection::Auto
+            && self.target_style == PartitionStyle::Unknown
+        {
+            log::warn!(
+                "[NATIVE INSTALL] target partition style is unknown; Auto boot mode used the current firmware probe: {}",
+                if use_uefi { "UEFI" } else { "Legacy" }
+            );
+        }
+
         if let Some(package) = self.pca_package.as_ref() {
             package
                 .inject_into_offline_windows(Path::new(&format!("{}\\", self.target)))
                 .map_err(|error| Self::error("inject_pca2023", error))?;
         }
-
-        let is_xp =
-            intent.options.is_xp || !Path::new(&format!("{}\\Windows\\Boot", self.target)).exists();
-        let use_uefi = match intent.options.boot_mode {
-            BootModeSelection::UEFI => true,
-            BootModeSelection::Legacy => false,
-            BootModeSelection::Auto => self.target_style == PartitionStyle::GPT,
-        };
         let manager = super::bcdedit::BootManager::new();
         if !use_uefi {
             if let Some(disk_number) = self
@@ -1774,9 +1909,9 @@ impl ProductionInstallBackend {
 
         if use_uefi && intent.options.advanced_options.win7_uefi_patch {
             let advanced = Self::legacy_advanced(intent);
-            if let Err(error) = advanced.apply_uefiseven_patch(&self.target) {
-                log::warn!("[NATIVE INSTALL] UefiSeven patch failed; continuing: {error}");
-            }
+            advanced
+                .apply_uefiseven_patch(&self.target)
+                .map_err(|error| Self::error("apply_win7_uefi_patch", error))?;
         }
         Ok(())
     }
@@ -1895,28 +2030,16 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                 InstallExecutionPhase::RepairBoot => self.repair_boot(intent),
                 InstallExecutionPhase::ApplyAdvancedOptions => {
                     let advanced = Self::legacy_advanced(intent);
-                    let is_xp = intent.options.is_xp
-                        || !Path::new(&format!("{}\\Windows\\Boot", self.target)).exists();
-                    if let Err(error) = advanced.apply_to_system(&self.target, is_xp) {
-                        if intent.options.advanced_options.disable_windows_defender
-                            || intent
-                                .options
-                                .advanced_options
-                                .import_storage_controller_drivers
-                            || intent.options.advanced_options.import_custom_drivers
-                        {
-                            return Err(Self::error("apply_required_advanced_option", error));
-                        }
-                        // Preserve legacy best-effort semantics for other post-deployment tweaks.
-                        log::error!("[NATIVE INSTALL] advanced options failed: {error}");
-                    }
-                    self.inject_versioned_user_drivers(is_xp)?;
+                    let is_nt5 = intent.options.is_xp || intent.options.is_xp_i386;
+                    let advanced_requested = validate_direct_advanced_request(&advanced, is_nt5)
+                        .map_err(|error| Self::error("invalid_advanced_option", error))?;
+                    run_requested_direct_operation(advanced_requested, || {
+                        advanced.apply_to_system(&self.target, is_nt5)
+                    })
+                    .map_err(|error| Self::error("apply_advanced_option", error))?;
+                    self.inject_versioned_user_drivers(is_nt5)?;
                     if intent.options.unattended_install {
-                        if let Err(error) = self.write_unattend(intent) {
-                            log::warn!(
-                                "[NATIVE INSTALL] unattended setup preparation failed; continuing for legacy compatibility: {error:?}"
-                            );
-                        }
+                        self.write_unattend(intent)?;
                     }
                     Ok(())
                 }
@@ -2079,6 +2202,9 @@ mod tests {
             target_partition: "E:".into(),
             target_disk_number: 1,
             target_partition_number: 2,
+            target_disk_size_bytes: 1_000_000_000_000,
+            target_partition_offset_bytes: 1_048_576,
+            target_partition_size_bytes: 500_000_000_000,
             image_path: "D:\\install.wim".into(),
             volume_index: 1,
             is_system_partition: false,
@@ -2159,6 +2285,9 @@ mod tests {
             stable_target: Some(StableTargetIdentity {
                 disk_number: 2,
                 partition_number: 3,
+                disk_size_bytes: 2_000_000_000_000,
+                partition_offset_bytes: 1_048_576,
+                partition_size_bytes: 1_000_000_000_000,
             }),
             bitlocker: BitLockerRequirement::Ready,
         };
@@ -2181,6 +2310,171 @@ mod tests {
         let plan = ProductionInstallBackend::format_plan_for_intent("E:", &value).unwrap();
         assert_eq!(plan.drive, "E:");
         assert_eq!(plan.volume_label, "Windows 11");
+    }
+
+    #[test]
+    fn direct_auto_boot_mode_uses_target_layout_when_known() {
+        let detector_must_not_run = || -> Result<bool, &'static str> {
+            panic!("known target layout must not query current firmware")
+        };
+        assert_eq!(
+            resolve_direct_install_uefi_mode_with(
+                BootModeSelection::Auto,
+                PartitionStyle::GPT,
+                detector_must_not_run,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            resolve_direct_install_uefi_mode_with(
+                BootModeSelection::Auto,
+                PartitionStyle::MBR,
+                detector_must_not_run,
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn direct_auto_boot_mode_probes_firmware_when_target_layout_is_unknown() {
+        assert_eq!(
+            resolve_direct_install_uefi_mode_with(
+                BootModeSelection::Auto,
+                PartitionStyle::Unknown,
+                || Ok::<_, &'static str>(true),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            resolve_direct_install_uefi_mode_with(
+                BootModeSelection::Auto,
+                PartitionStyle::Unknown,
+                || Ok::<_, &'static str>(false),
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            resolve_direct_install_uefi_mode_with(
+                BootModeSelection::Auto,
+                PartitionStyle::Unknown,
+                || Err("firmware probe failed"),
+            ),
+            Err("firmware probe failed")
+        );
+    }
+
+    #[test]
+    fn explicit_direct_boot_mode_never_queries_firmware() {
+        let detector_must_not_run = || -> Result<bool, &'static str> {
+            panic!("explicit boot mode must not query current firmware")
+        };
+        assert_eq!(
+            resolve_direct_install_uefi_mode_with(
+                BootModeSelection::UEFI,
+                PartitionStyle::Unknown,
+                detector_must_not_run,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            resolve_direct_install_uefi_mode_with(
+                BootModeSelection::Legacy,
+                PartitionStyle::Unknown,
+                detector_must_not_run,
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn nt5_boot_path_comes_only_from_validated_intent() {
+        assert!(validate_direct_boot_assets(true, false).is_ok());
+        assert!(validate_direct_boot_assets(false, true).is_ok());
+        assert_eq!(
+            validate_direct_boot_assets(false, false),
+            Err(
+                "the validated image is not NT5, but the applied Windows directory is missing Windows\\Boot"
+            )
+        );
+    }
+
+    #[test]
+    fn disabled_direct_advanced_options_do_not_start_an_offline_transaction() {
+        use std::cell::Cell;
+
+        let options = super::super::advanced_options::AdvancedOptions::default();
+        assert_eq!(validate_direct_advanced_request(&options, false), Ok(false));
+
+        let called = Cell::new(false);
+        run_requested_direct_operation(false, || -> Result<(), &'static str> {
+            called.set(true);
+            Err("must not run")
+        })
+        .expect("disabled options must not run their transaction");
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn explicitly_selected_direct_advanced_operation_is_fail_closed() {
+        let mut options = super::super::advanced_options::AdvancedOptions {
+            disable_uac: true,
+            ..Default::default()
+        };
+        assert_eq!(validate_direct_advanced_request(&options, false), Ok(true));
+        assert_eq!(
+            run_requested_direct_operation(true, || Err("offline write failed")),
+            Err("offline write failed")
+        );
+
+        options.disable_uac = false;
+        options.migrate_wifi = true;
+        assert_eq!(
+            validate_direct_advanced_request(&options, false),
+            Err("Wi-Fi migration was selected without a captured profile")
+        );
+    }
+
+    #[test]
+    fn explicitly_selected_direct_file_inputs_cannot_be_empty() {
+        let cases = [
+            (
+                "deploy",
+                "deployment script execution was selected without a script path",
+            ),
+            (
+                "first_login",
+                "first-login script execution was selected without a script path",
+            ),
+            (
+                "drivers",
+                "custom driver import was selected without a source path",
+            ),
+            (
+                "registry",
+                "registry import was selected without a .reg path",
+            ),
+            (
+                "files",
+                "custom file import was selected without a source path",
+            ),
+        ];
+
+        for (case, expected) in cases {
+            let mut options = super::super::advanced_options::AdvancedOptions::default();
+            match case {
+                "deploy" => options.run_script_during_deploy = true,
+                "first_login" => options.run_script_first_login = true,
+                "drivers" => options.import_custom_drivers = true,
+                "registry" => options.import_registry_file = true,
+                "files" => options.import_custom_files = true,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate_direct_advanced_request(&options, false),
+                Err(expected),
+                "case {case} must fail before the Direct transaction"
+            );
+        }
     }
 
     #[cfg(feature = "non-elevated-tests")]

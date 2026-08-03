@@ -34,6 +34,7 @@ pub enum PcaPreflightStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PcaPreflightError {
+    SecureBootStateUnknown,
     Pca2011Revoked,
     Pca2011NotTrusted,
     Pca2023NotTrusted,
@@ -48,6 +49,7 @@ pub enum PcaPreflightError {
 impl fmt::Display for PcaPreflightError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SecureBootStateUnknown => f.write_str("无法可靠读取固件 Secure Boot 状态"),
             Self::Pca2011Revoked => f.write_str("固件已撤销 PCA2011"),
             Self::Pca2011NotTrusted => f.write_str("固件不信任 PCA2011"),
             Self::Pca2023NotTrusted => f.write_str("固件不信任 Windows UEFI CA 2023"),
@@ -83,6 +85,9 @@ pub fn required_generation(
     requested: BootPcaMode,
     firmware: &FirmwarePcaInfo,
 ) -> Result<Option<PcaGeneration>, PcaPreflightError> {
+    if firmware.secure_boot_enabled.is_none() {
+        return Err(PcaPreflightError::SecureBootStateUnknown);
+    }
     let secure_boot = firmware.secure_boot_enabled == Some(true);
 
     match requested {
@@ -383,6 +388,21 @@ mod tests {
         assert_eq!(
             required_generation(BootPcaMode::Auto, &firmware()).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn unknown_secure_boot_state_fails_closed() {
+        let mut fw = firmware();
+        fw.secure_boot_enabled = None;
+        fw.error = Some("firmware variable access failed".to_owned());
+        assert_eq!(
+            required_generation(BootPcaMode::Auto, &fw),
+            Err(PcaPreflightError::SecureBootStateUnknown)
+        );
+        assert_eq!(
+            required_generation(BootPcaMode::Pca2023, &fw),
+            Err(PcaPreflightError::SecureBootStateUnknown)
         );
     }
 

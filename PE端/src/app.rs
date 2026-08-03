@@ -423,19 +423,23 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         log::info!("[PE安装] GHO 镜像，跳过 wimlib 校验");
     }
 
-    // Auto mode can become UEFI after a partitioning script, so preflight all
-    // modes except explicit Legacy before the first target-disk mutation.
-    let staged_pca_compat =
-        match crate::core::pca_preflight::staged_config(&config, std::path::Path::new(&data_dir)) {
+    // PCA/EFI validation only protects a later boot write. When the user
+    // explicitly disabled boot repair, neither validate nor stage boot assets.
+    let pca_compat_package = if !config.repair_boot || config.is_xp_i386 {
+        None
+    } else {
+        // Auto mode can become UEFI after target preparation, so preflight all
+        // modes except explicit Legacy before the first target-disk mutation.
+        let staged_pca_compat = match crate::core::pca_preflight::staged_config(
+            &config,
+            std::path::Path::new(&data_dir),
+        ) {
             Ok(staged) => staged,
             Err(error) => {
                 let _ = tx.send(WorkerMessage::Failed(error));
                 return;
             }
         };
-    let pca_compat_package = if config.is_xp_i386 {
-        None
-    } else {
         match crate::core::pca_preflight::verify_before_disk_write(
             &image_path,
             config.volume_index,
@@ -470,26 +474,28 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     // Step 1: 格式化分区
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::FormatPartition));
-    let _ = tx.send(WorkerMessage::SetStatus(tr!("正在格式化目标分区...")));
+    if config.format_partition {
+        let _ = tx.send(WorkerMessage::SetStatus(tr!("正在格式化目标分区...")));
 
-    // 使用卷标参数（如果有配置的话）
-    let volume_label = if config.volume_label.is_empty() {
-        None
+        // 使用卷标参数（如果有配置的话）
+        let volume_label = if config.volume_label.is_empty() {
+            None
+        } else {
+            Some(config.volume_label.as_str())
+        };
+
+        match DiskManager::format_partition_with_label(&target_partition, volume_label) {
+            Ok(_) => log::info!("分区格式化成功"),
+            Err(e) => {
+                log::error!("[PE安装] 格式化分区失败: {}", e);
+                let _ = tx.send(WorkerMessage::Failed(tr!("格式化分区失败: {}", e)));
+                return;
+            }
+        }
     } else {
-        Some(config.volume_label.as_str())
-    };
-
-    match DiskManager::format_partition_with_label(&target_partition, volume_label) {
-        Ok(_) => {
-            log::info!("分区格式化成功");
-            let _ = tx.send(WorkerMessage::SetProgress(100));
-        }
-        Err(e) => {
-            log::error!("[PE安装] 格式化分区失败: {}", e);
-            let _ = tx.send(WorkerMessage::Failed(tr!("格式化分区失败: {}", e)));
-            return;
-        }
+        log::info!("[PE安装] 用户已关闭格式化目标分区，跳过格式化");
     }
+    let _ = tx.send(WorkerMessage::SetProgress(100));
 
     // Step 2: 释放镜像
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::ApplyImage));
@@ -776,40 +782,44 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     // Step 5: 修复引导
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::RepairBoot));
-    let _ = tx.send(WorkerMessage::SetStatus(tr!("正在修复引导...")));
+    if config.repair_boot {
+        let _ = tx.send(WorkerMessage::SetStatus(tr!("正在修复引导...")));
 
-    let boot_manager = BootManager::new();
-    let use_uefi = match DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition)
-    {
-        Ok(value) => value,
-        Err(error) => {
-            log::error!("[PE安装] 无法可靠确定引导模式: {error}");
-            let _ = tx.send(WorkerMessage::Failed(tr!(
-                "无法可靠确定引导模式，已停止安装：{}",
-                error
-            )));
+        let boot_manager = BootManager::new();
+        let use_uefi =
+            match DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("[PE安装] 无法可靠确定引导模式: {error}");
+                    let _ = tx.send(WorkerMessage::Failed(tr!(
+                        "无法可靠确定引导模式，已停止安装：{}",
+                        error
+                    )));
+                    return;
+                }
+            };
+
+        // XP/2003 写 ntldr 引导；其余走 bcdboot。
+        // XP 判定：配置已标记 或 释放后的系统缺少 \Windows\Boot（该目录仅 Vista+ 才有）。
+        let win_boot_dir = format!("{}\\Windows\\Boot", target_partition);
+        let is_xp = config.is_xp || !std::path::Path::new(&win_boot_dir).exists();
+        let boot_result = if is_xp {
+            if use_uefi {
+                log::info!("[PE安装] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
+                boot_manager.write_xp_uefi_gpt_boot(&target_partition)
+            } else {
+                log::info!("[PE安装] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
+                boot_manager.write_xp_boot(&target_partition)
+            }
+        } else {
+            boot_manager.repair_boot_advanced(&target_partition, use_uefi, config.boot_pca_mode)
+        };
+        if let Err(e) = boot_result {
+            let _ = tx.send(WorkerMessage::Failed(tr!("修复引导失败: {}", e)));
             return;
         }
-    };
-
-    // XP/2003 写 ntldr 引导；其余走 bcdboot。
-    // XP 判定：配置已标记 或 释放后的系统缺少 \Windows\Boot（该目录仅 Vista+ 才有）。
-    let win_boot_dir = format!("{}\\Windows\\Boot", target_partition);
-    let is_xp = config.is_xp || !std::path::Path::new(&win_boot_dir).exists();
-    let boot_result = if is_xp {
-        if use_uefi {
-            log::info!("[PE安装] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
-            boot_manager.write_xp_uefi_gpt_boot(&target_partition)
-        } else {
-            log::info!("[PE安装] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
-            boot_manager.write_xp_boot(&target_partition)
-        }
     } else {
-        boot_manager.repair_boot_advanced(&target_partition, use_uefi, config.boot_pca_mode)
-    };
-    if let Err(e) = boot_result {
-        let _ = tx.send(WorkerMessage::Failed(tr!("修复引导失败: {}", e)));
-        return;
+        log::info!("[PE安装] 用户已关闭添加引导，跳过引导模式探测和引导写入");
     }
     let _ = tx.send(WorkerMessage::SetProgress(100));
 

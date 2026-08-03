@@ -263,7 +263,9 @@
     "内存信息: 总大小 {} GB ({} GB可用) 插槽数: {}": "Informations mémoire : Total {} Go ({} Go disponibles) Emplacements : {}",
     "内存大小: {} GB ({} GB可用)": "Taille de la mémoire : {} Go ({} Go disponible)",
     "内存大小: {} GB ({} GB可用)\n": "Taille de la mémoire : {} Go ({} Go disponible)\n",
-    "内部镜像校验失败: {}": "Échec de la vérification de l'image interne : {}",
+    "内部镜像校验失败: {}": "Échec de la vérification de l’image interne : {}",
+    "内部镜像校验失败: {}；ISO 卸载同时失败: {}": "Échec de la vérification de l’image interne : {} ; le démontage de l’ISO a également échoué : {}",
+    "ISO 校验完成，但卸载失败: {}": "La vérification ISO est terminée, mais le démontage a échoué : {}",
     "写入备份标记文件失败": "Échec de l'écriture du fichier de marqueur de sauvegarde",
     "写入备份配置文件失败": "Échec de l'écriture du fichier de configuration de sauvegarde",
     "写入安装标记文件失败": "Échec de l'écriture du fichier de marqueur d'installation",
@@ -2380,6 +2382,18 @@
     "镜像已下载，但安装前一致性检查未通过。": "L’image est téléchargée, mais le contrôle de cohérence a échoué.",
     "正在验证远程镜像链接、断点续传能力和分卷信息...": "Validation du lien de l’image distante, de la reprise et des métadonnées des volumes...",
     "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD/ISO 直链）：{}": "Impossible de lire l’image système distante (seuls les liens WIM/ESD/ISO directs prenant en charge la reprise sont acceptés) : {}",
-    "无法可靠确定引导模式，已停止安装：{}": "Le mode de démarrage du microprogramme n’a pas pu être déterminé de façon fiable ; l’installation a été arrêtée : {}"
+    "无法可靠确定引导模式，已停止安装：{}": "Le mode de démarrage du microprogramme n’a pas pu être déterminé de façon fiable ; l’installation a été arrêtée : {}",
+    "下载完成后无法重新读取目标分区，已停止安装。": "La partition cible n’a pas pu être relue après le téléchargement. L’installation a été arrêtée.",
+    "下载期间安装目标的磁盘、分区或容量发生变化，请重新选择后再试。": "Le disque, la partition ou la capacité cible a changé pendant le téléchargement. Sélectionnez à nouveau la cible.",
+    "无法可靠读取固件 Secure Boot 状态": "Impossible de lire de manière fiable l’état Secure Boot du microprogramme",
+    "bcdedit 执行失败（参数：{}，退出码：{}）：{}": "Échec de bcdedit (arguments : {} ; code de sortie : {}) : {}",
+    "boot.sdi 文件为空：{}": "Le fichier boot.sdi est vide : {}",
+    "boot.sdi 复制后大小不一致：源 {} 字节，目标 {} 字节": "La taille de boot.sdi diffère après la copie : source {} octets, destination {} octets",
+    "未找到可信的 boot.sdi，已停止创建 PE 引导；请修复当前 Windows 启动文件或使用包含 boot.sdi 的 PE ISO": "Aucun fichier boot.sdi fiable n’a été trouvé. La création du démarrage PE a été arrêtée. Réparez les fichiers de démarrage Windows ou utilisez une ISO PE contenant boot.sdi.",
+    "无法启动 bcdedit（参数：{}）：{}": "Impossible de démarrer bcdedit (arguments : {}) : {}",
+    "Legacy 引导修复缺少 bootsect.exe：{}": "bootsect.exe est absent pour la réparation du démarrage hérité : {}",
+    "bootsect 写入 Legacy 引导失败（退出码 {}）：{}": "bootsect n’a pas pu écrire le code de démarrage hérité (code de sortie {}) : {}",
+    "设置 Legacy 活动分区失败：{}": "Impossible de définir la partition héritée active : {}",
+    "ISO中未找到有效的 boot.sdi": "L’ISO ne contient aucun fichier boot.sdi valide"
   }
 }

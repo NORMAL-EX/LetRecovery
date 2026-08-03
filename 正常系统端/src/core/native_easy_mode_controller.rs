@@ -110,10 +110,44 @@ pub struct StartEasyInstallIntent {
     pub expected_build: Option<u32>,
     pub expected_architecture: Option<u16>,
     pub expected_installation_type: Option<String>,
-    pub system_partition_index: usize,
+    pub system_partition: EasyInstallTarget,
     pub download_then_install: bool,
     pub easy_mode_auto_install: bool,
     pub prefs: InstallPrefs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EasyInstallTarget {
+    pub partition: String,
+    pub disk_number: Option<u32>,
+    pub partition_number: Option<u32>,
+    pub total_size_mb: u64,
+    pub disk_size_bytes: Option<u64>,
+    pub partition_offset_bytes: Option<u64>,
+    pub partition_size_bytes: Option<u64>,
+}
+
+impl EasyInstallTarget {
+    pub fn matches_current(&self, current: &Self) -> bool {
+        if self.total_size_mb != current.total_size_mb
+            || self.disk_size_bytes != current.disk_size_bytes
+            || self.partition_offset_bytes != current.partition_offset_bytes
+            || self.partition_size_bytes != current.partition_size_bytes
+        {
+            return false;
+        }
+        match (
+            self.disk_number,
+            self.partition_number,
+            current.disk_number,
+            current.partition_number,
+        ) {
+            (Some(expected_disk), Some(expected_partition), Some(disk), Some(partition)) => {
+                expected_disk == disk && expected_partition == partition
+            }
+            _ => self.partition.eq_ignore_ascii_case(&current.partition),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,7 +319,7 @@ impl NativeEasyModeController {
 
     pub fn start_install_intent(
         &self,
-        system_partition_index: Option<usize>,
+        system_partition: Option<EasyInstallTarget>,
         download_directory: &Path,
         current_username: Option<&str>,
     ) -> Result<StartEasyInstallIntent, EasyModeValidationError> {
@@ -312,8 +346,8 @@ impl NativeEasyModeController {
         if system.download_url.trim().is_empty() {
             return Err(EasyModeValidationError::MissingDownloadUrl);
         }
-        let system_partition_index =
-            system_partition_index.ok_or(EasyModeValidationError::MissingSystemPartition)?;
+        let system_partition =
+            system_partition.ok_or(EasyModeValidationError::MissingSystemPartition)?;
         let filename = system
             .download_url
             .split(['?', '#'])
@@ -358,7 +392,7 @@ impl NativeEasyModeController {
             expected_build: volume.build,
             expected_architecture: volume.architecture,
             expected_installation_type: volume.installation_type.clone(),
-            system_partition_index,
+            system_partition,
             download_then_install: true,
             easy_mode_auto_install: true,
             prefs,
@@ -389,6 +423,18 @@ mod tests {
         }
     }
 
+    fn target() -> EasyInstallTarget {
+        EasyInstallTarget {
+            partition: "C:".to_owned(),
+            disk_number: Some(0),
+            partition_number: Some(3),
+            total_size_mb: 256_000,
+            disk_size_bytes: Some(1_000_000_000_000),
+            partition_offset_bytes: Some(1_048_576),
+            partition_size_bytes: Some(268_435_456_000),
+        }
+    }
+
     #[test]
     fn selecting_system_keeps_first_volume_default() {
         let mut controller = NativeEasyModeController::new(true, false);
@@ -411,7 +457,7 @@ mod tests {
         assert_eq!(view.selected_volume, Some(0));
         assert!(view.can_install);
         assert!(controller
-            .start_install_intent(Some(0), Path::new("downloads"), None)
+            .start_install_intent(Some(target()), Path::new("downloads"), None)
             .is_ok());
     }
 
@@ -432,11 +478,11 @@ mod tests {
         controller.set_catalogue(Some(&config), false);
         controller.apply(EasyModeAction::SelectSystem(0));
         let intent = controller
-            .start_install_intent(Some(2), Path::new("D:/downloads"), Some("Alice"))
+            .start_install_intent(Some(target()), Path::new("D:/downloads"), Some("Alice"))
             .unwrap();
         assert_eq!(intent.volume_number, 6);
         assert_eq!(intent.filename, "windows11.esd");
-        assert_eq!(intent.system_partition_index, 2);
+        assert_eq!(intent.system_partition, target());
         assert!(intent.download_then_install && intent.easy_mode_auto_install);
         assert!(intent.prefs.format_partition);
         assert!(intent.prefs.repair_boot);
@@ -463,7 +509,7 @@ mod tests {
         let mut controller = NativeEasyModeController::new(true, false);
         controller.set_catalogue(Some(&config), false);
         let intent = controller
-            .start_install_intent(Some(0), Path::new("D:/downloads"), None)
+            .start_install_intent(Some(target()), Path::new("D:/downloads"), None)
             .unwrap();
         assert_eq!(intent.filename, "windows7.wim");
     }
@@ -483,5 +529,22 @@ mod tests {
             controller.start_install_intent(None, Path::new("downloads"), None),
             Err(EasyModeValidationError::MissingSystemPartition)
         ));
+    }
+
+    #[test]
+    fn easy_target_survives_list_reordering_but_rejects_reused_numbers_or_capacity() {
+        let target = target();
+        let mut current = target.clone();
+        current.partition = "D:".to_string();
+        assert!(target.matches_current(&current));
+
+        current.disk_number = Some(1);
+        assert!(!target.matches_current(&current));
+        current.disk_number = target.disk_number;
+        current.total_size_mb = 128_000;
+        assert!(!target.matches_current(&current));
+        current.total_size_mb = target.total_size_mb;
+        current.partition_size_bytes = target.partition_size_bytes.map(|size| size + 4096);
+        assert!(!target.matches_current(&current));
     }
 }

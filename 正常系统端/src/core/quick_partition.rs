@@ -329,6 +329,19 @@ pub fn get_physical_disks() -> Vec<PhysicalDisk> {
     disks
 }
 
+/// Read one physical disk through the same IOCTL-backed inventory used by the
+/// quick-partition UI. Callers that already know the disk number should use
+/// this instead of enumerating every possible disk.
+#[cfg(windows)]
+pub fn get_physical_disk(disk_number: u32) -> Option<PhysicalDisk> {
+    get_disk_info(disk_number)
+}
+
+#[cfg(not(windows))]
+pub fn get_physical_disk(_disk_number: u32) -> Option<PhysicalDisk> {
+    None
+}
+
 #[cfg(not(windows))]
 pub fn get_physical_disks() -> Vec<PhysicalDisk> {
     Vec::new()
@@ -1092,14 +1105,13 @@ pub fn get_next_available_drive_letter(used_letters: &[char]) -> Option<char> {
 
 /// 获取所有已使用的盘符
 pub fn get_used_drive_letters() -> Vec<char> {
-    let mut letters = Vec::new();
-    for letter in 'A'..='Z' {
-        let path = format!("{}:\\", letter);
-        if Path::new(&path).exists() {
-            letters.push(letter);
-        }
-    }
-    letters
+    let Ok(mask) = lr_core::windows_storage::assigned_drive_letter_mask() else {
+        return ('A'..='Z').collect();
+    };
+    (0u8..=25)
+        .filter(|index| mask & (1u32 << index) != 0)
+        .map(|index| char::from(b'A' + index))
+        .collect()
 }
 
 /// 创建单个分区

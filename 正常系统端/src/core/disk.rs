@@ -82,6 +82,10 @@ pub struct Partition {
     pub partition_style: PartitionStyle,
     pub disk_number: Option<u32>,
     pub partition_number: Option<u32>,
+    /// Stable geometry captured from the physical-disk IOCTL inventory.
+    pub disk_size_bytes: Option<u64>,
+    pub partition_offset_bytes: Option<u64>,
+    pub partition_size_bytes: Option<u64>,
     pub bitlocker_status: VolumeStatus,
 }
 
@@ -162,6 +166,38 @@ impl DiskManager {
             {
                 partitions.push(info);
             }
+        }
+
+        // Disk and partition numbers can be reused after a hot-plug or a
+        // delete/recreate cycle. Enrich every visible volume with immutable
+        // geometry from the physical disk before any install intent is built.
+        let mut disk_geometry = std::collections::BTreeMap::new();
+        for partition in &partitions {
+            if let Some(disk_number) = partition.disk_number {
+                disk_geometry.entry(disk_number).or_insert_with(|| {
+                    crate::core::quick_partition::get_physical_disk(disk_number)
+                });
+            }
+        }
+        for partition in &mut partitions {
+            let (Some(disk_number), Some(partition_number)) =
+                (partition.disk_number, partition.partition_number)
+            else {
+                continue;
+            };
+            let Some(Some(disk)) = disk_geometry.get(&disk_number) else {
+                continue;
+            };
+            let Some(physical_partition) = disk
+                .partitions
+                .iter()
+                .find(|candidate| candidate.partition_number == partition_number)
+            else {
+                continue;
+            };
+            partition.disk_size_bytes = Some(disk.size_bytes);
+            partition.partition_offset_bytes = Some(physical_partition.offset_bytes);
+            partition.partition_size_bytes = Some(physical_partition.size_bytes);
         }
 
         Ok(partitions)
@@ -280,6 +316,9 @@ impl DiskManager {
                 partition_style: detail.style,
                 disk_number: detail.disk_number,
                 partition_number: detail.partition_number,
+                disk_size_bytes: None,
+                partition_offset_bytes: None,
+                partition_size_bytes: None,
                 bitlocker_status,
             },
             drive_kind,
@@ -877,15 +916,15 @@ impl DiskManager {
 
     /// 获取所有已使用的盘符
     pub fn get_used_drive_letters() -> Vec<char> {
-        let mut letters = Vec::new();
-        for letter in b'A'..=b'Z' {
-            let c = letter as char;
-            let path = format!("{}:\\", c);
-            if Path::new(&path).exists() {
-                letters.push(c);
-            }
-        }
-        letters
+        let Ok(mask) = lr_core::windows_storage::assigned_drive_letter_mask() else {
+            // A failed inventory must not cause an already assigned letter to
+            // be reused by a destructive storage operation.
+            return ('A'..='Z').collect();
+        };
+        (0u8..=25)
+            .filter(|index| mask & (1u32 << index) != 0)
+            .map(|index| char::from(b'A' + index))
+            .collect()
     }
 
     /// 查找第一个可用的盘符（未被使用的）

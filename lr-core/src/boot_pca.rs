@@ -20,9 +20,7 @@ use crate::encoding::gbk_to_utf8;
 /// assigned local and network drive without probing the filesystem.
 #[cfg(windows)]
 pub fn find_available_drive_letter() -> Option<char> {
-    use windows::Win32::Storage::FileSystem::GetLogicalDrives;
-
-    let assigned = unsafe { GetLogicalDrives() };
+    let assigned = crate::windows_storage::assigned_drive_letter_mask().ok()?;
     find_available_drive_letter_in_mask(assigned)
 }
 

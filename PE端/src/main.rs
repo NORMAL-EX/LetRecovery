@@ -556,19 +556,22 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             log::info!("[PE安装/CLI] 镜像校验通过");
         }
 
-        // Keep CLI installs on the same fail-closed path as the PE GUI. This
-        // check is read-only and runs before formatting the selected volume.
-        let staged_pca_compat =
-            match core::pca_preflight::staged_config(&config, std::path::Path::new(&data_dir)) {
+        // PCA/EFI validation only protects a later boot write. When the user
+        // explicitly disabled boot repair, neither validate nor stage boot assets.
+        let pca_compat_package = if !config.repair_boot || config.is_xp_i386 {
+            None
+        } else {
+            // Keep CLI installs on the same fail-closed path as the PE GUI.
+            let staged_pca_compat = match core::pca_preflight::staged_config(
+                &config,
+                std::path::Path::new(&data_dir),
+            ) {
                 Ok(staged) => staged,
                 Err(error) => {
                     show_error_message(&error);
                     return Ok(());
                 }
             };
-        let pca_compat_package = if config.is_xp_i386 {
-            None
-        } else {
             match core::pca_preflight::verify_before_disk_write(
                 &image_path,
                 config.volume_index,
@@ -597,13 +600,19 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         }
 
         // Step 1: 格式化分区
-        log::info!("[PE INSTALL] Step 1: 格式化分区");
-        let volume_label =
-            (!config.volume_label.is_empty()).then_some(config.volume_label.as_str());
-        if let Err(e) = DiskManager::format_partition_with_label(&target_partition, volume_label) {
-            log::error!("[PE INSTALL] 格式化失败: {}", e);
-            show_error_message(&tr!("格式化分区失败: {}", e));
-            return Ok(());
+        if config.format_partition {
+            log::info!("[PE INSTALL] Step 1: 格式化分区");
+            let volume_label =
+                (!config.volume_label.is_empty()).then_some(config.volume_label.as_str());
+            if let Err(e) =
+                DiskManager::format_partition_with_label(&target_partition, volume_label)
+            {
+                log::error!("[PE INSTALL] 格式化失败: {}", e);
+                show_error_message(&tr!("格式化分区失败: {}", e));
+                return Ok(());
+            }
+        } else {
+            log::info!("[PE INSTALL] 用户已关闭格式化目标分区，跳过格式化");
         }
 
         // Step 2: 释放镜像
@@ -754,44 +763,52 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         }
 
         // Step 5: 修复引导
-        log::info!("[PE INSTALL] Step 5: 修复引导");
-        let boot_manager = BootManager::new();
-        let use_uefi = DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition)?;
+        if config.repair_boot {
+            log::info!("[PE INSTALL] Step 5: 修复引导");
+            let boot_manager = BootManager::new();
+            let use_uefi =
+                DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition)?;
 
-        // XP/2003：写 XP 引导（UEFI 化映像走 UEFI/GPT，否则 ntldr）；其余走 bcdboot。
-        let win_boot_dir = format!("{}\\Windows\\Boot", target_partition);
-        let is_xp = config.is_xp || !std::path::Path::new(&win_boot_dir).exists();
-        let boot_result = if is_xp {
-            if use_uefi {
-                log::info!("[PE INSTALL] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
-                boot_manager.write_xp_uefi_gpt_boot(&target_partition)
+            // XP/2003：写 XP 引导（UEFI 化映像走 UEFI/GPT，否则 ntldr）；其余走 bcdboot。
+            let win_boot_dir = format!("{}\\Windows\\Boot", target_partition);
+            let is_xp = config.is_xp || !std::path::Path::new(&win_boot_dir).exists();
+            let boot_result = if is_xp {
+                if use_uefi {
+                    log::info!("[PE INSTALL] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
+                    boot_manager.write_xp_uefi_gpt_boot(&target_partition)
+                } else {
+                    log::info!("[PE INSTALL] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
+                    boot_manager.write_xp_boot(&target_partition)
+                }
             } else {
-                log::info!("[PE INSTALL] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
-                boot_manager.write_xp_boot(&target_partition)
+                boot_manager.repair_boot_advanced(&target_partition, use_uefi, config.boot_pca_mode)
+            };
+            if let Err(e) = boot_result {
+                log::error!("[PE INSTALL] 修复引导失败: {}", e);
+                show_error_message(&tr!("修复引导失败: {}", e));
+                return Ok(());
             }
-        } else {
-            boot_manager.repair_boot_advanced(&target_partition, use_uefi, config.boot_pca_mode)
-        };
-        if let Err(e) = boot_result {
-            log::error!("[PE INSTALL] 修复引导失败: {}", e);
-            show_error_message(&tr!("修复引导失败: {}", e));
-            return Ok(());
-        }
 
-        // Step 5.5: 如果启用了 Win7 UEFI 补丁，应用 UefiSeven
-        if use_uefi && config.win7_uefi_patch {
-            log::info!("[PE INSTALL] Step 5.5: 应用 Win7 UEFI 补丁 (UefiSeven)");
-            match ui::advanced_options::apply_uefiseven_patch(&data_partition, &target_partition) {
-                Ok(_) => log::info!("[PE INSTALL] UefiSeven 补丁应用成功"),
-                Err(e) => {
-                    // UefiSeven 补丁失败不中断安装，只记录警告
-                    log::warn!(
-                        "[PE INSTALL] 警告: UefiSeven 补丁应用失败: {} (继续安装)",
-                        e
-                    );
-                    log::warn!("UefiSeven 补丁应用失败: {}", e);
+            // Step 5.5: 如果启用了 Win7 UEFI 补丁，应用 UefiSeven
+            if use_uefi && config.win7_uefi_patch {
+                log::info!("[PE INSTALL] Step 5.5: 应用 Win7 UEFI 补丁 (UefiSeven)");
+                match ui::advanced_options::apply_uefiseven_patch(
+                    &data_partition,
+                    &target_partition,
+                ) {
+                    Ok(_) => log::info!("[PE INSTALL] UefiSeven 补丁应用成功"),
+                    Err(e) => {
+                        // UefiSeven 补丁失败不中断安装，只记录警告
+                        log::warn!(
+                            "[PE INSTALL] 警告: UefiSeven 补丁应用失败: {} (继续安装)",
+                            e
+                        );
+                        log::warn!("UefiSeven 补丁应用失败: {}", e);
+                    }
                 }
             }
+        } else {
+            log::info!("[PE INSTALL] 用户已关闭添加引导，跳过引导模式探测和引导写入");
         }
 
         // Step 6: 应用高级选项

@@ -189,6 +189,10 @@ pub fn run_cli_install(config_path: &str, advanced_path: Option<&str>) -> Result
         restore_drivers: false, // 由 driver_action_mode 主导
         driver_action_mode: spec.driver_action_mode,
         auto_reboot: spec.auto_reboot,
+        // The CLI flow historically always performed both operations and does
+        // not expose switches for them.
+        format_partition: true,
+        repair_boot: true,
         original_guid: String::new(),
         volume_index: spec.volume_index,
         target_partition: spec.target_partition.clone(),

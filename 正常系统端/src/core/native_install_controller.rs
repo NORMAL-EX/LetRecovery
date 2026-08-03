@@ -21,6 +21,9 @@ pub struct InstallTarget {
     pub partition: String,
     pub disk_number: Option<u32>,
     pub partition_number: Option<u32>,
+    pub disk_size_bytes: Option<u64>,
+    pub partition_offset_bytes: Option<u64>,
+    pub partition_size_bytes: Option<u64>,
     pub style: PartitionStyle,
     pub is_current_system: bool,
     pub has_windows: bool,
@@ -178,6 +181,9 @@ pub struct StartInstallIntent {
     pub target_partition: String,
     pub target_disk_number: u32,
     pub target_partition_number: u32,
+    pub target_disk_size_bytes: u64,
+    pub target_partition_offset_bytes: u64,
+    pub target_partition_size_bytes: u64,
     pub image_path: String,
     pub volume_index: u32,
     pub is_system_partition: bool,
@@ -214,6 +220,15 @@ impl NativeInstallState {
             .ok_or(InstallValidationError::UnstableTargetIdentity)?;
         let target_partition_number = target
             .partition_number
+            .ok_or(InstallValidationError::UnstableTargetIdentity)?;
+        let target_disk_size_bytes = target
+            .disk_size_bytes
+            .ok_or(InstallValidationError::UnstableTargetIdentity)?;
+        let target_partition_offset_bytes = target
+            .partition_offset_bytes
+            .ok_or(InstallValidationError::UnstableTargetIdentity)?;
+        let target_partition_size_bytes = target
+            .partition_size_bytes
             .ok_or(InstallValidationError::UnstableTargetIdentity)?;
         let is_xp_i386 = self.xp_i386_source.is_some();
         let is_gho = has_extension(&self.image_path, &["gho", "ghs"]);
@@ -356,6 +371,9 @@ impl NativeInstallState {
             target_partition: target.partition.clone(),
             target_disk_number,
             target_partition_number,
+            target_disk_size_bytes,
+            target_partition_offset_bytes,
+            target_partition_size_bytes,
             image_path,
             volume_index,
             is_system_partition: target.is_current_system,
@@ -412,6 +430,8 @@ impl StartInstallIntent {
             restore_drivers: self.options.export_drivers,
             driver_action_mode: InstallConfig::driver_action_to_mode(self.options.driver_action),
             auto_reboot: self.options.auto_reboot,
+            format_partition: self.options.format_partition,
+            repair_boot: self.options.repair_boot,
             original_guid: String::new(),
             volume_index: self.volume_index,
             target_partition: self.target_partition.clone(),
@@ -542,6 +562,9 @@ mod tests {
                 partition: "E:".to_string(),
                 disk_number: Some(1),
                 partition_number: Some(2),
+                disk_size_bytes: Some(1_000_000_000_000),
+                partition_offset_bytes: Some(1_048_576),
+                partition_size_bytes: Some(500_000_000_000),
                 style: PartitionStyle::GPT,
                 is_current_system: false,
                 has_windows: false,
@@ -646,6 +669,13 @@ mod tests {
 
         state.target.as_mut().unwrap().disk_number = Some(1);
         state.target.as_mut().unwrap().partition_number = None;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::UnstableTargetIdentity
+        );
+
+        state.target.as_mut().unwrap().partition_number = Some(2);
+        state.target.as_mut().unwrap().partition_offset_bytes = None;
         assert_eq!(
             state.start_intent().unwrap_err(),
             InstallValidationError::UnstableTargetIdentity
@@ -757,6 +787,8 @@ mod tests {
         let config = intent.to_install_config("images\\install.wim", 1, Some(&pca));
         assert_eq!(config.driver_action_mode, 2);
         assert_eq!(config.custom_username, "LetRecovery");
+        assert_eq!(config.format_partition, state.prefs.format_partition);
+        assert_eq!(config.repair_boot, state.prefs.repair_boot);
         assert!(!config.run_diskpart_scripts);
         assert!(!config.is_xp_i386);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);

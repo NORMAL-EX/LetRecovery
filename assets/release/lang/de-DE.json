@@ -264,6 +264,8 @@
     "内存大小: {} GB ({} GB可用)": "Arbeitsspeicher: {} GB ({} GB verfügbar)",
     "内存大小: {} GB ({} GB可用)\n": "Arbeitsspeicher: {} GB ({} GB verfügbar)\n",
     "内部镜像校验失败: {}": "Interne Abbildüberprüfung fehlgeschlagen: {}",
+    "内部镜像校验失败: {}；ISO 卸载同时失败: {}": "Interne Abbildüberprüfung fehlgeschlagen: {}; auch das Aushängen des ISO ist fehlgeschlagen: {}",
+    "ISO 校验完成，但卸载失败: {}": "ISO-Überprüfung abgeschlossen, aber das Aushängen ist fehlgeschlagen: {}",
     "写入备份标记文件失败": "Fehler beim Schreiben der Sicherungsmarkierungsdatei",
     "写入备份配置文件失败": "Das Schreiben der Sicherungskonfigurationsdatei ist fehlgeschlagen",
     "写入安装标记文件失败": "Das Schreiben der Installationsmarkierungsdatei ist fehlgeschlagen",
@@ -2380,6 +2382,18 @@
     "镜像已下载，但安装前一致性检查未通过。": "Das Abbild wurde heruntergeladen, bestand aber die Konsistenzprüfung nicht.",
     "正在验证远程镜像链接、断点续传能力和分卷信息...": "Remote-Abbildlink, Fortsetzungsunterstützung und Volume-Metadaten werden überprüft...",
     "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD/ISO 直链）：{}": "Das Remote-Systemabbild konnte nicht gelesen werden (nur direkte WIM/ESD/ISO-Links mit Fortsetzungsunterstützung werden akzeptiert): {}",
-    "无法可靠确定引导模式，已停止安装：{}": "Der Firmware-Startmodus konnte nicht zuverlässig bestimmt werden; die Installation wurde beendet: {}"
+    "无法可靠确定引导模式，已停止安装：{}": "Der Firmware-Startmodus konnte nicht zuverlässig bestimmt werden; die Installation wurde beendet: {}",
+    "下载完成后无法重新读取目标分区，已停止安装。": "Die Zielpartition konnte nach dem Download nicht erneut gelesen werden. Die Installation wurde beendet.",
+    "下载期间安装目标的磁盘、分区或容量发生变化，请重新选择后再试。": "Ziellaufwerk, Zielpartition oder Kapazität wurden während des Downloads geändert. Wählen Sie das Ziel erneut aus.",
+    "无法可靠读取固件 Secure Boot 状态": "Der Secure-Boot-Status der Firmware konnte nicht zuverlässig gelesen werden",
+    "bcdedit 执行失败（参数：{}，退出码：{}）：{}": "bcdedit ist fehlgeschlagen (Argumente: {}; Exitcode: {}): {}",
+    "boot.sdi 文件为空：{}": "Die Datei boot.sdi ist leer: {}",
+    "boot.sdi 复制后大小不一致：源 {} 字节，目标 {} 字节": "Die Größe von boot.sdi stimmt nach dem Kopieren nicht überein: Quelle {} Bytes, Ziel {} Bytes",
+    "未找到可信的 boot.sdi，已停止创建 PE 引导；请修复当前 Windows 启动文件或使用包含 boot.sdi 的 PE ISO": "Es wurde keine vertrauenswürdige boot.sdi gefunden. Die Erstellung des PE-Starts wurde beendet. Reparieren Sie die Windows-Startdateien oder verwenden Sie eine PE-ISO mit boot.sdi.",
+    "无法启动 bcdedit（参数：{}）：{}": "bcdedit konnte nicht gestartet werden (Argumente: {}): {}",
+    "Legacy 引导修复缺少 bootsect.exe：{}": "Für die Legacy-Startreparatur fehlt bootsect.exe: {}",
+    "bootsect 写入 Legacy 引导失败（退出码 {}）：{}": "bootsect konnte den Legacy-Startcode nicht schreiben (Exitcode {}): {}",
+    "设置 Legacy 活动分区失败：{}": "Die aktive Legacy-Partition konnte nicht festgelegt werden: {}",
+    "ISO中未找到有效的 boot.sdi": "Die ISO enthält keine gültige boot.sdi"
   }
 }

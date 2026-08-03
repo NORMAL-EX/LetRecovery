@@ -135,6 +135,9 @@ pub fn verify_before_disk_write(
 
 fn user_error(error: &PcaPreflightError) -> String {
     let detail = match error {
+        PcaPreflightError::SecureBootStateUnknown => {
+            tr!("无法可靠读取固件 Secure Boot 状态")
+        }
         PcaPreflightError::Pca2011Revoked => {
             tr!("固件已撤销 PCA2011，不能写入 PCA2011 引导")
         }

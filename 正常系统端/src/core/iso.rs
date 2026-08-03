@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::tr;
@@ -8,8 +8,7 @@ use windows::{
     core::PCWSTR,
     Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WIN32_ERROR},
     Win32::Storage::FileSystem::{
-        CreateFileW, GetDriveTypeW, GetLogicalDrives, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, GetDriveTypeW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     },
     Win32::Storage::Vhd::{
         AttachVirtualDisk, DetachVirtualDisk, GetVirtualDiskPhysicalPath, OpenVirtualDisk,
@@ -18,12 +17,21 @@ use windows::{
         OPEN_VIRTUAL_DISK_VERSION_1, VIRTUAL_DISK_ACCESS_DETACH, VIRTUAL_DISK_ACCESS_READ,
         VIRTUAL_STORAGE_TYPE, VIRTUAL_STORAGE_TYPE_DEVICE_ISO,
     },
-    Win32::System::Ioctl::IOCTL_STORAGE_EJECT_MEDIA,
+    Win32::System::Ioctl::{IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_GET_DEVICE_NUMBER},
     Win32::System::IO::DeviceIoControl,
 };
 
 #[cfg(windows)]
 const DRIVE_CDROM: u32 = 5;
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StorageDeviceNumber {
+    device_type: u32,
+    device_number: u32,
+    partition_number: u32,
+}
 
 #[cfg(windows)]
 const VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT: windows::core::GUID =
@@ -46,49 +54,79 @@ impl IsoMounter {
         crate::core::system_info::SystemInfo::check_pe_environment()
     }
 
-    /// 获取当前所有逻辑驱动器的位掩码
     #[cfg(windows)]
-    fn get_logical_drives_mask() -> u32 {
-        unsafe { GetLogicalDrives() }
+    unsafe fn query_device_number(device_path: &str) -> Result<StorageDeviceNumber> {
+        let wide: Vec<u16> = device_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = CreateFileW(
+            PCWSTR::from_raw(wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            Default::default(),
+            None,
+        )?;
+        let mut number = StorageDeviceNumber::default();
+        let result = DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            None,
+            0,
+            Some((&mut number as *mut StorageDeviceNumber).cast()),
+            std::mem::size_of::<StorageDeviceNumber>() as u32,
+            None,
+            None,
+        );
+        let _ = CloseHandle(handle);
+        result?;
+        Ok(number)
     }
 
-    /// 根据位掩码找出新增的 CDROM 驱动器盘符
     #[cfg(windows)]
-    fn find_new_cdrom_drive(before_mask: u32) -> Option<char> {
-        let after_mask = Self::get_logical_drives_mask();
-        let new_drives = after_mask & !before_mask; // 找出新增的盘符
-
-        log::info!(
-            "[ISO] 挂载前盘符掩码: 0x{:08X}, 挂载后: 0x{:08X}, 新增: 0x{:08X}",
-            before_mask,
-            after_mask,
-            new_drives
+    unsafe fn attached_device_path(handle: HANDLE) -> Result<String> {
+        let mut buffer = [0u16; 1024];
+        let mut size_bytes = std::mem::size_of_val(&buffer) as u32;
+        let result = GetVirtualDiskPhysicalPath(
+            handle,
+            &mut size_bytes,
+            windows::core::PWSTR::from_raw(buffer.as_mut_ptr()),
         );
+        if result != WIN32_ERROR(0) {
+            anyhow::bail!("GetVirtualDiskPhysicalPath 失败: {result:?}");
+        }
+        let length = (size_bytes as usize / 2).min(buffer.len());
+        Ok(String::from_utf16_lossy(&buffer[..length])
+            .trim_end_matches('\0')
+            .to_owned())
+    }
 
-        // 从 D 到 Z 检查新增的盘符
-        for i in 3..26u8 {
-            // D=3, E=4, ..., Z=25
-            let bit = 1u32 << i;
-            if new_drives & bit != 0 {
-                let letter = (b'A' + i) as char;
-                let drive_path = format!("{}:\\", letter);
-                let wide_path: Vec<u16> = drive_path
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
-
-                unsafe {
-                    let drive_type = GetDriveTypeW(PCWSTR::from_raw(wide_path.as_ptr()));
-                    log::info!("[ISO] 检查新盘符 {}: 类型={}", letter, drive_type);
-
-                    if drive_type == DRIVE_CDROM {
-                        return Some(letter);
-                    }
+    #[cfg(windows)]
+    unsafe fn find_drive_for_attached_device(device_path: &str) -> Result<char> {
+        let expected = Self::query_device_number(device_path)?;
+        for _ in 0..20 {
+            let mask = lr_core::windows_storage::assigned_drive_letter_mask()
+                .context("GetLogicalDrives 失败")?;
+            for index in 0..26u8 {
+                if mask & (1u32 << index) == 0 {
+                    continue;
+                }
+                let letter = (b'A' + index) as char;
+                let root = format!("{letter}:\\");
+                let wide_root: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+                if GetDriveTypeW(PCWSTR::from_raw(wide_root.as_ptr())) != DRIVE_CDROM {
+                    continue;
+                }
+                let volume_path = format!("\\\\.\\{letter}:");
+                if Self::query_device_number(&volume_path).ok() == Some(expected) {
+                    return Ok(letter);
                 }
             }
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
-
-        None
+        anyhow::bail!("ISO 已附加，但系统未为对应设备分配盘符")
     }
 
     /// 使用 Windows API 挂载 ISO 并返回盘符
@@ -101,10 +139,6 @@ impl IsoMounter {
         };
 
         log::info!("[ISO] 使用 Windows API 挂载 ISO: {}", iso_path);
-
-        // 1. 记录挂载前的盘符掩码
-        let before_mask = Self::get_logical_drives_mask();
-        log::info!("[ISO] 挂载前盘符掩码: 0x{:08X}", before_mask);
 
         // 转换路径为宽字符
         let wide_path: Vec<u16> = OsStr::new(iso_path)
@@ -169,54 +203,25 @@ impl IsoMounter {
 
             log::info!("[ISO] AttachVirtualDisk 成功");
 
-            // 获取挂载的物理路径 (可选，用于调试)
-            let mut path_buffer = [0u16; 260];
-            let mut path_size = (path_buffer.len() * 2) as u32;
-            let result = GetVirtualDiskPhysicalPath(
-                handle,
-                &mut path_size,
-                windows::core::PWSTR::from_raw(path_buffer.as_mut_ptr()),
-            );
-
-            if result == WIN32_ERROR(0) {
-                let path = String::from_utf16_lossy(&path_buffer[..path_size as usize / 2]);
-                log::info!("[ISO] 物理路径: {}", path.trim_end_matches('\0'));
-            }
-
-            // 关闭句柄 (因为使用了 PERMANENT_LIFETIME，ISO 会保持挂载)
-            let _ = CloseHandle(handle);
-
-            // 2. 轮询等待新盘符出现（最多10次，每次500ms，共5秒）
-            for i in 0..10 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-
-                if let Some(letter) = Self::find_new_cdrom_drive(before_mask) {
-                    // 3. 验证是否为 Windows 安装介质（Vista+ 的 \sources 或 XP/2003 的 \I386）
-                    if Self::is_windows_install_media(&format!("{}:", letter)) {
-                        log::info!("[ISO] 挂载成功，盘符: {}:，第 {} 次检测", letter, i + 1);
-                        return Ok(letter);
-                    } else {
-                        log::info!(
-                            "[ISO] 找到新 CDROM 盘符 {}: 但不含 \\sources 或 \\I386",
-                            letter
-                        );
-                    }
+            let mapped = Self::attached_device_path(handle).and_then(|device_path| {
+                log::info!("[ISO] 附加设备路径: {device_path}");
+                Self::find_drive_for_attached_device(&device_path)
+            });
+            match mapped {
+                Ok(letter) => {
+                    let _ = CloseHandle(handle);
+                    log::info!("[ISO] 精确匹配到附加设备盘符: {letter}:");
+                    Ok(letter)
                 }
-
-                log::info!("[ISO] 等待盘符分配... ({}/10)", i + 1);
+                Err(error) => {
+                    let detach = DetachVirtualDisk(handle, DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
+                    let _ = CloseHandle(handle);
+                    if detach != WIN32_ERROR(0) {
+                        anyhow::bail!("ISO 盘符映射失败: {error}; 回滚卸载同时失败: {detach:?}");
+                    }
+                    Err(error).context("ISO 盘符映射失败，已回滚卸载")
+                }
             }
-
-            // 4. 如果轮询失败，使用后备方案：遍历所有 CDROM 盘符
-            log::info!("[ISO] 轮询超时，尝试后备方案...");
-            if let Some(drive) = Self::find_iso_drive() {
-                let letter = drive.chars().next().ok_or_else(|| {
-                    anyhow::anyhow!("{}", tr!("ISO 挂载后无法找到盘符，请手动检查"))
-                })?;
-                log::info!("[ISO] 后备方案找到盘符: {}", drive);
-                return Ok(letter);
-            }
-
-            anyhow::bail!("{}", tr!("ISO 挂载后无法找到盘符，请手动检查"))
         }
     }
 
@@ -328,45 +333,15 @@ impl IsoMounter {
     /// 使用 Windows API 卸载所有挂载的 ISO
     #[cfg(windows)]
     pub fn unmount_all_iso() -> Result<()> {
-        log::info!("[ISO] 使用 Windows API 卸载所有挂载的 ISO");
-
-        // 遍历所有盘符 D-Z，查找 CDROM 类型的驱动器并弹出
-        for letter in b'D'..=b'Z' {
-            let letter = letter as char;
-            let drive_path = format!("{}:\\", letter);
-            let wide_path: Vec<u16> = drive_path
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-
-            unsafe {
-                let drive_type = GetDriveTypeW(PCWSTR::from_raw(wide_path.as_ptr()));
-
-                if drive_type == DRIVE_CDROM {
-                    // 检查是否包含 Windows 安装文件（确认是挂载的 ISO）
-                    let sources_path = format!("{}:\\sources", letter);
-                    if Path::new(&sources_path).exists() {
-                        log::info!("[ISO] 发现挂载的 ISO: {}:", letter);
-                        match Self::eject_cdrom_drive(letter) {
-                            Ok(_) => log::info!("[ISO] 成功弹出: {}:", letter),
-                            Err(e) => log::warn!("[ISO] 弹出失败 {}: {} (将继续执行)", letter, e),
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        anyhow::bail!(
+            "拒绝卸载所有光盘或 ISO：必须使用原始 ISO 路径卸载 LetRecovery 自己挂载的镜像"
+        )
     }
 
     /// 挂载 ISO 并返回盘符 (如 "F:")
     pub fn mount_iso(iso_path: &str) -> Result<String> {
         log::info!("[ISO] ========== 挂载 ISO ==========");
         log::info!("[ISO] 路径: {}", iso_path);
-
-        // 先尝试卸载已存在的挂载
-        let _ = Self::unmount();
-        std::thread::sleep(std::time::Duration::from_millis(300));
 
         let is_pe = Self::is_pe_environment();
         log::info!("[ISO] PE 环境: {}", is_pe);
@@ -393,16 +368,26 @@ impl IsoMounter {
         }
     }
 
+    /// Run a read-only operation against an ISO mounted by LetRecovery and always detach the
+    /// exact image path before returning. The operation never scans or ejects unrelated media.
+    pub fn with_mounted_iso<T>(
+        iso_path: &str,
+        operation: impl FnOnce(&str) -> Result<T>,
+    ) -> Result<T> {
+        let drive = Self::mount_iso(iso_path)?;
+        let operation_result = operation(&drive);
+        let detach_result = Self::unmount_iso_by_path(iso_path);
+        match (operation_result, detach_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(detach)) => Err(detach).context("ISO 操作成功，但卸载失败"),
+            (Err(error), Err(detach)) => Err(error).context(format!("ISO 卸载同时失败: {detach}")),
+        }
+    }
+
     /// 卸载 ISO
     pub fn unmount() -> Result<()> {
-        log::info!("[ISO] ========== 卸载 ISO ==========");
-
-        #[cfg(windows)]
-        {
-            let _ = Self::unmount_all_iso();
-        }
-
-        Ok(())
+        anyhow::bail!("拒绝无所有权信息的 ISO 卸载：请按原始 ISO 路径卸载")
     }
 
     /// 判断盘符是否为 Windows 安装介质：

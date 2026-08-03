@@ -264,6 +264,8 @@
     "内存大小: {} GB ({} GB可用)": "Memory size: {} GB ({} GB available)",
     "内存大小: {} GB ({} GB可用)\n": "Memory size: {} GB ({} GB available)\n",
     "内部镜像校验失败: {}": "Internal image verification failed: {}",
+    "内部镜像校验失败: {}；ISO 卸载同时失败: {}": "Internal image verification failed: {}; unmounting the ISO also failed: {}",
+    "ISO 校验完成，但卸载失败: {}": "ISO verification completed, but unmounting failed: {}",
     "写入备份标记文件失败": "Failed to write backup marker file",
     "写入备份配置文件失败": "Failed to write backup configuration file",
     "写入安装标记文件失败": "Failed to write installation marker file",
@@ -2390,6 +2392,18 @@
     "镜像已下载，但安装前一致性检查未通过。": "The image was downloaded, but its pre-installation consistency check failed.",
     "正在验证远程镜像链接、断点续传能力和分卷信息...": "Validating the remote image link, resume support, and volume metadata...",
     "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD/ISO 直链）：{}": "Failed to read the remote system image (only direct WIM/ESD/ISO links with resume support are accepted): {}",
-    "无法可靠确定引导模式，已停止安装：{}": "The firmware boot mode could not be determined reliably, so installation was stopped: {}"
+    "无法可靠确定引导模式，已停止安装：{}": "The firmware boot mode could not be determined reliably, so installation was stopped: {}",
+    "下载完成后无法重新读取目标分区，已停止安装。": "The target partition could not be refreshed after the download, so installation was stopped.",
+    "下载期间安装目标的磁盘、分区或容量发生变化，请重新选择后再试。": "The target disk, partition, or capacity changed during the download. Select the target again and retry.",
+    "无法可靠读取固件 Secure Boot 状态": "The firmware Secure Boot state could not be read reliably",
+    "bcdedit 执行失败（参数：{}，退出码：{}）：{}": "bcdedit failed (arguments: {}; exit code: {}): {}",
+    "boot.sdi 文件为空：{}": "The boot.sdi file is empty: {}",
+    "boot.sdi 复制后大小不一致：源 {} 字节，目标 {} 字节": "The boot.sdi size changed during copying: source {} bytes, destination {} bytes",
+    "未找到可信的 boot.sdi，已停止创建 PE 引导；请修复当前 Windows 启动文件或使用包含 boot.sdi 的 PE ISO": "No trusted boot.sdi was found, so PE boot creation was stopped. Repair the current Windows boot files or use a PE ISO that contains boot.sdi.",
+    "无法启动 bcdedit（参数：{}）：{}": "Could not start bcdedit (arguments: {}): {}",
+    "Legacy 引导修复缺少 bootsect.exe：{}": "Legacy boot repair is missing bootsect.exe: {}",
+    "bootsect 写入 Legacy 引导失败（退出码 {}）：{}": "bootsect failed to write the Legacy boot code (exit code {}): {}",
+    "设置 Legacy 活动分区失败：{}": "Failed to set the active Legacy partition: {}",
+    "ISO中未找到有效的 boot.sdi": "The ISO does not contain a valid boot.sdi"
   }
 }

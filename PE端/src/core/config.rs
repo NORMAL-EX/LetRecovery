@@ -49,6 +49,10 @@ pub struct InstallConfig {
     pub driver_action_mode: DriverActionMode,
     /// 立即重启
     pub auto_reboot: bool,
+    /// 在释放镜像前格式化目标分区。
+    pub format_partition: bool,
+    /// 在释放镜像后写入或修复目标系统引导。
+    pub repair_boot: bool,
     /// 原系统引导GUID（用于删除旧引导项）
     pub original_guid: String,
     /// 安装分卷索引
@@ -698,6 +702,10 @@ impl ConfigFileManager {
     fn deserialize_install_config(content: &str) -> Result<InstallConfig> {
         let mut config = InstallConfig {
             volume_index: 1,
+            // Older normal-endpoint handoff files always performed both
+            // operations and did not contain explicit switches.
+            format_partition: true,
+            repair_boot: true,
             ..InstallConfig::default()
         };
 
@@ -720,6 +728,12 @@ impl ConfigFileManager {
                         config.driver_action_mode = DriverActionMode::from_u8(mode_value);
                     }
                     "AutoReboot" => config.auto_reboot = value.parse().unwrap_or(false),
+                    "FormatPartition" => {
+                        config.format_partition = value.parse().unwrap_or(config.format_partition)
+                    }
+                    "RepairBoot" => {
+                        config.repair_boot = value.parse().unwrap_or(config.repair_boot)
+                    }
                     "OriginalGUID" => config.original_guid = value.to_string(),
                     "VolumeIndex" => config.volume_index = value.parse().unwrap_or(1),
                     "TargetPartition" => config.target_partition = value.to_string(),
@@ -864,6 +878,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.volume_index, 4);
+        assert!(config.format_partition);
+        assert!(config.repair_boot);
         assert_eq!(config.boot_mode, 0);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
         assert!(config.pca_compat_package.is_empty());
@@ -889,7 +905,8 @@ mod tests {
     #[test]
     fn reads_explicit_pca2023_selection_from_normal_endpoint() {
         let config = ConfigFileManager::deserialize_install_config(concat!(
-            "[Install]\r\nBootMode=1\r\nBootPcaMode=pca2023\r\n",
+            "[Install]\r\nFormatPartition=false\r\nRepairBoot=false\r\n",
+            "BootMode=1\r\nBootPcaMode=pca2023\r\n",
             "PcaCompatPackage=pca_compat\\package.wim\r\n",
             "PcaCompatSha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n",
             "PcaCompatImageIndex=1\r\nPcaCompatTargetBuild=19045\r\n",
@@ -897,6 +914,8 @@ mod tests {
         ))
         .unwrap();
 
+        assert!(!config.format_partition);
+        assert!(!config.repair_boot);
         assert_eq!(config.boot_mode, 1);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Pca2023);
         assert_eq!(config.pca_compat_package, "pca_compat\\package.wim");

@@ -113,7 +113,9 @@ use crate::core::native_download_executor::{
     DownloadFailureStage, DownloadWorker, DownloadWorkerCommand, DownloadWorkerError,
     DownloadWorkerMessage, NativeDownloadExecutor,
 };
-use crate::core::native_easy_mode_controller::{EasyModeAction, NativeEasyModeController};
+use crate::core::native_easy_mode_controller::{
+    EasyInstallTarget, EasyModeAction, NativeEasyModeController,
+};
 use crate::core::native_expand_c_executor::{
     start_expand_c_handoff, ExpandCHandoffRequest, ExpandCWorkerMessage,
 };
@@ -361,7 +363,9 @@ impl PartitionSelectionKey {
             partition.partition_number,
         ) {
             (Some(expected_disk), Some(expected_partition), Some(disk), Some(partition_number)) => {
-                expected_disk == disk && expected_partition == partition_number
+                expected_disk == disk
+                    && expected_partition == partition_number
+                    && self.total_size_mb == partition.total_size_mb
             }
             _ => {
                 self.letter.eq_ignore_ascii_case(&partition.letter)
@@ -1546,6 +1550,9 @@ mod layout_tests {
                 partition_style: crate::core::disk::PartitionStyle::GPT,
                 disk_number: Some(0),
                 partition_number: Some(1),
+                disk_size_bytes: Some(500_000_000_000),
+                partition_offset_bytes: Some(1_048_576),
+                partition_size_bytes: Some(100 * 1024 * 1024),
                 bitlocker_status: crate::core::bitlocker::VolumeStatus::NotEncrypted,
             },
             crate::core::disk::Partition {
@@ -1558,6 +1565,9 @@ mod layout_tests {
                 partition_style: crate::core::disk::PartitionStyle::GPT,
                 disk_number: Some(1),
                 partition_number: Some(1),
+                disk_size_bytes: Some(1_000_000_000_000),
+                partition_offset_bytes: Some(1_048_576),
+                partition_size_bytes: Some(200 * 1024 * 1024),
                 bitlocker_status: crate::core::bitlocker::VolumeStatus::EncryptedUnlocked,
             },
         ];
@@ -5528,7 +5538,16 @@ impl NativeWindow {
                 let system_partition = self
                     .partitions
                     .iter()
-                    .position(|partition| partition.is_system_partition);
+                    .find(|partition| partition.is_system_partition)
+                    .map(|partition| EasyInstallTarget {
+                        partition: partition.letter.clone(),
+                        disk_number: partition.disk_number,
+                        partition_number: partition.partition_number,
+                        total_size_mb: partition.total_size_mb,
+                        disk_size_bytes: partition.disk_size_bytes,
+                        partition_offset_bytes: partition.partition_offset_bytes,
+                        partition_size_bytes: partition.partition_size_bytes,
+                    });
                 let download_directory = dirs::download_dir()
                     .unwrap_or_else(|| std::env::temp_dir().join("LetRecovery"));
                 match self.easy_controller.start_install_intent(
@@ -5537,11 +5556,7 @@ impl NativeWindow {
                     std::env::var("USERNAME").ok().as_deref(),
                 ) {
                     Ok(intent) => {
-                        let target = self
-                            .partitions
-                            .get(intent.system_partition_index)
-                            .map(|partition| partition.letter.as_str())
-                            .unwrap_or("?");
+                        let target = intent.system_partition.partition.as_str();
                         let spec = DialogSpec {
                             window_title: crate::tr!("确认重装系统"),
                             title: crate::tr!("确认重装系统"),
@@ -7401,6 +7416,7 @@ impl NativeWindow {
                 });
                 dialog.show_modeless();
                 self.mutating_tool_dialogs.push(dialog);
+                let _ = EnableWindow(hwnd, false);
                 let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
             }
             Err(error) => {
@@ -7564,6 +7580,7 @@ impl NativeWindow {
             BitLockerGateCompletion::ContinuePending => {
                 self.mutating_tool_dialogs
                     .retain(|dialog| dialog.kind() != MutatingToolKind::ManageBitLocker);
+                let _ = EnableWindow(hwnd, true);
                 if let Some(pending) = self.pending_bitlocker_gate.take() {
                     self.continue_pending_bitlocker_intent(hwnd, pending.intent);
                 }
@@ -8812,6 +8829,7 @@ impl NativeWindow {
         }
         if cancel_bitlocker_gate {
             self.pending_bitlocker_gate = None;
+            let _ = EnableWindow(hwnd, true);
         }
         for (kind, execution, is_bitlocker_gate) in confirmed_jobs {
             if is_bitlocker_gate {
@@ -9002,6 +9020,9 @@ impl NativeWindow {
             partition: partition.letter.clone(),
             disk_number: partition.disk_number,
             partition_number: partition.partition_number,
+            disk_size_bytes: partition.disk_size_bytes,
+            partition_offset_bytes: partition.partition_offset_bytes,
+            partition_size_bytes: partition.partition_size_bytes,
             style: partition.partition_style,
             is_current_system: partition.is_system_partition,
             has_windows: partition.has_windows,
@@ -9324,11 +9345,17 @@ impl NativeWindow {
             Some(StableTargetIdentity {
                 disk_number: partition.disk_number?,
                 partition_number: partition.partition_number?,
+                disk_size_bytes: partition.disk_size_bytes?,
+                partition_offset_bytes: partition.partition_offset_bytes?,
+                partition_size_bytes: partition.partition_size_bytes?,
             })
         });
         let expected_target = StableTargetIdentity {
             disk_number: intent.target_disk_number,
             partition_number: intent.target_partition_number,
+            disk_size_bytes: intent.target_disk_size_bytes,
+            partition_offset_bytes: intent.target_partition_offset_bytes,
+            partition_size_bytes: intent.target_partition_size_bytes,
         };
         if stable_target != Some(expected_target) {
             if let Some(handles) = &self.handles {
@@ -10254,17 +10281,43 @@ impl NativeWindow {
             }
             self.mounted_iso = mounted_iso;
         }
+        if !self.refresh_partitions() {
+            self.fail_easy_install_after_download(crate::tr!(
+                "下载完成后无法重新读取目标分区，已停止安装。"
+            ));
+            return;
+        }
         let target = self
             .partitions
-            .get(intent.system_partition_index)
+            .iter()
+            .find(|partition| {
+                intent.system_partition.matches_current(&EasyInstallTarget {
+                    partition: partition.letter.clone(),
+                    disk_number: partition.disk_number,
+                    partition_number: partition.partition_number,
+                    total_size_mb: partition.total_size_mb,
+                    disk_size_bytes: partition.disk_size_bytes,
+                    partition_offset_bytes: partition.partition_offset_bytes,
+                    partition_size_bytes: partition.partition_size_bytes,
+                })
+            })
             .map(|partition| InstallTarget {
                 partition: partition.letter.clone(),
                 disk_number: partition.disk_number,
                 partition_number: partition.partition_number,
+                disk_size_bytes: partition.disk_size_bytes,
+                partition_offset_bytes: partition.partition_offset_bytes,
+                partition_size_bytes: partition.partition_size_bytes,
                 style: partition.partition_style,
                 is_current_system: partition.is_system_partition,
                 has_windows: partition.has_windows,
             });
+        if target.is_none() {
+            self.fail_easy_install_after_download(crate::tr!(
+                "下载期间安装目标的磁盘、分区或容量发生变化，请重新选择后再试。"
+            ));
+            return;
+        }
         let pe = self.available_pe();
         let state = NativeInstallState {
             image_path: effective_image_path.to_string_lossy().into_owned(),

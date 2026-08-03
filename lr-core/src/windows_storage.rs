@@ -202,7 +202,8 @@ mod platform {
         CloseHandle, BOOLEAN, E_UNEXPECTED, HANDLE, RPC_E_CHANGED_MODE,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, GetLogicalDrives, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
     use windows::Win32::Storage::VirtualDiskService::{
         CLSID_VdsLoader, IEnumVdsObject, IVdsAdvancedDisk, IVdsAsync, IVdsCreatePartitionEx,
@@ -526,6 +527,17 @@ mod platform {
             ));
         }
         normalize_letter(letter)
+    }
+
+    pub fn assigned_drive_letter_mask() -> Result<u32, StorageError> {
+        let mask = unsafe { GetLogicalDrives() };
+        if mask == 0 {
+            return Err(StorageError::new(
+                "enumerate assigned drive letters",
+                windows::core::Error::from_win32().to_string(),
+            ));
+        }
+        Ok(mask)
     }
 
     pub unsafe fn volume_identity(drive_letter: char) -> Result<VolumeIdentity, StorageError> {
@@ -1717,6 +1729,19 @@ pub fn assign_partition_drive_letter(
 #[cfg(windows)]
 pub fn current_windows_drive_letter() -> Result<char, StorageError> {
     platform::current_windows_drive_letter()
+}
+
+#[cfg(windows)]
+pub fn assigned_drive_letter_mask() -> Result<u32, StorageError> {
+    platform::assigned_drive_letter_mask()
+}
+
+#[cfg(not(windows))]
+pub fn assigned_drive_letter_mask() -> Result<u32, StorageError> {
+    Err(StorageError::new(
+        "enumerate assigned drive letters",
+        "Windows storage APIs are unavailable",
+    ))
 }
 
 #[cfg(windows)]

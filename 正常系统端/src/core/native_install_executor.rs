@@ -11,12 +11,33 @@ use super::native_install_controller::{InstallMode, StartInstallIntent};
 /// Stable partition identity captured immediately before an installation.
 ///
 /// A drive letter is not sufficient because DiskPart and WinPE can reassign
-/// letters.  Direct installs therefore require the disk/partition pair before
-/// the backend is allowed to mutate the target.
+/// letters, and disk/partition numbers can be reused after hot-plug or
+/// recreation. Direct installs therefore require the exact physical geometry
+/// before the backend is allowed to mutate the target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StableTargetIdentity {
     pub disk_number: u32,
     pub partition_number: u32,
+    pub disk_size_bytes: u64,
+    pub partition_offset_bytes: u64,
+    pub partition_size_bytes: u64,
+}
+
+impl StableTargetIdentity {
+    pub fn matches_components(
+        self,
+        disk_number: Option<u32>,
+        partition_number: Option<u32>,
+        disk_size_bytes: Option<u64>,
+        partition_offset_bytes: Option<u64>,
+        partition_size_bytes: Option<u64>,
+    ) -> bool {
+        disk_number == Some(self.disk_number)
+            && partition_number == Some(self.partition_number)
+            && disk_size_bytes == Some(self.disk_size_bytes)
+            && partition_offset_bytes == Some(self.partition_offset_bytes)
+            && partition_size_bytes == Some(self.partition_size_bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -508,6 +529,9 @@ mod tests {
             target_partition: "E:".to_string(),
             target_disk_number: 1,
             target_partition_number: 2,
+            target_disk_size_bytes: 1_000_000_000_000,
+            target_partition_offset_bytes: 1_048_576,
+            target_partition_size_bytes: 500_000_000_000,
             image_path: "D:\\install.wim".to_string(),
             volume_index: 1,
             is_system_partition: mode == InstallMode::ViaPe,
@@ -536,9 +560,31 @@ mod tests {
             stable_target: Some(StableTargetIdentity {
                 disk_number: 2,
                 partition_number: 3,
+                disk_size_bytes: 2_000_000_000_000,
+                partition_offset_bytes: 1_048_576,
+                partition_size_bytes: 1_000_000_000_000,
             }),
             bitlocker: BitLockerRequirement::Ready,
         }
+    }
+
+    #[test]
+    fn stable_target_identity_rejects_reused_numbers_with_changed_geometry() {
+        let identity = direct_context().stable_target.unwrap();
+        assert!(identity.matches_components(
+            Some(2),
+            Some(3),
+            Some(2_000_000_000_000),
+            Some(1_048_576),
+            Some(1_000_000_000_000),
+        ));
+        assert!(!identity.matches_components(
+            Some(2),
+            Some(3),
+            Some(2_000_000_000_000),
+            Some(1_048_576),
+            Some(999_999_995_904),
+        ));
     }
 
     #[test]

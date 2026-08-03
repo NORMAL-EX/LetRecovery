@@ -11,6 +11,65 @@ use lr_core::cached_artifact::{
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::{get_bin_dir, get_exe_dir, get_pe_download_cache_dir};
 
+fn ensure_bcdedit_success(
+    arguments: &[&str],
+    success: bool,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> Result<()> {
+    if success {
+        return Ok(());
+    }
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    anyhow::bail!(
+        "{}",
+        tr!(
+            "bcdedit 执行失败（参数：{}，退出码：{}）：{}",
+            arguments.join(" "),
+            exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| tr!("未知")),
+            detail
+        )
+    )
+}
+
+fn copy_first_boot_sdi(target: &Path, candidates: &[PathBuf]) -> Result<PathBuf> {
+    for source in candidates {
+        if !source.is_file() {
+            continue;
+        }
+        let expected_size = std::fs::metadata(source)?.len();
+        if expected_size == 0 {
+            anyhow::bail!("{}", tr!("boot.sdi 文件为空：{}", source.display()));
+        }
+        let copied = std::fs::copy(source, target)?;
+        let actual_size = std::fs::metadata(target)?.len();
+        if copied != expected_size || actual_size != expected_size {
+            anyhow::bail!(
+                "{}",
+                tr!(
+                    "boot.sdi 复制后大小不一致：源 {} 字节，目标 {} 字节",
+                    expected_size,
+                    actual_size
+                )
+            );
+        }
+        return Ok(target.to_path_buf());
+    }
+    anyhow::bail!(
+        "{}",
+        tr!(
+            "未找到可信的 boot.sdi，已停止创建 PE 引导；请修复当前 Windows 启动文件或使用包含 boot.sdi 的 PE ISO"
+        )
+    )
+}
+
 /// WinPE 启动管理器
 pub struct PeManager {
     bcdedit_path: String,
@@ -129,69 +188,37 @@ impl PeManager {
     fn boot_from_iso(&self, iso_path: &str, display_name: &str) -> Result<()> {
         log::info!("[PE] 从ISO启动PE");
 
-        // 1. 挂载ISO
-        crate::core::iso::IsoMounter::mount_iso(iso_path)?;
-        let mount_point = crate::core::iso::IsoMounter::find_iso_drive()
-            .ok_or_else(|| anyhow::anyhow!("{}", tr!("无法找到ISO挂载点")))?;
-        log::info!("[PE] ISO已挂载到: {}", mount_point);
+        let (target_wim, target_sdi) =
+            crate::core::iso::IsoMounter::with_mounted_iso(iso_path, |mount_point| {
+                log::info!("[PE] ISO已挂载到: {mount_point}");
+                let wim_path = [
+                    format!("{}\\sources\\boot.wim", mount_point),
+                    format!("{}\\Boot\\boot.wim", mount_point),
+                    format!("{}\\boot.wim", mount_point),
+                    format!("{}\\BOOT\\BOOT.WIM", mount_point),
+                ]
+                .into_iter()
+                .find(|path| Path::new(path).exists())
+                .ok_or_else(|| anyhow::anyhow!("{}", tr!("ISO中未找到 boot.wim")))?;
+                let sdi_path = [
+                    format!("{}\\boot\\boot.sdi", mount_point),
+                    format!("{}\\Boot\\boot.sdi", mount_point),
+                    format!("{}\\BOOT\\BOOT.SDI", mount_point),
+                ]
+                .into_iter()
+                .find(|path| Path::new(path).exists())
+                .ok_or_else(|| anyhow::anyhow!("{}", tr!("ISO中未找到有效的 boot.sdi")))?;
 
-        // 2. 查找PE WIM文件
-        let wim_paths = [
-            format!("{}\\sources\\boot.wim", mount_point),
-            format!("{}\\Boot\\boot.wim", mount_point),
-            format!("{}\\boot.wim", mount_point),
-            format!("{}\\BOOT\\BOOT.WIM", mount_point),
-        ];
+                let target_dir = "C:\\LetRecovery_PE";
+                std::fs::create_dir_all(target_dir)?;
+                let target_wim = format!("{}\\boot.wim", target_dir);
+                let target_sdi = format!("{}\\boot.sdi", target_dir);
+                std::fs::copy(&wim_path, &target_wim)?;
+                std::fs::copy(&sdi_path, &target_sdi)?;
+                Ok((target_wim, target_sdi))
+            })?;
 
-        let mut wim_path = None;
-        for path in &wim_paths {
-            if Path::new(path).exists() {
-                wim_path = Some(path.clone());
-                break;
-            }
-        }
-
-        let wim_path =
-            wim_path.ok_or_else(|| anyhow::anyhow!("{}", tr!("ISO中未找到 boot.wim")))?;
-        log::info!("[PE] 找到WIM: {}", wim_path);
-
-        // 3. 查找boot.sdi
-        let sdi_paths = [
-            format!("{}\\boot\\boot.sdi", mount_point),
-            format!("{}\\Boot\\boot.sdi", mount_point),
-            format!("{}\\BOOT\\BOOT.SDI", mount_point),
-        ];
-
-        let mut sdi_path = None;
-        for path in &sdi_paths {
-            if Path::new(path).exists() {
-                sdi_path = Some(path.clone());
-                break;
-            }
-        }
-
-        // 4. 复制必要文件到系统分区
-        let target_dir = "C:\\LetRecovery_PE";
-        std::fs::create_dir_all(target_dir)?;
-
-        let target_wim = format!("{}\\boot.wim", target_dir);
-        log::info!("[PE] 复制 boot.wim 到 {}", target_wim);
-        std::fs::copy(&wim_path, &target_wim)?;
-
-        let target_sdi = if let Some(sdi) = sdi_path {
-            let target = format!("{}\\boot.sdi", target_dir);
-            log::info!("[PE] 复制 boot.sdi 到 {}", target);
-            std::fs::copy(&sdi, &target)?;
-            target
-        } else {
-            // 创建默认的boot.sdi
-            self.create_default_sdi(target_dir)?
-        };
-
-        // 5. 卸载ISO
-        let _ = crate::core::iso::IsoMounter::unmount();
-
-        // 6. 创建BCD引导项
+        // 创建BCD引导项
         self.create_pe_boot_entry(display_name, &target_wim, &target_sdi)?;
 
         // 7. 设置下次启动
@@ -315,42 +342,51 @@ impl PeManager {
 
     /// 创建默认的boot.sdi文件
     fn create_default_sdi(&self, target_dir: &str) -> Result<String> {
-        let sdi_path = format!("{}\\boot.sdi", target_dir);
+        let sdi_path = PathBuf::from(format!("{}\\boot.sdi", target_dir));
 
         // 尝试从Windows系统复制
         let system_sdi_paths = [
-            "C:\\Windows\\Boot\\DVD\\PCAT\\boot.sdi",
-            "C:\\Windows\\Boot\\DVD\\EFI\\boot.sdi",
+            PathBuf::from("C:\\Windows\\Boot\\DVD\\PCAT\\boot.sdi"),
+            PathBuf::from("C:\\Windows\\Boot\\DVD\\EFI\\boot.sdi"),
         ];
 
-        for path in &system_sdi_paths {
-            if Path::new(path).exists() {
-                log::info!("[PE] 从系统复制 boot.sdi: {}", path);
-                std::fs::copy(path, &sdi_path)?;
-                return Ok(sdi_path);
-            }
+        if let Some(source) = system_sdi_paths.iter().find(|path| path.is_file()) {
+            log::info!("[PE] 从系统复制 boot.sdi: {}", source.display());
         }
+        copy_first_boot_sdi(&sdi_path, &system_sdi_paths)
+            .map(|path| path.to_string_lossy().into_owned())
+    }
 
-        // 如果系统中没有，创建一个空的SDI文件（最小有效SDI）
-        // SDI文件头结构
-        log::info!("[PE] 创建最小 boot.sdi");
-        let sdi_header: [u8; 512] = {
-            let mut header = [0u8; 512];
-            // SDI signature: "$SDI"
-            header[0] = b'$';
-            header[1] = b'S';
-            header[2] = b'D';
-            header[3] = b'I';
-            // Version
-            header[4] = 0x01;
-            header[5] = 0x00;
-            header[6] = 0x01;
-            header[7] = 0x00;
-            header
-        };
-        std::fs::write(&sdi_path, sdi_header)?;
-
-        Ok(sdi_path)
+    fn run_bcdedit(&self, arguments: &[&str]) -> Result<String> {
+        let output = create_command(&self.bcdedit_path)
+            .args(arguments)
+            .output()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "{}",
+                    tr!(
+                        "无法启动 bcdedit（参数：{}）：{}",
+                        arguments.join(" "),
+                        error
+                    )
+                )
+            })?;
+        let stdout = gbk_to_utf8(&output.stdout);
+        let stderr = gbk_to_utf8(&output.stderr);
+        ensure_bcdedit_success(
+            arguments,
+            output.status.success(),
+            output.status.code(),
+            &stdout,
+            &stderr,
+        )?;
+        log::info!(
+            "[PE] bcdedit {:?}: stdout={} stderr={}",
+            arguments,
+            stdout,
+            stderr
+        );
+        Ok(stdout)
     }
 
     /// 创建PE引导项
@@ -366,7 +402,7 @@ impl PeManager {
         log::info!("[PE] 引导模式: {}", if is_uefi { "UEFI" } else { "Legacy" });
 
         // 清理旧的PE引导项
-        let _ = self.cleanup_old_pe_entries();
+        self.cleanup_old_pe_entries()?;
 
         // 转换路径为BCD格式
         let wim_bcd_path = wim_path.replace("C:", "").replace("/", "\\");
@@ -374,12 +410,8 @@ impl PeManager {
 
         // 1. 创建ramdisk设备
         log::info!("[PE] 创建 ramdisk 设备");
-        let output = create_command(&self.bcdedit_path)
-            .args(["/create", "/d", &format!("{} RAM", display_name), "/device"])
-            .output()?;
-
-        let stdout = gbk_to_utf8(&output.stdout);
-        log::info!("[PE] bcdedit output: {}", stdout);
+        let ram_description = format!("{} RAM", display_name);
+        let stdout = self.run_bcdedit(&["/create", "/d", &ram_description, "/device"])?;
         let ramdisk_guid = Self::extract_guid(&stdout)?;
         log::info!("[PE] Ramdisk GUID: {}", ramdisk_guid);
 
@@ -390,18 +422,13 @@ impl PeManager {
         ];
 
         for cmd in &cmds {
-            let output = create_command(&self.bcdedit_path).args(cmd).output()?;
-            log::info!("[PE] bcdedit {:?}: {}", cmd, gbk_to_utf8(&output.stdout));
+            self.run_bcdedit(cmd)?;
         }
 
         // 2. 创建osloader
         log::info!("[PE] 创建 osloader");
-        let output = create_command(&self.bcdedit_path)
-            .args(["/create", "/d", display_name, "/application", "osloader"])
-            .output()?;
-
-        let stdout = gbk_to_utf8(&output.stdout);
-        log::info!("[PE] bcdedit output: {}", stdout);
+        let stdout =
+            self.run_bcdedit(&["/create", "/d", display_name, "/application", "osloader"])?;
         let loader_guid = Self::extract_guid(&stdout)?;
         log::info!("[PE] Loader GUID: {}", loader_guid);
 
@@ -425,24 +452,15 @@ impl PeManager {
         ];
 
         for cmd in &cmds {
-            let output = create_command(&self.bcdedit_path).args(cmd).output()?;
-            let out_str = gbk_to_utf8(&output.stdout);
-            let err_str = gbk_to_utf8(&output.stderr);
-            log::info!("[PE] bcdedit {:?}: {} {}", cmd, out_str, err_str);
+            self.run_bcdedit(cmd)?;
         }
 
         // 3. 添加到启动菜单
         log::info!("[PE] 添加到启动菜单");
-        let output = create_command(&self.bcdedit_path)
-            .args(["/displayorder", &loader_guid, "/addfirst"])
-            .output()?;
-        log::info!("[PE] displayorder: {}", gbk_to_utf8(&output.stdout));
+        self.run_bcdedit(&["/displayorder", &loader_guid, "/addfirst"])?;
 
         // 4. 设置超时
-        let output = create_command(&self.bcdedit_path)
-            .args(["/timeout", "5"])
-            .output()?;
-        log::info!("[PE] timeout: {}", gbk_to_utf8(&output.stdout));
+        self.run_bcdedit(&["/timeout", "5"])?;
 
         // 5. 保存GUID用于清理
         let guid_file = "C:\\LetRecovery_PE\\pe_guid.txt";
@@ -455,32 +473,30 @@ impl PeManager {
     fn set_next_boot(&self) -> Result<()> {
         // 读取PE的loader GUID
         let guid_file = "C:\\LetRecovery_PE\\pe_guid.txt";
-        if let Ok(content) = std::fs::read_to_string(guid_file) {
-            let lines: Vec<&str> = content.lines().collect();
-            if lines.len() >= 2 {
-                let loader_guid = lines[1];
-                log::info!("[PE] 设置下次启动: {}", loader_guid);
-
-                let output = create_command(&self.bcdedit_path)
-                    .args(["/bootsequence", loader_guid])
-                    .output()?;
-                log::info!("[PE] bootsequence: {}", gbk_to_utf8(&output.stdout));
-            }
-        }
+        let content = std::fs::read_to_string(guid_file)
+            .map_err(|error| anyhow::anyhow!("读取 PE 引导 GUID 文件失败: {}", error))?;
+        let loader_guid = content
+            .lines()
+            .nth(1)
+            .filter(|guid| !guid.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("PE 引导 GUID 文件缺少 loader GUID"))?;
+        log::info!("[PE] 设置下次启动: {}", loader_guid);
+        self.run_bcdedit(&["/bootsequence", loader_guid])?;
         Ok(())
     }
 
     /// 清理旧的PE引导项
     fn cleanup_old_pe_entries(&self) -> Result<()> {
         let guid_file = "C:\\LetRecovery_PE\\pe_guid.txt";
-        if let Ok(content) = std::fs::read_to_string(guid_file) {
-            for guid in content.lines() {
-                if !guid.is_empty() {
-                    log::info!("[PE] 清理旧引导项: {}", guid);
-                    let _ = create_command(&self.bcdedit_path)
-                        .args(["/delete", guid, "/f"])
-                        .output();
-                }
+        let content = match std::fs::read_to_string(guid_file) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for guid in content.lines() {
+            if !guid.trim().is_empty() {
+                log::info!("[PE] 清理旧引导项: {}", guid);
+                self.run_bcdedit(&["/delete", guid, "/f"])?;
             }
         }
         Ok(())
@@ -590,6 +606,28 @@ mod cache_policy_tests {
 
     const WRONG_MD5: &str = "00000000000000000000000000000000";
 
+    #[test]
+    fn bcdedit_nonzero_exit_is_never_treated_as_success() {
+        let error = ensure_bcdedit_success(
+            &["/bootsequence", "{fixture}"],
+            false,
+            Some(5),
+            "",
+            "access denied",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("/bootsequence"));
+        assert!(error.contains('5'));
+        assert!(error.contains("access denied"));
+    }
+
+    #[test]
+    fn bcdedit_zero_exit_is_accepted() {
+        ensure_bcdedit_success(&["/timeout", "5"], true, Some(0), "ok", "").unwrap();
+    }
+
     struct TestDirectory(PathBuf);
 
     impl TestDirectory {
@@ -611,6 +649,33 @@ mod cache_policy_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn missing_boot_sdi_fails_without_creating_placeholder() {
+        let fixture = TestDirectory::new("missing-sdi");
+        let target = fixture.0.join("boot.sdi");
+
+        let error = copy_first_boot_sdi(&target, &[fixture.0.join("missing-source.sdi")])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("boot.sdi"));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn boot_sdi_copy_requires_and_preserves_a_real_source() {
+        let fixture = TestDirectory::new("copy-sdi");
+        let source = fixture.0.join("source.sdi");
+        let target = fixture.0.join("target.sdi");
+        let bytes = b"trusted boot sdi fixture";
+        fs::write(&source, bytes).unwrap();
+
+        let copied = copy_first_boot_sdi(&target, std::slice::from_ref(&source)).unwrap();
+
+        assert_eq!(copied, target);
+        assert_eq!(fs::read(copied).unwrap(), bytes);
     }
 
     #[test]

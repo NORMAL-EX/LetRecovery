@@ -376,22 +376,22 @@ log=0
 
         // 1. 移除快捷方式小箭头
         if self.remove_shortcut_arrow {
-            self.apply_remove_shortcut_arrow();
+            self.apply_remove_shortcut_arrow()?;
         }
 
         // 2. Win11恢复经典右键菜单
         if self.restore_classic_context_menu {
-            self.apply_restore_classic_context_menu(default_loaded);
+            self.apply_restore_classic_context_menu(default_loaded)?;
         }
 
         // 3. OOBE绕过强制联网
         if self.bypass_nro {
-            self.apply_bypass_nro();
+            self.apply_bypass_nro()?;
         }
 
         // 4. 禁用Windows自动更新
         if self.disable_windows_update {
-            self.apply_disable_windows_update();
+            self.apply_disable_windows_update()?;
         }
 
         // 5. 仅深度移除 Microsoft Defender Antivirus 引擎，保留安全中心等组件
@@ -416,17 +416,17 @@ log=0
 
         // 6. 禁用系统保留空间
         if self.disable_reserved_storage {
-            self.apply_disable_reserved_storage();
+            self.apply_disable_reserved_storage()?;
         }
 
         // 7. 禁用UAC
         if self.disable_uac {
-            self.apply_disable_uac();
+            self.apply_disable_uac()?;
         }
 
         // 8. 禁用自动设备加密 (BitLocker)
         if self.disable_device_encryption {
-            self.apply_disable_device_encryption();
+            self.apply_disable_device_encryption()?;
         }
 
         // 9. 删除预装UWP应用 - 通过删除 AppxProvisioned 配置
@@ -438,7 +438,7 @@ log=0
         // Windows 安装末尾会自动运行 %WINDIR%\Setup\Scripts\SetupComplete.cmd（SYSTEM 身份），
         // 用 netsh 添加 WiFi 配置后系统即可自动连接（profile 默认 autoconnect）。
         if self.migrate_wifi && !self.wifi_profile_xml.is_empty() {
-            self.apply_migrate_wifi(target_partition);
+            self.apply_migrate_wifi(target_partition)?;
         }
 
         // ============ 自定义脚本 ============
@@ -484,7 +484,7 @@ log=0
 
         // 15. 导入自定义文件
         if self.import_custom_files && !self.custom_files_path.is_empty() {
-            self.apply_import_custom_files(target_partition);
+            self.apply_import_custom_files(target_partition)?;
         }
 
         // 16. 自定义用户名 - 写入标记文件供无人值守使用
@@ -525,13 +525,13 @@ log=0
 
         // 20. Win7 修复 ACPI_BIOS_ERROR (0xA5) 蓝屏
         if self.win7_fix_acpi_bsod {
-            self.apply_win7_fix_acpi_bsod();
+            self.apply_win7_fix_acpi_bsod()?;
         }
 
         // 21. Win7 修复 INACCESSIBLE_BOOT_DEVICE (0x7B) 蓝屏
         // 这是Win7在现代硬件上最常见的蓝屏问题，原因是存储控制器驱动未启用
         if self.win7_fix_storage_bsod {
-            self.apply_win7_fix_storage_bsod();
+            self.apply_win7_fix_storage_bsod()?;
         }
 
         // ============ Windows XP 专用：离线注入存储/USB3 驱动 ============
@@ -551,115 +551,121 @@ log=0
     // ============ apply_to_system 各优化块的私有 helper（行为与内联版本逐字等价）============
 
     /// 1. 移除快捷方式小箭头
-    fn apply_remove_shortcut_arrow(&self) {
+    fn apply_remove_shortcut_arrow(&self) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 移除快捷方式小箭头");
-        let _ = OfflineRegistry::set_string(
+        OfflineRegistry::set_string(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Icons",
             "29",
             "%systemroot%\\system32\\imageres.dll,197",
-        );
+        )?;
+        Ok(())
     }
 
     /// 2. Win11恢复经典右键菜单
-    fn apply_restore_classic_context_menu(&self, default_loaded: bool) {
+    fn apply_restore_classic_context_menu(&self, default_loaded: bool) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 恢复经典右键菜单");
         // 在 DEFAULT hive 中设置（影响所有新用户）
         if default_loaded {
             // 创建空的 InprocServer32 键，这会禁用新式右键菜单
-            let _ = OfflineRegistry::create_key(
+            OfflineRegistry::create_key(
                 "HKLM\\pc-default\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32"
-            );
+            )?;
             // 设置默认值为空字符串
-            let _ = OfflineRegistry::set_string(
+            OfflineRegistry::set_string(
                 "HKLM\\pc-default\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
                 "",
                 "",
-            );
+            )?;
         }
         // 同时在 SOFTWARE 中设置（系统级）
-        let _ = OfflineRegistry::create_key(
+        OfflineRegistry::create_key(
             "HKLM\\pc-soft\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
-        );
-        let _ = OfflineRegistry::set_string(
+        )?;
+        OfflineRegistry::set_string(
             "HKLM\\pc-soft\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
             "",
             "",
-        );
+        )?;
+        Ok(())
     }
 
     /// 3. OOBE绕过强制联网
-    fn apply_bypass_nro(&self) {
+    fn apply_bypass_nro(&self) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 设置OOBE绕过联网");
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\OOBE",
             "BypassNRO",
             1,
-        );
+        )?;
+        Ok(())
     }
 
     /// 4. 禁用Windows自动更新
-    fn apply_disable_windows_update(&self) {
+    fn apply_disable_windows_update(&self) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 通过策略禁用Windows自动更新");
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
             "NoAutoUpdate",
             1,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
             "AUOptions",
             1,
-        );
+        )?;
+        Ok(())
     }
 
     /// 6. 禁用系统保留空间
-    fn apply_disable_reserved_storage(&self) {
+    fn apply_disable_reserved_storage(&self) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 禁用系统保留空间");
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\ReserveManager",
             "ShippedWithReserves",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\ReserveManager",
             "PassedPolicy",
             0,
-        );
+        )?;
+        Ok(())
     }
 
     /// 7. 禁用UAC
-    fn apply_disable_uac(&self) {
+    fn apply_disable_uac(&self) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 禁用UAC");
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
             "EnableLUA",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
             "ConsentPromptBehaviorAdmin",
             0,
-        );
+        )?;
+        Ok(())
     }
 
     /// 8. 禁用自动设备加密 (BitLocker)
-    fn apply_disable_device_encryption(&self) {
+    fn apply_disable_device_encryption(&self) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 禁用自动设备加密");
         // 禁用 BitLocker 自动加密
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Control\\BitLocker",
             "PreventDeviceEncryption",
             1,
-        );
+        )?;
         // 禁用 MBAM (Microsoft BitLocker Administration and Monitoring)
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-soft\\Policies\\Microsoft\\FVE", "OSRecovery", 0);
+        OfflineRegistry::set_dword("HKLM\\pc-soft\\Policies\\Microsoft\\FVE", "OSRecovery", 0)?;
         // 禁用设备加密
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\BDESVC",
             "Start",
             4, // Disabled
-        );
+        )?;
+        Ok(())
     }
 
     /// 9. 删除预装UWP应用 - 通过删除 AppxProvisioned 配置
@@ -674,33 +680,23 @@ log=0
     }
 
     /// WiFi 迁移：把抓到的 profile XML + SetupComplete.cmd 写到目标系统。
-    fn apply_migrate_wifi(&self, target_partition: &str) {
+    fn apply_migrate_wifi(&self, target_partition: &str) -> anyhow::Result<()> {
         let setup_scripts = format!("{}\\Windows\\Setup\\Scripts", target_partition);
-        match std::fs::create_dir_all(&setup_scripts) {
-            Ok(_) => {
-                let xml_path = format!("{}\\LR_WiFi.xml", setup_scripts);
-                let cmd_path = format!("{}\\SetupComplete.cmd", setup_scripts);
-                if let Err(e) = std::fs::write(&xml_path, self.wifi_profile_xml.as_bytes()) {
-                    log::error!("[ADVANCED] 写入 WiFi 配置失败: {}", e);
-                } else {
-                    use std::io::Write;
-                    // 追加，避免覆盖可能已存在的 SetupComplete.cmd
-                    let line = "netsh wlan add profile filename=\"%~dp0LR_WiFi.xml\" user=all\r\n";
-                    let res = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&cmd_path)
-                        .and_then(|mut f| f.write_all(line.as_bytes()));
-                    match res {
-                        Ok(_) => {
-                            log::info!("[ADVANCED] 已配置 WiFi 自动迁移: {}", self.wifi_ssid)
-                        }
-                        Err(e) => log::error!("[ADVANCED] 写入 SetupComplete.cmd 失败: {}", e),
-                    }
-                }
-            }
-            Err(e) => log::error!("[ADVANCED] 创建 Setup\\Scripts 目录失败: {}", e),
-        }
+        std::fs::create_dir_all(&setup_scripts)?;
+        let xml_path = format!("{}\\LR_WiFi.xml", setup_scripts);
+        let cmd_path = format!("{}\\SetupComplete.cmd", setup_scripts);
+        std::fs::write(&xml_path, self.wifi_profile_xml.as_bytes())?;
+
+        use std::io::Write;
+        // 追加，避免覆盖可能已存在的 SetupComplete.cmd
+        let line = "netsh wlan add profile filename=\"%~dp0LR_WiFi.xml\" user=all\r\n";
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&cmd_path)?
+            .write_all(line.as_bytes())?;
+        log::info!("[ADVANCED] 已配置 WiFi 自动迁移: {}", self.wifi_ssid);
+        Ok(())
     }
 
     /// 10. 系统部署中运行脚本
@@ -853,34 +849,30 @@ log=0
         log::info!("[ADVANCED] 导入注册表文件: {}", self.registry_file_path);
 
         // 读取原始 .reg 文件
-        if let Ok(reg_content) = std::fs::read_to_string(&self.registry_file_path) {
-            // 转换路径：HKEY_LOCAL_MACHINE\SOFTWARE -> HKLM\pc-soft
-            // 转换路径：HKEY_LOCAL_MACHINE\SYSTEM -> HKLM\pc-sys
-            let converted = Self::convert_reg_file_for_offline(&reg_content);
+        let reg_content = std::fs::read_to_string(&self.registry_file_path)?;
+        // 转换路径：HKEY_LOCAL_MACHINE\SOFTWARE -> HKLM\pc-soft
+        // 转换路径：HKEY_LOCAL_MACHINE\SYSTEM -> HKLM\pc-sys
+        let converted = Self::convert_reg_file_for_offline(&reg_content);
 
-            // 写入临时文件
-            let temp_reg = format!("{}\\temp_import.reg", scripts_dir);
-            std::fs::write(&temp_reg, &converted)?;
-
-            // 导入注册表
-            match OfflineRegistry::import_reg_file(&temp_reg) {
-                Ok(_) => log::info!("[ADVANCED] 注册表文件导入成功"),
-                Err(e) => log::error!("[ADVANCED] 注册表文件导入失败: {} (继续执行)", e),
-            }
-
-            // 删除临时文件
-            let _ = std::fs::remove_file(&temp_reg);
-        }
+        // `create_new` prevents concurrent installations from overwriting the
+        // same import file; the guard cleans up on every return path.
+        let temp_reg = lr_core::scoped_temp_file::ScopedTempFile::create_in(
+            std::path::Path::new(scripts_dir),
+            "lr-reg-import",
+            "reg",
+            converted.as_bytes(),
+        )?;
+        OfflineRegistry::import_reg_file(&temp_reg.to_string_lossy())?;
+        log::info!("[ADVANCED] 注册表文件导入成功");
         Ok(())
     }
 
     /// 15. 导入自定义文件
-    fn apply_import_custom_files(&self, target_partition: &str) {
+    fn apply_import_custom_files(&self, target_partition: &str) -> anyhow::Result<()> {
         log::info!("[ADVANCED] 导入自定义文件: {}", self.custom_files_path);
-        match Self::copy_dir_all(&self.custom_files_path, target_partition) {
-            Ok(_) => log::info!("[ADVANCED] 自定义文件导入成功"),
-            Err(e) => log::error!("[ADVANCED] 自定义文件导入失败: {} (继续执行)", e),
-        }
+        Self::copy_dir_all(&self.custom_files_path, target_partition)?;
+        log::info!("[ADVANCED] 自定义文件导入成功");
+        Ok(())
     }
 
     /// 16. 自定义用户名 - 写入标记文件供无人值守使用
@@ -1013,237 +1005,196 @@ log=0
     }
 
     /// 20. Win7 修复 ACPI_BIOS_ERROR (0xA5) 蓝屏
-    fn apply_win7_fix_acpi_bsod(&self) {
+    fn apply_win7_fix_acpi_bsod(&self) -> anyhow::Result<()> {
         log::info!("[ADVANCED] Win7: 修复ACPI蓝屏问题");
 
         // 禁用 intelppm 服务 (Intel 电源管理)
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\intelppm",
             "Start",
             4, // 4 = Disabled
-        );
+        )?;
 
         // 禁用 amdppm 服务 (AMD 电源管理)
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\amdppm", "Start", 4);
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\amdppm", "Start", 4)?;
 
         // 禁用 Processor 服务
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\Processor",
             "Start",
             4,
-        );
+        )?;
 
         // 同时设置 ControlSet002 (如果存在)
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\intelppm",
             "Start",
             4,
-        );
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\amdppm", "Start", 4);
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\amdppm", "Start", 4)?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\Processor",
             "Start",
             4,
-        );
+        )?;
 
         log::info!("[ADVANCED] Win7 ACPI蓝屏修复设置完成");
+        Ok(())
     }
 
     /// 21. Win7 修复 INACCESSIBLE_BOOT_DEVICE (0x7B) 蓝屏
     ///
     /// 这是Win7在现代硬件上最常见的蓝屏问题，原因是存储控制器驱动未启用
-    fn apply_win7_fix_storage_bsod(&self) {
+    fn apply_win7_fix_storage_bsod(&self) -> anyhow::Result<()> {
         log::info!("[ADVANCED] Win7: 修复存储控制器蓝屏问题 (0x7B)");
 
         // ========== AHCI 相关驱动 ==========
         // msahci - Microsoft AHCI 驱动 (Win7原版自带但默认禁用)
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\msahci",
             "Start",
             0, // 0 = Boot (启动时加载)
-        );
+        )?;
         // 同时设置 ControlSet002
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\msahci", "Start", 0);
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\msahci", "Start", 0)?;
 
         // StorAHCI - 新版 AHCI 驱动 (Win8+)
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\storahci",
             "Start",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\storahci",
             "Start",
             0,
-        );
+        )?;
 
         // ========== IDE 相关驱动 ==========
         // pciide - 标准 PCI IDE 控制器
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\pciide", "Start", 0);
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\pciide", "Start", 0);
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\pciide", "Start", 0)?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\pciide", "Start", 0)?;
 
         // intelide - Intel IDE 控制器
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\intelide",
             "Start",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\intelide",
             "Start",
             0,
-        );
+        )?;
 
         // atapi - ATAPI/PATA 驱动
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\atapi", "Start", 0);
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\atapi", "Start", 0);
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\atapi", "Start", 0)?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\atapi", "Start", 0)?;
 
         // ========== Intel 存储驱动 ==========
         // iaStorV - Intel 快速存储技术 (RST)
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\iaStorV",
-            "Start",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\iaStorV",
-            "Start",
-            0,
-        );
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\iaStorV", "Start", 0)?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\iaStorV", "Start", 0)?;
 
         // iaStorAV - Intel AHCI 驱动
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\iaStorAV",
             "Start",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\iaStorAV",
             "Start",
             0,
-        );
+        )?;
 
         // iaStor - 旧版 Intel 存储驱动
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\iaStor", "Start", 0);
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\iaStor", "Start", 0);
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\iaStor", "Start", 0)?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\iaStor", "Start", 0)?;
 
         // ========== NVMe 驱动 ==========
         // stornvme - Microsoft NVMe 驱动 (需要注入驱动文件才能生效)
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\stornvme",
             "Start",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\stornvme",
             "Start",
             0,
-        );
+        )?;
 
         // ========== AMD 存储驱动 ==========
         // amd_sata - AMD SATA 驱动
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\amd_sata",
             "Start",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\amd_sata",
             "Start",
             0,
-        );
+        )?;
 
         // amd_xata - AMD AHCI 驱动
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\amd_xata",
             "Start",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\amd_xata",
             "Start",
             0,
-        );
+        )?;
 
         // amdsata - AMD SATA (另一版本)
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\amdsata",
-            "Start",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\amdsata",
-            "Start",
-            0,
-        );
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\amdsata", "Start", 0)?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\amdsata", "Start", 0)?;
 
         // ========== VMware/VirtualBox 虚拟机存储驱动 ==========
         // LSI_SAS - VMware 默认存储控制器
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\LSI_SAS",
-            "Start",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\LSI_SAS",
-            "Start",
-            0,
-        );
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\LSI_SAS", "Start", 0)?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\LSI_SAS", "Start", 0)?;
 
         // LSI_SAS2 - VMware LSI Logic SAS
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\LSI_SAS2",
             "Start",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\LSI_SAS2",
             "Start",
             0,
-        );
+        )?;
 
         // LSI_SCSI - LSI SCSI 控制器
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Services\\LSI_SCSI",
             "Start",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet002\\Services\\LSI_SCSI",
             "Start",
             0,
-        );
+        )?;
 
         // megasas - MegaRAID SAS 控制器
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\megasas",
-            "Start",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\megasas",
-            "Start",
-            0,
-        );
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\megasas", "Start", 0)?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\megasas", "Start", 0)?;
 
         // ========== 通用 SCSI 驱动 ==========
         // vhdmp - VHD Mini-Port 驱动
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\vhdmp", "Start", 0);
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\vhdmp", "Start", 0);
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\vhdmp", "Start", 0)?;
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\vhdmp", "Start", 0)?;
 
         log::info!("[ADVANCED] Win7 存储控制器蓝屏修复设置完成");
         log::info!("[ADVANCED] 已启用: msahci, storahci, pciide, intelide, atapi, iaStorV, iaStorAV, iaStor, stornvme, amd_sata, amd_xata, amdsata, LSI_SAS, LSI_SAS2, LSI_SCSI, megasas, vhdmp");
+        Ok(())
     }
 
     /// Windows XP 专用：离线注入存储/USB3 驱动

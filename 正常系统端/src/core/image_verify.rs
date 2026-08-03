@@ -1017,9 +1017,17 @@ impl ImageVerifier {
                     result.details.extend(inner_result.details);
 
                     if inner_result.status != VerifyStatus::Valid {
-                        let _ = IsoMounter::unmount();
+                        let detach_error = IsoMounter::unmount_iso_by_path(file_path).err();
                         result.status = inner_result.status;
-                        result.message = tr!("内部镜像校验失败: {}", inner_result.message);
+                        result.message = if let Some(detach_error) = detach_error {
+                            tr!(
+                                "内部镜像校验失败: {}；ISO 卸载同时失败: {}",
+                                inner_result.message,
+                                detach_error
+                            )
+                        } else {
+                            tr!("内部镜像校验失败: {}", inner_result.message)
+                        };
                         return result;
                     }
                 } else {
@@ -1029,7 +1037,11 @@ impl ImageVerifier {
                 }
 
                 reporter.report(97, tr!("正在卸载 ISO..."), file_path);
-                let _ = IsoMounter::unmount();
+                if let Err(error) = IsoMounter::unmount_iso_by_path(file_path) {
+                    result.status = VerifyStatus::Error;
+                    result.message = tr!("ISO 校验完成，但卸载失败: {}", error);
+                    return result;
+                }
 
                 result.status = VerifyStatus::Valid;
                 result.message = if result.image_count > 0 {

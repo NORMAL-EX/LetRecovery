@@ -147,6 +147,10 @@ pub struct InstallConfig {
     pub driver_action_mode: u8,
     /// 立即重启
     pub auto_reboot: bool,
+    /// 在 PE 释放镜像前格式化目标分区。
+    pub format_partition: bool,
+    /// 在 PE 释放镜像后写入或修复目标系统引导。
+    pub repair_boot: bool,
     /// 原系统引导GUID（用于删除旧引导项）
     pub original_guid: String,
     /// 安装分卷索引
@@ -844,6 +848,8 @@ Unattended={}
 RestoreDrivers={}
 DriverActionMode={}
 AutoReboot={}
+FormatPartition={}
+RepairBoot={}
 OriginalGUID={}
 VolumeIndex={}
 TargetPartition={}
@@ -898,6 +904,8 @@ XpInjectNvmeDriver={}
             config.restore_drivers,
             config.driver_action_mode,
             config.auto_reboot,
+            config.format_partition,
+            config.repair_boot,
             config.original_guid,
             config.volume_index,
             config.target_partition,
@@ -971,7 +979,14 @@ Language={}
 
     /// 反序列化安装配置
     fn deserialize_install_config(content: &str) -> Result<InstallConfig> {
-        let mut config = InstallConfig::default();
+        // Older handoff files predate these switches and always performed both
+        // operations. Keep that behavior unless the normal endpoint explicitly
+        // persists a newer value.
+        let mut config = InstallConfig {
+            format_partition: true,
+            repair_boot: true,
+            ..InstallConfig::default()
+        };
 
         for line in content.lines() {
             let line = line.trim();
@@ -989,6 +1004,12 @@ Language={}
                     "RestoreDrivers" => config.restore_drivers = value.parse().unwrap_or(false),
                     "DriverActionMode" => config.driver_action_mode = value.parse().unwrap_or(0),
                     "AutoReboot" => config.auto_reboot = value.parse().unwrap_or(false),
+                    "FormatPartition" => {
+                        config.format_partition = value.parse().unwrap_or(config.format_partition)
+                    }
+                    "RepairBoot" => {
+                        config.repair_boot = value.parse().unwrap_or(config.repair_boot)
+                    }
                     "OriginalGUID" => config.original_guid = value.to_string(),
                     "VolumeIndex" => config.volume_index = value.parse().unwrap_or(1),
                     "TargetPartition" => config.target_partition = value.to_string(),
@@ -1182,6 +1203,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.volume_index, 3);
+        assert!(config.format_partition);
+        assert!(config.repair_boot);
         assert_eq!(config.boot_mode, 0);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
         assert!(!config.is_xp_i386);
@@ -1205,6 +1228,8 @@ mod tests {
     #[test]
     fn install_config_round_trips_boot_selection() {
         let source = InstallConfig {
+            format_partition: false,
+            repair_boot: false,
             boot_mode: 1,
             boot_pca_mode: BootPcaMode::Pca2023,
             pca_compat_package: "pca_compat\\package.wim".to_string(),
@@ -1220,6 +1245,8 @@ mod tests {
         let serialized = ConfigFileManager::serialize_install_config(&source);
         let parsed = ConfigFileManager::deserialize_install_config(&serialized).unwrap();
 
+        assert!(!parsed.format_partition);
+        assert!(!parsed.repair_boot);
         assert_eq!(parsed.boot_mode, 1);
         assert_eq!(parsed.boot_pca_mode, BootPcaMode::Pca2023);
         assert_eq!(parsed.pca_compat_package, "pca_compat\\package.wim");
