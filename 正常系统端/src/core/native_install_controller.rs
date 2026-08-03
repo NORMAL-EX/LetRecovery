@@ -70,7 +70,6 @@ pub struct NativeInstallState {
     pub target: Option<InstallTarget>,
     pub is_pe_environment: bool,
     pub pe_available: bool,
-    pub selected_pe: Option<usize>,
     pub custom_unattend_path: String,
     pub custom_unattend_error: Option<String>,
     /// True while a device-change inventory refresh is queued or running. The cached target
@@ -92,7 +91,6 @@ pub enum InstallValidationError {
     MissingTargetPartition,
     UnstableTargetIdentity,
     PeUnavailable,
-    MissingPeSelection,
     InvalidCustomUnattend,
     BuiltInAdministratorRequiresUnattended,
     BuiltInAdministratorUnsupportedSource,
@@ -119,7 +117,6 @@ impl std::fmt::Display for InstallValidationError {
                 crate::tr!("无法确认安装目标的磁盘和分区身份，请刷新后重试。")
             }
             Self::PeUnavailable => crate::tr!("安装到当前系统分区需要可用的 PE 环境。"),
-            Self::MissingPeSelection => crate::tr!("请选择用于安装的 PE 环境。"),
             Self::InvalidCustomUnattend => crate::tr!("自定义无人值守文件无效。"),
             Self::BuiltInAdministratorRequiresUnattended => {
                 crate::tr!("启用内置 Administrator 账户需要同时启用无人值守安装。")
@@ -184,7 +181,7 @@ pub struct StartInstallIntent {
     pub image_path: String,
     pub volume_index: u32,
     pub is_system_partition: bool,
-    pub selected_pe: Option<usize>,
+    pub pe_index: Option<usize>,
     pub is_gho: bool,
     pub options: InstallOptions,
 }
@@ -305,13 +302,8 @@ impl NativeInstallState {
         } else {
             InstallMode::ViaPe
         };
-        if mode == InstallMode::ViaPe {
-            if !self.pe_available {
-                return Err(InstallValidationError::PeUnavailable);
-            }
-            if self.selected_pe.is_none() {
-                return Err(InstallValidationError::MissingPeSelection);
-            }
+        if mode == InstallMode::ViaPe && !self.pe_available {
+            return Err(InstallValidationError::PeUnavailable);
         }
 
         let volume_index = self
@@ -367,7 +359,7 @@ impl NativeInstallState {
             image_path,
             volume_index,
             is_system_partition: target.is_current_system,
-            selected_pe: self.selected_pe,
+            pe_index: (mode == InstallMode::ViaPe).then_some(0),
             is_gho,
             options,
         })
@@ -530,10 +522,7 @@ mod tests {
         let mut x86 = image(6, 1);
         x86.architecture = Some(0);
         assert_eq!(
-            windows7_driver_defaults(
-                Some(x86),
-                Some(lr_core::windows_storage::DiskBusType::Nvme)
-            ),
+            windows7_driver_defaults(Some(x86), Some(lr_core::windows_storage::DiskBusType::Nvme)),
             (true, false)
         );
     }
@@ -559,7 +548,6 @@ mod tests {
             }),
             is_pe_environment: false,
             pe_available: false,
-            selected_pe: None,
             custom_unattend_path: String::new(),
             custom_unattend_error: None,
             partition_refresh_pending: false,
@@ -579,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn current_system_requires_selected_pe() {
+    fn current_system_automatically_uses_first_available_pe() {
         let mut state = base_state();
         state.target.as_mut().unwrap().is_current_system = true;
         assert_eq!(
@@ -587,12 +575,9 @@ mod tests {
             InstallValidationError::PeUnavailable
         );
         state.pe_available = true;
-        assert_eq!(
-            state.start_intent().unwrap_err(),
-            InstallValidationError::MissingPeSelection
-        );
-        state.selected_pe = Some(0);
-        assert_eq!(state.start_intent().unwrap().mode, InstallMode::ViaPe);
+        let intent = state.start_intent().unwrap();
+        assert_eq!(intent.mode, InstallMode::ViaPe);
+        assert_eq!(intent.pe_index, Some(0));
     }
 
     #[test]
@@ -616,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn xp_i386_current_system_routes_through_selected_pe() {
+    fn xp_i386_current_system_routes_through_first_available_pe() {
         let mut state = base_state();
         state.xp_i386_source = Some("F:\\I386".to_string());
         state.selected_image = None;
@@ -632,9 +617,9 @@ mod tests {
             InstallValidationError::PeUnavailable
         );
         state.pe_available = true;
-        state.selected_pe = Some(0);
         let intent = state.start_intent().unwrap();
         assert_eq!(intent.mode, InstallMode::ViaPe);
+        assert_eq!(intent.pe_index, Some(0));
         assert!(intent.options.is_xp_i386);
         assert!(intent.options.advanced_options.xp_inject_usb3_driver);
         assert!(intent.options.advanced_options.xp_inject_nvme_driver);

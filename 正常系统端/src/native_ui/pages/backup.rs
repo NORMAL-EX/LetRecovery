@@ -36,7 +36,6 @@ pub const ID_BROWSE: u16 = 414;
 pub const ID_NAME: u16 = 415;
 pub const ID_DESCRIPTION: u16 = 416;
 pub const ID_INCREMENTAL: u16 = 417;
-pub const ID_PE: u16 = 425;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackupFormat {
@@ -280,13 +279,10 @@ pub struct BackupPageHandles {
     pub description: HWND,
     pub incremental: HWND,
     pub warning: HWND,
-    pub pe_label: HWND,
-    pub pe: HWND,
 }
 
 pub struct BackupPage {
     handles: BackupPageHandles,
-    pe_count: usize,
     default_timestamp: String,
     generated_name: RefCell<String>,
     generated_description: RefCell<String>,
@@ -297,7 +293,6 @@ impl BackupPage {
     pub unsafe fn create(
         parent: HWND,
         partitions: &[BackupPartitionRow],
-        pe_labels: &[String],
         initial: &BackupPageState,
         default_timestamp: &str,
     ) -> windows::core::Result<Self> {
@@ -394,22 +389,6 @@ impl BackupPage {
             0,
             424,
         )?;
-        let pe_label = child(parent, w!("STATIC"), &crate::tr!("PE 环境:"), 0, 426)?;
-        let pe = child(
-            parent,
-            w!("COMBOBOX"),
-            "",
-            CBS_DROPDOWNLIST | WS_TABSTOP.0 as i32,
-            ID_PE,
-        )?;
-        for label in pe_labels {
-            let label = wide(label);
-            let _ = SendMessageW(pe, CB_ADDSTRING, WPARAM(0), LPARAM(label.as_ptr() as isize));
-        }
-        if pe_labels.len() == 1 {
-            let _ = SendMessageW(pe, CB_SETCURSEL, WPARAM(0), LPARAM(0));
-        }
-
         let page = Self {
             handles: BackupPageHandles {
                 source_label,
@@ -428,10 +407,7 @@ impl BackupPage {
                 description,
                 incremental,
                 warning,
-                pe_label,
-                pe,
             },
-            pe_count: pe_labels.len(),
             default_timestamp: default_timestamp.to_owned(),
             generated_name: RefCell::new(initial.name.clone()),
             generated_description: RefCell::new(initial.description.clone()),
@@ -460,28 +436,6 @@ impl BackupPage {
         );
     }
 
-    pub unsafe fn selected_pe(&self) -> Option<usize> {
-        usize::try_from(SendMessageW(self.handles.pe, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0)
-            .ok()
-            .filter(|index| *index < self.pe_count)
-    }
-
-    pub unsafe fn replace_pe_labels(&mut self, labels: &[String]) {
-        let _ = SendMessageW(self.handles.pe, CB_RESETCONTENT, WPARAM(0), LPARAM(0));
-        for label in labels {
-            let label = wide(label);
-            let _ = SendMessageW(
-                self.handles.pe,
-                CB_ADDSTRING,
-                WPARAM(0),
-                LPARAM(label.as_ptr() as isize),
-            );
-        }
-        self.pe_count = labels.len();
-        let selected = if labels.len() == 1 { 0 } else { usize::MAX };
-        let _ = SendMessageW(self.handles.pe, CB_SETCURSEL, WPARAM(selected), LPARAM(0));
-    }
-
     pub unsafe fn relocalize(&self) {
         let h = self.handles;
         set_text(h.source_label, &crate::tr!("选择要备份的分区:"));
@@ -492,7 +446,6 @@ impl BackupPage {
         set_text(h.name_label, &crate::tr!("备份名称:"));
         set_text(h.description_label, &crate::tr!("备份描述:"));
         set_text(h.incremental, &crate::tr!("增量备份 (追加到现有镜像)"));
-        set_text(h.pe_label, &crate::tr!("PE 环境:"));
 
         // Generated defaults follow the selected interface language. Each field is considered
         // independently so editing only the description does not freeze the generated name (or
@@ -589,17 +542,6 @@ impl BackupPage {
         selected: Option<usize>,
     ) {
         self.populate_partitions(partitions, selected, false, false);
-    }
-
-    pub unsafe fn show_pe_selector(&self, visible: bool) {
-        // A sole PE is selected automatically and is not a meaningful user choice.
-        let command = if visible && self.pe_count > 1 {
-            SW_SHOW
-        } else {
-            SW_HIDE
-        };
-        let _ = ShowWindow(self.handles.pe_label, command);
-        let _ = ShowWindow(self.handles.pe, command);
     }
 
     /// Refreshes the legacy source warning after selection or inventory changes.
@@ -747,23 +689,6 @@ impl BackupPage {
             width - incremental_width - options_gap,
             s(20),
         );
-        let pe_top = options_top + s(32);
-        let pe_closed_height = combo_closed_height(h.pe, metrics.field_height);
-        let pe_row_height = pe_closed_height.max(metrics.field_height);
-        move_control(
-            h.pe_label,
-            left,
-            centered_control_y_ceil(pe_top, pe_row_height, metrics.label_height),
-            label_width,
-            metrics.label_height,
-        );
-        move_control(
-            h.pe,
-            left + label_width,
-            centered_control_y_ceil(pe_top, pe_row_height, pe_closed_height),
-            (width - label_width).min(s(320)).max(0),
-            s(180),
-        );
     }
 
     pub unsafe fn show(&self, visible: bool) {
@@ -773,10 +698,6 @@ impl BackupPage {
         }
         if visible {
             self.update_format_controls();
-            if self.pe_count <= 1 {
-                let _ = ShowWindow(self.handles.pe_label, SW_HIDE);
-                let _ = ShowWindow(self.handles.pe, SW_HIDE);
-            }
         }
     }
 
@@ -791,7 +712,6 @@ impl BackupPage {
             self.handles.save_path,
             self.handles.name,
             self.handles.description,
-            self.handles.pe,
         ] {
             apply_control_theme(control, palette, NativeControlKind::Field);
         }
@@ -865,7 +785,6 @@ impl BackupPage {
             self.handles.name,
             self.handles.description,
             self.handles.incremental,
-            self.handles.pe,
         ] {
             let _ = EnableWindow(control, enabled);
         }
@@ -984,7 +903,7 @@ impl BackupPage {
         }
     }
 
-    fn all_controls(&self) -> [HWND; 18] {
+    fn all_controls(&self) -> [HWND; 16] {
         let h = self.handles;
         [
             h.source_label,
@@ -1003,8 +922,6 @@ impl BackupPage {
             h.description,
             h.incremental,
             h.warning,
-            h.pe_label,
-            h.pe,
         ]
     }
 }

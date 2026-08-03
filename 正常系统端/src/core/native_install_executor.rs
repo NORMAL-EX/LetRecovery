@@ -511,7 +511,7 @@ mod tests {
             image_path: "D:\\install.wim".to_string(),
             volume_index: 1,
             is_system_partition: mode == InstallMode::ViaPe,
-            selected_pe: (mode == InstallMode::ViaPe).then_some(0),
+            pe_index: (mode == InstallMode::ViaPe).then_some(0),
             is_gho: false,
             options: InstallOptions {
                 format_partition: true,

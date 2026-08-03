@@ -922,19 +922,6 @@ fn shared_install_mode_label_width(
         .clamp(minimum.max(0), maximum.max(minimum.max(0)))
 }
 
-fn preserved_pe_selection(
-    preferred_filename: Option<&str>,
-    available: &[OnlinePE],
-) -> Option<usize> {
-    preferred_filename
-        .and_then(|filename| {
-            available
-                .iter()
-                .position(|pe| pe.filename.eq_ignore_ascii_case(filename))
-        })
-        .or_else(|| (available.len() == 1).then_some(0))
-}
-
 /// Returns the top of the installation partition heading relative to the image row.
 ///
 /// The optional image-volume row must be a true zero-height row while no WIM volume
@@ -984,9 +971,8 @@ mod layout_tests {
         install_partition_heading_y, list_view_selection_state_changed, may_publish_install_chrome,
         minimum_window_size, page_switch_requires_full_layout, pca_pending_status,
         pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
-        pca_target_uses_uefi, preferred_window_size, preserved_pe_selection,
-        primary_state_refresh_for_page, reusable_pca_target_result,
-        shared_install_mode_label_width, tool_backend_result_succeeded,
+        pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
+        reusable_pca_target_result, shared_install_mode_label_width, tool_backend_result_succeeded,
         unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
         Page, PcaPendingStatus, PcaTargetCacheEntry, PcaTargetContext, PcaTargetKey,
         PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
@@ -1141,27 +1127,6 @@ mod layout_tests {
             Some(PcaPendingStatus::TargetEfiSignature)
         );
         assert_eq!(pca_pending_status(true, false, false), None);
-    }
-
-    #[test]
-    fn refreshed_pe_catalogue_preserves_a_matching_user_selection() {
-        let pe = |name: &str, filename: &str| crate::download::config::OnlinePE {
-            download_url: format!("https://example.invalid/{filename}"),
-            display_name: name.to_owned(),
-            filename: filename.to_owned(),
-            md5: None,
-            sha256: None,
-        };
-        let available = vec![pe("PE A renamed", "a.wim"), pe("PE B", "b.wim")];
-        assert_eq!(preserved_pe_selection(Some("B.WIM"), &available), Some(1));
-        assert_eq!(
-            preserved_pe_selection(Some("missing.wim"), &available),
-            None
-        );
-        assert_eq!(
-            preserved_pe_selection(None, &[pe("Only PE", "only.wim")]),
-            Some(0)
-        );
     }
 
     #[test]
@@ -1703,7 +1668,6 @@ const ID_ADVANCED: u16 = 210;
 const ID_REFRESH: u16 = 211;
 const ID_PRIMARY: u16 = 212;
 const ID_IMAGE_VOLUME: u16 = 213;
-const ID_INSTALL_PE: u16 = 214;
 const ID_UNATTEND_BROWSE: u16 = 215;
 const ID_UNATTEND_CLEAR: u16 = 216;
 const ID_PCA_MODE: u16 = 217;
@@ -1777,8 +1741,6 @@ struct Handles {
     run_diskpart: HWND,
     open_diskpart_dir: HWND,
     edit_boot_commands: HWND,
-    pe_label: HWND,
-    pe: HWND,
     advanced: HWND,
     refresh: HWND,
     status: HWND,
@@ -2451,17 +2413,6 @@ impl NativeWindow {
         for control in [run_diskpart, open_diskpart_dir, edit_boot_commands] {
             let _ = ShowWindow(control, SW_HIDE);
         }
-        let pe_label = child(hwnd, w!("STATIC"), &crate::tr!("PE 环境:"), 0, 308)?;
-        let pe = child(
-            hwnd,
-            w!("COMBOBOX"),
-            "",
-            CBS_DROPDOWNLIST | WS_TABSTOP.0 as i32,
-            ID_INSTALL_PE,
-        )?;
-        self.populate_install_pe_combo(pe, None);
-        let _ = ShowWindow(pe_label, SW_HIDE);
-        let _ = ShowWindow(pe, SW_HIDE);
         let advanced = child(
             hwnd,
             w!("BUTTON"),
@@ -2520,8 +2471,6 @@ impl NativeWindow {
             run_diskpart,
             open_diskpart_dir,
             edit_boot_commands,
-            pe_label,
-            pe,
             advanced,
             refresh,
             status,
@@ -2823,18 +2772,7 @@ impl NativeWindow {
             description: backup_description,
             ..BackupPageState::default()
         };
-        let backup_pe_labels: Vec<String> = self
-            .available_pe()
-            .into_iter()
-            .map(|pe| pe.display_name)
-            .collect();
-        let backup = BackupPage::create(
-            hwnd,
-            &backup_rows,
-            &backup_pe_labels,
-            &backup_initial,
-            &backup_timestamp,
-        )?;
+        let backup = BackupPage::create(hwnd, &backup_rows, &backup_initial, &backup_timestamp)?;
         backup.apply_font(self.font);
         backup.apply_theme(self.palette);
         self.backup_page = Some(backup);
@@ -3058,7 +2996,6 @@ impl NativeWindow {
             h.driver,
             h.boot_mode,
             h.pca_mode,
-            h.pe,
         ] {
             theme::apply_control_theme(field, control_palette, theme::NativeControlKind::Field);
         }
@@ -3250,8 +3187,6 @@ impl NativeWindow {
                 h.run_diskpart,
                 h.open_diskpart_dir,
                 h.edit_boot_commands,
-                h.pe_label,
-                h.pe,
                 h.advanced,
                 h.refresh,
                 h.status,
@@ -3625,32 +3560,7 @@ impl NativeWindow {
         } else {
             second_y + self.scale(34)
         };
-        let pe_label_width = self.scale(if compact_chinese { 60 } else { 84 });
-        let pe_x = content_left;
-        let pe_closed_height = theme::combo_closed_height(h.pe, metrics.field_height);
-        let pe_row_height = pe_closed_height.max(metrics.label_height);
-        let _ = MoveWindow(
-            h.pe_label,
-            pe_x,
-            centered_control_y_ceil(third_y, pe_row_height, metrics.label_height),
-            pe_label_width,
-            metrics.label_height,
-            true,
-        );
-        let _ = MoveWindow(
-            h.pe,
-            pe_x + pe_label_width + self.scale(4),
-            centered_control_y_ceil(third_y, pe_row_height, pe_closed_height),
-            (content_right - pe_x - pe_label_width - self.scale(4)).clamp(0, self.scale(300)),
-            self.scale(180),
-            true,
-        );
-        let pe_selector_visible = self.install_pe_selector_should_be_visible();
-        let pca_y = if pe_selector_visible {
-            third_y + self.scale(34)
-        } else {
-            third_y
-        };
+        let pca_y = third_y;
         let open_width = measured_button_width(
             hwnd,
             self.font,
@@ -3673,10 +3583,9 @@ impl NativeWindow {
         // The unattended file controls are conditional. Once the checkbox is cleared, repack the
         // following advanced actions into the released part of the boot-mode row instead of
         // retaining an invisible browse/hint slot. Keep a separate row when the translated labels
-        // do not fit or when the PE selector already owns the next conditional layout branch.
+        // do not fit.
         let advanced_follows_boot = !unattended_enabled
             && self.app_config.enable_advanced_options
-            && !pe_selector_visible
             && advanced_inline_x + advanced_inline_width <= content_right;
         let advanced_row_x = if advanced_follows_boot {
             advanced_inline_x
@@ -4150,10 +4059,6 @@ impl NativeWindow {
         for control in [h.run_diskpart, h.open_diskpart_dir] {
             let _ = ShowWindow(control, SW_HIDE);
         }
-        let show_pe = install_visible && self.install_pe_selector_should_be_visible();
-        let pe_command = if show_pe { SW_SHOW } else { SW_HIDE };
-        let _ = ShowWindow(h.pe_label, pe_command);
-        let _ = ShowWindow(h.pe, pe_command);
         self.update_unattend_controls_visibility();
         // PCA controls have stricter, image-dependent visibility than the rest of the install
         // page. Reapply that policy after every page switch instead of showing them wholesale.
@@ -4396,8 +4301,6 @@ impl NativeWindow {
             h.run_diskpart,
             h.open_diskpart_dir,
             h.edit_boot_commands,
-            h.pe_label,
-            h.pe,
             h.refresh,
             h.primary,
         ] {
@@ -4491,21 +4394,19 @@ impl NativeWindow {
         let is_pe_environment = crate::core::disk::DiskManager::is_pe_environment();
         page.update_source_warning(&rows, is_pe_environment);
         let mut enabled = state.validate(&rows).is_ok();
-        let mut requires_pe = false;
         if let Some(index) = state.source_partition {
-            requires_pe = rows
+            let requires_pe = rows
                 .get(index)
                 .is_some_and(|partition| partition.is_system_partition)
                 && !is_pe_environment;
-            if requires_pe && (self.available_pe().is_empty() || page.selected_pe().is_none()) {
+            if requires_pe && self.available_pe().is_empty() {
                 enabled = false;
                 set_text(
                     page.handles().warning,
-                    &crate::tr!("备份当前系统分区前请选择可用的 PE 环境。"),
+                    &crate::tr!("备份当前系统分区需要可用的 PE 环境。"),
                 );
             }
         }
-        page.show_pe_selector(requires_pe);
         if IsWindowEnabled(handles.primary).as_bool() != enabled {
             let _ = EnableWindow(handles.primary, enabled);
             let _ = InvalidateRect(handles.primary, None, false);
@@ -4527,12 +4428,6 @@ impl NativeWindow {
                 log::warn!("保存目标分区推荐安装选项失败: {error}");
             }
         }
-        let show_pe = !crate::core::disk::DiskManager::is_pe_environment()
-            && self.available_pe().len() > 1
-            && target.is_some_and(|target| target.is_current_system);
-        let command = if show_pe { SW_SHOW } else { SW_HIDE };
-        let _ = ShowWindow(handles.pe_label, command);
-        let _ = ShowWindow(handles.pe, command);
         self.layout(hwnd);
         self.apply_unattend_default();
         self.update_unattend_conflict();
@@ -6472,20 +6367,14 @@ impl NativeWindow {
     }
 
     unsafe fn quick_partition_compound_pe_ready(&self) -> Result<(), String> {
-        let handles = self
-            .handles
-            .ok_or_else(|| crate::tr!("未选择 PE 环境，无法扩容"))?;
         let pe = self.available_pe();
-        let selected = usize::try_from(SendMessageW(handles.pe, 0x0147, WPARAM(0), LPARAM(0)).0)
-            .ok()
-            .or_else(|| (pe.len() == 1).then_some(0));
-        let pe = selected
-            .and_then(|index| pe.get(index))
-            .ok_or_else(|| crate::tr!("未选择 PE 环境，无法扩容"))?;
+        let pe = pe
+            .first()
+            .ok_or_else(|| crate::tr!("没有可用的 PE 环境，无法扩容"))?;
         #[cfg(feature = "non-elevated-tests")]
         {
             let _ = pe;
-            Err(crate::tr!("未选择 PE 环境，无法扩容"))
+            Err(crate::tr!("没有可用的 PE 环境，无法扩容"))
         }
         #[cfg(not(feature = "non-elevated-tests"))]
         {
@@ -6504,20 +6393,16 @@ impl NativeWindow {
     }
 
     unsafe fn start_expand_c_execution(&mut self, _hwnd: HWND, request: ExpandCRequest) {
-        let Some(handles) = self.handles else { return };
         self.expand_from_quick_partition =
             self.quick_partition_dialog.is_some() && self.expand_c_dialog.is_none();
         let pe = self.available_pe();
-        let selected = usize::try_from(SendMessageW(handles.pe, 0x0147, WPARAM(0), LPARAM(0)).0)
-            .ok()
-            .or_else(|| (pe.len() == 1).then_some(0));
-        let Some(pe) = selected.and_then(|index| pe.get(index)).cloned() else {
+        let Some(pe) = pe.first().cloned() else {
             if let Some(dialog) = &mut self.expand_c_dialog {
-                dialog.set_error(crate::tr!("未选择 PE 环境，无法扩容"));
+                dialog.set_error(crate::tr!("没有可用的 PE 环境，无法扩容"));
             }
             if self.expand_from_quick_partition {
                 if let Some(dialog) = &mut self.quick_partition_dialog {
-                    dialog.set_operation_error(crate::tr!("未选择 PE 环境，无法扩容"));
+                    dialog.set_operation_error(crate::tr!("没有可用的 PE 环境，无法扩容"));
                 }
             }
             return;
@@ -7510,7 +7395,6 @@ impl NativeWindow {
             return;
         };
         let backup_state = page.read_state();
-        let selected_pe = page.selected_pe();
         let rows = self.backup_partition_rows();
         let config = match backup_state.to_backup_config(&rows, self.app_config.wim_engine) {
             Ok(config) => config,
@@ -7532,7 +7416,7 @@ impl NativeWindow {
             &config,
             crate::core::disk::DiskManager::is_pe_environment(),
             source.is_system_partition,
-            selected_pe.and_then(|index| pe.get(index)),
+            pe.first(),
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -8902,33 +8786,6 @@ impl NativeWindow {
         self.pe_catalogue.clone()
     }
 
-    unsafe fn selected_install_pe_filename(&self) -> Option<String> {
-        let handles = self.handles?;
-        let selected = SendMessageW(handles.pe, 0x0147, WPARAM(0), LPARAM(0)).0;
-        self.pe_catalogue
-            .get(usize::try_from(selected).ok()?)
-            .map(|pe| pe.filename.clone())
-    }
-
-    unsafe fn install_pe_selector_should_be_visible(&self) -> bool {
-        !crate::core::disk::DiskManager::is_pe_environment()
-            && self.available_pe().len() > 1
-            && self
-                .selected_install_target()
-                .is_some_and(|target| target.is_current_system)
-    }
-
-    unsafe fn populate_install_pe_combo(&self, combo: HWND, preferred_filename: Option<&str>) {
-        let _ = SendMessageW(combo, 0x014B, WPARAM(0), LPARAM(0));
-        let available = self.available_pe();
-        for pe in &available {
-            let label = wide(&pe.display_name);
-            let _ = SendMessageW(combo, 0x0143, WPARAM(0), LPARAM(label.as_ptr() as isize));
-        }
-        let selected = preserved_pe_selection(preferred_filename, &available).unwrap_or(usize::MAX);
-        let _ = SendMessageW(combo, 0x014E, WPARAM(selected), LPARAM(0));
-    }
-
     unsafe fn selected_install_target(&self) -> Option<InstallTarget> {
         let handles = self.handles.as_ref()?;
         let selected = SendMessageW(handles.partitions, 0x100C, WPARAM(usize::MAX), LPARAM(2)).0;
@@ -8978,9 +8835,6 @@ impl NativeWindow {
             target: self.selected_install_target(),
             is_pe_environment: crate::core::disk::DiskManager::is_pe_environment(),
             pe_available: !pe.is_empty(),
-            selected_pe: usize::try_from(SendMessageW(handles.pe, 0x0147, WPARAM(0), LPARAM(0)).0)
-                .ok()
-                .filter(|index| *index < pe.len()),
             custom_unattend_path: self.custom_unattend_path.clone(),
             custom_unattend_error: self.custom_unattend_error.clone(),
             partition_refresh_pending: self.partition_refresh_requested
@@ -9115,7 +8969,7 @@ impl NativeWindow {
             }
             InstallMode::ViaPe => {
                 if let Some(pe) = intent
-                    .selected_pe
+                    .pe_index
                     .and_then(|index| self.pe_catalogue.get(index))
                 {
                     log::info!(
@@ -9162,8 +9016,6 @@ impl NativeWindow {
             handles.run_diskpart,
             handles.open_diskpart_dir,
             handles.edit_boot_commands,
-            handles.pe_label,
-            handles.pe,
             handles.advanced,
             handles.refresh,
             handles.status,
@@ -9386,7 +9238,7 @@ impl NativeWindow {
         if intent.mode != crate::core::native_install_controller::InstallMode::ViaPe {
             return false;
         }
-        let Some(index) = intent.selected_pe else {
+        let Some(index) = intent.pe_index else {
             return false;
         };
         let available = self.available_pe();
@@ -9642,30 +9494,12 @@ impl NativeWindow {
         self.download_controller
             .replace_trusted_remote_catalogue(&catalogue);
         if !catalogue.pe_list.is_empty() {
-            let selected_install_pe = self.selected_install_pe_filename();
             self.pe_catalogue = catalogue.pe_list.clone();
             if let Err(error) = PeCache::save(&catalogue.pe_list) {
                 log::warn!("刷新 PE 目录后保存本地缓存失败: {error}");
             }
-            if let Some(page) = &mut self.backup_page {
-                let labels: Vec<String> = catalogue
-                    .pe_list
-                    .iter()
-                    .map(|pe| pe.display_name.clone())
-                    .collect();
-                page.replace_pe_labels(&labels);
-            }
             self.update_backup_primary_state();
-            if let Some(handles) = self.handles {
-                self.populate_install_pe_combo(handles.pe, selected_install_pe.as_deref());
-                let show_pe = self.page == Page::Install
-                    && !self.easy_mode_enabled()
-                    && !self.advanced_visible
-                    && !self.progress_visible
-                    && self.install_pe_selector_should_be_visible();
-                let command = if show_pe { SW_SHOW } else { SW_HIDE };
-                let _ = ShowWindow(handles.pe_label, command);
-                let _ = ShowWindow(handles.pe, command);
+            if self.handles.is_some() {
                 self.layout(hwnd);
                 self.update_install_primary_state();
             }
@@ -10083,7 +9917,6 @@ impl NativeWindow {
             target,
             is_pe_environment: crate::core::disk::DiskManager::is_pe_environment(),
             pe_available: !pe.is_empty(),
-            selected_pe: (!pe.is_empty()).then_some(0),
             custom_unattend_path: String::new(),
             custom_unattend_error: None,
             partition_refresh_pending: false,
@@ -10396,7 +10229,6 @@ impl NativeWindow {
             set_text(handles.run_diskpart, &crate::tr!("运行Diskpart脚本"));
             set_text(handles.open_diskpart_dir, &crate::tr!("打开目录"));
             set_text(handles.edit_boot_commands, &crate::tr!("修改引导命令"));
-            set_text(handles.pe_label, &crate::tr!("PE 环境:"));
             set_text(handles.advanced, &crate::tr!("高级选项..."));
             set_text(handles.refresh, &crate::tr!("刷新分区"));
             update_list_column_titles(
@@ -11642,8 +11474,7 @@ unsafe extern "system" fn window_proc(
                     | crate::native_ui::pages::backup::ID_SAVE_PATH
                     | crate::native_ui::pages::backup::ID_NAME
                     | crate::native_ui::pages::backup::ID_DESCRIPTION
-                    | crate::native_ui::pages::backup::ID_INCREMENTAL
-                    | crate::native_ui::pages::backup::ID_PE => {
+                    | crate::native_ui::pages::backup::ID_INCREMENTAL => {
                         state.update_backup_primary_state();
                     }
                     ID_REFRESH => {
@@ -11669,7 +11500,6 @@ unsafe extern "system" fn window_proc(
                         state.update_pca_detection_status();
                         state.update_install_primary_state();
                     }
-                    ID_INSTALL_PE => state.update_install_primary_state(),
                     ID_UNATTEND => {
                         state.persist_install_preferences();
                         state.update_advanced_install_context();

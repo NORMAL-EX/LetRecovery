@@ -354,8 +354,8 @@ impl ProductionInstallBackend {
         &mut self,
         intent: &StartInstallIntent,
     ) -> Result<(), InstallBackendError> {
-        let selected = intent.selected_pe.ok_or_else(|| {
-            InstallBackendError::new("missing_pe_selection", "no PE environment was selected")
+        let pe_index = intent.pe_index.ok_or_else(|| {
+            InstallBackendError::new("missing_pe_index", "automatic PE index is missing")
         })?;
         let entries = crate::download::config::PeCache::load().ok_or_else(|| {
             InstallBackendError::new(
@@ -363,10 +363,10 @@ impl ProductionInstallBackend {
                 "the cached PE catalog is unavailable; refresh the online PE list",
             )
         })?;
-        let pe = entries.get(selected).ok_or_else(|| {
+        let pe = entries.get(pe_index).ok_or_else(|| {
             InstallBackendError::new(
-                "invalid_pe_selection",
-                "selected PE index is no longer valid",
+                "invalid_pe_index",
+                "automatic PE index is no longer valid",
             )
         })?;
         let status = super::pe::PeManager::check_cached_pe(
@@ -2085,7 +2085,7 @@ mod tests {
             image_path: "D:\\install.wim".into(),
             volume_index: 1,
             is_system_partition: false,
-            selected_pe: None,
+            pe_index: None,
             is_gho: false,
             options: InstallOptions {
                 format_partition: false,

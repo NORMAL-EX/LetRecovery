@@ -68,7 +68,7 @@ pub enum BackupPlanningError {
     UnsupportedFormat(u8),
     InvalidSavePath,
     ExtensionMismatch { expected: &'static str },
-    PeSelectionRequired,
+    PeUnavailable,
 }
 
 impl std::fmt::Display for BackupPlanningError {
@@ -86,7 +86,9 @@ impl std::fmt::Display for BackupPlanningError {
             Self::ExtensionMismatch { expected } => {
                 formatter.write_str(&crate::tr!("备份保存路径必须使用 .{} 扩展名", expected))
             }
-            Self::PeSelectionRequired => formatter.write_str("备份当前系统分区前必须选择 PE 环境"),
+            Self::PeUnavailable => {
+                formatter.write_str(&crate::tr!("备份当前系统分区需要可用的 PE 环境。"))
+            }
         }
     }
 }
@@ -111,11 +113,11 @@ pub fn plan_backup_launch(
     config: &BackupConfig,
     is_pe_environment: bool,
     source_is_system_partition: bool,
-    selected_pe: Option<&OnlinePE>,
+    first_available_pe: Option<&OnlinePE>,
 ) -> Result<BackupLaunchPlan, BackupPlanningError> {
     validate_minimum_config(config)?;
     let mode = decide_launch_mode(is_pe_environment, source_is_system_partition);
-    let pe_display_name = selected_pe.map(|pe| pe.display_name.clone());
+    let pe_display_name = first_available_pe.map(|pe| pe.display_name.clone());
     let preview = BackupLaunchPreview {
         mode,
         source_partition: config.source_partition.clone(),
@@ -133,7 +135,7 @@ pub fn plan_backup_launch(
             task: direct_task(config)?,
         }),
         BackupLaunchMode::ViaPe => {
-            let pe = selected_pe.ok_or(BackupPlanningError::PeSelectionRequired)?;
+            let pe = first_available_pe.ok_or(BackupPlanningError::PeUnavailable)?;
             BackupLaunchIntent::ViaPe(PeBackupPreparationIntent {
                 config: config.clone(),
                 pe: pe.clone(),
@@ -264,10 +266,10 @@ mod tests {
     }
 
     #[test]
-    fn live_system_partition_requires_a_selected_pe() {
+    fn live_system_partition_requires_an_available_pe() {
         assert!(matches!(
             plan_backup_launch(&config(0), false, true, None),
-            Err(BackupPlanningError::PeSelectionRequired)
+            Err(BackupPlanningError::PeUnavailable)
         ));
         let plan = plan_backup_launch(&config(0), false, true, Some(&pe())).unwrap();
         assert!(plan.preview.requires_pe_preparation);
