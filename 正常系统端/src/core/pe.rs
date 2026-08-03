@@ -98,25 +98,12 @@ impl PeManager {
         }
     }
 
-    /// 检查是否为UEFI启动
-    pub fn is_uefi_boot() -> bool {
-        // 检查 EFI 系统分区是否存在
-        Path::new("C:\\Windows\\Boot\\EFI").exists()
-            || std::env::var("firmware_type")
-                .map(|v| v.to_lowercase() == "uefi")
-                .unwrap_or(false)
-            || {
-                // 通过 bcdedit 检查
-                let output = create_command("bcdedit")
-                    .args(["/enum", "{current}"])
-                    .output();
-                if let Ok(out) = output {
-                    let stdout = gbk_to_utf8(&out.stdout);
-                    stdout.contains("winload.efi")
-                } else {
-                    false
-                }
-            }
+    /// 使用共享 WinAPI 边界检查当前 Windows 的实际固件启动模式。
+    pub fn is_uefi_boot() -> Result<bool> {
+        match lr_core::windows_firmware::detect_firmware_type()? {
+            lr_core::windows_firmware::FirmwareType::Uefi => Ok(true),
+            lr_core::windows_firmware::FirmwareType::Bios => Ok(false),
+        }
     }
 
     /// 从ISO/WIM启动PE
@@ -375,7 +362,7 @@ impl PeManager {
     ) -> Result<()> {
         log::info!("[PE] 创建BCD引导项");
 
-        let is_uefi = Self::is_uefi_boot();
+        let is_uefi = Self::is_uefi_boot()?;
         log::info!("[PE] 引导模式: {}", if is_uefi { "UEFI" } else { "Legacy" });
 
         // 清理旧的PE引导项

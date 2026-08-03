@@ -81,7 +81,7 @@ LetRecovery 是具有管理员权限的 Windows 系统安装、备份和磁盘�
 
 - 当前服务端入口是代码内固定 HTTPS 地址，普通用户不可在 UI 中修改；不得引入私密凭据或隐藏后门配置。
 - LetRecovery 发布回调只允许原子更新服务端 `v3/index.json` 的 `data.pe`、生成时间和 PE 计数；不得再写入 LetRecovery v1/v2 目录文件。正常端在线目录读取也必须以 `v3/index.json` 为唯一入口，v3 请求、解析或结构校验失败时直接失败并保留上下文，不得回退 v1/v2 或把部分目录伪装为加载成功。回调必须把 HTTPS URL、文件名、MD5、SHA-256 和字节数全部纳入签名绑定。
-- 简易模式目录允许只提供单文件 WIM/ESD URL 而省略卷列表；正常端只能用两个有界的精确 HTTP Range 请求读取标准 WIM 头和 XML 资源，服务器忽略 Range、资源压缩/跨卷、范围越界、实体大小或 ETag/Last-Modified 在请求间变化时必须失败关闭，严禁为探测元数据退化为完整下载。只显示 XML 中明确为 Client/Server、具有版本元数据的可安装卷，并按实际版本 6.1/6.2/6.3/10.0 与产品名区分 Windows 7/8/8.1/10/11；WindowsPE、Windows Setup、Setup Media、WinRE 和无法确认的镜像不得显示。简易模式启用时隐藏在线下载和工具箱入口。在线目录的系统“安装”动作必须先把原 URL 交给安装页读取卷，用户确认安装后才下载；下载完成必须重新读取完整本地镜像并比对所选卷的索引、版本、Build、架构和安装类型，一致后才能继续既有安装流程。
+- 简易模式目录允许只提供单文件 WIM/ESD URL 而省略卷列表；系统安装页也允许用户手工输入 WIM/ESD 直链。正常端只能用两个有界的精确 HTTP Range 请求读取标准 WIM 头和 XML 资源，同时以两次正确的 `206 Partial Content` 作为链接支持断点续传的必要证据；服务器忽略 Range、返回完整 `200 OK`、资源压缩/跨卷、范围越界、实体大小或 ETag/Last-Modified 在请求间变化时必须失败关闭，严禁为探测元数据退化为完整下载。只显示 XML 中明确为 Client/Server、具有版本元数据的可安装卷，并按实际版本 6.1/6.2/6.3/10.0 与产品名区分 Windows 7/8/8.1/10/11；WindowsPE、Windows Setup、Setup Media、WinRE 和无法确认的镜像不得显示。简易模式启用时隐藏在线下载和工具箱入口。在线目录的系统“安装”动作必须先把原 URL 交给安装页读取卷，用户确认安装后才下载；下载必须启用续传，完成后必须重新读取完整本地镜像并比对所选卷的索引、版本、Build、架构和安装类型，一致后才能继续既有安装流程。
 - PE 元数据必须继续兼容现有 MD5 字段；可选 SHA-256 存在时优先使用 SHA-256。
 - 联网下载和受管 PE 缓存声明校验值后，计算失败或不匹配必须失败关闭。“未声明校验值”和“计算出错”必须是不同状态。服务端提供 MD5 或 SHA-256 时必须随目录项一起传递到 UI、下载器和缓存校验边界；服务端未声明哈希时 UI 不得显示“已校验/已验证”。随发布包提供的 `bin/pe` 是明确的用户管理边界，允许用户替换或修改 WIM，因此不强制匹配远端哈希，但仍必须限制为安全文件名和普通文件；联网文件不得下载到该目录来绕过校验。
 - 正常端只允许为已经通过完整 libwim 校验的单文件 WIM/ESD 保存有界的本机 BLAKE3 验证缓存；再次校验必须在拒绝写入和删除共享的文件句柄仍被持有时重新计算完整 256 位指纹，只有指纹完全相同才能复用先前结果。不得仅依赖路径、大小或时间戳；缓存缺失、损坏、超限、指纹不匹配、读取或持久化失败都必须回退完整 libwim 校验，SWM 分卷不得使用该快路径。
@@ -257,7 +257,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `lr-core/src/windows_cabinet.rs`：两端共享的 SetupAPI CAB 枚举与解压边界；严格按通知类型返回 `FILEOP_*` 或 Win32 错误码，拒绝非普通 CAB、路径穿越、绝对/UNC 条目、重解析目标和分卷包，并在返回成功前核对请求数、解压数及每个输出文件。
 - `lr-core/src/windows_file_copy.rs`：基于 `CopyFileExW` 的普通文件与递归目录复制边界；拒绝跟随重解析目录，逐文件保留错误上下文并供 XP/2003 文件准备复用。
 - `lr-core/src/windows_file_version.rs`：使用 Version Information API 读取文件固定版本块，校验返回长度与 `VS_FIXEDFILEINFO` 签名后提供两端共享的版本四元组。
-- `lr-core/src/windows_firmware.rs`：使用微软文档规定的空变量名/全零 GUID `GetFirmwareEnvironmentVariableW` 探针判断 UEFI/Legacy，并区分“不支持固件变量”和真实探测错误。
+- `lr-core/src/windows_firmware.rs`：优先动态解析 Windows 8+ 的 `GetFirmwareType` 直接判断当前系统实际以 UEFI 还是 Legacy BIOS 启动，保持 Windows 7 可加载；API 不存在时才严格启用并核对 `SeSystemEnvironmentPrivilege`，使用微软文档规定的空变量名/全零 GUID `GetFirmwareEnvironmentVariableW` 探针。目录、ESP、盘符、环境变量和本地化命令输出不得参与固件模式推断，所有无法确认的错误必须向调用方失败关闭。
 - `lr-core/src/windows_shutdown.rs`：严格启用并核对 `SeShutdownPrivilege`，通过 `InitiateSystemShutdownExW` 安排带计划原因码的本机重启，禁止忽略权限未分配或调度失败。
 - `lr-core/src/windows_storage.rs`：两端共享的参数化 Windows 存储管理边界；为兼容 Windows 7/WinPE 使用 VDS COM 完成分区创建/删除、带文件系统、卷标、分配单元大小及快速/完整选项的 NTFS/FAT32/exFAT 格式化、卷扩缩、盘符和 MBR 活动标记，使用受文档支持的磁盘/卷 IOCTL 完成 RAW 盘初始化、分区表/MBR 签名、卷物理范围查询，并通过两阶段 `IOCTL_STORAGE_QUERY_PROPERTY` 读取目标物理盘 `STORAGE_DEVICE_DESCRIPTOR.BusType`；只有明确的 `BusTypeNvme` 才能驱动 NVMe 默认值，查询失败或其他总线不得猜测。离线块移动后重建普通 GPT 基础数据分区时允许显式保留原 partition GUID、attributes 和 name，普通新建分区必须继续生成新 GUID。异步 VDS 操作必须同时校验 `Wait` 调用与操作 HRESULT、核对输出类型，调用方必须在写入前复核稳定磁盘指纹并在写入后重新枚举验证，当前 Windows 卷只能由 `GetWindowsDirectoryW` 和卷范围确定，不得回退写死 `C:`。
 - `lr-core/src/wimgapi.rs`：动态封装 Windows WIMGAPI 的镜像 apply、capture、元数据和进度回调；消息编号严格使用 `WM_APP + 0x1476` 契约，安装取消仅在官方规定的 `WIM_MSG_PROCESS` 回调中返回 `WIM_MSG_ABORT_IMAGE`，避免跨 FFI 展开或猜测非标准中止方式。

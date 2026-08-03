@@ -779,7 +779,18 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在修复引导...")));
 
     let boot_manager = BootManager::new();
-    let use_uefi = DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition);
+    let use_uefi = match DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            log::error!("[PE安装] 无法可靠确定引导模式: {error}");
+            let _ = tx.send(WorkerMessage::Failed(tr!(
+                "无法可靠确定引导模式，已停止安装：{}",
+                error
+            )));
+            return;
+        }
+    };
 
     // XP/2003 写 ntldr 引导；其余走 bcdboot。
     // XP 判定：配置已标记 或 释放后的系统缺少 \Windows\Boot（该目录仅 Vista+ 才有）。

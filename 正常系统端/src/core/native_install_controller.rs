@@ -679,6 +679,22 @@ mod tests {
     }
 
     #[test]
+    fn selected_boot_mode_survives_intent_and_pe_config_serialization() {
+        for (selection, expected) in [
+            (BootModeSelection::Auto, 0),
+            (BootModeSelection::UEFI, 1),
+            (BootModeSelection::Legacy, 2),
+        ] {
+            let mut state = base_state();
+            state.prefs.boot_mode = selection;
+            let intent = state.start_intent().unwrap();
+            assert_eq!(intent.options.boot_mode, selection);
+            let config = intent.to_install_config("images\\install.wim", 1, None);
+            assert_eq!(config.boot_mode, expected);
+        }
+    }
+
+    #[test]
     fn irrelevant_pca_state_does_not_block_non_pca_install_paths() {
         let mut state = base_state();
         state.pca_detection_pending = true;

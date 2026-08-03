@@ -5046,7 +5046,10 @@ impl NativeWindow {
         let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
         self.set_install_volume_row_visible(hwnd, false);
         let _ = EnableWindow(handles.primary, false);
-        set_text(handles.status, &crate::tr!("正在读取远程系统镜像卷..."));
+        set_text(
+            handles.status,
+            &crate::tr!("正在验证远程镜像链接、断点续传能力和分卷信息..."),
+        );
         self.image_request_generation = self.image_request_generation.wrapping_add(1);
         let generation = self.image_request_generation;
         let url = source.plan.url.clone();
@@ -11657,7 +11660,7 @@ unsafe extern "system" fn window_proc(
                             state.update_advanced_install_context();
                             set_text(
                                 handles.status,
-                                &crate::tr!("远程镜像卷读取完成；开始安装时将先下载镜像。"),
+                                &crate::tr!("远程镜像支持断点续传；开始安装时将先下载镜像。"),
                             );
                         }
                         state.source_has_unattend = false;
@@ -11677,7 +11680,10 @@ unsafe extern "system" fn window_proc(
                         state.update_advanced_install_context();
                         set_text(
                             handles.status,
-                            &crate::tr!("读取远程系统镜像失败：{}", error),
+                            &crate::tr!(
+                                "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD 直链）：{}",
+                                error
+                            ),
                         );
                         let _ = EnableWindow(handles.primary, false);
                     }

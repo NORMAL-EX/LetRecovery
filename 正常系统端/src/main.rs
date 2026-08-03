@@ -735,7 +735,7 @@ fn execute_pe_install(
             match target_style {
                 Some(core::disk::PartitionStyle::GPT) => true,
                 Some(core::disk::PartitionStyle::MBR) => false,
-                _ => detect_uefi_mode(),
+                _ => detect_uefi_mode()?,
             }
         }
     };
@@ -869,59 +869,11 @@ fn execute_pe_backup(
 }
 
 /// 检测UEFI模式（使用 Windows API）
-fn detect_uefi_mode() -> bool {
-    // 检查EFI系统分区
-    for letter in ['S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'] {
-        let efi_path = format!("{}:\\EFI\\Microsoft\\Boot", letter);
-        if std::path::Path::new(&efi_path).exists() {
-            return true;
-        }
+fn detect_uefi_mode() -> anyhow::Result<bool> {
+    match lr_core::windows_firmware::detect_firmware_type()? {
+        lr_core::windows_firmware::FirmwareType::Uefi => Ok(true),
+        lr_core::windows_firmware::FirmwareType::Bios => Ok(false),
     }
-
-    // 使用 Windows API 检测固件类型
-    #[cfg(windows)]
-    {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetFirmwareEnvironmentVariableW(
-                lpName: *const u16,
-                lpGuid: *const u16,
-                pBuffer: *mut u8,
-                nSize: u32,
-            ) -> u32;
-        }
-
-        unsafe {
-            let name: Vec<u16> = "".encode_utf16().chain(std::iter::once(0)).collect();
-            let guid: Vec<u16> = "{00000000-0000-0000-0000-000000000000}"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            let mut buffer = [0u8; 1];
-
-            let result = GetFirmwareEnvironmentVariableW(
-                name.as_ptr(),
-                guid.as_ptr(),
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
-            );
-
-            if result == 0 {
-                let error = std::io::Error::last_os_error();
-                let raw_error = error.raw_os_error().unwrap_or(0) as u32;
-
-                // ERROR_INVALID_FUNCTION (1) 表示是 Legacy BIOS
-                if raw_error == 1 {
-                    return false;
-                }
-            }
-            // 其他情况都认为是 UEFI
-            true
-        }
-    }
-
-    #[cfg(not(windows))]
-    false
 }
 
 /// 生成无人值守XML (PE版本)

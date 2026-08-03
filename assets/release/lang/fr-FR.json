@@ -2377,6 +2377,10 @@
     "下载后的镜像中已找不到先前选择的安装卷。": "Le volume d’installation sélectionné est absent de l’image téléchargée.",
     "下载后的镜像卷信息与下载前读取的元数据不一致，已停止安装。": "Les métadonnées de l’image téléchargée diffèrent ; l’installation a été arrêtée.",
     "无法继续系统安装": "Impossible de poursuivre l’installation du système",
-    "镜像已下载，但安装前一致性检查未通过。": "L’image est téléchargée, mais le contrôle de cohérence a échoué."
+    "镜像已下载，但安装前一致性检查未通过。": "L’image est téléchargée, mais le contrôle de cohérence a échoué.",
+    "正在验证远程镜像链接、断点续传能力和分卷信息...": "Validation du lien de l’image distante, de la reprise et des métadonnées des volumes...",
+    "远程镜像支持断点续传；开始安装时将先下载镜像。": "L’image distante prend en charge la reprise et sera téléchargée avant l’installation.",
+    "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD 直链）：{}": "Impossible de lire l’image système distante (seuls les liens WIM/ESD directs prenant en charge la reprise sont acceptés) : {}",
+    "无法可靠确定引导模式，已停止安装：{}": "Le mode de démarrage du microprogramme n’a pas pu être déterminé de façon fiable ; l’installation a été arrêtée : {}"
   }
 }

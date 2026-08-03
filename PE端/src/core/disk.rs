@@ -356,11 +356,11 @@ impl DiskManager {
     }
 
     /// 检测是否为UEFI模式
-    pub fn detect_uefi_mode() -> bool {
-        matches!(
-            lr_core::windows_firmware::detect_firmware_type(),
-            Ok(lr_core::windows_firmware::FirmwareType::Uefi)
-        )
+    pub fn detect_uefi_mode() -> anyhow::Result<bool> {
+        match lr_core::windows_firmware::detect_firmware_type()? {
+            lr_core::windows_firmware::FirmwareType::Uefi => Ok(true),
+            lr_core::windows_firmware::FirmwareType::Bios => Ok(false),
+        }
     }
 
     /// Resolve the install boot mode against the selected target disk.
@@ -368,38 +368,48 @@ impl DiskManager {
     /// Auto must follow the target partition table rather than the way WinPE
     /// itself was booted. The PE firmware mode is only a last-resort fallback
     /// when the Win32 storage provider cannot identify the target disk layout.
-    pub fn resolve_install_uefi_mode(boot_mode: u8, target_partition: &str) -> bool {
+    pub fn resolve_install_uefi_mode(
+        boot_mode: u8,
+        target_partition: &str,
+    ) -> anyhow::Result<bool> {
         match boot_mode {
-            1 => true,
-            2 => false,
-            _ => {
-                let detail = Self::get_partition_style(target_partition);
-                match detail.style {
-                    PartitionStyle::GPT => {
-                        log::info!(
-                            "[BOOT] 自动模式：目标分区 {} 位于 GPT 磁盘，使用 UEFI",
-                            target_partition
-                        );
-                        true
-                    }
-                    PartitionStyle::MBR => {
-                        log::info!(
-                            "[BOOT] 自动模式：目标分区 {} 位于 MBR 磁盘，使用 Legacy",
-                            target_partition
-                        );
-                        false
-                    }
-                    PartitionStyle::Unknown => {
-                        let fallback = Self::detect_uefi_mode();
-                        log::warn!(
-                            "[BOOT] 无法识别目标分区 {} 的分区表，回退当前 PE 固件模式: {}",
-                            target_partition,
-                            if fallback { "UEFI" } else { "Legacy" }
-                        );
-                        fallback
-                    }
+            1 => return Ok(true),
+            2 => return Ok(false),
+            _ => {}
+        }
+        let detail = Self::get_partition_style(target_partition);
+        Self::resolve_install_uefi_mode_with(boot_mode, detail.style, Self::detect_uefi_mode)
+    }
+
+    fn resolve_install_uefi_mode_with<F>(
+        boot_mode: u8,
+        target_style: PartitionStyle,
+        detect_current_firmware: F,
+    ) -> anyhow::Result<bool>
+    where
+        F: FnOnce() -> anyhow::Result<bool>,
+    {
+        match boot_mode {
+            1 => Ok(true),
+            2 => Ok(false),
+            _ => match target_style {
+                PartitionStyle::GPT => {
+                    log::info!("[BOOT] 自动模式：目标分区位于 GPT 磁盘，使用 UEFI");
+                    Ok(true)
                 }
-            }
+                PartitionStyle::MBR => {
+                    log::info!("[BOOT] 自动模式：目标分区位于 MBR 磁盘，使用 Legacy");
+                    Ok(false)
+                }
+                PartitionStyle::Unknown => {
+                    let fallback = detect_current_firmware()?;
+                    log::warn!(
+                        "[BOOT] 无法识别目标分区的分区表，回退当前 PE 固件模式: {}",
+                        if fallback { "UEFI" } else { "Legacy" }
+                    );
+                    Ok(fallback)
+                }
+            },
         }
     }
 
@@ -737,7 +747,9 @@ impl DiskManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{partitions_are_physically_adjacent, PartitionGeometry};
+    use super::{
+        partitions_are_physically_adjacent, DiskManager, PartitionGeometry, PartitionStyle,
+    };
 
     fn geometry(
         disk_number: u32,
@@ -786,5 +798,50 @@ mod tests {
             geometry(0, 2, u64::MAX - 10, 20),
             geometry(0, 3, u64::MAX, 1)
         ));
+    }
+
+    #[test]
+    fn explicit_boot_mode_is_preserved_and_auto_follows_target_style() {
+        let detector_must_not_run = || -> anyhow::Result<bool> {
+            panic!("explicit or known target mode must not query current firmware")
+        };
+        assert!(DiskManager::resolve_install_uefi_mode_with(
+            1,
+            PartitionStyle::MBR,
+            detector_must_not_run,
+        )
+        .unwrap());
+        assert!(!DiskManager::resolve_install_uefi_mode_with(
+            2,
+            PartitionStyle::GPT,
+            detector_must_not_run,
+        )
+        .unwrap());
+        assert!(DiskManager::resolve_install_uefi_mode_with(
+            0,
+            PartitionStyle::GPT,
+            detector_must_not_run,
+        )
+        .unwrap());
+        assert!(!DiskManager::resolve_install_uefi_mode_with(
+            0,
+            PartitionStyle::MBR,
+            detector_must_not_run,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn unknown_auto_style_uses_firmware_probe_and_propagates_failure() {
+        assert!(
+            DiskManager::resolve_install_uefi_mode_with(0, PartitionStyle::Unknown, || Ok(true),)
+                .unwrap()
+        );
+        assert!(DiskManager::resolve_install_uefi_mode_with(
+            0,
+            PartitionStyle::Unknown,
+            || anyhow::bail!("probe failed"),
+        )
+        .is_err());
     }
 }
