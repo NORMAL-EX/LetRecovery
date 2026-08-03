@@ -558,6 +558,20 @@ mod tests {
             16,
         )
         .is_err());
+
+        let explicitly_allowed = plan_remote_system_image(
+            "http://example.com/install.iso?token=redacted",
+            r"D:\Downloads",
+            IntegrityRequirement::NotProvided,
+            true,
+            16,
+        )
+        .unwrap();
+        assert_eq!(
+            explicitly_allowed.url,
+            "http://example.com/install.iso?token=redacted"
+        );
+        assert_eq!(explicitly_allowed.filename, "install.iso");
     }
 
     #[test]

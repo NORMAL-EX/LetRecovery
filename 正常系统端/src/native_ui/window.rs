@@ -4966,20 +4966,26 @@ impl NativeWindow {
             if path.to_ascii_lowercase().starts_with("https://")
                 || path.to_ascii_lowercase().starts_with("http://")
             {
+                // Pasting an explicit HTTP image URL is itself the compatibility opt-in for this
+                // one user-selected source. Catalogue and unattended downloads continue to use
+                // the application-wide HTTPS policy.
+                let manually_allowed_http = path.to_ascii_lowercase().starts_with("http://");
+                let allow_insecure_http =
+                    self.app_config.allow_insecure_http_downloads || manually_allowed_http;
                 let download_directory = dirs::download_dir()
                     .unwrap_or_else(|| std::env::temp_dir().join("LetRecovery"));
                 match crate::core::native_download_controller::plan_remote_system_image(
                     path,
                     download_directory,
                     lr_core::download_integrity::IntegrityRequirement::NotProvided,
-                    self.app_config.allow_insecure_http_downloads,
+                    allow_insecure_http,
                     self.app_config.download_threads,
                 ) {
                     Ok(plan) => self.load_remote_image_url(
                         hwnd,
                         RemoteImageDownload {
                             plan,
-                            allow_insecure_http: self.app_config.allow_insecure_http_downloads,
+                            allow_insecure_http,
                         },
                     ),
                     Err(error) => set_text(
@@ -5460,7 +5466,10 @@ impl NativeWindow {
                                 .extension()
                                 .and_then(|extension| extension.to_str())
                                 .is_some_and(|extension| {
-                                    matches!(extension.to_ascii_lowercase().as_str(), "wim" | "esd")
+                                    matches!(
+                                        extension.to_ascii_lowercase().as_str(),
+                                        "wim" | "esd" | "iso"
+                                    )
                                 })
                         {
                             self.select_page(hwnd, Page::Install);
@@ -10066,6 +10075,7 @@ impl NativeWindow {
             }
         };
         let crate::core::native_image_source::InspectedImageSource::WimFamily {
+            effective_image_path,
             volumes,
             mounted_iso,
             ..
@@ -10073,22 +10083,25 @@ impl NativeWindow {
         else {
             discard_stale_inspected_source(inspected);
             self.fail_remote_install_after_download(crate::tr!(
-                "下载完成的文件不是可用的 WIM 或 ESD 系统镜像。"
+                "下载完成的文件不是可用的 WIM、ESD 或 Windows 安装 ISO。"
             ));
             return;
         };
-        if let Some(path) = mounted_iso {
-            let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(&path.to_string_lossy());
-        }
         let Some(actual) = volumes.iter().find(|image| {
             image.index == pending.expected_image.index && is_installable_image(image)
         }) else {
+            if let Some(path) = mounted_iso.as_ref() {
+                let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(&path.to_string_lossy());
+            }
             self.fail_remote_install_after_download(crate::tr!(
                 "下载后的镜像中已找不到先前选择的安装卷。"
             ));
             return;
         };
         if !remote_image_identity_matches(&pending.expected_image, actual) {
+            if let Some(path) = mounted_iso.as_ref() {
+                let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(&path.to_string_lossy());
+            }
             self.fail_remote_install_after_download(crate::tr!(
                 "下载后的镜像卷信息与下载前读取的元数据不一致，已停止安装。"
             ));
@@ -10100,7 +10113,7 @@ impl NativeWindow {
             .position(|image| image.index == pending.expected_image.index)
             .unwrap_or_default();
         let mut intent = pending.intent;
-        intent.image_path = pending.downloaded_path.to_string_lossy().into_owned();
+        intent.image_path = effective_image_path.to_string_lossy().into_owned();
         if let Some(handles) = self.handles {
             self.image_edit_programmatic_change = true;
             set_text(handles.image_edit, &intent.image_path);
@@ -10108,7 +10121,7 @@ impl NativeWindow {
             self.image_volumes = volumes.into_iter().filter(is_installable_image).collect();
             let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
             for volume in &self.image_volumes {
-                let label = wide(format!("{}. {}", volume.index, volume.name));
+                let label = wide(&volume.name);
                 let _ = SendMessageW(
                     handles.image_volume,
                     0x0143,
@@ -10125,7 +10138,7 @@ impl NativeWindow {
         }
         self.effective_image_path = Some(intent.image_path.clone());
         self.xp_i386_source = None;
-        self.mounted_iso = None;
+        self.mounted_iso = mounted_iso;
         self.source_has_unattend = false;
         self.refresh_source_unattend();
         self.update_unattend_conflict();
@@ -11542,7 +11555,7 @@ unsafe extern "system" fn window_proc(
                         }
                         let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
                         for volume in &state.image_volumes {
-                            let label = wide(format!("{}. {}", volume.index, volume.name));
+                            let label = wide(&volume.name);
                             let _ = SendMessageW(
                                 handles.image_volume,
                                 0x0143,
@@ -11637,7 +11650,7 @@ unsafe extern "system" fn window_proc(
                             .collect();
                         let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
                         for volume in &state.image_volumes {
-                            let label = wide(format!("{}. {}", volume.index, volume.name));
+                            let label = wide(&volume.name);
                             let _ = SendMessageW(
                                 handles.image_volume,
                                 0x0143,
@@ -11681,7 +11694,7 @@ unsafe extern "system" fn window_proc(
                         set_text(
                             handles.status,
                             &crate::tr!(
-                                "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD 直链）：{}",
+                                "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD/ISO 直链）：{}",
                                 error
                             ),
                         );

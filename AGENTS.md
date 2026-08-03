@@ -81,11 +81,11 @@ LetRecovery 是具有管理员权限的 Windows 系统安装、备份和磁盘�
 
 - 当前服务端入口是代码内固定 HTTPS 地址，普通用户不可在 UI 中修改；不得引入私密凭据或隐藏后门配置。
 - LetRecovery 发布回调只允许原子更新服务端 `v3/index.json` 的 `data.pe`、生成时间和 PE 计数；不得再写入 LetRecovery v1/v2 目录文件。正常端在线目录读取也必须以 `v3/index.json` 为唯一入口，v3 请求、解析或结构校验失败时直接失败并保留上下文，不得回退 v1/v2 或把部分目录伪装为加载成功。回调必须把 HTTPS URL、文件名、MD5、SHA-256 和字节数全部纳入签名绑定。
-- 简易模式目录允许只提供单文件 WIM/ESD URL 而省略卷列表；系统安装页也允许用户手工输入 WIM/ESD 直链。正常端只能用两个有界的精确 HTTP Range 请求读取标准 WIM 头和 XML 资源，同时以两次正确的 `206 Partial Content` 作为链接支持断点续传的必要证据；服务器忽略 Range、返回完整 `200 OK`、资源压缩/跨卷、范围越界、实体大小或 ETag/Last-Modified 在请求间变化时必须失败关闭，严禁为探测元数据退化为完整下载。只显示 XML 中明确为 Client/Server、具有版本元数据的可安装卷，并按实际版本 6.1/6.2/6.3/10.0 与产品名区分 Windows 7/8/8.1/10/11；WindowsPE、Windows Setup、Setup Media、WinRE 和无法确认的镜像不得显示。简易模式启用时隐藏在线下载和工具箱入口。在线目录的系统“安装”动作必须先把原 URL 交给安装页读取卷，用户确认安装后才下载；下载必须启用续传，完成后必须重新读取完整本地镜像并比对所选卷的索引、版本、Build、架构和安装类型，一致后才能继续既有安装流程。
+- 简易模式目录允许只提供 WIM/ESD/ISO URL 而省略卷列表；系统安装页也允许用户手工输入这些格式的直链。直接 WIM/ESD 必须用两个有界的精确 HTTP Range 读取标准 WIM 头和 XML；ISO 必须先按 ECMA-119 用有界 Range 读取 ISO 9660/Joliet 卷描述符和 `sources/install.esd|wim` 的单段或多段 extent，再把内嵌镜像视为连续逻辑字节流读取头和 XML，禁止为探测元数据下载完整 ISO。每次请求都必须得到范围完全匹配的 `206 Partial Content`；服务器忽略 Range、返回完整 `200 OK`、内容编码、范围/extent 越界、实体大小、最终重定向地址或 ETag/Last-Modified 在请求间变化时必须失败关闭。最多跟随五次经过 URL/传输策略验证的重定向，首个 Range 请求解析出的最终 URL 只供当前元数据会话的后续 Range 使用，不得改写用户输入框或持久化配置中的原始链接。只显示 XML 中明确为 Client/Server、具有版本元数据的可安装卷，并按实际版本 6.1/6.2/6.3/10.0 与产品名区分 Windows 7/8/8.1/10/11；WindowsPE、Windows Setup、Setup Media、WinRE 和无法确认的镜像不得显示。简易模式启用时隐藏在线下载和工具箱入口。在线目录的系统“安装”动作必须先把原 URL 交给安装页读取卷，用户确认安装后才下载；下载必须启用续传，完成后必须重新读取完整本地镜像或挂载已下载 ISO，并比对所选卷的索引、版本、Build、架构和安装类型，一致后才能继续既有安装流程。
 - PE 元数据必须继续兼容现有 MD5 字段；可选 SHA-256 存在时优先使用 SHA-256。
 - 联网下载和受管 PE 缓存声明校验值后，计算失败或不匹配必须失败关闭。“未声明校验值”和“计算出错”必须是不同状态。服务端提供 MD5 或 SHA-256 时必须随目录项一起传递到 UI、下载器和缓存校验边界；服务端未声明哈希时 UI 不得显示“已校验/已验证”。随发布包提供的 `bin/pe` 是明确的用户管理边界，允许用户替换或修改 WIM，因此不强制匹配远端哈希，但仍必须限制为安全文件名和普通文件；联网文件不得下载到该目录来绕过校验。
 - 正常端只允许为已经通过完整 libwim 校验的单文件 WIM/ESD 保存有界的本机 BLAKE3 验证缓存；再次校验必须在拒绝写入和删除共享的文件句柄仍被持有时重新计算完整 256 位指纹，只有指纹完全相同才能复用先前结果。不得仅依赖路径、大小或时间戳；缓存缺失、损坏、超限、指纹不匹配、读取或持久化失败都必须回退完整 libwim 校验，SWM 分卷不得使用该快路径。
-- 自动下载默认只允许 HTTPS。若确需 HTTP，必须通过明确兼容选项启用并显示警告。
+- 自动目录等非手工下载默认只允许 HTTPS。用户在系统安装页手工输入 `http://` 镜像直链视为仅对该链接的明确兼容授权；不得据此放宽其他下载来源，也不得把原始链接静默改写成重定向后的地址。
 - 正常系统端和 PE 端已有配置格式需要向后兼容；新字段应有安全默认值，并为旧配置增加解析测试。
 - 内置 Administrator 高级选项只允许在 Windows 7 及以上 WIM/ESD/SWM 的内置无人值守路径启用；不得与自定义无人值守文件、普通“自定义用户名”、GHO/GHS 或 XP/2003 路径并用。账户改名必须按 RID-500 身份定位，不能依赖本地化账户显示名；密码只允许存在于当前安装会话配置和 Windows Setup 无人值守文件中，持久化用户偏好、调试输出和日志必须脱敏，安装清理仍需删除会话文件。
 - 历史配置字段 `disable_windows_defender` 的用户语义固定为“仅深度移除 Microsoft Defender Antivirus 杀毒引擎”。实现只能处理 `WinDefend`、`WdBoot`、`WdFilter`、`WdNisDrv`、`WdNisSvc` 及同目录下随引擎演进的 `WdAiNisDrv`、`WdDevFlt`、`KslD`，以及 Defender 引擎目录、驱动目录和 Defender 自身计划任务；必须保留 `SecurityHealthService`、`wscsvc`、`mpssvc`、UAC、VBS、SmartScreen、System Guard、Web Threat Defense、Pluton 和 Microsoft Defender for Endpoint (`Sense`)。两端必须复用 `lr-core::defender_removal`，仅允许对完整离线 Windows 目标执行；目标盘、控制集、任务 GUID、重解析点、ACL 修改和删除后状态都要严格验证，所选操作任何一步失败时安装流程必须失败关闭，不能再把旧策略键写入或删除失败伪装成成功。
@@ -380,7 +380,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `正常系统端/src/core/native_boot_repair.rs`：把一键修复引导的单个已检测 Windows 分区转换为既有强类型工具后端请求，执行前要求目标仍在 fresh 检测列表中并固定使用 `BootRepairMode::Auto`，UEFI/Legacy 继续由后端按分区样式自动判定；本模块无副作用。
 - `正常系统端/src/core/native_download_controller.rs`：原生在线资源目录状态、分类选择、HTTPS/文件名/保存路径校验、架构 URL 选择、显式下载线程数和下载后动作计划；只有经固定 HTTPS 服务端目录装载并原样选中的历史条目可兼容其 HTTP URL，本地或任意构造目录仍默认拒绝 HTTP，显式兼容开关语义保留。
 - `正常系统端/src/core/native_download_executor.rs`：执行已验证下载计划的后台 worker，把计划中的下载线程数显式交给 aria2，并负责进度/取消/完整性校验及显式完成后动作；开发测试构建禁止网络和文件写入。
-- `正常系统端/src/core/remote_wim_metadata.rs`：通过两个精确且有界的 HTTP Range 读取远程 WIM/ESD 的头和 XML 元数据，校验 Content-Range、实体稳定性与资源边界，过滤非安装卷并按实际 Windows 代际补全简易模式目录；不得在探测阶段下载完整镜像。
+- `正常系统端/src/core/remote_wim_metadata.rs`：通过精确且有界的 HTTP Range 读取远程 WIM/ESD 的头和 XML，或解析远程 ISO 的 ISO 9660/Joliet 目录及内嵌安装镜像单段/多段 extent；绑定最终重定向地址、Content-Range、实体验证器和 ISO/WIM 资源边界，过滤非安装卷并按实际 Windows 代际补全简易模式目录；不得在探测阶段下载完整镜像或 ISO。
 - `正常系统端/src/core/native_driver_transfer.rs`：驱动导出/导入对话框的纯状态、条件目录角色、按桌面当前系统/PE 首个离线系统排序的 Windows 目标库存复核、输入校验和强类型执行/浏览意图；不读取驱动目录、不调用 DISM。
 - `正常系统端/src/core/native_tools_controller.rs`：工具箱 21 项的稳定原生动作映射、桌面/PE 可用性、预加载请求、对话框/外部工具路由和安全分类；无损扩大 C 盘使用专属对话框、只读分析预加载与危险存储分类，详细硬件检测使用后台只读快照，仅生成计划。
 - `正常系统端/src/core/native_tool_executor.rs`：工具箱原生意图的类型化安全执行边界；只读任务可进入既有读取实现，镜像校验在独立工作线程中实时转发进度并接受外部原子取消标志，修改性与外部工具操作仅在明确确认后生成计划，开发测试构建保持无危险副作用。
