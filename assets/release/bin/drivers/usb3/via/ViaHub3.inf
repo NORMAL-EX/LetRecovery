@@ -1,0 +1,125 @@
+;/*++
+;
+;Copyright (c) VIA Corporation.  All rights reserved.
+;
+;   THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY
+;   KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+;   IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR
+;   PURPOSE.
+;
+;Module Name:
+;
+;    ViaHub3.INF
+;
+;Abstract:
+;    INF file for VIA eXtensible host controller hub
+;
+;--*/
+
+[Version]
+Signature      = "$WINDOWS NT$"
+Class          = USB
+ClassGuid      = {36FC9E60-C465-11CF-8056-444553540000}
+Provider       = %VIA%
+DriverVer=07/18/2017,6.1.7600.5601
+CatalogFile    = ViaHub3.cat
+
+[DestinationDirs]
+DefaultDestDir  = 12
+
+;-------------------------------------------------------------------------
+; Device Install Section
+;-------------------------------------------------------------------------
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%VIA%=VIA,NTAMD64
+
+[SourceDisksFiles]
+ViaHub3.sys     = 1
+
+[SourceDisksNames]
+1=%DISK_NAME%,
+
+; For XP and later
+[VIA.NTAMD64]
+; DisplayName      Section      DeviceId
+; -----------      -------      --------
+%VUSB3\ROOT_HUB30.DeviceDesc% = VUSB3HUB, USB\VIA_ROOT_HUB
+%VUSB3\CLASS_09.DeviceDesc%   = VUSB3HUB, VUSB3\CLASS_09
+%VUSB2\CLASS_09.DeviceDesc%   = VUSB3HUB, VUSB2\CLASS_09
+%VUSB1\CLASS_09.DeviceDesc%   = VUSB3HUB, VUSB1\CLASS_09
+%VUSB2\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc%   = VUSB3HUB, VUSB2\CLASS_09&SUBCLASS_00&PROT_02
+
+[VUSB3HUB.NT]
+CopyFiles     = VUSB3HUB.CopyFiles
+
+[VUSB3HUB.NT.HW]
+AddReg         = DefaultIdleAndWake.AddReg
+
+[VUSB3HUB.CopyFiles]
+ViaHub3.sys
+
+[VUSB3HUB.NT.Services]
+AddService     = VUSB3HUB,0x00000002,VUSB3HUB_Service
+
+[VUSB3HUB_Service]
+DisplayName    = %VUSB3HUB.SVCDESC%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\ViaHub3.sys
+LoadOrderGroup = Base
+AddReg         = SpecificParam
+
+[SpecificParam]
+HKR, "Parameters", "RPU1Timeout", 0x00010001, 0x40 ; Refer to Table 10-12 of USB3.0 spec
+HKR, "Parameters", "RPU2Timeout", 0x00010001, 0x7F ; Refer to Table 10-13 of USB3.0 spec
+HKR, "Parameters", "U1Timeout", 0x00010001, 0x40 ; Refer to Table 10-12 of USB3.0 spec
+HKR, "Parameters", "U2Timeout", 0x00010001, 0x7F ; Refer to Table 10-13 of USB3.0 spec
+HKR, "Parameters", "DisableSelectiveSuspend", 0x00010001, 1
+HKR, "Parameters", "EnumRetryTimes", 0x00010001, 3
+
+[DefaultIdleAndWake.AddReg]
+HKR, "WDF", "WdfDefaultIdleInWorkingState", 0x00010001, 0   
+HKR, "WDF", "WdfDefaultWakeFromSleepState", 0x00010001, 0   
+
+;-------------------------------------------------------------------------
+; WDF Coinstaller installation
+;-------------------------------------------------------------------------
+[DestinationDirs]
+CoInstaller_CopyFiles = 11
+
+[VUSB3HUB.NT.CoInstallers]
+AddReg         = CoInstaller_AddReg
+CopyFiles      = CoInstaller_CopyFiles
+
+[CoInstaller_CopyFiles]
+WdfCoInstaller01009.dll
+
+[SourceDisksFiles]
+WdfCoInstaller01009.dll = 1 ; make sure the number matches with SourceDisksNames
+
+[CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller01009.dll,WdfCoInstaller"
+
+[VUSB3HUB.NT.Wdf]
+KmdfService    = VUSB3HUB, VUSB3HUB_wdfsect
+
+[VUSB3HUB_wdfsect]
+KmdfLibraryVersion = 1.9
+
+;------------------------------------------------------------------------------
+;  String Definitions
+;------------------------------------------------------------------------------
+
+[Strings]
+VIA            = "VIA"
+DISK_NAME = "USB3.0 HUB Installation Disk"
+VUSB3\ROOT_HUB30.DeviceDesc = "VIA USB 3 Root Hub"
+VUSB3\CLASS_09.DeviceDesc   = "VIA USB 3 Hub"
+VUSB2\CLASS_09.DeviceDesc   = "VIA USB 2 Hub"
+VUSB1\CLASS_09.DeviceDesc   = "VIA USB 1 Hub"
+VUSB2\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc = "VIA USB 2 MTT Hub"
+VUSB3HUB.SvcDesc            = "VIA USB 3 Root Hub Service"

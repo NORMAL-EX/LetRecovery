@@ -1,1 +1,4 @@
 docs/third-party/wimlib-1.14.5/*.patch -whitespace
+# Signed driver payloads are immutable binary members even when their extension
+# is textual; line-ending normalization would invalidate the lock and catalogs.
+assets/release/bin/drivers/** -text -whitespace

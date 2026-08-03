@@ -37,6 +37,7 @@ pub mod wim_engine;
 pub mod wimgapi;
 pub mod wimlib;
 pub mod wimlib_dll;
+pub mod win7_driver_package;
 pub mod windows_accounts;
 pub mod windows_cabinet;
 pub mod windows_file_copy;

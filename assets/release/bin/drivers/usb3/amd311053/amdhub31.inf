@@ -1,0 +1,690 @@
+;*****************************************************************************
+;
+; Name:  amdhub31.inf
+;
+; Function:
+;	Install AMD USB3.1 Hub Driver 
+;
+; Copyright (c) 2014-2018 AMD, ASMedia, MCCI.
+;
+; MCCI(R) is a registered trademark of MCCI Corporation.
+;
+;*****************************************************************************
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=USB
+ClassGuid={36fc9e60-c465-11cf-8056-444553540000}
+Provider=%Provider%
+DriverVer=01/22/2018, 1.0.5.3
+CatalogFile=amdhub31.cat
+
+[SourceDisksNames.x86]
+1=%DiskKey%,"amdhub31.sys",,\x86
+
+[SourceDisksNames.amd64]
+1=%DiskKey%,"amdhub31.sys",,\x64
+
+[SourceDisksFiles.x86]
+amdhub31.sys=1
+
+[SourceDisksFiles.amd64]
+amdhub31.sys=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%RootHub.MFG%=RootHub, ntx86, ntamd64
+%Hub.MFG%=Hub, ntx86, ntamd64
+
+[Hub.ntamd64]
+%Hub_Product_2%=Hub_Product2_Install,USB\AMD_HUB31
+%Hub_Product_3%=Hub_Product3_Install,USB\AMD_HUB31SS
+
+[Hub.ntx86]
+%Hub_Product_2%=Hub_Product2_Install,USB\AMD_HUB31
+%Hub_Product_3%=Hub_Product3_Install,USB\AMD_HUB31SS
+
+[Hub_Product2_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[Hub_Product2_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[Hub_Product2_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[Hub_Product2_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[Hub_Product3_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[Hub_Product3_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[Hub_Product3_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[Hub_Product3_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub.ntamd64]
+%RootHub_Product_1%=RootHub_Product1_Install,USB\AMDROOT_HUB31&VID1022&PID43B9&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product2_Install,USB\AMDROOT_HUB31&VID1022&PID43BA&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product3_Install,USB\AMDROOT_HUB31&VID1022&PID43BB&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product4_Install,USB\AMDROOT_HUB31&VID1022&PID43BC&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product5_Install,USB\AMDROOT_HUB31&VID1022&PID43D0&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product6_Install,USB\AMDROOT_HUB31&VID1022&PID43D1&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product7_Install,USB\AMDROOT_HUB31&VID1022&PID43D2&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product8_Install,USB\AMDROOT_HUB31&VID1022&PID43D3&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product9_Install,USB\AMDROOT_HUB31&VID1022&PID43D4&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product10_Install,USB\AMDROOT_HUB31&VID1022&PID43D5&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product11_Install,USB\AMDROOT_HUB31&VID1022&PID43D6&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product12_Install,USB\AMDROOT_HUB31&VID1022&PID43D7&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product13_Install,USB\AMDROOT_HUB31&VID1022&PID43D8&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product14_Install,USB\AMDROOT_HUB31&VID1022&PID43D9&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product15_Install,USB\AMDROOT_HUB31&VID1022&PID43DA&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product16_Install,USB\AMDROOT_HUB31&VID1022&PID43DB&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product17_Install,USB\AMDROOT_HUB31&VID1022&PID43DC&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product18_Install,USB\AMDROOT_HUB31&VID1022&PID43DD&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product19_Install,USB\AMDROOT_HUB31&VID1022&PID43DE&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product20_Install,USB\AMDROOT_HUB31&VID1022&PID43DF&VER0001000000050003
+
+[RootHub.ntx86]
+%RootHub_Product_1%=RootHub_Product1_Install,USB\AMDROOT_HUB31&VID1022&PID43B9&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product2_Install,USB\AMDROOT_HUB31&VID1022&PID43BA&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product3_Install,USB\AMDROOT_HUB31&VID1022&PID43BB&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product4_Install,USB\AMDROOT_HUB31&VID1022&PID43BC&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product5_Install,USB\AMDROOT_HUB31&VID1022&PID43D0&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product6_Install,USB\AMDROOT_HUB31&VID1022&PID43D1&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product7_Install,USB\AMDROOT_HUB31&VID1022&PID43D2&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product8_Install,USB\AMDROOT_HUB31&VID1022&PID43D3&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product9_Install,USB\AMDROOT_HUB31&VID1022&PID43D4&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product10_Install,USB\AMDROOT_HUB31&VID1022&PID43D5&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product11_Install,USB\AMDROOT_HUB31&VID1022&PID43D6&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product12_Install,USB\AMDROOT_HUB31&VID1022&PID43D7&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product13_Install,USB\AMDROOT_HUB31&VID1022&PID43D8&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product14_Install,USB\AMDROOT_HUB31&VID1022&PID43D9&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product15_Install,USB\AMDROOT_HUB31&VID1022&PID43DA&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product16_Install,USB\AMDROOT_HUB31&VID1022&PID43DB&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product17_Install,USB\AMDROOT_HUB31&VID1022&PID43DC&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product18_Install,USB\AMDROOT_HUB31&VID1022&PID43DD&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product19_Install,USB\AMDROOT_HUB31&VID1022&PID43DE&VER0001000000050003
+%RootHub_Product_1%=RootHub_Product20_Install,USB\AMDROOT_HUB31&VID1022&PID43DF&VER0001000000050003
+
+[RootHub_Product1_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product1_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product1_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product1_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product1_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product1_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product1_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product2_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product2_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product2_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product2_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product2_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product2_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product2_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product3_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product3_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product3_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product3_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product3_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product3_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product3_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product4_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product4_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product4_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product4_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product4_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product4_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product4_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product5_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product5_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product5_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product5_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product5_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product5_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product5_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product6_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product6_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product6_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product6_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product6_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product6_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product6_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product7_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product7_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product7_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product7_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product7_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product7_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product7_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product8_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product8_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product8_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product8_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product8_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product8_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product8_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product9_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product9_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product9_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product9_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product9_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product9_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product9_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product10_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product10_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product10_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product10_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product10_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product10_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product10_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product11_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product11_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product11_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product11_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product11_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product11_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product11_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product12_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product12_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product12_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product12_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product12_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product12_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product12_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product13_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product13_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product13_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product13_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product13_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product13_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product13_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product14_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product14_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product14_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product14_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product14_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product14_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product14_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product15_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product15_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product15_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product15_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product15_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product15_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product15_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product16_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product16_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product16_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product16_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product16_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product16_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product16_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product17_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product17_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product17_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product17_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product17_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product17_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product17_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product18_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product18_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product18_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product18_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product18_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product18_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product18_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product19_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product19_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product19_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product19_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product19_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product19_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product19_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product20_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product20_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product20_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product20_Install.ntamd64.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[RootHub_Product20_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdhub31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=RootHub_Product20_Install.AddReg
+AddReg=amdhub31.DeviceInterfaceGuids
+AddReg=amdhub31.ProductDeviceInterfaceGuids
+
+[RootHub_Product20_Install.ntx86.services]
+AddService=amdhub31,0x00000002,amdhub31_service
+
+[WinToGo_amdhub31.AddReg]
+HKR,,BootFlags, 0x10001, 0x10
+
+[amdhub31.CopyFiles.amd64]
+amdhub31.sys
+
+[amdhub31.CopyFiles.x86]
+amdhub31.sys
+
+[amdhub31.DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_HUB3,, "{314B0371-157A-434A-8459-685D389ED910}"
+
+[amdhub31.ProductDeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_USB3_DRIVERS,, "{C6164C12-A1E1-4B7E-B49C-F942E3A8C050}"
+
+[amdhub31_service]
+DisplayName=%amdhub31_ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\amdhub31.sys
+LoadOrderGroup=Base
+AddReg=WinToGo_amdhub31.AddReg
+
+[Strings]
+DiskKey = "AMD USB 3.1 Install Disk"
+Hub.MFG = "(Generic USB Hub)"
+Hub_Product_2 = "Generic USB Hub"
+Hub_Product_3 = "Generic SuperSpeed USB Hub"
+Provider = "Advanced Micro Devices, Inc."
+RootHub.MFG = "(Standard USB Host Controller)"
+RootHub_Product_1 = "AMD USB3.1 Root Hub"
+amdhub31_ServiceDescription = "AMD USB3.1 Hub Service"
+
+;**** end of file ****

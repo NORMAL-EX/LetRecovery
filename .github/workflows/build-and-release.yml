@@ -160,6 +160,29 @@ jobs:
             -LockFile "docs\STORAGE_CONTROLLER_DRIVERS.lock.json" `
             -VerifySignatures
 
+      - name: Validate and synchronize Windows 7 compatibility drivers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = "assets\release\bin\drivers"
+          & ".github\scripts\test-windows7-drivers.ps1" `
+            -Root $source `
+            -LockFile "docs\WINDOWS7_DRIVERS.lock.json" `
+            -VerifySignatures
+          $destination = "pkg\bin\drivers"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          foreach ($family in @("usb3", "nvme")) {
+            $target = Join-Path $destination $family
+            if (Test-Path -LiteralPath $target) {
+              Remove-Item -LiteralPath $target -Recurse -Force
+            }
+            Copy-Item -LiteralPath (Join-Path $source $family) -Destination $target -Recurse
+          }
+          & ".github\scripts\test-windows7-drivers.ps1" `
+            -Root $destination `
+            -LockFile "docs\WINDOWS7_DRIVERS.lock.json"
+          Write-Host "Synchronized locked Windows 7 USB3/NVMe payloads into the release package."
+
       - name: Relocate system-side lang/diskpart into bin
         shell: bash
         run: |
@@ -306,6 +329,35 @@ jobs:
             -Root $storageDestination `
             -LockFile "docs\STORAGE_CONTROLLER_DRIVERS.lock.json"
           Write-Host "Injected locked storage-controller drivers: $storageDestination"
+          $windows7Source = "pkg\bin\drivers"
+          $windows7Destination = Join-Path $mount "Program Files\LetRecoveryPE\drivers"
+          New-Item -ItemType Directory -Force -Path $windows7Destination | Out-Null
+          foreach ($family in @("usb3", "nvme")) {
+            $target = Join-Path $windows7Destination $family
+            if (Test-Path -LiteralPath $target) {
+              Remove-Item -LiteralPath $target -Recurse -Force
+            }
+            Copy-Item -LiteralPath (Join-Path $windows7Source $family) `
+              -Destination $target -Recurse
+          }
+          # Files exposed through a mounted WIM can carry mount-provider reparse attributes.
+          # Copy the completed tree out before applying the release-tree no-reparse policy.
+          $windows7StagingAudit = Join-Path $env:RUNNER_TEMP ("wim-win7-staging-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $windows7StagingAudit | Out-Null
+          try {
+            foreach ($family in @("usb3", "nvme")) {
+              Copy-Item -LiteralPath (Join-Path $windows7Destination $family) `
+                -Destination (Join-Path $windows7StagingAudit $family) -Recurse
+            }
+            & ".github\scripts\test-windows7-drivers.ps1" `
+              -Root $windows7StagingAudit `
+              -LockFile "docs\WINDOWS7_DRIVERS.lock.json"
+          } finally {
+            if (Test-Path -LiteralPath $windows7StagingAudit) {
+              Remove-Item -LiteralPath $windows7StagingAudit -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "Injected locked Windows 7 compatibility drivers: $windows7Destination"
           # DISM falls back to the current user's %TEMP% when /ScratchDir is omitted.
           # The base PE image declares X:\Users\Default\AppData\Local\Temp but may not
           # contain that directory, which makes Apply-Image fail immediately with error 3.
@@ -336,15 +388,17 @@ jobs:
           Write-Host "=== WIM info AFTER clean ==="
           dism /Get-WimInfo /WimFile:"$wim" /Index:1
 
-      - name: Verify storage-controller drivers in final WIM
+      - name: Verify locked drivers in final WIM
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $wim = (Resolve-Path -LiteralPath "pkg\bin\pe\LetRecovery_PE.wim").Path
           $mount = Join-Path $env:RUNNER_TEMP ("wim-storage-audit-" + [guid]::NewGuid().ToString("N"))
           $audit = Join-Path $env:RUNNER_TEMP ("wim-storage-files-" + [guid]::NewGuid().ToString("N"))
+          $windows7Audit = Join-Path $env:RUNNER_TEMP ("wim-win7-files-" + [guid]::NewGuid().ToString("N"))
           New-Item -ItemType Directory -Path $mount | Out-Null
           New-Item -ItemType Directory -Path $audit | Out-Null
+          New-Item -ItemType Directory -Path $windows7Audit | Out-Null
           $mounted = $false
           try {
             dism /Mount-Image /ImageFile:"$wim" /Index:1 /MountDir:"$mount" /ReadOnly
@@ -358,6 +412,15 @@ jobs:
               -Root $audit `
               -LockFile "docs\STORAGE_CONTROLLER_DRIVERS.lock.json" `
               -VerifySignatures
+            $windows7Root = Join-Path $mount "Program Files\LetRecoveryPE\drivers"
+            foreach ($family in @("usb3", "nvme")) {
+              Copy-Item -LiteralPath (Join-Path $windows7Root $family) `
+                -Destination (Join-Path $windows7Audit $family) -Recurse
+            }
+            & ".github\scripts\test-windows7-drivers.ps1" `
+              -Root $windows7Audit `
+              -LockFile "docs\WINDOWS7_DRIVERS.lock.json" `
+              -VerifySignatures
           } finally {
             if ($mounted) {
               dism /Unmount-Image /MountDir:"$mount" /Discard
@@ -369,9 +432,12 @@ jobs:
             if (Test-Path -LiteralPath $audit) {
               Remove-Item -LiteralPath $audit -Recurse -Force -ErrorAction SilentlyContinue
             }
+            if (Test-Path -LiteralPath $windows7Audit) {
+              Remove-Item -LiteralPath $windows7Audit -Recurse -Force -ErrorAction SilentlyContinue
+            }
           }
 
-      - name: Update WIM MD5 in config.json
+      - name: Update WIM checksums in config.json
         shell: bash
         run: |
           set -euo pipefail
@@ -387,6 +453,12 @@ jobs:
                   for chunk in iter(lambda: fp.read(1024 * 1024), b""):
                       h.update(chunk)
               return h.hexdigest().upper()
+          def sha256_upper(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as fp:
+                  for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+                      h.update(chunk)
+              return h.hexdigest().upper()
           updated = []
           for entry in data.get("pe_cache", {}).get("pe_list", []):
               fn = entry.get("filename")
@@ -395,17 +467,20 @@ jobs:
               matches = glob.glob(os.path.join(pkg, "**", fn), recursive=True)
               if not matches:
                   raise SystemExit(f"WIM not found in package for config entry: {fn}")
-              new = md5_upper(matches[0])
-              old = entry.get("md5")
-              entry["md5"] = new
-              updated.append((fn, old, new, matches[0]))
+              new_md5 = md5_upper(matches[0])
+              new_sha256 = sha256_upper(matches[0])
+              old_md5 = entry.get("md5")
+              old_sha256 = entry.get("sha256")
+              entry["md5"] = new_md5
+              entry["sha256"] = new_sha256
+              updated.append((fn, old_md5, new_md5, old_sha256, new_sha256, matches[0]))
           if not updated:
               raise SystemExit("No pe_list entries updated; config.json structure unexpected")
           with open(cfg, "w", encoding="utf-8", newline="\n") as f:
               json.dump(data, f, ensure_ascii=False, indent=2)
               f.write("\n")
-          for fn, old, new, p in updated:
-              print(f"{fn}: {old} -> {new}  ({p})")
+          for fn, old_md5, new_md5, old_sha256, new_sha256, p in updated:
+              print(f"{fn}: MD5 {old_md5} -> {new_md5}; SHA-256 {old_sha256} -> {new_sha256}  ({p})")
           PY
           echo "--- updated config.json ---"
           cat pkg/config.json

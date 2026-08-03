@@ -315,6 +315,12 @@ pub fn verify_builtin_storage_driver_package(
 
 /// Returns whether at least one regular INF below `root` covers `hardware_id`.
 pub fn inf_tree_contains_hardware_id(root: &Path, hardware_id: &str) -> Result<bool> {
+    inf_tree_matches_any_hardware_id(root, &[hardware_id.to_owned()])
+}
+
+/// Returns whether at least one regular INF below `root` covers any supplied
+/// hardware ID while reading each INF only once.
+pub fn inf_tree_matches_any_hardware_id(root: &Path, hardware_ids: &[String]) -> Result<bool> {
     let metadata = root
         .symlink_metadata()
         .with_context(|| format!("driver tree is unavailable: {}", root.display()))?;
@@ -342,7 +348,10 @@ pub fn inf_tree_contains_hardware_id(root: &Path, hardware_id: &str) -> Result<b
             );
         }
         let text = read_inf_text(entry.path())?;
-        if inf_contains_hardware_id(&text, hardware_id) {
+        if hardware_ids
+            .iter()
+            .any(|hardware_id| inf_contains_hardware_id(&text, hardware_id))
+        {
             return Ok(true);
         }
     }

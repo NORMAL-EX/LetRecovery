@@ -1,0 +1,154 @@
+;*****************************************************************************
+;
+; Name:  tihub3.inf
+;
+; Function:
+;	Install TI USB3 Hub Driver 
+;
+; Copyright (c) 2009-2012 TI, portions copyright MCCI
+;
+; 
+;
+; NOTICE: This software is licensed, not sold.  Any modification of this
+; inf file to change the reference to an operating system or to change the
+; reference to a device is not permitted unless authorized in writing by
+; MCCI Corporation
+;
+;*****************************************************************************
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=USB
+ClassGuid={36fc9e60-c465-11cf-8056-444553540000}
+Provider=%Provider%
+DriverVer=04/14/2016, 1.16.6.0
+CatalogFile=tihub3.cat
+
+[SourceDisksNames]
+1=%DiskKey%,"tihub3.sys",,\i386
+
+[SourceDisksNames.x86]
+1=%DiskKey%,"tihub3.sys",,\i386
+
+[SourceDisksNames.amd64]
+1=%DiskKey%,"tihub3.sys",,\amd64
+
+[SourceDisksFiles]
+tihub3.sys=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%Hub.MFG%=Hub, ntx86, ntamd64
+%RootHub.MFG%=RootHub, ntx86, ntamd64
+
+[Hub]
+%Hub_Product_2%=Hub_Product2_Install,USB\TIUSBD_Hub
+
+[Hub.ntamd64]
+%Hub_Product_2%=Hub_Product2_Install,USB\TIUSBD_Hub
+
+[Hub.ntx86]
+%Hub_Product_2%=Hub_Product2_Install,USB\TIUSBD_Hub
+
+[Hub_Product2_Install]
+CopyFiles=tihub3.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=tihub3.DeviceInterfaceGuids
+AddReg=tihub3.ProductDeviceInterfaceGuids
+
+[Hub_Product2_Install.ntamd64]
+CopyFiles=tihub3.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=tihub3.DeviceInterfaceGuids
+AddReg=tihub3.ProductDeviceInterfaceGuids
+
+[Hub_Product2_Install.ntamd64.services]
+AddService=tihub3,0x00000002,tihub3_service
+
+[Hub_Product2_Install.ntx86]
+CopyFiles=tihub3.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=tihub3.DeviceInterfaceGuids
+AddReg=tihub3.ProductDeviceInterfaceGuids
+
+[Hub_Product2_Install.ntx86.services]
+AddService=tihub3,0x00000002,tihub3_service
+
+[Hub_Product2_Install.services]
+AddService=tihub3,0x00000002,tihub3_service
+
+[RootHub]
+%RootHub_Product_1%=RootHub_Product1_Install,USB\TIUSBD_Hub&VID_040E&PID_0100
+
+[RootHub.ntamd64]
+%RootHub_Product_1%=RootHub_Product1_Install,USB\TIUSBD_Hub&VID_040E&PID_0100
+
+[RootHub.ntx86]
+%RootHub_Product_1%=RootHub_Product1_Install,USB\TIUSBD_Hub&VID_040E&PID_0100
+
+[RootHub_Product1_Install]
+CopyFiles=tihub3.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=RootHub_Product1_Install.AddReg
+AddReg=tihub3.DeviceInterfaceGuids
+AddReg=tihub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product1_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x1
+
+[RootHub_Product1_Install.ntamd64]
+CopyFiles=tihub3.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=RootHub_Product1_Install.AddReg
+AddReg=tihub3.DeviceInterfaceGuids
+AddReg=tihub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product1_Install.ntamd64.services]
+AddService=tihub3,0x00000002,tihub3_service
+
+[RootHub_Product1_Install.ntx86]
+CopyFiles=tihub3.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=RootHub_Product1_Install.AddReg
+AddReg=tihub3.DeviceInterfaceGuids
+AddReg=tihub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product1_Install.ntx86.services]
+AddService=tihub3,0x00000002,tihub3_service
+
+[RootHub_Product1_Install.services]
+AddService=tihub3,0x00000002,tihub3_service
+
+[tihub3.CopyFiles]
+tihub3.sys
+
+[tihub3.DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_TI_HUB3,, "{406b3596-8ac7-11df-867e-005056a72cb6}"
+
+[tihub3.ProductDeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_TI_USB3_DRIVERS,, "{0e16b110-8ac7-11df-867e-005056a72cb6}"
+
+[tihub3_service]
+DisplayName=%tihub3_ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\tihub3.sys
+LoadOrderGroup=Base
+
+[Strings]
+DiskKey = "TI USB 3.0 Install Disk"
+Hub.MFG = "(Generic USB Hub)"
+Hub_Product_2 = "Generic USB Hub"
+Provider = "Texas Instruments Incorporated"
+RootHub.MFG = "(Standard USB Host Controller)"
+RootHub_Product_1 = "Texas Instruments USB Root Hub"
+tihub3_ServiceDescription = "TI USB3 Hub Service"
+
+;**** end of file ****

@@ -119,7 +119,8 @@ use crate::core::native_expand_c_executor::{
 };
 use crate::core::native_install_backend::ProductionInstallBackend;
 use crate::core::native_install_controller::{
-    InstallMode, InstallTarget, NativeInstallState, SelectedImageMetadata, StartInstallIntent,
+    windows7_driver_defaults, InstallMode, InstallTarget, NativeInstallState,
+    SelectedImageMetadata, StartInstallIntent,
 };
 use crate::core::native_install_executor::{
     BitLockerRequirement, InstallExecutionContext, InstallExecutionEvent, NativeInstallExecutor,
@@ -4535,6 +4536,7 @@ impl NativeWindow {
         self.layout(hwnd);
         self.apply_unattend_default();
         self.update_unattend_conflict();
+        self.update_storage_driver_default();
         self.update_advanced_install_context();
         self.request_pca_target_detection(hwnd);
         self.update_pca_detection_status();
@@ -4691,10 +4693,12 @@ impl NativeWindow {
         let selected = usize::try_from(selected_index)
             .ok()
             .and_then(|index| self.image_volumes.get(index));
-        // The bundled Windows 7 USB/NVMe and UefiSeven resources were retired. Keep the legacy
-        // config fields parse-compatible, but do not expose options that no longer have a vetted
-        // release payload.
-        let show_windows_7 = false;
+        let show_windows_7 = selected.is_some_and(|image| {
+            matches!(
+                (image.major_version, image.minor_version),
+                (Some(6), Some(1))
+            )
+        });
         let show_xp = self.xp_i386_source.is_some()
             || selected.is_some_and(|image| image.major_version == Some(5));
         let show_pca = self.page == Page::Install
@@ -4705,7 +4709,6 @@ impl NativeWindow {
         let pca_command = if show_pca { SW_SHOW } else { SW_HIDE };
         let _ = ShowWindow(handles.pca_label, pca_command);
         let _ = ShowWindow(handles.pca_mode, pca_command);
-        let target_uefi = self.selected_target_uses_uefi();
         let unattended_enabled =
             SendMessageW(handles.unattend, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
         let source_is_gho = self.effective_image_path.as_deref().is_some_and(|path| {
@@ -4729,7 +4732,9 @@ impl NativeWindow {
                     .wifi_detected
                     .unwrap_or(false),
                 show_windows_7,
-                show_windows_7_uefi: show_windows_7 && target_uefi,
+                // UefiSeven remains retired; restoring the independently verified USB3/NVMe
+                // driver payload must not make the unrelated boot patch visible again.
+                show_windows_7_uefi: false,
                 show_xp,
             });
         }
@@ -4798,22 +4803,45 @@ impl NativeWindow {
         let selected = usize::try_from(selected_index)
             .ok()
             .and_then(|index| self.image_volumes.get(index));
+        let selected_metadata = selected.map(|image| SelectedImageMetadata {
+            volume_index: image.index,
+            major_version: image.major_version,
+            minor_version: image.minor_version,
+            architecture: image.architecture,
+        });
+        let target_disk_number = self
+            .selected_install_target()
+            .and_then(|target| target.disk_number);
+        let target_bus = target_disk_number.and_then(|disk_number| {
+            match lr_core::windows_storage::disk_bus_type(disk_number) {
+                Ok(bus) => Some(bus),
+                Err(error) => {
+                    log::warn!(
+                        "[WIN7 DRIVERS] cannot confirm bus type for physical disk {disk_number}: {error}"
+                    );
+                    None
+                }
+            }
+        });
         let target = selected.map(|image| {
             format!(
-                "{}::{}::{}",
+                "{}::{}::{}::disk={:?}::bus={:?}",
                 self.effective_image_path.as_deref().unwrap_or_default(),
                 image.index,
-                image.name
+                image.name,
+                target_disk_number,
+                target_bus
             )
         });
         if target == self.advanced_defaults_target {
             return;
         }
         self.advanced_defaults_target = target;
+        let (win7_usb3, win7_nvme) = windows7_driver_defaults(selected_metadata, target_bus);
         let advanced = &mut self.app_config.install_prefs.advanced_options;
-        advanced.win7_inject_usb3_driver = false;
+        advanced.win7_inject_usb3_driver = win7_usb3;
         advanced.win7_usb3_driver_path.clear();
-        advanced.win7_inject_nvme_driver = false;
+        advanced.win7_inject_nvme_driver = win7_nvme;
         advanced.win7_nvme_driver_path.clear();
         advanced.win7_fix_acpi_bsod = false;
         advanced.win7_fix_storage_bsod = false;
@@ -8941,6 +8969,7 @@ impl NativeWindow {
                     .map(|image| SelectedImageMetadata {
                         volume_index: image.index,
                         major_version: image.major_version,
+                        minor_version: image.minor_version,
                         architecture: image.architecture,
                     })
             },
@@ -10013,6 +10042,7 @@ impl NativeWindow {
                     SelectedImageMetadata {
                         volume_index: volume.index,
                         major_version: volume.major_version,
+                        minor_version: volume.minor_version,
                         architecture: volume.architecture,
                     },
                     mounted_iso,

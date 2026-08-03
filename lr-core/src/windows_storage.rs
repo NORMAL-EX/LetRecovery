@@ -14,6 +14,16 @@ pub enum DiskStyle {
     Gpt,
 }
 
+/// Physical storage bus classification used for fail-closed install defaults.
+///
+/// Only an explicit `BusTypeNvme` result is classified as NVMe. RAID/VMD,
+/// virtual and failed queries are deliberately not guessed to be NVMe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiskBusType {
+    Nvme,
+    Other,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileSystem {
     Ntfs,
@@ -802,6 +812,100 @@ mod platform {
         )
         .map_err(|error| api_error("read physical disk layout", error))?;
         Ok((handle, storage, returned))
+    }
+
+    /// Reads `STORAGE_DEVICE_DESCRIPTOR.BusType` for one physical disk.
+    ///
+    /// Microsoft documents a header query followed by an allocation using the
+    /// returned `Size`; using the two-call form avoids truncating descriptors on
+    /// storage stacks that append bus-specific properties.
+    pub unsafe fn disk_bus_type(disk_number: u32) -> Result<DiskBusType, StorageError> {
+        use windows::Win32::Storage::FileSystem::BusTypeNvme;
+        use windows::Win32::System::Ioctl::{
+            PropertyStandardQuery, StorageDeviceProperty, IOCTL_STORAGE_QUERY_PROPERTY,
+            STORAGE_DESCRIPTOR_HEADER, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY,
+        };
+        use windows::Win32::System::IO::DeviceIoControl;
+
+        const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
+
+        let path = wide(&format!(r"\\.\PhysicalDrive{disk_number}"));
+        let handle = CreateFileW(
+            PCWSTR(path.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            Default::default(),
+            None,
+        )
+        .map(OwnedHandle)
+        .map_err(|error| api_error("open physical disk for bus query", error))?;
+        let query = STORAGE_PROPERTY_QUERY {
+            PropertyId: StorageDeviceProperty,
+            QueryType: PropertyStandardQuery,
+            AdditionalParameters: [0],
+        };
+        let mut header = STORAGE_DESCRIPTOR_HEADER::default();
+        let mut returned = 0_u32;
+        DeviceIoControl(
+            handle.0,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(&query as *const _ as *const c_void),
+            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            Some(&mut header as *mut _ as *mut c_void),
+            size_of::<STORAGE_DESCRIPTOR_HEADER>() as u32,
+            Some(&mut returned),
+            None,
+        )
+        .map_err(|error| api_error("query physical disk descriptor size", error))?;
+        if returned < size_of::<STORAGE_DESCRIPTOR_HEADER>() as u32 {
+            return Err(StorageError::new(
+                "query physical disk bus",
+                "storage descriptor header was truncated",
+            ));
+        }
+        let descriptor_size = usize::try_from(header.Size).map_err(|_| {
+            StorageError::new(
+                "query physical disk bus",
+                "storage descriptor size does not fit in memory",
+            )
+        })?;
+        if descriptor_size < size_of::<STORAGE_DEVICE_DESCRIPTOR>()
+            || descriptor_size > MAX_DESCRIPTOR_BYTES
+        {
+            return Err(StorageError::new(
+                "query physical disk bus",
+                format!("invalid storage descriptor size: {descriptor_size}"),
+            ));
+        }
+
+        let mut buffer = vec![0_u8; descriptor_size];
+        returned = 0;
+        DeviceIoControl(
+            handle.0,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(&query as *const _ as *const c_void),
+            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            Some(buffer.as_mut_ptr() as *mut c_void),
+            buffer.len() as u32,
+            Some(&mut returned),
+            None,
+        )
+        .map_err(|error| api_error("query physical disk descriptor", error))?;
+        if returned < size_of::<STORAGE_DEVICE_DESCRIPTOR>() as u32 {
+            return Err(StorageError::new(
+                "query physical disk bus",
+                "storage device descriptor was truncated",
+            ));
+        }
+        let descriptor =
+            std::ptr::read_unaligned(buffer.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR);
+        Ok(if descriptor.BusType == BusTypeNvme {
+            DiskBusType::Nvme
+        } else {
+            DiskBusType::Other
+        })
     }
 
     fn wide(value: &str) -> Vec<u16> {
@@ -1633,6 +1737,11 @@ pub fn set_mbr_signature(disk_number: u32, signature: u32) -> Result<(), Storage
 #[cfg(windows)]
 pub fn disk_style(disk_number: u32) -> Result<DiskStyle, StorageError> {
     unsafe { platform::disk_style(disk_number) }
+}
+
+#[cfg(windows)]
+pub fn disk_bus_type(disk_number: u32) -> Result<DiskBusType, StorageError> {
+    unsafe { platform::disk_bus_type(disk_number) }
 }
 
 #[cfg(windows)]

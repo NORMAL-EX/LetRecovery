@@ -1,0 +1,92 @@
+; ========================================================
+; Copyright (c) 2010-2012 Renesas Electronics Corporation
+; INF file for installing USB 3.0 host controller driver.
+; ========================================================
+
+[Version]
+ Signature="$Windows NT$"
+ Class=USB
+ ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+ Provider=%RENESAS%
+ DriverVer=08/21/2012,3.0.23.0
+ CatalogFile=rusb3xhc.cat
+
+[SourceDisksNames]
+ 1 = %DISKID%
+
+[SourceDisksFiles]
+ rusb3xhc.sys = 1
+ rusb3co.dll = 1
+
+[DestinationDirs]
+ DefaultDestDir = 12 
+ RUSB3CO.CopyFiles = 11
+
+[Manufacturer]
+ %RENESAS% = RENESAS,NTamd64
+
+[RENESAS.NTamd64]
+ %PCI\VEN_1912&DEV_0014&REV_01.DeviceDesc% = RUSB3XHC, PCI\VEN_1912&DEV_0014&REV_01
+ %PCI\VEN_1912&DEV_0014&REV_02.DeviceDesc% = RUSB3XHC, PCI\VEN_1912&DEV_0014&REV_02
+ %PCI\VEN_1912&DEV_0014&REV_03.DeviceDesc% = RUSB3XHC, PCI\VEN_1912&DEV_0014&REV_03
+ %PCI\VEN_1912&DEV_0015&REV_01.DeviceDesc% = RUSB3XHC, PCI\VEN_1912&DEV_0015&REV_01
+ %PCI\VEN_1912&DEV_0015&REV_02.DeviceDesc% = RUSB3XHC, PCI\VEN_1912&DEV_0015&REV_02
+
+[DefaultInstall]
+ CopyINF = rusb3xhc.inf
+
+;---------------------
+; RUSB3XHC
+;---------------------
+[RUSB3XHC.NT]
+ CopyFiles = RUSB3XHC.CopyFiles
+
+[RUSB3XHC.CopyFiles]
+ rusb3xhc.sys
+
+[RUSB3XHC.NT.HW]
+ AddReg = RUSB3XHC.AddReg.HW
+
+[RUSB3XHC.AddReg.HW]
+ HKR,"Interrupt Management\MessageSignaledInterruptProperties",MSISupported,0x00010001,1
+
+[RUSB3XHC.NT.Services]
+ AddService = rusb3xhc, 0x00000002, RUSB3XHC.AddService, RUSB3XHC.EventLog
+
+[RUSB3XHC.AddService]
+ DisplayName    = %RUSB3XHC.SvcDesc%
+ ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+ StartType      = 3                 ; SERVICE_DEMAND_START 
+ ErrorControl   = 1                 ; SERVICE_ERROR_NORMAL
+ ServiceBinary  = %12%\rusb3xhc.sys
+ LoadOrderGroup = Base
+
+[RUSB3XHC.EventLog]
+ AddReg = RUSB3XHC.EventLog.AddReg
+
+[RUSB3XHC.EventLog.AddReg]
+ HKR,,"EventMessageFile",0x00020000,"%11%\iologmsg.dll;%12%\rusb3xhc.sys"
+ HKR,,"TypesSupported",0x00010001,7
+
+;--- Coinstaller installation -----
+
+[RUSB3XHC.NT.CoInstallers]
+ AddReg = RUSB3CO.AddReg
+ CopyFiles = RUSB3CO.CopyFiles
+
+[RUSB3CO.CopyFiles]
+ rusb3co2.dll,rusb3co.dll,,0x6000
+
+[RUSB3CO.AddReg]
+ HKR,,CoInstallers32,0x00010000,"rusb3co2.dll,Nusb3CoInstaller"
+
+[Strings]
+ RENESAS = "Renesas Electronics"
+ DISKID = "Renesas Electronics USB 3.0 Device Driver Installation Disk"
+ RUSB3XHC.SvcDesc = "Renesas Electronics USB 3.0 Host Controller Driver (Version 3.0)"
+
+ PCI\VEN_1912&DEV_0014&REV_01.DeviceDesc = "Renesas Electronics USB 3.0 Host Controller"
+ PCI\VEN_1912&DEV_0014&REV_02.DeviceDesc = "Renesas Electronics USB 3.0 Host Controller"
+ PCI\VEN_1912&DEV_0014&REV_03.DeviceDesc = "Renesas Electronics USB 3.0 Host Controller"
+ PCI\VEN_1912&DEV_0015&REV_01.DeviceDesc = "Renesas Electronics USB 3.0 Host Controller"
+ PCI\VEN_1912&DEV_0015&REV_02.DeviceDesc = "Renesas Electronics USB 3.0 Host Controller"

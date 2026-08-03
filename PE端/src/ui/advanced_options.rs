@@ -2,8 +2,8 @@ use crate::core::config::InstallConfig;
 use crate::core::dism::Dism;
 use crate::core::registry::OfflineRegistry;
 use crate::utils::path;
-use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
+use anyhow::Context;
+use std::path::Path;
 
 /// 脚本目录名称（统一路径，与正常系统端保持一致）
 const SCRIPTS_DIR: &str = "LetRecovery_Scripts";
@@ -384,29 +384,32 @@ pub fn apply_advanced_options(
     // 12. Win7 注入 USB3 驱动
     if config.win7_inject_usb3_driver {
         log::info!("[ADVANCED] Win7: 开始注入USB3驱动");
-        let usb3_dir = path::get_exe_dir().join("drivers").join("usb3");
-
-        if !usb3_dir.is_dir() {
-            anyhow::bail!("Win7 USB3驱动目录不存在: {}", usb3_dir.display());
-        }
+        let drivers_root = path::get_exe_dir().join("drivers");
+        let payload = lr_core::win7_driver_package::verify_windows7_driver_payload(&drivers_root)?;
+        let architecture = target_win7_architecture(target_partition)?;
+        let hardware_ids = lr_core::driver::list_present_hardware_ids()
+            .context("枚举当前 USB 控制器硬件 ID 失败")?;
+        let packages = payload.select_usb3_packages(&hardware_ids, architecture)?;
         with_offline_hives_unloaded(
             default_loaded,
             &software_hive,
             &system_hive,
             &default_hive,
             || {
-                let processed_path = prepare_win7_drivers(&usb3_dir)?;
-                let import_result = (|| -> anyhow::Result<()> {
-                    let dism = Dism::new();
-                    let image_path = format!("{}\\", target_partition);
-                    dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy())?;
-                    log::info!("[ADVANCED] Win7 USB3驱动注入成功");
-                    Ok(())
-                })();
-                if processed_path != usb3_dir {
-                    let _ = std::fs::remove_dir_all(&processed_path);
+                let dism = Dism::new();
+                let image_path = format!("{}\\", target_partition);
+                if packages.is_empty() {
+                    log::warn!("[ADVANCED] 当前硬件没有匹配的内置 Win7 USB3 驱动包，安全跳过");
                 }
-                import_result
+                for package in &packages {
+                    log::info!(
+                        "[ADVANCED] Win7: 注入匹配的 USB3 驱动包: {}",
+                        package.display()
+                    );
+                    dism.add_drivers_offline(&image_path, &package.to_string_lossy())?;
+                }
+                log::info!("[ADVANCED] Win7 USB3驱动注入成功");
+                Ok(())
             },
         )?;
     }
@@ -414,17 +417,13 @@ pub fn apply_advanced_options(
     // 13. Win7 注入 NVMe 驱动
     if config.win7_inject_nvme_driver {
         log::info!("[ADVANCED] Win7: 开始注入NVMe驱动");
-        let nvme_dir = path::get_exe_dir().join("drivers").join("nvme");
-
-        if !nvme_dir.is_dir() {
-            anyhow::bail!("Win7 NVMe驱动目录不存在: {}", nvme_dir.display());
-        }
+        let drivers_root = path::get_exe_dir().join("drivers");
         with_offline_hives_unloaded(
             default_loaded,
             &software_hive,
             &system_hive,
             &default_hive,
-            || install_win7_nvme_drivers(&nvme_dir, target_partition),
+            || install_win7_nvme_drivers(&drivers_root, target_partition),
         )?;
         log::info!("[ADVANCED] Win7 NVMe驱动注入成功");
     }
@@ -693,392 +692,33 @@ pub fn apply_advanced_options(
     Ok(())
 }
 
-/// 安装 Win7 NVMe 驱动
-///
-/// 智能检测并处理两种类型的驱动包：
-/// 1. Windows Update CAB包（如KB2990941、KB3087873）- 使用DISM API安装
-/// 2. 普通驱动包（包含INF文件）- 使用驱动导入方式
-///
-/// # 参数
-/// - `nvme_dir`: NVMe驱动目录
-/// - `target_partition`: 目标分区（如 "D:"）
-fn install_win7_nvme_drivers(nvme_dir: &Path, target_partition: &str) -> anyhow::Result<()> {
-    // CabinetExtractor 已通过其他函数间接使用，无需直接导入
-
-    log::info!("[NVME] 开始处理NVMe驱动目录: {}", nvme_dir.display());
-
-    // 收集目录中的文件
-    let mut cab_files: Vec<PathBuf> = Vec::new();
-    let mut inf_files: Vec<PathBuf> = Vec::new();
-    let mut has_subdirs = false;
-
-    for entry in std::fs::read_dir(nvme_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let ext_lower = ext.to_lowercase();
-                if ext_lower == "cab" {
-                    cab_files.push(path);
-                } else if ext_lower == "inf" {
-                    inf_files.push(path);
-                }
-            }
-        } else if path.is_dir() {
-            has_subdirs = true;
+fn target_win7_architecture(
+    target_partition: &str,
+) -> anyhow::Result<lr_core::win7_driver_package::Windows7TargetArchitecture> {
+    match crate::core::system_utils::get_offline_system_architecture(Path::new(target_partition)) {
+        crate::core::system_utils::SystemArchitecture::X86 => {
+            Ok(lr_core::win7_driver_package::Windows7TargetArchitecture::X86)
+        }
+        crate::core::system_utils::SystemArchitecture::X64 => {
+            Ok(lr_core::win7_driver_package::Windows7TargetArchitecture::Amd64)
+        }
+        architecture => {
+            anyhow::bail!("无法确认 Windows 7 目标系统架构，拒绝注入驱动: {architecture:?}")
         }
     }
-
-    log::info!(
-        "[NVME] 发现: {} 个CAB文件, {} 个INF文件, 子目录={}",
-        cab_files.len(),
-        inf_files.len(),
-        has_subdirs
-    );
-
-    let mut success_count = 0;
-    let mut fail_count = 0;
-
-    // 处理CAB文件
-    for cab_path in &cab_files {
-        log::info!("[NVME] 处理CAB文件: {}", cab_path.display());
-
-        // 检测CAB类型
-        let cab_type = detect_cab_type(cab_path)?;
-
-        match cab_type {
-            CabType::WindowsUpdate => {
-                // Windows Update包 - 使用dism.exe安装
-                log::info!("[NVME] 检测到Windows Update包，使用dism.exe安装");
-                let dism = Dism::new();
-                let image_path = format!("{}\\", target_partition);
-                match dism.add_package_offline(&image_path, &cab_path.to_string_lossy()) {
-                    Ok(_) => {
-                        log::info!("[NVME] Windows Update包安装成功: {}", cab_path.display());
-                        success_count += 1;
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[NVME] Windows Update包安装失败: {} - {}",
-                            cab_path.display(),
-                            e
-                        );
-                        fail_count += 1;
-                    }
-                }
-            }
-            CabType::DriverPackage => {
-                // 驱动包 - 解压后使用驱动导入
-                log::info!("[NVME] 检测到驱动包，解压后导入");
-                match install_cab_as_driver(cab_path, target_partition) {
-                    Ok(_) => {
-                        success_count += 1;
-                    }
-                    Err(e) => {
-                        log::warn!("[NVME] 驱动包安装失败: {} - {}", cab_path.display(), e);
-                        fail_count += 1;
-                    }
-                }
-            }
-            CabType::Unknown => {
-                // 未知类型 - 尝试两种方式
-                log::info!("[NVME] CAB类型未知，尝试多种方法");
-
-                // 先尝试dism.exe安装
-                let dism = Dism::new();
-                let image_path = format!("{}\\", target_partition);
-                let dism_result =
-                    dism.add_package_offline(&image_path, &cab_path.to_string_lossy());
-                if dism_result.is_ok() {
-                    success_count += 1;
-                    continue;
-                }
-
-                // 再尝试驱动导入
-                match install_cab_as_driver(cab_path, target_partition) {
-                    Ok(_) => success_count += 1,
-                    Err(_) => fail_count += 1,
-                }
-            }
-        }
-    }
-
-    // 处理直接的INF文件和子目录
-    if !inf_files.is_empty() || has_subdirs {
-        log::info!("[NVME] 处理INF文件和子目录");
-        let dism = Dism::new();
-        let image_path = format!("{}\\", target_partition);
-
-        match dism.add_drivers_offline(&image_path, &nvme_dir.to_string_lossy()) {
-            Ok(_) => {
-                log::info!("[NVME] 驱动目录导入成功");
-                success_count += 1;
-            }
-            Err(e) => {
-                log::warn!("[NVME] 驱动目录导入失败: {}", e);
-                fail_count += 1;
-            }
-        }
-    }
-
-    log::info!(
-        "[NVME] NVMe驱动处理完成: 成功={}, 失败={}",
-        success_count,
-        fail_count
-    );
-
-    if fail_count > 0 {
-        anyhow::bail!("{} 个NVMe驱动包安装失败", fail_count);
-    }
-    if success_count == 0 {
-        anyhow::bail!("NVMe驱动目录中没有可安装的受支持驱动包");
-    }
-
-    Ok(())
 }
 
-/// CAB文件类型
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CabType {
-    /// Windows Update包（如KB2990941）
-    WindowsUpdate,
-    /// 普通驱动包（包含INF/SYS）
-    DriverPackage,
-    /// 未知类型
-    Unknown,
-}
-
-/// 检测CAB文件类型
-fn detect_cab_type(cab_path: &Path) -> anyhow::Result<CabType> {
-    use crate::core::cabinet::CabinetExtractor;
-
-    // 先根据文件名判断
-    let file_name = cab_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    // Windows Update包通常包含KB编号
-    if file_name.contains("kb")
-        || file_name.contains("windows6")
-        || file_name.contains("windows8")
-        || file_name.contains("windows10")
-    {
-        return Ok(CabType::WindowsUpdate);
-    }
-
-    let staging = lr_core::scoped_temp_file::ScopedTempDir::create_in(
-        &std::env::temp_dir(),
-        "lr-cab-detect",
-    )?;
-    let extractor = CabinetExtractor::new()?;
-    let files = extractor.extract(cab_path, staging.path())?;
-    let has_manifest = files.iter().any(|path| {
-        let name = path.to_string_lossy().to_lowercase();
-        name.ends_with(".manifest") || name.ends_with(".mum") || name.contains("update.mum")
-    });
-    let has_inf = files.iter().any(|path| {
-        path.extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("inf"))
-    });
-    let has_nested_cab = files.iter().any(|path| {
-        path.extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
-    });
-    Ok(if has_manifest || has_nested_cab {
-        CabType::WindowsUpdate
-    } else if has_inf {
-        CabType::DriverPackage
-    } else {
-        CabType::Unknown
-    })
-}
-
-/// 将CAB作为驱动包安装（解压后导入INF）
-fn install_cab_as_driver(cab_path: &Path, target_partition: &str) -> anyhow::Result<()> {
-    use crate::core::cabinet::CabinetExtractor;
-
-    log::info!("[NVME] 解压驱动CAB: {}", cab_path.display());
-
-    let staging = lr_core::scoped_temp_file::ScopedTempDir::create_in(
-        &std::env::temp_dir(),
-        "lr-cab-driver",
-    )?;
-    let temp_dir = staging.path();
-    let extractor = CabinetExtractor::new()?;
-    let _files = extractor.extract(cab_path, temp_dir)?;
-
-    // 检查是否有嵌套cab
-    process_nested_cabs_for_drivers(temp_dir)?;
-
-    // 使用Dism导入驱动
+/// Installs the locked Microsoft NVMe hotfix pair in dependency order.
+fn install_win7_nvme_drivers(drivers_root: &Path, target_partition: &str) -> anyhow::Result<()> {
+    let payload = lr_core::win7_driver_package::verify_windows7_driver_payload(drivers_root)?;
+    let architecture = target_win7_architecture(target_partition)?;
+    let cabs = payload.nvme_cabs(architecture)?;
     let dism = Dism::new();
     let image_path = format!("{}\\", target_partition);
-    dism.add_drivers_offline(&image_path, &temp_dir.to_string_lossy())
-}
-
-/// 处理嵌套的CAB文件
-fn process_nested_cabs_for_drivers(dir: &Path) -> anyhow::Result<()> {
-    use crate::core::cabinet::CabinetExtractor;
-
-    // 查找嵌套cab
-    let nested_cabs = find_nested_cabs(dir)?;
-
-    if nested_cabs.is_empty() {
-        return Ok(());
+    for cab in cabs {
+        log::info!("[NVME] 按依赖顺序安装锁定的微软更新: {}", cab.display());
+        dism.add_package_offline(&image_path, &cab.to_string_lossy())?;
     }
-
-    log::info!("[NVME] 处理 {} 个嵌套CAB", nested_cabs.len());
-
-    let extractor = CabinetExtractor::new()?;
-
-    for cab in nested_cabs {
-        let extract_dir = cab.with_extension("extracted");
-        extractor.extract(&cab, &extract_dir)?;
-        process_nested_cabs_for_drivers(&extract_dir)?;
-    }
-
-    Ok(())
-}
-
-/// 递归查找嵌套CAB
-fn find_nested_cabs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let metadata = dir.symlink_metadata()?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        anyhow::bail!("嵌套 CAB 根目录不是普通目录: {}", dir.display());
-    }
-    let mut cabs = Vec::new();
-    for entry in WalkDir::new(dir).follow_links(false) {
-        let entry = entry?;
-        if entry.file_type().is_file()
-            && entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
-        {
-            cabs.push(entry.into_path());
-        }
-    }
-    cabs.sort();
-    Ok(cabs)
-}
-
-/// 准备 Win7 驱动目录
-///
-/// 如果目录中包含 .cab 文件，会将其解压到临时目录。
-/// 支持 Windows 更新包格式（如 KB2990941、KB3087873）。
-fn prepare_win7_drivers(driver_dir: &PathBuf) -> anyhow::Result<PathBuf> {
-    use crate::core::cabinet::CabinetExtractor;
-
-    // 检查目录中是否有 .cab 文件
-    let mut cab_files: Vec<PathBuf> = Vec::new();
-    let mut has_inf_files = false;
-    let mut has_subdirs = false;
-
-    for entry in std::fs::read_dir(driver_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let ext_lower = ext.to_lowercase();
-                if ext_lower == "cab" {
-                    cab_files.push(path);
-                } else if ext_lower == "inf" {
-                    has_inf_files = true;
-                }
-            }
-        } else if path.is_dir() {
-            has_subdirs = true;
-        }
-    }
-
-    // 如果没有 .cab 文件，直接返回原目录
-    if cab_files.is_empty() {
-        log::info!("[ADVANCED] 目录中没有 .cab 文件，直接使用原目录");
-        return Ok(driver_dir.clone());
-    }
-
-    log::info!("[ADVANCED] 发现 {} 个 .cab 文件，开始解压", cab_files.len());
-
-    // 尝试创建 Cabinet 解压器
-    let extractor = CabinetExtractor::new()?;
-
-    let temp_parent = std::env::temp_dir();
-    let staging = lr_core::scoped_temp_file::ScopedTempDir::create_in(&temp_parent, "lr-win7drv")?;
-    let temp_dir = staging.path().to_path_buf();
-
-    for cab_path in &cab_files {
-        let cab_name = cab_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-
-        let extract_dir = temp_dir.join(cab_name);
-
-        log::info!(
-            "[ADVANCED] 解压: {} -> {}",
-            cab_path.display(),
-            extract_dir.display()
-        );
-
-        let files = extractor.extract(cab_path, &extract_dir)?;
-        log::info!("[ADVANCED] 成功解压 {} 个文件", files.len());
-    }
-
-    // 如果原目录有普通驱动文件或子目录，也复制到临时目录
-    if has_inf_files || has_subdirs {
-        log::info!("[ADVANCED] 复制原目录中的其他驱动文件");
-
-        for entry in std::fs::read_dir(driver_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_name = entry.file_name();
-
-            // 跳过 .cab 文件（已处理）
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if ext.to_lowercase() == "cab" {
-                        continue;
-                    }
-                }
-            }
-
-            let dest = temp_dir.join(&file_name);
-
-            if path.is_dir() {
-                // 递归复制子目录
-                copy_dir_recursive(&path, &dest)?;
-            } else {
-                // 复制文件
-                std::fs::copy(&path, &dest)?;
-            }
-        }
-    }
-
-    log::info!("[ADVANCED] Win7 驱动准备完成: {}", temp_dir.display());
-
-    Ok(staging.into_path())
-}
-
-/// 递归复制目录
-fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dst)?;
-
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let path = entry.path();
-        let dest = dst.join(entry.file_name());
-
-        if path.is_dir() {
-            copy_dir_recursive(&path, &dest)?;
-        } else {
-            std::fs::copy(&path, &dest)?;
-        }
-    }
-
     Ok(())
 }
 

@@ -1,0 +1,88 @@
+;/*++
+;
+;(C) Copyright 2014-2020  Advanced Micro Devices, Inc.
+;
+;Module Name:
+;
+;    amdhub3.inf
+;
+;Abstract:
+;    INF file for installing USB 3.0 hub driver.
+;
+;--*/
+
+
+[Version]
+Signature="$Windows NT$"
+Class=USB
+ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+Provider=%AMD%
+DriverVer = 03/05/2020,2.0.0.0060
+CatalogFile=amdhub3.cat
+PnpLockDown = 1
+
+[SourceDisksNames]
+1 = %DISKID%
+
+[SourceDisksFiles]
+amdhub3.sys = 1,
+
+
+[DestinationDirs]
+DefaultDestDir = 12 
+
+[Manufacturer]
+%AMD% = AMD, NTamd64
+
+[AMD.NTamd64]
+%AMDUSB3\ROOT_HUB3.DeviceDesc%                     = AMDHUB3, AMDUSB3\ROOT_HUB3
+%AMDUSB3\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc%   = AMDHUB3, AMDUSB3\CLASS_09&SUBCLASS_00&PROT_00
+%AMDUSB3\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc%   = AMDHUB3, AMDUSB3\CLASS_09&SUBCLASS_00&PROT_01
+%AMDUSB3\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc%   = AMDHUB3, AMDUSB3\CLASS_09&SUBCLASS_00&PROT_02
+%AMDUSB3\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc%   = AMDHUB3, AMDUSB3\CLASS_09&SUBCLASS_00&PROT_03
+%AMDUSB3\CLASS_09&SUBCLASS_01.DeviceDesc%           = AMDHUB3, AMDUSB3\CLASS_09&SUBCLASS_01
+
+
+
+;[DefaultInstall]
+;CopyINF = amdhub3.inf
+
+;---------------------
+; AMDHUB3
+;---------------------
+[AMDHUB3.NT]
+CopyFiles = AMDHUB3.CopyFiles
+
+[AMDHUB3.CopyFiles]
+amdhub3.sys
+
+[AMDHUB3.NT.Services]
+AddService = amdhub3, 0x00000002, AMDHUB3.AddService, AMDHUB3.EventLog
+
+[AMDHUB3.AddService]
+DisplayName    = %AMDHUB3.SvcDesc%
+ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+StartType      = 3                 ; SERVICE_DEMAND_START
+ErrorControl   = 1                 ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\amdhub3.sys
+LoadOrderGroup = Base
+
+[AMDHUB3.EventLog]
+AddReg = AMDHUB3.EventLog.AddReg
+
+[AMDHUB3.EventLog.AddReg]
+HKR,,"EventMessageFile",0x00020000,"%%11%%\iologmsg.dll;%%12%%\amdhub3.sys"
+HKR,,"TypesSupported",0x00010001,7
+
+[Strings]
+AMD                                              = "Advanced Micro Devices, Inc"
+DISKID                                           = "AMD USB 3.0 Device Driver Installation Disk"
+amdhub3.SvcDesc                                 = "AMD USB 3.0 Hub"
+
+AMDUSB3\ROOT_HUB3.DeviceDesc                   = "AMD Root Hub(xHCI)"
+AMDUSB3\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc = "AMD USB Hub"
+AMDUSB3\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc = "AMD USB 2.0 Hub"
+AMDUSB3\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc = "AMD USB 2.0 MTT Hub"
+AMDUSB3\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc = "AMD USB 3.0 Hub"
+AMDUSB3\CLASS_09&SUBCLASS_01.DeviceDesc         = "AMD USB Hub"
+

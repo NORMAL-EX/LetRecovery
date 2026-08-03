@@ -1,0 +1,84 @@
+; ========================================================
+; Copyright (c) 2010-2012 Renesas Electronics Corporation
+; INF file for installing USB 3.0 host controller driver.
+; ========================================================
+
+[Version]
+ Signature="$Windows NT$"
+ Class=USB
+ ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+ Provider=%RENESAS%
+ DriverVer=08/21/2012,2.1.39.0
+ CatalogFile=nusb3xhc.cat
+
+[SourceDisksNames]
+ 1 = %DISKID%
+
+[SourceDisksFiles]
+ nusb3xhc.sys = 1
+ nusb3co.dll = 1
+
+[DestinationDirs]
+ DefaultDestDir = 12 
+ NUSB3CO.CopyFiles = 11
+
+[Manufacturer]
+ %RENESAS% = RENESAS,NTamd64
+
+[RENESAS.NTamd64]
+ %NUSB3XHC.DeviceDesc% = NUSB3XHC, PCI\VEN_1033&DEV_0194&REV_03
+ %NUSB3XHC.DeviceDesc% = NUSB3XHC, PCI\VEN_1033&DEV_0194&REV_04
+
+[DefaultInstall]
+ CopyINF = nusb3xhc.inf
+
+;---------------------
+; NUSB3XHC
+;---------------------
+[NUSB3XHC.NT]
+ CopyFiles = NUSB3XHC.CopyFiles
+
+[NUSB3XHC.CopyFiles]
+ nusb3xhc.sys
+
+[NUSB3XHC.NT.HW]
+ AddReg = NUSB3XHC.AddReg.HW
+
+[NUSB3XHC.AddReg.HW]
+ HKR,"Interrupt Management\MessageSignaledInterruptProperties",MSISupported,0x00010001,1
+
+[NUSB3XHC.NT.Services]
+ AddService = nusb3xhc, 0x00000002, NUSB3XHC.AddService, NUSB3XHC.EventLog
+
+[NUSB3XHC.AddService]
+ DisplayName    = %NUSB3XHC.SvcDesc%
+ ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+ StartType      = 3                 ; SERVICE_DEMAND_START 
+ ErrorControl   = 1                 ; SERVICE_ERROR_NORMAL
+ ServiceBinary  = %12%\nusb3xhc.sys
+ LoadOrderGroup = Base
+
+[NUSB3XHC.EventLog]
+ AddReg = NUSB3XHC.EventLog.AddReg
+
+[NUSB3XHC.EventLog.AddReg]
+ HKR,,"EventMessageFile",0x00020000,"%11%\iologmsg.dll;%12%\nusb3xhc.sys"
+ HKR,,"TypesSupported",0x00010001,7
+
+;--- Coinstaller installation -----
+
+[NUSB3XHC.NT.CoInstallers]
+ AddReg = NUSB3CO.AddReg
+ CopyFiles = NUSB3CO.CopyFiles
+
+[NUSB3CO.CopyFiles]
+ nusb3co3.dll,nusb3co.dll,,0x6000
+
+[NUSB3CO.AddReg]
+ HKR,,CoInstallers32,0x00010000,"nusb3co3.dll,Nusb3CoInstaller"
+
+[Strings]
+ RENESAS = "Renesas Electronics"
+ DISKID = "Renesas Electronics USB 3.0 Device Driver Installation Disk"
+ NUSB3XHC.SvcDesc = "Renesas Electronics USB 3.0 Host Controller Driver"
+ NUSB3XHC.DeviceDesc = "Renesas Electronics USB 3.0 Host Controller"

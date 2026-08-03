@@ -1,0 +1,236 @@
+; Etron USB 3.0 host controller
+; Copyright(c) 2009, Etron Technology Inc.
+;
+
+[Version]
+Signature="$CHICAGO$"
+Provider=%Etron%
+Class=USB
+ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+DriverVer = 10/29/2013,1.00.0000.0119
+CatalogFile.ntx86=EtronXHCI.cat
+CatalogFile.ntamd64=EtronXHCI.cat
+
+[SourceDisksNames]
+ 1 = %Etron_DISKID%
+ 2 = %Etron_DISKID_ENHANCE%
+
+[SourceDisksFiles]
+ EtronXHCI.sys = 1
+ EtronHub3.sys = 1
+ EtronSTOR.sys = 2
+
+[DestinationDirs]
+ DefaultDestDir = 12
+
+[Manufacturer]
+%Etron.Mfg%=Etron.Section,NTAMD64
+
+[Etron.Section]
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&CC_0C0330   ; Etron xHC EJ168
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7052&CC_0C0330   ; Etron xHC EJ188, EJ198
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_80301025
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_06271025
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_06081025
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_05891025
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_70011B5B
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_06611025
+%Etron_RTH3.DeviceDesc%=EtronHub3,ENUSB3\ROOT_HUB30
+%Etron_HUB1.DeviceDesc%=EtronHub3,ENUSB3\EXT_HUB10
+%Etron_HUB2.DeviceDesc%=EtronHub3,ENUSB3\EXT_HUB20
+%Etron_HUB3.DeviceDesc%=EtronHub3,ENUSB3\EXT_HUB30
+%Etron_STOR.DeviceDesc%=EtronSTOR,ENUSB\Class_08&SubClass_06&Prot_50 ; Etron USB Mass Storage Device
+%Etron_UASP.DeviceDesc%=EtronSTOR, ENUSB\Class_08&SubClass_06&Prot_62
+
+[Etron.Section.NTAMD64]
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&CC_0C0330   ; Etron xHC EJ168
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7052&CC_0C0330   ; Etron xHC EJ188, EJ198
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_80301025
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_06271025
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_06081025
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_05891025
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_70011B5B
+%Etron_XHCI.DeviceDesc%=EtronXHCI,PCI\VEN_1B6F&DEV_7023&SUBSYS_06611025
+%Etron_RTH3.DeviceDesc%=EtronHub3,ENUSB3\ROOT_HUB30
+%Etron_HUB1.DeviceDesc%=EtronHub3,ENUSB3\EXT_HUB10
+%Etron_HUB2.DeviceDesc%=EtronHub3,ENUSB3\EXT_HUB20
+%Etron_HUB3.DeviceDesc%=EtronHub3,ENUSB3\EXT_HUB30
+%Etron_STOR.DeviceDesc%=EtronSTOR,ENUSB\Class_08&SubClass_06&Prot_50 ; Etron USB Mass Storage Device
+%Etron_UASP.DeviceDesc%=EtronSTOR, ENUSB\Class_08&SubClass_06&Prot_62
+
+
+; --------------------------------------------------------------
+; xHCI
+; --------------------------------------------------------------
+[EtronXHCI.NT]
+CopyFiles=xHCI.CopyFiles
+AddReg=xHCI.AddReg
+DelFiles=xHCI.DelFiles
+
+[EtronXHCI.NT.HW]
+Include=machine.inf
+Needs=PciIoSpaceNotRequired
+Addreg=MSIInterrupts.reg
+
+[EtronXHCI.NT.Services]
+AddService = EtronXHCI, 0x00000002, EtronXHCI.AddService
+
+
+[EtronXHCI.NTAMD64]
+CopyFiles=xHCI.CopyFiles
+AddReg=xHCI.AddReg
+DelFiles=xHCI.DelFiles
+
+[EtronXHCI.NTAMD64.HW]
+Include=machine.inf
+Needs=PciIoSpaceNotRequired
+Addreg=MSIInterrupts.reg
+
+[EtronXHCI.NTAMD64.Services]
+AddService = EtronXHCI, 0x00000002, EtronXHCI.AddService
+
+
+[EtronXHCI.AddService]
+DisplayName    = %Etron_XHCI.DriverDesc%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %10%\System32\Drivers\EtronXHCI.sys
+LoadOrderGroup = Base
+
+[xHCI.CopyFiles]
+EtronXHCI.sys
+
+[xHCI.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,EtronXHCI.sys
+HKR,,PerformanceMode, 0x00010001, 260
+
+[xHCI.DelFiles]
+EtronXHCI.sys,,,1
+
+[MSIInterrupts.reg]
+HKR, "Interrupt Management", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 1
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 1
+
+
+; --------------------------------------------------------------
+; Hub3
+; --------------------------------------------------------------
+[EtronHub3.NT]
+CopyFiles=Hub3.CopyFiles
+AddReg=Hub3.AddReg, U1U2.AddReg, POWER.AddReg
+;DelFiles=Hub3.DelFiles
+
+[EtronHub3.NTAMD64]
+CopyFiles=Hub3.CopyFiles
+AddReg=Hub3.AddReg, U1U2.AddReg, POWER.AddReg
+;DelFiles=Hub3.DelFiles
+
+[EtronHub3.NT.Services]
+AddService = EtronHub3, 0x00000002, EtronHub3.AddService
+
+[EtronHub3.NTAMD64.Services]
+AddService = EtronHub3, 0x00000002, EtronHub3.AddService
+
+[EtronHub3.AddService]
+DisplayName    = %Etron_HUB3.DriverDesc%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %10%\System32\Drivers\EtronHub3.sys
+LoadOrderGroup = Base
+
+[Hub3.CopyFiles]
+EtronHub3.sys
+
+[Hub3.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,EtronHub3.sys
+
+[Hub3.DelFiles]
+EtronHub3.sys,,,1
+
+[U1U2.AddReg]
+HKR,,DeviceEnableU1, 0x00010001, 0
+HKR,,DeviceEnableU2, 0x00010001, 0
+HKR,,DeviceEnableU1TimeOut, 0x00010001, 0
+HKR,,DeviceEnableU2TimeOut, 0x00010001, 0
+HKR,,HubEnableU1, 0x00010001, 0
+HKR,,HubEnableU2, 0x00010001, 0
+HKR,,HubEnableU1TimeOut, 0x00010001, 0
+HKR,,HubEnableU2TimeOut, 0x00010001, 0
+
+[POWER.AddReg]
+HKR,,PowerSavingMode, 0x00010001, 0
+
+;
+; --------------------------------------------------------------
+; EtronSTOR
+; --------------------------------------------------------------
+[EtronSTOR.NT]
+CopyFiles=EtronSTOR.CopyFiles
+AddReg=EtronSTOR.AddReg
+;DelFiles=Hub3.DelFiles
+
+[EtronSTOR.NTAMD64]
+CopyFiles=EtronSTOR.CopyFiles
+AddReg=EtronSTOR.AddReg
+;DelFiles=Hub3.DelFiles
+
+[EtronSTOR.NT.Services]
+AddService = EtronSTOR, 0x00000002, EtronSTOR.AddService
+
+[EtronSTOR.NTAMD64.Services]
+AddService = EtronSTOR, 0x00000002, EtronSTOR.AddService
+
+[EtronSTOR.AddService]
+DisplayName    = %Etron_STOR.DriverDesc%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %10%\System32\Drivers\EtronSTOR.sys
+LoadOrderGroup = Base
+
+[EtronSTOR.CopyFiles]
+EtronSTOR.sys
+
+[EtronSTOR.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,EtronSTOR.sys
+
+[EtronSTOR.DelFiles]
+EtronSTOR.sys,,,1
+
+
+; --------------------------------------------------------------
+; Common
+; --------------------------------------------------------------
+[DestinationDirs]
+XHCI.CopyFiles = 10,SYSTEM32\DRIVERS
+XHCI.DelFiles  = 10,SYSTEM32\DRIVERS
+Hub3.CopyFiles = 10,SYSTEM32\DRIVERS
+Hub3.DelFiles  = 10,SYSTEM32\DRIVERS
+EtronSTOR.CopyFiles = 10,SYSTEM32\DRIVERS
+EtronSTOR.DelFiles  = 10,SYSTEM32\DRIVERS
+
+
+
+[Strings]
+Etron="Etron Technology Inc."
+Etron.Mfg="Etron Technology Inc."
+Etron_DISKID = "Etron USB 3.0 Device Driver Installation Disk"
+Etron_XHCI.DriverDesc="Etron USB 3.0 Extensible Host Controller Driver"
+Etron_HUB3.DriverDesc="Etron USB 3.0 Extensible Hub Driver"
+Etron_XHCI.DeviceDesc="Etron USB 3.0 Extensible Host Controller"
+Etron_RTH3.DeviceDesc="Etron USB 3.0 Extensible Root Hub"
+Etron_HUB1.DeviceDesc="Etron USB1 (FS) Hub"
+Etron_HUB2.DeviceDesc="Etron USB2 (HS) Hub"
+Etron_HUB3.DeviceDesc="Etron USB3 (SS) Hub"
+USBClassName="Universal Serial Bus controllers"
+Etron_STOR.DeviceDesc = "Etron USB Mass Storage Device"
+Etron_UASP.DeviceDesc = "Etron USB Attached SCSI Protocol (UASP) Device"
+Etron_STOR.DriverDesc = "Etron Enhance USB BOT/UASP Mass Storage Driver"
+Etron_DISKID_ENHANCE = "Etron Enhance USB Mass Storage Driver Installation Disk"

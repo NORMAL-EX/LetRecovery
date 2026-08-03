@@ -1,0 +1,1083 @@
+;*****************************************************************************
+;
+; Name:  amdxhc31.inf
+;
+; Function:
+;	Install AMD XHCI Host Controller Driver 
+;
+; Copyright (c) 2014-2018 AMD, ASMedia, MCCI.
+;
+; MCCI(R) is a registered trademark of MCCI Corporation.
+;
+;*****************************************************************************
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=USB
+ClassGuid={36fc9e60-c465-11cf-8056-444553540000}
+Provider=%Provider%
+DriverVer=01/22/2018, 1.0.5.3
+CatalogFile=amdxhc31.cat
+
+[SourceDisksNames.x86]
+1=%DiskKey%,"amdxhc31.sys",,\x86
+
+[SourceDisksNames.amd64]
+1=%DiskKey%,"amdxhc31.sys",,\x64
+
+[SourceDisksFiles.x86]
+amdxhc31.sys=1
+
+[SourceDisksFiles.amd64]
+amdxhc31.sys=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%AMD.MFG%=AMD, ntx86, ntamd64
+
+[AMD.ntamd64]
+%AMD_Product_1%=AMD_Product1_Install,PCI\VEN_1022&DEV_43B9
+%AMD_Product_2%=AMD_Product2_Install,PCI\VEN_1022&DEV_43BA
+%AMD_Product_3%=AMD_Product3_Install,PCI\VEN_1022&DEV_43BB
+%AMD_Product_4%=AMD_Product4_Install,PCI\VEN_1022&DEV_43BC
+%AMD_Product_5%=AMD_Product5_Install,PCI\VEN_1022&DEV_43D0
+%AMD_Product_6%=AMD_Product6_Install,PCI\VEN_1022&DEV_43D1
+%AMD_Product_7%=AMD_Product7_Install,PCI\VEN_1022&DEV_43D2
+%AMD_Product_8%=AMD_Product8_Install,PCI\VEN_1022&DEV_43D3
+%AMD_Product_9%=AMD_Product9_Install,PCI\VEN_1022&DEV_43D4
+%AMD_Product_10%=AMD_Product10_Install,PCI\VEN_1022&DEV_43D5
+%AMD_Product_11%=AMD_Product11_Install,PCI\VEN_1022&DEV_43D6
+%AMD_Product_12%=AMD_Product12_Install,PCI\VEN_1022&DEV_43D7
+%AMD_Product_13%=AMD_Product13_Install,PCI\VEN_1022&DEV_43D8
+%AMD_Product_14%=AMD_Product14_Install,PCI\VEN_1022&DEV_43D9
+%AMD_Product_15%=AMD_Product15_Install,PCI\VEN_1022&DEV_43DA
+%AMD_Product_16%=AMD_Product16_Install,PCI\VEN_1022&DEV_43DB
+%AMD_Product_17%=AMD_Product17_Install,PCI\VEN_1022&DEV_43DC
+%AMD_Product_18%=AMD_Product18_Install,PCI\VEN_1022&DEV_43DD
+%AMD_Product_19%=AMD_Product19_Install,PCI\VEN_1022&DEV_43DE
+%AMD_Product_20%=AMD_Product20_Install,PCI\VEN_1022&DEV_43DF
+
+[AMD.ntx86]
+%AMD_Product_1%=AMD_Product1_Install,PCI\VEN_1022&DEV_43B9
+%AMD_Product_2%=AMD_Product2_Install,PCI\VEN_1022&DEV_43BA
+%AMD_Product_3%=AMD_Product3_Install,PCI\VEN_1022&DEV_43BB
+%AMD_Product_4%=AMD_Product4_Install,PCI\VEN_1022&DEV_43BC
+%AMD_Product_5%=AMD_Product5_Install,PCI\VEN_1022&DEV_43D0
+%AMD_Product_6%=AMD_Product6_Install,PCI\VEN_1022&DEV_43D1
+%AMD_Product_7%=AMD_Product7_Install,PCI\VEN_1022&DEV_43D2
+%AMD_Product_8%=AMD_Product8_Install,PCI\VEN_1022&DEV_43D3
+%AMD_Product_9%=AMD_Product9_Install,PCI\VEN_1022&DEV_43D4
+%AMD_Product_10%=AMD_Product10_Install,PCI\VEN_1022&DEV_43D5
+%AMD_Product_11%=AMD_Product11_Install,PCI\VEN_1022&DEV_43D6
+%AMD_Product_12%=AMD_Product12_Install,PCI\VEN_1022&DEV_43D7
+%AMD_Product_13%=AMD_Product13_Install,PCI\VEN_1022&DEV_43D8
+%AMD_Product_14%=AMD_Product14_Install,PCI\VEN_1022&DEV_43D9
+%AMD_Product_15%=AMD_Product15_Install,PCI\VEN_1022&DEV_43DA
+%AMD_Product_16%=AMD_Product16_Install,PCI\VEN_1022&DEV_43DB
+%AMD_Product_17%=AMD_Product17_Install,PCI\VEN_1022&DEV_43DC
+%AMD_Product_18%=AMD_Product18_Install,PCI\VEN_1022&DEV_43DD
+%AMD_Product_19%=AMD_Product19_Install,PCI\VEN_1022&DEV_43DE
+%AMD_Product_20%=AMD_Product20_Install,PCI\VEN_1022&DEV_43DF
+
+[AMD_Product10_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product10_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product10_Install.AddReg
+AddReg=AMD_Product10_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product10_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product10_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product10_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product10_Install.AddReg
+AddReg=AMD_Product10_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product10_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product10_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product10_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{16AC14EA-A26C-4C39-A228-1467E758F47B}"
+
+[AMD_Product11_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product11_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product11_Install.AddReg
+AddReg=AMD_Product11_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product11_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product11_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product11_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product11_Install.AddReg
+AddReg=AMD_Product11_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product11_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product11_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product11_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{0365C536-6BC6-4A6C-80CD-18EFF3E56A79}"
+
+[AMD_Product12_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product12_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product12_Install.AddReg
+AddReg=AMD_Product12_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product12_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product12_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product12_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product12_Install.AddReg
+AddReg=AMD_Product12_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product12_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product12_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product12_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{6F33DA41-4DDF-4149-A6E8-8E4E1F6F7621}"
+
+[AMD_Product13_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product13_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product13_Install.AddReg
+AddReg=AMD_Product13_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product13_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product13_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product13_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product13_Install.AddReg
+AddReg=AMD_Product13_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product13_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product13_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product13_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{639BAF63-7984-4684-8AEB-7FF6502FC98B}"
+
+[AMD_Product14_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product14_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product14_Install.AddReg
+AddReg=AMD_Product14_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product14_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product14_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product14_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product14_Install.AddReg
+AddReg=AMD_Product14_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product14_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product14_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product14_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{5AEC5B87-6180-432D-B23F-33FAA3D713D4}"
+
+[AMD_Product15_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product15_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product15_Install.AddReg
+AddReg=AMD_Product15_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product15_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product15_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product15_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product15_Install.AddReg
+AddReg=AMD_Product15_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product15_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product15_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product15_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{30B24D87-C26A-44D5-8328-CF2B16098D49}"
+
+[AMD_Product16_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product16_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product16_Install.AddReg
+AddReg=AMD_Product16_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product16_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product16_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product16_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product16_Install.AddReg
+AddReg=AMD_Product16_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product16_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product16_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product16_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{1F4CEECF-F554-4CAF-9C6B-CAEB551CEE55}"
+
+[AMD_Product17_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product17_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product17_Install.AddReg
+AddReg=AMD_Product17_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product17_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product17_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product17_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product17_Install.AddReg
+AddReg=AMD_Product17_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product17_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product17_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product17_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{964C4AA2-2F58-45CA-959B-C76817DBA1A9}"
+
+[AMD_Product18_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product18_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product18_Install.AddReg
+AddReg=AMD_Product18_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product18_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product18_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product18_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product18_Install.AddReg
+AddReg=AMD_Product18_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product18_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product18_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product18_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{C3A79A63-62A2-4702-A086-0898FC5D3D72}"
+
+[AMD_Product19_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product19_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product19_Install.AddReg
+AddReg=AMD_Product19_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product19_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product19_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product19_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product19_Install.AddReg
+AddReg=AMD_Product19_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product19_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product19_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product19_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{4C3CA8CE-938A-44B8-AC6C-E1F1A91BE912}"
+
+[AMD_Product1_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product1_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product1_Install.AddReg
+AddReg=AMD_Product1_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product1_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product1_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product1_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product1_Install.AddReg
+AddReg=AMD_Product1_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product1_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product1_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product1_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{007F3D95-0069-4275-8193-549A6458D0F3}"
+
+[AMD_Product20_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product20_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product20_Install.AddReg
+AddReg=AMD_Product20_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product20_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product20_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product20_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product20_Install.AddReg
+AddReg=AMD_Product20_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product20_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product20_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product20_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{B2301F5D-5CD6-4756-A543-7DDE6007AD83}"
+
+[AMD_Product2_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product2_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product2_Install.AddReg
+AddReg=AMD_Product2_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product2_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product2_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product2_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product2_Install.AddReg
+AddReg=AMD_Product2_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product2_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product2_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product2_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{7797860E-B107-463A-9707-A0653F1BB2B0}"
+
+[AMD_Product3_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product3_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product3_Install.AddReg
+AddReg=AMD_Product3_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product3_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product3_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product3_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product3_Install.AddReg
+AddReg=AMD_Product3_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product3_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product3_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product3_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{E45C8953-FBA8-4585-AAA1-40801F75E112}"
+
+[AMD_Product4_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product4_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product4_Install.AddReg
+AddReg=AMD_Product4_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product4_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product4_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product4_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product4_Install.AddReg
+AddReg=AMD_Product4_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product4_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product4_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product4_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{E1907C73-9EA6-4631-856A-D9D31A8D8330}"
+
+[AMD_Product5_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product5_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product5_Install.AddReg
+AddReg=AMD_Product5_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product5_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product5_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product5_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product5_Install.AddReg
+AddReg=AMD_Product5_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product5_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product5_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product5_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{C26FA43A-2057-4CA9-9EA2-63D9655CF1B8}"
+
+[AMD_Product6_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product6_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product6_Install.AddReg
+AddReg=AMD_Product6_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product6_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product6_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product6_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product6_Install.AddReg
+AddReg=AMD_Product6_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product6_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product6_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product6_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{798DA166-9884-42A3-9E03-2BCF5F7A145B}"
+
+[AMD_Product7_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product7_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product7_Install.AddReg
+AddReg=AMD_Product7_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product7_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product7_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product7_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product7_Install.AddReg
+AddReg=AMD_Product7_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product7_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product7_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product7_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{5F76CF69-49F6-4083-B1C7-84D509BF1BDF}"
+
+[AMD_Product8_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product8_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product8_Install.AddReg
+AddReg=AMD_Product8_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product8_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product8_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product8_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product8_Install.AddReg
+AddReg=AMD_Product8_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product8_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product8_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product8_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{F4E9FF41-F591-482E-B97A-B35B869A862B}"
+
+[AMD_Product9_Install.AddReg]
+HKR,,DataPumpAutoLpmEnable, 0x10001, 0
+HKR,,DataPumpHardwareLpmEnable, 0x10001, 0
+HKR,,DataPumpUxEnable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdU3EntryEnable, 0x10001, 0
+HKR,,DataPumpXhcdUsb2PortMap, 1, 02,04,03
+HKR,,DataPumpXhcdUsb3PortMap, 1, 02,01,02
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x40000
+HKR,,EnableAcpiPortConfig, 0x10001, 0x1
+HKR,,WakeEnabled, 0x10001, 0x1
+
+[AMD_Product9_Install.ntamd64]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.amd64
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product9_Install.AddReg
+AddReg=AMD_Product9_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product9_Install.ntamd64.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product9_Install.ntamd64.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product9_Install.ntx86]
+FeatureScore=80
+CopyFiles=amdxhc31.CopyFiles.x86
+DriverVer=01/22/2018, 1.0.5.3
+AddReg=AMD_Product9_Install.AddReg
+AddReg=AMD_Product9_Install_DeviceInterfaceGuids
+AddReg=amdxhc31.DeviceInterfaceGuids
+AddReg=amdxhc31.ProductDeviceInterfaceGuids
+
+[AMD_Product9_Install.ntx86.hw]
+AddReg=amdxhc31.MsiConfig
+
+[AMD_Product9_Install.ntx86.services]
+AddService=amdxhc31,0x00000002,amdxhc31_service
+
+[AMD_Product9_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI_PT_00,, "{3652DA89-36DE-4513-90F4-A148BD91AEA4}"
+
+[WinToGo_amdxhc31.AddReg]
+HKR,,BootFlags, 0x10001, 0x10
+
+[amdxhc31.CopyFiles.amd64]
+amdxhc31.sys
+
+[amdxhc31.CopyFiles.x86]
+amdxhc31.sys
+
+[amdxhc31.DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_XHCI,, "{8938B61C-45DD-4085-B2B9-FA160D04F44B}"
+
+[amdxhc31.MsiConfig]
+HKR, "Interrupt Management", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 1
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 1
+
+[amdxhc31.ProductDeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_AMD_USB3_DRIVERS,, "{C6164C12-A1E1-4B7E-B49C-F942E3A8C050}"
+
+[amdxhc31_service]
+DisplayName=%amdxhc31_ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\amdxhc31.sys
+LoadOrderGroup=Base
+AddReg=WinToGo_amdxhc31.AddReg
+
+[Strings]
+AMD.MFG = "Advanced Micro Devices, Inc."
+AMD_Product_1 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_10 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_11 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_12 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_13 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_14 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_15 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_16 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_17 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_18 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_19 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_2 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_20 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_3 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_4 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_5 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_6 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_7 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_8 = "AMD USB3.1 eXtensible Host Controller"
+AMD_Product_9 = "AMD USB3.1 eXtensible Host Controller"
+DiskKey = "AMD USB 3.1 Install Disk"
+Provider = "Advanced Micro Devices, Inc."
+amdxhc31_ServiceDescription = "AMD XHCI Service"
+
+;**** end of file ****

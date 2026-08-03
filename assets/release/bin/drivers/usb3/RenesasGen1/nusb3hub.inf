@@ -1,0 +1,74 @@
+; ========================================================
+; Copyright (c) 2010-2012 Renesas Electronics Corporation
+; INF file for installing USB 3.0 hub driver.
+; ========================================================
+
+[Version]
+ Signature="$Windows NT$"
+ Class=USB
+ ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+ Provider=%RENESAS%
+ DriverVer=08/21/2012,2.1.39.0
+ CatalogFile=nusb3hub.cat
+
+[SourceDisksNames]
+ 1 = %DISKID%
+
+[SourceDisksFiles]
+ nusb3hub.sys = 1
+
+[DestinationDirs]
+ DefaultDestDir = 12 
+
+[Manufacturer]
+ %RENESAS% = RENESAS,NTamd64
+
+[RENESAS.NTamd64]
+ %NUSB3\ROOT_HUB30.DeviceDesc% = NUSB3HUB, NUSB3\ROOT_HUB30
+ %NUSB3\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc% = NUSB3HUB, NUSB3\CLASS_09&SUBCLASS_00&PROT_00
+ %NUSB3\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc% = NUSB3HUB, NUSB3\CLASS_09&SUBCLASS_00&PROT_01
+ %NUSB3\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc% = NUSB3HUB, NUSB3\CLASS_09&SUBCLASS_00&PROT_02
+ %NUSB3\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc% = NUSB3HUB, NUSB3\CLASS_09&SUBCLASS_00&PROT_03
+ %NUSB3\CLASS_09&SUBCLASS_01.DeviceDesc% = NUSB3HUB,NUSB3\CLASS_09&SUBCLASS_01
+
+[DefaultInstall]
+ CopyINF = nusb3hub.inf
+
+;---------------------
+; NUSB3HUB
+;---------------------
+[NUSB3HUB.NT]
+ CopyFiles = NUSB3HUB.CopyFiles
+
+[NUSB3HUB.CopyFiles]
+ nusb3hub.sys
+
+[NUSB3HUB.NT.Services]
+ AddService = nusb3hub, 0x00000002, NUSB3HUB.AddService, NUSB3HUB.EventLog
+
+[NUSB3HUB.AddService]
+ DisplayName    = %NUSB3HUB.SvcDesc%
+ ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+ StartType      = 3                 ; SERVICE_DEMAND_START
+ ErrorControl   = 1                 ; SERVICE_ERROR_NORMAL
+ ServiceBinary  = %12%\nusb3hub.sys
+ LoadOrderGroup = Base
+
+[NUSB3HUB.EventLog]
+ AddReg = NUSB3HUB.EventLog.AddReg
+
+[NUSB3HUB.EventLog.AddReg]
+ HKR,,"EventMessageFile",0x00020000,"%11%\iologmsg.dll;%12%\nusb3hub.sys"
+ HKR,,"TypesSupported",0x00010001,7
+
+[Strings]
+ RENESAS = "Renesas Electronics"
+ DISKID  = "Renesas Electronics USB 3.0 Device Driver Installation Disk"
+ NUSB3HUB.SvcDesc = "Renesas Electronics USB 3.0 Hub Driver"
+
+ NUSB3\ROOT_HUB30.DeviceDesc = "Renesas Electronics USB 3.0 Root Hub"
+ NUSB3\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc = "Renesas Electronics USB Hub"
+ NUSB3\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc = "Renesas Electronics USB 2.0 Hub"
+ NUSB3\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc = "Renesas Electronics USB 2.0 Hub"
+ NUSB3\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc = "Renesas Electronics USB 3.0 Hub"
+ NUSB3\CLASS_09&SUBCLASS_01.DeviceDesc = "Renesas Electronics USB Hub"

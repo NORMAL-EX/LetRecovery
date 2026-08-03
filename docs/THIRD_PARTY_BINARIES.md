@@ -101,7 +101,18 @@ expected signer. Release validation rejects missing, extra or modified files,
 synchronizes the locked tree into the PE WIM and then mounts the final cleaned
 WIM read-only to repeat the same hash and signature checks.
 
-The retired blanket package directories (`18`, `19`, `20`, `AMD`, `Applessd`,
-`iastorE` and `viostor`) must not be restored. Windows 7 UefiSeven, USB3 and NVMe
-compatibility payloads were also removed; XP/2003-specific driver resources are
-separate and remain supported.
+The retired blanket storage-controller package directories (`18`, `19`, `20`,
+`AMD`, `Applessd`, `iastorE` and `viostor`) and UefiSeven must not be restored.
+
+Windows 7 USB3 compatibility support is sourced from the user-supplied legacy
+LetRecovery package, but only the 13 package directories whose catalogs validate
+as Microsoft Windows Hardware Compatibility Publisher are retained. Modified or
+expired kernel-policy packages (`amdXHCI`, `intel9th+`, `IntelCeousb3` and
+`Intelcommonusb3`) were excluded. Runtime selection first verifies every byte,
+then uses SetupAPI hardware IDs and the applied image architecture to inject only
+matching package directories. The Windows 7 NVMe payload contains only Microsoft's
+x64 KB2990941 v3 and KB3087873 v2 CABs and installs them in that order; loose
+legacy INF/SYS files are excluded. Exact membership, sizes and SHA-256 values are
+recorded in `docs/WINDOWS7_DRIVERS.lock.json`, and release validation checks the
+source tree, normal package, injected PE WIM and signer subjects. XP/2003-specific
+driver resources remain separate.

@@ -30,7 +30,32 @@ pub struct InstallTarget {
 pub struct SelectedImageMetadata {
     pub volume_index: u32,
     pub major_version: Option<u16>,
+    pub minor_version: Option<u16>,
     pub architecture: Option<u16>,
+}
+
+impl SelectedImageMetadata {
+    pub const fn is_windows_7(self) -> bool {
+        matches!((self.major_version, self.minor_version), (Some(6), Some(1)))
+    }
+}
+
+/// Built-in Windows 7 compatibility-driver defaults.
+///
+/// USB 3.x is enabled for every positively identified Windows 7 image. NVMe is
+/// enabled only when the selected physical target returned `BusTypeNvme`; an
+/// unavailable or abstracted RAID/VMD bus query remains fail-closed.
+pub fn windows7_driver_defaults(
+    image: Option<SelectedImageMetadata>,
+    target_bus: Option<lr_core::windows_storage::DiskBusType>,
+) -> (bool, bool) {
+    let is_windows_7 = image.is_some_and(SelectedImageMetadata::is_windows_7);
+    (
+        is_windows_7,
+        is_windows_7
+            && image.and_then(|metadata| metadata.architecture) == Some(9)
+            && target_bus == Some(lr_core::windows_storage::DiskBusType::Nvme),
+    )
 }
 
 /// Complete UI snapshot needed to decide whether the install button may proceed.
@@ -462,6 +487,57 @@ fn has_extension(path: &str, extensions: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    fn image(major: u16, minor: u16) -> SelectedImageMetadata {
+        SelectedImageMetadata {
+            volume_index: 1,
+            major_version: Some(major),
+            minor_version: Some(minor),
+            architecture: Some(9),
+        }
+    }
+
+    #[test]
+    fn win7_usb3_is_defaulted_even_when_target_bus_is_unknown() {
+        assert_eq!(
+            windows7_driver_defaults(Some(image(6, 1)), None),
+            (true, false)
+        );
+        assert_eq!(
+            windows7_driver_defaults(
+                Some(image(6, 1)),
+                Some(lr_core::windows_storage::DiskBusType::Other)
+            ),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn win7_nvme_is_defaulted_only_for_an_explicit_nvme_bus() {
+        assert_eq!(
+            windows7_driver_defaults(
+                Some(image(6, 1)),
+                Some(lr_core::windows_storage::DiskBusType::Nvme)
+            ),
+            (true, true)
+        );
+        assert_eq!(
+            windows7_driver_defaults(
+                Some(image(10, 0)),
+                Some(lr_core::windows_storage::DiskBusType::Nvme)
+            ),
+            (false, false)
+        );
+        let mut x86 = image(6, 1);
+        x86.architecture = Some(0);
+        assert_eq!(
+            windows7_driver_defaults(
+                Some(x86),
+                Some(lr_core::windows_storage::DiskBusType::Nvme)
+            ),
+            (true, false)
+        );
+    }
+
     fn base_state() -> NativeInstallState {
         NativeInstallState {
             image_path: "D:\\install.wim".to_string(),
@@ -469,6 +545,7 @@ mod tests {
             selected_image: Some(SelectedImageMetadata {
                 volume_index: 3,
                 major_version: Some(10),
+                minor_version: Some(0),
                 architecture: Some(9),
             }),
             xp_i386_source: None,

@@ -1,0 +1,570 @@
+;*****************************************************************************
+;
+; Name:  asmthub3.inf
+;
+; Function:
+;	Install ASMedia USB3.1 Hub Driver 
+;
+; Copyright (c) 2009-2020 ASMedia, MCCI.
+;
+; MCCI(R) is a registered trademark of MCCI Corporation.
+;
+; NOTICE: This software is licensed, not sold.  Any modification of this
+; inf file to change the reference to an operating system or to change the
+; reference to a device is not permitted unless authorized in writing by
+; MCCI Corporation
+;
+;*****************************************************************************
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=USB
+ClassGuid={36fc9e60-c465-11cf-8056-444553540000}
+Provider=%Provider%
+DriverVer=05/21/2020, 1.16.61.1
+CatalogFile=asmthub3.cat
+
+[SourceDisksNames.x86]
+1=%DiskKey%,"asmthub3.sys",,\i386
+
+[SourceDisksNames.amd64]
+1=%DiskKey%,"asmthub3.sys",,\amd64
+
+[SourceDisksNames.ia64]
+1=%DiskKey%,"asmthub3.sys",,\ia64
+
+[SourceDisksFiles.x86]
+asmthub3.sys=1
+
+[SourceDisksFiles.amd64]
+asmthub3.sys=1
+
+[SourceDisksFiles.ia64]
+asmthub3.sys=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%RootHub.MFG%=RootHub, ntx86, ntamd64, ntia64
+%Hub.MFG%=Hub, ntx86, ntamd64, ntia64
+
+[Hub.ntamd64]
+%Hub_Product_2%=Hub_Product2_Install,USB\ASMEDIAUSBD_Hub&VER01166101
+%Hub_Product_3%=Hub_Product3_Install,USB\ASMEDIAUSBD_HubSS&VER01166101
+
+[Hub.ntia64]
+%Hub_Product_2%=Hub_Product2_Install,USB\ASMEDIAUSBD_Hub&VER01166101
+%Hub_Product_3%=Hub_Product3_Install,USB\ASMEDIAUSBD_HubSS&VER01166101
+
+[Hub.ntx86]
+%Hub_Product_2%=Hub_Product2_Install,USB\ASMEDIAUSBD_Hub&VER01166101
+%Hub_Product_3%=Hub_Product3_Install,USB\ASMEDIAUSBD_HubSS&VER01166101
+
+[Hub_Product2_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[Hub_Product2_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[Hub_Product2_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[Hub_Product2_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[Hub_Product2_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[Hub_Product2_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[Hub_Product3_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[Hub_Product3_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[Hub_Product3_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[Hub_Product3_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[Hub_Product3_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[Hub_Product3_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub.ntamd64]
+%RootHub_Product_1%=RootHub_Product1_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1040&VER01166101
+%RootHub_Product_1%=RootHub_Product2_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1041&VER01166101
+%RootHub_Product_1%=RootHub_Product3_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1042&VER01166101
+%RootHub_Product_1%=RootHub_Product4_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1142&VER01166101
+%RootHub_Product_1%=RootHub_Product5_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1240&VER01166101
+%RootHub_Product_1%=RootHub_Product6_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1241&VER01166101
+%RootHub_Product_1%=RootHub_Product7_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1242&VER01166101
+%RootHub_Product_1%=RootHub_Product8_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1343&VER01166101
+%RootHub_Product_1%=RootHub_Product9_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID2142&VER01166101
+%RootHub_Product_1%=RootHub_Product10_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID3142&VER01166101
+
+[RootHub.ntia64]
+%RootHub_Product_1%=RootHub_Product1_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1040&VER01166101
+%RootHub_Product_1%=RootHub_Product2_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1041&VER01166101
+%RootHub_Product_1%=RootHub_Product3_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1042&VER01166101
+%RootHub_Product_1%=RootHub_Product4_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1142&VER01166101
+%RootHub_Product_1%=RootHub_Product5_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1240&VER01166101
+%RootHub_Product_1%=RootHub_Product6_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1241&VER01166101
+%RootHub_Product_1%=RootHub_Product7_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1242&VER01166101
+%RootHub_Product_1%=RootHub_Product8_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1343&VER01166101
+%RootHub_Product_1%=RootHub_Product9_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID2142&VER01166101
+%RootHub_Product_1%=RootHub_Product10_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID3142&VER01166101
+
+[RootHub.ntx86]
+%RootHub_Product_1%=RootHub_Product1_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1040&VER01166101
+%RootHub_Product_1%=RootHub_Product2_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1041&VER01166101
+%RootHub_Product_1%=RootHub_Product3_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1042&VER01166101
+%RootHub_Product_1%=RootHub_Product4_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1142&VER01166101
+%RootHub_Product_1%=RootHub_Product5_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1240&VER01166101
+%RootHub_Product_1%=RootHub_Product6_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1241&VER01166101
+%RootHub_Product_1%=RootHub_Product7_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1242&VER01166101
+%RootHub_Product_1%=RootHub_Product8_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID1343&VER01166101
+%RootHub_Product_1%=RootHub_Product9_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID2142&VER01166101
+%RootHub_Product_1%=RootHub_Product10_Install,USB\ASMEDIAROOT_Hub&VID1B21&PID3142&VER01166101
+
+[RootHub_Product1_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product1_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product1_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product1_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product1_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product1_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product1_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product1_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product1_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product1_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product2_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product2_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product2_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product2_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product2_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product2_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product2_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product2_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product2_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product2_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product3_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product3_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product3_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product3_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product3_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product3_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product3_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product3_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product3_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product3_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product4_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product4_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product4_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product4_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product4_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product4_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product4_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product4_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product4_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product4_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product5_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product5_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product5_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product5_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product5_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product5_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product5_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product5_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product5_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product5_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product6_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product6_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product6_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product6_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product6_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product6_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product6_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product6_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product6_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product6_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product7_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product7_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product7_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product7_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product7_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product7_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product7_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product7_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product7_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product7_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product8_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product8_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product8_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product8_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product8_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product8_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product8_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product8_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product8_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product8_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product9_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product9_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product9_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product9_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product9_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product9_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product9_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product9_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product9_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product9_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product10_Install.AddReg]
+HKR,,WdkSelectiveSuspendDisableWithChild, 0x10001, 0x1
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x40
+
+[RootHub_Product10_Install.ntamd64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.amd64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product10_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product10_Install.ntamd64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product10_Install.ntia64]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.ia64
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product10_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product10_Install.ntia64.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[RootHub_Product10_Install.ntx86]
+FeatureScore=80
+CopyFiles=asmthub3.CopyFiles.x86
+DriverVer=05/21/2020, 1.16.61.1
+AddReg=RootHub_Product10_Install.AddReg
+AddReg=asmthub3.DeviceInterfaceGuids
+AddReg=asmthub3.ProductDeviceInterfaceGuids
+
+[RootHub_Product10_Install.ntx86.services]
+AddService=asmthub3,0x00000002,asmthub3_service
+
+[WinToGo_asmthub3.AddReg]
+HKR,,BootFlags, 0x10001, 0x10
+
+[asmthub3.CopyFiles.amd64]
+asmthub3.sys
+
+[asmthub3.CopyFiles.ia64]
+asmthub3.sys
+
+[asmthub3.CopyFiles.x86]
+asmthub3.sys
+
+[asmthub3.DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_ASMEDIA_HUB3,, "{AF69AE2D-55D0-49ef-AEEB-E463CFC5ECE8}"
+
+[asmthub3.ProductDeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_ASMEDIA_USB3_DRIVERS,, "{A7E675DB-4F15-4cf1-9F60-431474707087}"
+
+[asmthub3_service]
+DisplayName=%asmthub3_ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\asmthub3.sys
+LoadOrderGroup=Base
+AddReg=WinToGo_asmthub3.AddReg
+
+[Strings]
+DiskKey = "ASMedia USB 3.1 Install Disk"
+Hub.MFG = "(Generic USB Hub)"
+Hub_Product_2 = "Generic USB Hub"
+Hub_Product_3 = "Generic SuperSpeed USB Hub"
+Provider = "ASMedia Technology Inc"
+RootHub.MFG = "(Standard USB Host Controller)"
+RootHub_Product_1 = "ASMedia USB Root Hub"
+asmthub3_ServiceDescription = "ASMedia USB3.1 Hub Service"
+
+;**** end of file ****

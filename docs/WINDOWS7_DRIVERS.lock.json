@@ -1,0 +1,686 @@
+{
+    "version":  1,
+    "source":  "User-provided legacy LetRecovery.7z; unsafe or non-kernel-policy USB3 packages excluded",
+    "usb3_packages":  [
+                          {
+                              "directory":  "amd30h",
+                              "architectures":  [
+                                                    "x86",
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "amdhub30.cat",
+                                                "size":  9615,
+                                                "sha256":  "C97D62FA98D82D55630E850E49B3F4C0BED719FB679C2EBD0E4337AAEA447094"
+                                            },
+                                            {
+                                                "path":  "amdhub30.inf",
+                                                "size":  4636,
+                                                "sha256":  "FCE4266AEA73C1836E7CF3011D9D40DCB65683D0BFF5988052F729DF726A321F"
+                                            },
+                                            {
+                                                "path":  "amdxhc.cat",
+                                                "size":  9603,
+                                                "sha256":  "7FD27BD04988923E23751E906924119A7080F0B6E4E5CA685DF6154023818E40"
+                                            },
+                                            {
+                                                "path":  "amdxhc.inf",
+                                                "size":  2147,
+                                                "sha256":  "B448C6921A60C262CADED0798634951D69743135253A966833E9A1E239C7172B"
+                                            },
+                                            {
+                                                "path":  "x64/amdhub30.sys",
+                                                "size":  117744,
+                                                "sha256":  "804609E749E3F3C6BF1E52832A2BC6E39A15CC288C852480FE14882F157F57F2"
+                                            },
+                                            {
+                                                "path":  "x64/amdxhc.sys",
+                                                "size":  237552,
+                                                "sha256":  "B115900D5C5FCCC8287CEDDBEBD6CF645B65EB5DEF01EE0D11B5C7C0D818B002"
+                                            },
+                                            {
+                                                "path":  "x86/amdhub30.sys",
+                                                "size":  95216,
+                                                "sha256":  "A2189ADC3ADDC66CEFFD30091437FB1AB18B9B36697FA44CF39ECA215BBDD7C2"
+                                            },
+                                            {
+                                                "path":  "x86/amdxhc.sys",
+                                                "size":  188400,
+                                                "sha256":  "E7DDAF462A774E3C5AD2CAE818B42FCA7FD6B00CD98BD12DE54C454CC0581016"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "amd30ryzen",
+                              "architectures":  [
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "amdhub3.cat",
+                                                "size":  10679,
+                                                "sha256":  "0568A7300255E8D88AB1B025617AFCA1C9F3D26314A418F008FA3DEAA1620031"
+                                            },
+                                            {
+                                                "path":  "amdhub3.inf",
+                                                "size":  2591,
+                                                "sha256":  "B5BC256D20B7C16D8E281E1C7C6DDB6CCE3CCD55B2FDD6DCB4F25601AED277C9"
+                                            },
+                                            {
+                                                "path":  "amdhub3.sys",
+                                                "size":  162056,
+                                                "sha256":  "6F92545D55FC765FB7BFFAFEF76858398065D6B1BAFFF5F7AC31F840BF4F5BFD"
+                                            },
+                                            {
+                                                "path":  "amdxhc.inf",
+                                                "size":  1854,
+                                                "sha256":  "B984FEA2B03A5082FF7F95DF8B2C35BE22DB5DE2F1124F936271CBEA6AFBAA7C"
+                                            },
+                                            {
+                                                "path":  "amdxhci.cat",
+                                                "size":  10677,
+                                                "sha256":  "A471526EF15C91F7E8643867DC7530C6AC707728C1B110D9F572B0A69B0EA06D"
+                                            },
+                                            {
+                                                "path":  "amdxhci.sys",
+                                                "size":  348936,
+                                                "sha256":  "AD0AEDA775C44F95B912549959F56D2667B4B0815A777841ABD60BAE9D236A39"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "amd3110013",
+                              "architectures":  [
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "amdRhub3.cat",
+                                                "size":  11031,
+                                                "sha256":  "8865AC39B1E1A7A8F0BACC19189527E1AA3996845EDF790215F07EF5CBBB49E9"
+                                            },
+                                            {
+                                                "path":  "amdRhub3.inf",
+                                                "size":  2573,
+                                                "sha256":  "8AEC4DCC4BD8E7577730F18A23106829EA28A2C2860F3D17449A04E20127A666"
+                                            },
+                                            {
+                                                "path":  "amdRhub3.sys",
+                                                "size":  173248,
+                                                "sha256":  "130437967B6B025943573BEB5D1E39D07205E77544FFAE9ABF8950C7240AD1D6"
+                                            },
+                                            {
+                                                "path":  "amdRxhc.inf",
+                                                "size":  2325,
+                                                "sha256":  "CB64115E2A381913F9E6E0FC47A21433105C608FEB35F95DE5D574D9B9941DF4"
+                                            },
+                                            {
+                                                "path":  "amdRxhci.cat",
+                                                "size":  11029,
+                                                "sha256":  "398DD6D814D3E3AB3C34691472948449D8B629D9AAEA52673D17E79C7CF4DE89"
+                                            },
+                                            {
+                                                "path":  "amdRxhci.sys",
+                                                "size":  359104,
+                                                "sha256":  "8C8DCC4E071A5EB3C6A3E3D314FA807E96E823900A9B29C02599DFA58538AA46"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "amd311053",
+                              "architectures":  [
+                                                    "x86",
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "amdhub31.cat",
+                                                "size":  13142,
+                                                "sha256":  "2EB6830BDDB8B206F0499F5057F8E01433568DB4C026C7C24E9C76EE5375C9D9"
+                                            },
+                                            {
+                                                "path":  "amdhub31.inf",
+                                                "size":  23759,
+                                                "sha256":  "B514192B23ED67460F4E515BAB605D7143960CCB49B494382A1AFB7A55CA0C8A"
+                                            },
+                                            {
+                                                "path":  "amdhub31.msi",
+                                                "size":  116224,
+                                                "sha256":  "B6652F27C7885C135CB29A1A96136D505DA05E8974C59C307D39732AB459D6C6"
+                                            },
+                                            {
+                                                "path":  "amdxhc31.cat",
+                                                "size":  13142,
+                                                "sha256":  "8A73F2BF546F3047A3801DD2F606DA5E97A094C93675CFBFB04F92D9F0B6C82F"
+                                            },
+                                            {
+                                                "path":  "amdxhc31.inf",
+                                                "size":  37352,
+                                                "sha256":  "A95DE3979A8AF18A67BF1A6793C45CC934A7B1A7B336C5874F46DD9C6A36C443"
+                                            },
+                                            {
+                                                "path":  "amdxhc31.msi",
+                                                "size":  116736,
+                                                "sha256":  "78E5B3AA7DF35D9A2D8426B19915DD2986F8008024296C84D636F2B428754179"
+                                            },
+                                            {
+                                                "path":  "x64/amdhub31.sys",
+                                                "size":  154464,
+                                                "sha256":  "BC51A36D3BBB3FD155B1738B59E901ECB03809AAF3098707F73100076F008F7A"
+                                            },
+                                            {
+                                                "path":  "x64/amdxhc31.sys",
+                                                "size":  465248,
+                                                "sha256":  "CD4E891937F5D4386F11C91859503BD73DCCBE7472138741B7431B8C2612A16E"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "ASMedia",
+                              "architectures":  [
+                                                    "x86",
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "amd64/asmthub3.sys",
+                                                "size":  155392,
+                                                "sha256":  "EE388D46F4A5CAA64A8AC2EE12F6008119A172FCF4EF28ACF1BE0088AD114D6E"
+                                            },
+                                            {
+                                                "path":  "amd64/asmtxhci.sys",
+                                                "size":  470272,
+                                                "sha256":  "941EEFF00B47B91FDF6E4DDEDE0B65357A87CF732716571E05A8D818E1538FC5"
+                                            },
+                                            {
+                                                "path":  "amd64/asmtxhcicoinstaller.dll",
+                                                "size":  27904,
+                                                "sha256":  "00DF626066FBC49DDF4C2269ACFD8DDA0C622B1516F5F9B302D85851E4FB2B60"
+                                            },
+                                            {
+                                                "path":  "asmthub3.cat",
+                                                "size":  23330,
+                                                "sha256":  "1E4E3A8435F1971745415124F8FECCE96DC751A4D3D24C2EF8412402DFC0CF88"
+                                            },
+                                            {
+                                                "path":  "asmthub3.inf",
+                                                "size":  19041,
+                                                "sha256":  "3933CFE5BD1DDD3A9015B36421B7FF2E19E69B24BD768F11F0D7BF7522C700C4"
+                                            },
+                                            {
+                                                "path":  "asmtxhci.cat",
+                                                "size":  24218,
+                                                "sha256":  "30461AA15E05BA14A93EE7796BCD25344BB0B2A7A0348EEAABAD09974FEEB295"
+                                            },
+                                            {
+                                                "path":  "asmtxhci.inf",
+                                                "size":  297007,
+                                                "sha256":  "C411343619D2EAA734F7C9400FA1A105AAE44C66C5728FA58E5E2AAA2B80E082"
+                                            },
+                                            {
+                                                "path":  "i386/asmthub3.sys",
+                                                "size":  124672,
+                                                "sha256":  "837491BC1AE5336582E454F0906B2FEC2BCC9FB5D72E304953C9702780DAB6B9"
+                                            },
+                                            {
+                                                "path":  "i386/asmtxhci.sys",
+                                                "size":  378112,
+                                                "sha256":  "138E553CBD0D98AFC50080F5406DE823F3C2F58873048832A3E4D94EA37B6523"
+                                            },
+                                            {
+                                                "path":  "i386/asmtxhcicoinstaller.dll",
+                                                "size":  26368,
+                                                "sha256":  "2EBE438629E350328DD0CC483D344527057A55939FC3386D431746AFA49BE9B4"
+                                            },
+                                            {
+                                                "path":  "ia64/asmthub3.sys",
+                                                "size":  396032,
+                                                "sha256":  "425CB36E8FA84ECCF9D7D8C80E9CC182E1F0C03029E6BEEBD38DD0EFB9074428"
+                                            },
+                                            {
+                                                "path":  "ia64/asmtxhci.sys",
+                                                "size":  1215232,
+                                                "sha256":  "DE24CC8BF9787D811F7AE8BE1D818F0D95C9C1C4ADA201E6F24E9D9F40D4ADE2"
+                                            },
+                                            {
+                                                "path":  "ia64/asmtxhcicoinstaller.dll",
+                                                "size":  41216,
+                                                "sha256":  "899895FF69F93A4F88AB33860BEB749378283B33567F48530864F1F5DB7483EB"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "etron",
+                              "architectures":  [
+                                                    "x86",
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "EtronHUB3.SYS",
+                                                "size":  65408,
+                                                "sha256":  "4E492E1441A5BDEA248A2A908A10D5DB0B9AE530312E243D9C1AFB002794B965"
+                                            },
+                                            {
+                                                "path":  "EtronSTOR.SYS",
+                                                "size":  39296,
+                                                "sha256":  "23D0F90169F9A12C37037D56C87368CA827CFEFA9D7A71341D83EB4D92E32188"
+                                            },
+                                            {
+                                                "path":  "etronxhci.cat",
+                                                "size":  10532,
+                                                "sha256":  "57201CB871E74C9CD41126CA03BEB1C3F3EFDE291D607FDADC312F279567A32D"
+                                            },
+                                            {
+                                                "path":  "EtronXHCI.INF",
+                                                "size":  7842,
+                                                "sha256":  "536C8D08724E0DD45C6D6C7BC52D72FBF3E642AFA94E01EC77D98577673C5260"
+                                            },
+                                            {
+                                                "path":  "EtronXHCI.SYS",
+                                                "size":  94208,
+                                                "sha256":  "4EBF7F1394F0C9F90676802FFF5FC5DC34A8CF703DF347B432936ED09E64422E"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "intel7th",
+                              "architectures":  [
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "iusb3hcs.cat",
+                                                "size":  8563,
+                                                "sha256":  "34526F09F0D76D90055B799C0D511A34455793E4DA4E16B94621A52B989FFA9C"
+                                            },
+                                            {
+                                                "path":  "iusb3hcs.inf",
+                                                "size":  27936,
+                                                "sha256":  "5C2D591A942E2FE09CD93445BF5174E4DA7C9AFCA5069A584FA84F3619264AA1"
+                                            },
+                                            {
+                                                "path":  "iusb3hcs.sys",
+                                                "size":  20464,
+                                                "sha256":  "3423D53842CAB2473EECE6EF90ED25765B3DB9D85EA5D3A4D2C59A947A959F4D"
+                                            },
+                                            {
+                                                "path":  "iusb3hub.cat",
+                                                "size":  8566,
+                                                "sha256":  "B0FD02A07345EC74FF51E7F9C37768E586F07189FC5DC6D3C088982BC014C3A0"
+                                            },
+                                            {
+                                                "path":  "iusb3hub.inf",
+                                                "size":  27876,
+                                                "sha256":  "2315B19502BE4780EA4D79A1BAFC3D1DD7B762A03CAA6D4B024873828C38AFD5"
+                                            },
+                                            {
+                                                "path":  "IUsb3Hub.man",
+                                                "size":  178206,
+                                                "sha256":  "EEFC70358ED93D85FE0872DFB238FEC460D594B76AA6D50D04E88F7E37F90996"
+                                            },
+                                            {
+                                                "path":  "iusb3hub.sys",
+                                                "size":  358896,
+                                                "sha256":  "11757969FCAA14C1DCD4CF06C11BA9EA528C2CD4C6F0C2F5C4EFFFA82AAA22A6"
+                                            },
+                                            {
+                                                "path":  "iusb3xhc.cat",
+                                                "size":  8582,
+                                                "sha256":  "2FE5FED4151D66AFE85B06E4FD6315BA6A37BA0B3283CE1D16989EE1EDCFA575"
+                                            },
+                                            {
+                                                "path":  "iusb3xhc.inf",
+                                                "size":  17994,
+                                                "sha256":  "68AC033212F817F6F8F1A7AA2C8B474CECC053446810047EFDA09AF8B69345A1"
+                                            },
+                                            {
+                                                "path":  "iusb3xhc.man",
+                                                "size":  467270,
+                                                "sha256":  "FC7B21106D1E84E4DB834055B44FB448FB457F458CA71D81F8139E98FC732C97"
+                                            },
+                                            {
+                                                "path":  "iusb3xhc.sys",
+                                                "size":  795632,
+                                                "sha256":  "517938881A8395B36847838407E1BDE2C0A982AF544CECC44C86BEEA382E9E63"
+                                            },
+                                            {
+                                                "path":  "WdfCoInstaller01009.dll",
+                                                "size":  1721576,
+                                                "sha256":  "18487B4FF94EDCCC98ED59D9FCA662D4A1331C5F1E14DF8DB3093256DD9F1C3E"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "intel8th+",
+                              "architectures":  [
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "iusb3hcs.cat",
+                                                "size":  8547,
+                                                "sha256":  "64D15E147CC114C8ADADBE763896DCE04D96F1211691CF07AA9C3FFD7A78F4BE"
+                                            },
+                                            {
+                                                "path":  "iusb3hcs.inf",
+                                                "size":  28598,
+                                                "sha256":  "E22920E0062D5A4F049BAA066FB2E17C9B21E0B1F9B6DAA247F068EBD6DEFF76"
+                                            },
+                                            {
+                                                "path":  "iusb3hcs.sys",
+                                                "size":  23552,
+                                                "sha256":  "89666D6DCD5477AC50B2D73DF9DED1AEBC14FAFBA4120E705603842E7A85F133"
+                                            },
+                                            {
+                                                "path":  "iusb3hub.cat",
+                                                "size":  8622,
+                                                "sha256":  "E6B6DAA1FB6E23DA72DDC6BAEB0E526279ACE98954843FBDD8E180B9273F9421"
+                                            },
+                                            {
+                                                "path":  "iusb3hub.inf",
+                                                "size":  40854,
+                                                "sha256":  "6A120389743A1E4DD25BD92ED7F405B68A0CA8DBFBC59809B5FAEB8A6400EA93"
+                                            },
+                                            {
+                                                "path":  "IUsb3Hub.man",
+                                                "size":  178206,
+                                                "sha256":  "EEFC70358ED93D85FE0872DFB238FEC460D594B76AA6D50D04E88F7E37F90996"
+                                            },
+                                            {
+                                                "path":  "iusb3hub.sys",
+                                                "size":  401408,
+                                                "sha256":  "CD3E47D1A7439D545D7171DC7F17374932F389EB6A008C9906B26ABBE050E62E"
+                                            },
+                                            {
+                                                "path":  "iusb3xhc.cat",
+                                                "size":  11736,
+                                                "sha256":  "AC94266D27F1A813207C89513B38726566F3300EEA54E7BA30F848F99830256F"
+                                            },
+                                            {
+                                                "path":  "iusb3xhc.inf",
+                                                "size":  36384,
+                                                "sha256":  "D4D07E6854E08E80C4049BE5A4B91284B75C2BC412863B53739651F06DA079BF"
+                                            },
+                                            {
+                                                "path":  "iusb3xhc.man",
+                                                "size":  468858,
+                                                "sha256":  "C57D5595CB9B9221C174D1603FBEF3ABBB3BBDD9E9A56B8D05E58AFA14E5851A"
+                                            },
+                                            {
+                                                "path":  "iusb3xhc.sys",
+                                                "size":  816640,
+                                                "sha256":  "F9C2220F17F4D47883D525292254BB71D218C9B2AC1ADEBE3AAF23E3F050D286"
+                                            },
+                                            {
+                                                "path":  "WdfCoInstaller01009.dll",
+                                                "size":  1726464,
+                                                "sha256":  "DC2FB85DA7F6B58B514EE46ED3512B8C5CCBDBB4C51CBEFD712B6E280ADCBA74"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "inteltitan",
+                              "architectures":  [
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "tusb3hub.cat",
+                                                "size":  8992,
+                                                "sha256":  "5903F1DF6A38BDBE783289918D8D14F44C87361D05564C88EE8507AF8562364B"
+                                            },
+                                            {
+                                                "path":  "tusb3hub.inf",
+                                                "size":  40556,
+                                                "sha256":  "D6801D90C3EAB5D9469E54E27B70E5FF6D5896FC9915038CADA46FCA069E2CC8"
+                                            },
+                                            {
+                                                "path":  "tusb3hub.sys",
+                                                "size":  409128,
+                                                "sha256":  "C8875C8D03D0E6EEA028F616A9575DB892F2AD02F421DA817A5CEA27CCAE232C"
+                                            },
+                                            {
+                                                "path":  "tusb3xhc.cat",
+                                                "size":  8992,
+                                                "sha256":  "B0D8A9A0E13C19C08D725DD47D74E4BA82B59B9731E9A1202FCFB7447FF6BD59"
+                                            },
+                                            {
+                                                "path":  "tusb3xhc.inf",
+                                                "size":  30942,
+                                                "sha256":  "6CDD9711203DBA06601D5D5D3D09EF280262F6775D7E68790CC4153B73FB34AA"
+                                            },
+                                            {
+                                                "path":  "tusb3xhc.sys",
+                                                "size":  824872,
+                                                "sha256":  "1FCB9505AAD4374C94CD45A5CDCB8C726AF81ADED490DB3B1268A2954EE55EC5"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "RenesasGen1",
+                              "architectures":  [
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "nusb3co.dll",
+                                                "size":  81920,
+                                                "sha256":  "9F390FF3844EB516CAEB8535EC38759C4291D79A9BFCFEE696610CFB6C7894E3"
+                                            },
+                                            {
+                                                "path":  "nusb3hub.cat",
+                                                "size":  8383,
+                                                "sha256":  "6F3B96A4EC65A2917AC7EFB2962C3C5BEEC999A6E2EBDFD62EADA4035BC85ABC"
+                                            },
+                                            {
+                                                "path":  "nusb3hub.inf",
+                                                "size":  2591,
+                                                "sha256":  "9F7FD10751925976FF4724A89D63651A86DF20A3C26F67D9A77FE58CD3060997"
+                                            },
+                                            {
+                                                "path":  "nusb3hub.sys",
+                                                "size":  107912,
+                                                "sha256":  "407BD335FE7C87DFBD9EDE49BDD828263D8C8D25C8216FF04AC70320E74AE8B6"
+                                            },
+                                            {
+                                                "path":  "nusb3xhc.cat",
+                                                "size":  8780,
+                                                "sha256":  "62C5D1B093111A0201BCC3575D8DD8C8854577C4D9704158409CC5A7CE1C0DE6"
+                                            },
+                                            {
+                                                "path":  "nusb3xhc.inf",
+                                                "size":  2286,
+                                                "sha256":  "58296B391289B399707AF6F275A617775D0AF0426BE9712DF8B50926C179351C"
+                                            },
+                                            {
+                                                "path":  "nusb3xhc.sys",
+                                                "size":  226696,
+                                                "sha256":  "D26C921679888D90EEC6FBFDF3884FF151E4C28FD3920CE7F3AB58A8EEF3845E"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "RenesasGen2",
+                              "architectures":  [
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "rusb3co.dll",
+                                                "size":  81920,
+                                                "sha256":  "2A61157B6134AFD3AE28A48B0EF3D44F3552C93008C5CEBF7C2CAD0D00BE6068"
+                                            },
+                                            {
+                                                "path":  "rusb3hub.cat",
+                                                "size":  8919,
+                                                "sha256":  "C196022A261F14B3C955196497EB711E437A3AFB36AD87622AF2BCB2C4CFD23B"
+                                            },
+                                            {
+                                                "path":  "rusb3hub.inf",
+                                                "size":  2991,
+                                                "sha256":  "47E18F4BB9A9934D55AC19DC7FAA1C5F1DB04214355D534CC040A7DE22F4076F"
+                                            },
+                                            {
+                                                "path":  "rusb3hub.sys",
+                                                "size":  114568,
+                                                "sha256":  "A1BE2758EE21CBFB00E6F32D3C62323D890BD9AD177E880390CFAD9F5326A9B3"
+                                            },
+                                            {
+                                                "path":  "rusb3xhc.cat",
+                                                "size":  9316,
+                                                "sha256":  "4EC1531FC29EB6D9DA6E9626963C09EBC5E5DC624D0E880B5235D8557C353B04"
+                                            },
+                                            {
+                                                "path":  "rusb3xhc.inf",
+                                                "size":  2977,
+                                                "sha256":  "2E738D958A4E1B4C04FA05EAD2D779F23D079CC037C3235257EE58BBB3B9E0B6"
+                                            },
+                                            {
+                                                "path":  "rusb3xhc.sys",
+                                                "size":  230280,
+                                                "sha256":  "3BCA3269A6ECA501508F2BAC56DB9C0B2DAD3DDA853C5FB168E4C628A94E1C83"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "Texas",
+                              "architectures":  [
+                                                    "x86",
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "amd64/tihub3.sys",
+                                                "size":  145904,
+                                                "sha256":  "F0EA6ACCB89C6B9F326D370CA65C8B2957930F714F1A04AFF792105B512BE344"
+                                            },
+                                            {
+                                                "path":  "amd64/tixhci.sys",
+                                                "size":  422392,
+                                                "sha256":  "91E389A94CE5E792F80074ACE4B2A1B2EFE50D4534C983B71F3D70D31592BA20"
+                                            },
+                                            {
+                                                "path":  "coinst-x64/difxapi.dll",
+                                                "size":  519232,
+                                                "sha256":  "BF0798D3A4540B15F45C5B329798A2AC532FF693764948B9B4757265E145216E"
+                                            },
+                                            {
+                                                "path":  "coinst-x64/xHCI_Inst.exe",
+                                                "size":  10240,
+                                                "sha256":  "776ADDEC866996F08A3A295D01A7447CB94C9EEBFC4AADC8B12133268C85DF82"
+                                            },
+                                            {
+                                                "path":  "coinst-x86/difxapi.dll",
+                                                "size":  323648,
+                                                "sha256":  "34998DC12E70CD7DDBF9A190EE52835DBE73488EAB37C0BE7916E0931A754FEB"
+                                            },
+                                            {
+                                                "path":  "coinst-x86/xHCI_Inst.exe",
+                                                "size":  10752,
+                                                "sha256":  "1ACE75E1D4C7C46B0BD2CDFF0EE35BB46FC5EB45918B7B58257C7F047C240926"
+                                            },
+                                            {
+                                                "path":  "i386/tihub3.sys",
+                                                "size":  118264,
+                                                "sha256":  "128D50DD350ACC4E2062A6DA0296F1E6A3139D78D942A250F79A4FDE8A58218F"
+                                            },
+                                            {
+                                                "path":  "i386/tixhci.sys",
+                                                "size":  337400,
+                                                "sha256":  "0941781FD464BAB1C3CF7528670E168236188D16AB00679C876C8E6B0A2E29C4"
+                                            },
+                                            {
+                                                "path":  "LICENSE.txt",
+                                                "size":  2153,
+                                                "sha256":  "3D6C9A34096FFD70F400AA6A7F76A386347213473E5CE104AA5DA3188A48E2C0"
+                                            },
+                                            {
+                                                "path":  "tihub3.cat",
+                                                "size":  8841,
+                                                "sha256":  "E218753025E4EC0327DFE5ADF55042269F60BA1876D44062FCB1544C7D96A10A"
+                                            },
+                                            {
+                                                "path":  "tihub3.inf",
+                                                "size":  4199,
+                                                "sha256":  "CA7D80D811C22D8A145DAFA5A6C00F882E141B4D1853283D32DDF8CAF9C3A0B1"
+                                            },
+                                            {
+                                                "path":  "tixhci.cat",
+                                                "size":  8752,
+                                                "sha256":  "EB461D2F5ECD92DB9E2D085F804C1712F15AFC77C677865A06B03FCC6837F853"
+                                            },
+                                            {
+                                                "path":  "tixhci.inf",
+                                                "size":  4845,
+                                                "sha256":  "B8A50B8BCA7535E2DFC151CFF3D5E3C3E18864DA2BAE9587961FA25C874B2750"
+                                            }
+                                        ]
+                          },
+                          {
+                              "directory":  "via",
+                              "architectures":  [
+                                                    "amd64"
+                                                ],
+                              "files":  [
+                                            {
+                                                "path":  "viahub3.cat",
+                                                "size":  9823,
+                                                "sha256":  "2F8F0D37DDE505AD6034E956928B0A38EFD883A529E5616DD8F456E2B96300AA"
+                                            },
+                                            {
+                                                "path":  "ViaHub3.inf",
+                                                "size":  3977,
+                                                "sha256":  "73C851DC6F76BC97B819E7CD970DD62802261996EE76747484D0EDACCBECB3EF"
+                                            },
+                                            {
+                                                "path":  "ViaHub3.sys",
+                                                "size":  231928,
+                                                "sha256":  "ABB552730326D234ED506E87DDCE68F7C57B68A97A84A76E4F0ACAAE4A1D43FE"
+                                            },
+                                            {
+                                                "path":  "WdfCoInstaller01009.dll",
+                                                "size":  1721576,
+                                                "sha256":  "18487B4FF94EDCCC98ED59D9FCA662D4A1331C5F1E14DF8DB3093256DD9F1C3E"
+                                            },
+                                            {
+                                                "path":  "xhcdrv.cat",
+                                                "size":  9819,
+                                                "sha256":  "D6E54C6B1DF975BE510F9F00987B04C39B9EEEBD722FB9018725CB71F0E454FA"
+                                            },
+                                            {
+                                                "path":  "xhcdrv.inf",
+                                                "size":  4889,
+                                                "sha256":  "199D55D57A3E5F1622ACCF1FD5DE71022B1F2346B3400EAFE75BEF2D1D31D313"
+                                            },
+                                            {
+                                                "path":  "xhcdrv.sys",
+                                                "size":  306680,
+                                                "sha256":  "7F194BB0F600FA983D6A6A07AC4499C4F58810BAD5DF20DDE9C0F9A7595E275C"
+                                            }
+                                        ]
+                          }
+                      ],
+    "nvme":  {
+                 "architecture":  "amd64",
+                 "install_order":  [
+                                       "Windows6.1-KB2990941-v3-x64.cab",
+                                       "Windows6.1-KB3087873-v2-x64.cab"
+                                   ],
+                 "files":  [
+                               {
+                                   "path":  "Windows6.1-KB2990941-v3-x64.cab",
+                                   "size":  6062245,
+                                   "sha256":  "3ECC3FE4E588CC308690093FA65E91B87161E806C2B784C093F6E67A5F3828AA",
+                                   "signer_contains":  "Microsoft Corporation"
+                               },
+                               {
+                                   "path":  "Windows6.1-KB3087873-v2-x64.cab",
+                                   "size":  539077,
+                                   "sha256":  "3589D4F6FA3F024B7F9AA764F0F10D9FB4735F0C6A90CD11C52D4E5FC230EE22",
+                                   "signer_contains":  "Microsoft Corporation"
+                               }
+                           ]
+             }
+}

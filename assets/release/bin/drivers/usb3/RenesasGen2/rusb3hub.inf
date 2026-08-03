@@ -1,0 +1,76 @@
+; ========================================================
+; Copyright (c) 2010-2012 Renesas Electronics Corporation
+; INF file for installing USB 3.0 hub driver.
+; ========================================================
+
+[Version]
+ Signature="$Windows NT$"
+ Class=USB
+ ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+ Provider=%RENESAS%
+ DriverVer=08/21/2012,3.0.23.0
+ CatalogFile=rusb3hub.cat
+
+[SourceDisksNames]
+ 1 = %DISKID%
+
+[SourceDisksFiles]
+ rusb3hub.sys = 1
+
+[DestinationDirs]
+ DefaultDestDir = 12 
+
+[Manufacturer]
+ %RENESAS% = RENESAS,NTamd64
+
+[RENESAS.NTamd64]
+ %RENESAS_USB3\ROOT_HUB30&VID_1912&PID_0014.DeviceDesc% = RUSB3HUB, RENESAS_USB3\ROOT_HUB30&VID_1912&PID_0014
+ %RENESAS_USB3\ROOT_HUB30&VID_1912&PID_0015.DeviceDesc% = RUSB3HUB, RENESAS_USB3\ROOT_HUB30&VID_1912&PID_0015
+ %RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc% = RUSB3HUB, RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_00
+ %RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc% = RUSB3HUB, RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_01
+ %RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc% = RUSB3HUB, RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_02
+ %RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc% = RUSB3HUB, RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_03
+ %RENESAS_USB3\CLASS_09&SUBCLASS_01.DeviceDesc% = RUSB3HUB,RENESAS_USB3\CLASS_09&SUBCLASS_01
+
+[DefaultInstall]
+ CopyINF = rusb3hub.inf
+
+;---------------------
+; RUSB3HUB
+;---------------------
+[RUSB3HUB.NT]
+ CopyFiles = RUSB3HUB.CopyFiles
+
+[RUSB3HUB.CopyFiles]
+ rusb3hub.sys
+
+[RUSB3HUB.NT.Services]
+ AddService = rusb3hub, 0x00000002, RUSB3HUB.AddService, RUSB3HUB.EventLog
+
+[RUSB3HUB.AddService]
+ DisplayName    = %RUSB3HUB.SvcDesc%
+ ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+ StartType      = 3                 ; SERVICE_DEMAND_START
+ ErrorControl   = 1                 ; SERVICE_ERROR_NORMAL
+ ServiceBinary  = %12%\rusb3hub.sys
+ LoadOrderGroup = Base
+
+[RUSB3HUB.EventLog]
+ AddReg = RUSB3HUB.EventLog.AddReg
+
+[RUSB3HUB.EventLog.AddReg]
+ HKR,,"EventMessageFile",0x00020000,"%11%\iologmsg.dll;%12%\rusb3hub.sys"
+ HKR,,"TypesSupported",0x00010001,7
+
+[Strings]
+ RENESAS = "Renesas Electronics"
+ DISKID = "Renesas Electronics USB 3.0 Device Driver Installation Disk"
+ RUSB3HUB.SvcDesc = "Renesas Electronics USB 3.0 Hub Driver (Version 3.0)"
+
+ RENESAS_USB3\ROOT_HUB30&VID_1912&PID_0014.DeviceDesc = "Renesas Electronics USB 3.0 Root Hub"
+ RENESAS_USB3\ROOT_HUB30&VID_1912&PID_0015.DeviceDesc = "Renesas Electronics USB 3.0 Root Hub"
+ RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc = "Renesas Electronics USB Hub"
+ RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc = "Renesas Electronics USB 2.0 Hub"
+ RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc = "Renesas Electronics USB 2.0 Hub"
+ RENESAS_USB3\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc = "Renesas Electronics USB 3.0 Hub"
+ RENESAS_USB3\CLASS_09&SUBCLASS_01.DeviceDesc = "Renesas Electronics USB Hub"

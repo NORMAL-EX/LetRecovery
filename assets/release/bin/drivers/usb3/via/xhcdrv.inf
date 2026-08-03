@@ -1,0 +1,144 @@
+;/*++
+;
+;Copyright (c) VIA Corporation.  All rights reserved.
+;
+;   THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY
+;   KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+;   IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR
+;   PURPOSE.
+;
+;Module Name:
+;
+;    xhcdrv.INF
+;
+;Abstract:
+;    INF file for VIA eXtensible host controller
+;
+;--*/
+
+[Version]
+Signature      = "$WINDOWS NT$"
+Class          = USB
+ClassGuid      = {36FC9E60-C465-11CF-8056-444553540000}
+Provider       = %VIA%
+DriverVer=07/18/2017,6.1.7600.5601
+CatalogFile    = xhcdrv.cat
+
+[DestinationDirs]
+DefaultDestDir  = 12
+
+;-------------------------------------------------------------------------
+; Device Install Section
+;-------------------------------------------------------------------------
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%VIA%=VIA,NTAMD64
+
+[SourceDisksFiles]
+xhcdrv.sys     = 1
+
+[SourceDisksNames]
+1=%DISK_NAME%,
+
+; For XP and later
+[VIA.NTAMD64]
+; DisplayName      Section      DeviceId
+; -----------      -------      --------
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1106&DEV_3432
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1106&DEV_3483
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1458&DEV_3483
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1462&DEV_3483
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1106&DEV_9201
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1106&DEV_9202
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1106&DEV_3515
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1106&DEV_9203
+%XHC.DRVDESC% = xHC_Inst, PCI\VEN_1106&DEV_9204
+
+[xHC_Inst.NT]
+CopyFiles     = xHC.CopyFiles
+
+[xHC.CopyFiles]
+xhcdrv.sys
+
+
+
+[xHC_Inst.NT.Services]
+AddService     = xhcdrv,0x00000002,xHC_Service
+
+[xHC_Service]
+DisplayName    = %xHC.SVCDESC%
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 3                  ; SERVICE_DEMAND_START
+ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\xhcdrv.sys
+LoadOrderGroup = Base
+AddReg         = SpecificParam
+
+[SpecificParam]
+HKR, "Parameters", "IMODI", 0x00010001, 1
+HKR, "Parameters", "MsDelayAfterAddressBsr0", 0x00010001, 20
+HKR, "Parameters", "SecondaryIntrTarget", 0x00010001, 1
+HKR, "Parameters", "RootPortStatusFormat", 0x00010001, 1 ; 0: by port (usb2/3 port: usb2/3 hub port status), 1: xhci
+HKR, "Parameters", "HwTriggerMask", 0x00010001, 0xFFFFFFFF
+HKR, "Parameters", "MaxRootHubReEnumCount", 0x00010001, 3
+HKR, "Parameters", "UsDelayBetweenSeparateTd", 0x00010001, 1000
+HKR, "Parameters", "UsMinLfsBulkUrbCompletionTime", 0x00010001, 160
+HKR, "Parameters", "UsMinSsBulkUrbCompletionTime", 0x00010001, 280
+HKR, "Parameters", "UsMinCtrlUrbCompletionTime", 0x00010001, 0
+HKR, "Parameters", "MsDelayAfterModifyIntegratedHubPp", 0x00010001, 100
+HKR, "Parameters", "FrameWindow", 0x00010001, 0x7FF
+HKR, "Parameters", "DmaEnablerAlignmentRequirement", 0x00010001, 0x00000003     ; FILE_LONG_ALIGNMENT
+HKR, "Parameters", "DisableUpdateFirstTrbCycleBitLast", 0x00010001, 0
+HKR, "Parameters", "DisableSecondaryInterrupters", 0x00010001, 0 
+HKR, "Parameters", "DisableSelectiveSuspend", 0x00010001, 1
+HKR, "Parameters", "DisableSimplifiedBulkHandlingOnBOT", 0x00010001, 0 
+HKR, "Parameters", "DisableRemoteWakeup", 0x00010001, 0 
+HKR, "Parameters", "DisableDynamicRootHubEnum", 0x00010001, 0
+HKR, "Parameters", "DisableIsochBei", 0x00010001, 1
+
+;-------------------------------------------------------------------------
+; WDF Coinstaller installation
+;-------------------------------------------------------------------------
+[DestinationDirs]
+CoInstaller_CopyFiles = 11
+
+[xHC_Inst.NT.CoInstallers]
+AddReg         = CoInstaller_AddReg
+CopyFiles      = CoInstaller_CopyFiles
+
+[CoInstaller_CopyFiles]
+WdfCoInstaller01009.dll
+
+[xHC_Inst.NT.HW]
+AddReg = xHC_HW_AddReg
+
+[xHC_HW_AddReg]
+HKR, "Interrupt Management", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", ,0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 1
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 8
+
+[SourceDisksFiles]
+WdfCoInstaller01009.dll = 1 ; make sure the number matches with SourceDisksNames
+
+[CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller01009.dll,WdfCoInstaller"
+
+[xHC_Inst.NT.Wdf]
+KmdfService    = xhcdrv, xHC_wdfsect
+
+[xHC_wdfsect]
+KmdfLibraryVersion = 1.9
+
+;------------------------------------------------------------------------------
+;  String Definitions
+;------------------------------------------------------------------------------
+
+[Strings]
+VIA            = "VIA"
+xHC.SVCDESC    = "VIA USB eXtensible Host Controller Service"
+xHC.DRVDESC    = "VIA USB eXtensible Host Controller"
+DISK_NAME      = "VIA USB eXtensible Host Controller Install Disk"
+

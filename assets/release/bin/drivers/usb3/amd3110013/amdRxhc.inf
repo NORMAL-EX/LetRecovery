@@ -1,0 +1,90 @@
+;/*++
+;
+;(C) Copyright 2020  Advanced Micro Devices, Inc.
+;
+;Module Name:
+;
+;    amdRxhci.inf
+;
+;Abstract:
+;    INF file for installing AMD RADEON USB3.1 Controller Driver.
+;
+;--*/
+
+[Version]
+Signature="$Windows NT$"
+Class=USB
+ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+Provider=%AMD%
+DriverVer = 05/28/2020,1.0.0.0013
+CatalogFile=amdRxhci.cat
+
+
+[SourceDisksNames]
+1 = %DISKID%
+
+[SourceDisksFiles.amd64]
+amdRxhci.sys = 1, 
+
+[DestinationDirs]
+DefaultDestDir = 12 
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%AMD% = AMD, NTamd64
+
+[AMD.NTamd64]
+%AMDRXHCI.DeviceDesc% = AMDXHCI, PCI\VEN_1002&DEV_7316
+%AMDRXHCI.DeviceDesc% = AMDXHCI, PCI\VEN_1002&DEV_73A6
+%AMDRXHCI.DeviceDesc% = AMDXHCI, PCI\VEN_1002&DEV_73C6
+%AMDRXHCI.DeviceDesc% = AMDXHCI, PCI\VEN_1002&DEV_73E6
+%AMDXHCI.DeviceDesc% = AMDXHCI, PCI\VEN_1022&DEV_15E1
+%AMDXHCI.DeviceDesc% = AMDXHCI, PCI\VEN_1022&DEV_15E0
+
+;---------------------
+; AMDXHCI
+;---------------------
+
+[AMDXHCI.NT]
+CopyFiles = AMDXHCI.CopyFiles
+
+[AMDXHCI.CopyFiles]
+amdRxhci.sys
+
+[AMDXHCI.NT.HW]
+AddReg = AMDXHCI.AddReg.HW
+
+[AMDXHCI.AddReg.HW]
+HKR,"Interrupt Management\MessageSignaledInterruptProperties",MSISupported,0x00010001,1
+
+;-------------- Service installation---------------------
+[AMDXHCI.NT.Services]
+AddService = amdRxhci, 0x00000002, AMDXHCI.AddService, AMDXHCI.EventLog
+
+; -------------- AMDXHCI driver install sections
+[AMDXHCI.AddService]
+DisplayName    = %AMDXHCI.SvcDesc%
+ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+StartType      = 3                 ; SERVICE_DEMAND_START 
+ErrorControl   = 1                 ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\amdRxhci.sys
+LoadOrderGroup = Base
+
+[AMDXHCI.EventLog]
+AddReg = AMDXHCI.EventLog.AddReg
+
+[AMDXHCI.EventLog.AddReg]
+HKR,,"EventMessageFile",0x00020000,"%11%\iologmsg.dll;%12%\amdRxhci.sys"
+HKR,,"TypesSupported",0x00010001,7
+
+[Strings]
+AMD               = "Advanced Micro Devices, Inc"
+DISKID            = "AMD Radeon USB 3.1 Device Driver Installation Disk"
+AMDXHCI.SvcDesc    = "AMD USB3.1 Host Controller Driver"
+AMDRXHCI.DeviceDesc = "AMD Radeon USB3.1 Host Controller - 1.1"
+AMDXHCI.DeviceDesc = "AMD USB3.1 Host Controller - 1.1"
+
+

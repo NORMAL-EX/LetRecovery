@@ -1,0 +1,159 @@
+;*****************************************************************************
+;
+; Name:  tixhci.inf
+;
+; Function:
+;	Install TI XHCI Host Controller Driver 
+;
+; Copyright (c) 2009-2012 TI, portions copyright MCCI
+;
+; 
+;
+; NOTICE: This software is licensed, not sold.  Any modification of this
+; inf file to change the reference to an operating system or to change the
+; reference to a device is not permitted unless authorized in writing by
+; MCCI Corporation
+;
+;*****************************************************************************
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=USB
+ClassGuid={36fc9e60-c465-11cf-8056-444553540000}
+Provider=%Provider%
+DriverVer=04/14/2016, 1.16.6.0
+CatalogFile=tixhci.cat
+
+[SourceDisksNames]
+1=%DiskKey%,"tixhci.sys",,\i386
+
+[SourceDisksNames.x86]
+1=%DiskKey%,"tixhci.sys",,\i386
+
+[SourceDisksNames.amd64]
+1=%DiskKey%,"tixhci.sys",,\amd64
+
+[SourceDisksFiles]
+tixhci.sys=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Manufacturer]
+%TI.MFG%=TI, ntx86, ntamd64
+
+[TI]
+%TI_Product_1%=TI_Product1_Install,PCI\VEN_104C&DEV_8241
+
+[TI.ntamd64]
+%TI_Product_1%=TI_Product1_Install,PCI\VEN_104C&DEV_8241
+
+[TI.ntx86]
+%TI_Product_1%=TI_Product1_Install,PCI\VEN_104C&DEV_8241
+
+[TI_Product1_Install]
+CopyFiles=tixhci.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=TI_Product1_Install.AddReg
+AddReg=TI_Product1_Install_DeviceInterfaceGuids
+AddReg=tixhci.DeviceInterfaceGuids
+AddReg=tixhci.ProductDeviceInterfaceGuids
+
+[TI_Product1_Install.AddReg]
+HKR,,DataPumpDebugFlags, 0x10001, 0xa003
+HKR,,DataPumpHubAutoSuspendEnable, 0x10001, 0
+HKR,,DataPumpMinU1TimeoutEncodeValue, 0x10001, 0
+HKR,,DataPumpMinU2TimeoutEncodeValue, 0x10001, 0
+HKR,,DataPumpPowerOffWhenSleep, 0x10001, 0
+HKR,,DataPumpU1Enable, 0x10001, 0
+HKR,,DataPumpU2Enable, 0x10001, 0
+HKR,,DataPumpWakeOnConnectionEnable, 0x10001, 0x1
+HKR,,DataPumpWakeOnDisconnectionEnable, 0x10001, 0x1
+HKR,,DataPumpWakeOnOvercurrentEnable, 0x10001, 0x1
+HKR,,DataPumpXhcdEventRingSegmentSize, 0x10001, 0x400
+HKR,,DataPumpXhcdMaxEventRingSize, 0x10001, 0x400
+HKR,,DataPumpXhcdNumOfBufferSegment, 0x10001, 0x8
+HKR,,DataPumpXhcdPollPortStatusTime, 0x10001, 0x7d0
+HKR,,DataPumpXhcdRxThreshold, 0x10001, 0x28400000
+HKR,,DataPumpXhcdSystemResumeRecoveryTime, 0x10001, 0x7d0
+HKR,,DataPumpXhcdTxThreshold, 0x10001, 0x22040000
+HKR,,DataPumpXhcdWiringValue, 0x10001, 0x6360a
+HKR,,Disable64BitDma, 0x10001, 0
+HKR,,EnableClockPower, 0x10001, 0x1
+HKR,,EnableDynamicD3, 0x10001, 0x2
+HKR,,EnablePciBridge, 0x10001, 0x1
+HKR,,EnableXiWake, 0x10001, 0x2
+HKR,,WdkSelectiveSuspendEnable, 0x10001, 0x1
+HKR,,WmiOverCurrentMessageDisable, 0x10001, 0
+
+[TI_Product1_Install.hw]
+AddReg=tixhci.MsiConfig
+
+[TI_Product1_Install.ntamd64]
+CopyFiles=tixhci.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=TI_Product1_Install.AddReg
+AddReg=TI_Product1_Install_DeviceInterfaceGuids
+AddReg=tixhci.DeviceInterfaceGuids
+AddReg=tixhci.ProductDeviceInterfaceGuids
+
+[TI_Product1_Install.ntamd64.hw]
+AddReg=tixhci.MsiConfig
+
+[TI_Product1_Install.ntamd64.services]
+AddService=tixhci,0x00000002,tixhci_service
+
+[TI_Product1_Install.ntx86]
+CopyFiles=tixhci.CopyFiles
+DriverVer=04/14/2016, 1.16.6.0
+AddReg=TI_Product1_Install.AddReg
+AddReg=TI_Product1_Install_DeviceInterfaceGuids
+AddReg=tixhci.DeviceInterfaceGuids
+AddReg=tixhci.ProductDeviceInterfaceGuids
+
+[TI_Product1_Install.ntx86.hw]
+AddReg=tixhci.MsiConfig
+
+[TI_Product1_Install.ntx86.services]
+AddService=tixhci,0x00000002,tixhci_service
+
+[TI_Product1_Install.services]
+AddService=tixhci,0x00000002,tixhci_service
+
+[TI_Product1_Install_DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_TI_XHCI_8241_02,, "{8e5f3630-a165-11df-867e-005056a72cb6}"
+
+[tixhci.CopyFiles]
+tixhci.sys
+
+[tixhci.DeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_TI_XHCI,, "{106c44a2-8ac7-11df-867e-005056a72cb62}"
+
+[tixhci.MsiConfig]
+HKR, "Interrupt Management", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 1
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 1
+
+[tixhci.ProductDeviceInterfaceGuids]
+HKR,DeviceInterfaces,GUID_DEVINTERFACE_TI_USB3_DRIVERS,, "{0e16b110-8ac7-11df-867e-005056a72cb6}"
+
+[tixhci_service]
+DisplayName=%tixhci_ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\tixhci.sys
+LoadOrderGroup=Base
+
+[Strings]
+DiskKey = "TI USB 3.0 Install Disk"
+Provider = "Texas Instruments Incorporated"
+TI.MFG = "Texas Instruments Incorporated"
+TI_Product_1 = "Texas Instruments XHCI Controller"
+tixhci_ServiceDescription = "TI XHCI Service"
+
+;**** end of file ****

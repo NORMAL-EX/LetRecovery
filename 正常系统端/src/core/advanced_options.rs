@@ -1,5 +1,6 @@
 //! Advanced installation options and their offline application boundary.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -148,16 +149,24 @@ impl AdvancedOptions {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     }
 
-    /// 获取 Win7 驱动目录（bin\drivers\{usb3|nvme}）
-    fn get_win7_driver_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
-        let base = Self::get_program_dir();
-        let usb3 = base
-            .as_ref()
-            .map(|b| b.join("bin").join("drivers").join("usb3"));
-        let nvme = base
-            .as_ref()
-            .map(|b| b.join("bin").join("drivers").join("nvme"));
-        (usb3, nvme)
+    fn get_win7_drivers_root() -> Option<PathBuf> {
+        Self::get_program_dir().map(|base| base.join("bin").join("drivers"))
+    }
+
+    fn target_win7_architecture(
+        target_partition: &str,
+    ) -> anyhow::Result<lr_core::win7_driver_package::Windows7TargetArchitecture> {
+        match crate::core::system_utils::get_system_architecture(target_partition) {
+            crate::core::system_utils::SystemArchitecture::X86 => {
+                Ok(lr_core::win7_driver_package::Windows7TargetArchitecture::X86)
+            }
+            crate::core::system_utils::SystemArchitecture::Amd64 => {
+                Ok(lr_core::win7_driver_package::Windows7TargetArchitecture::Amd64)
+            }
+            architecture => {
+                anyhow::bail!("无法确认 Windows 7 目标系统架构，拒绝注入驱动: {architecture:?}")
+            }
+        }
     }
 
     /// 获取 XP 驱动目录（bin\drivers\xp\{usb3|nvme|ahci}）
@@ -901,38 +910,47 @@ log=0
         system_hive: &str,
         default_hive: &str,
     ) -> anyhow::Result<()> {
-        let usb3_path = if !self.win7_usb3_driver_path.is_empty() {
-            Some(PathBuf::from(&self.win7_usb3_driver_path))
-        } else {
-            let (usb3_dir, _) = Self::get_win7_driver_dirs();
-            usb3_dir
-        };
-
-        let usb3_path = match usb3_path {
-            Some(p) if p.exists() => p,
-            Some(p) => anyhow::bail!("Win7 USB3驱动目录不存在: {}", p.display()),
-            None => anyhow::bail!("无法获取 Win7 USB3驱动目录"),
-        };
-
-        log::info!(
-            "[ADVANCED] Win7: 处理USB3驱动目录: {}",
-            usb3_path.to_string_lossy()
-        );
+        let custom_path = (!self.win7_usb3_driver_path.trim().is_empty())
+            .then(|| PathBuf::from(&self.win7_usb3_driver_path));
+        let architecture = Self::target_win7_architecture(target_partition)?;
         with_offline_hives_unloaded(
             default_loaded,
             software_hive,
             system_hive,
             default_hive,
             || {
-                let processed_path = Self::prepare_win7_drivers(&usb3_path)?;
                 let dism = crate::core::dism::Dism::new();
                 let image_path = format!("{}\\", target_partition);
-                let import_result =
-                    dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy());
-                if processed_path != usb3_path {
-                    let _ = std::fs::remove_dir_all(&processed_path);
+                if let Some(path) = custom_path.as_ref() {
+                    if !path.is_dir() {
+                        anyhow::bail!("Win7 USB3驱动目录不存在: {}", path.display());
+                    }
+                    let processed = Self::prepare_win7_drivers(path)?;
+                    let result =
+                        dism.add_drivers_offline(&image_path, &processed.to_string_lossy());
+                    if processed != *path {
+                        let _ = std::fs::remove_dir_all(&processed);
+                    }
+                    result?;
+                } else {
+                    let root = Self::get_win7_drivers_root()
+                        .ok_or_else(|| anyhow::anyhow!("无法获取内置 Win7 驱动目录"))?;
+                    let payload =
+                        lr_core::win7_driver_package::verify_windows7_driver_payload(&root)?;
+                    let hardware_ids = lr_core::driver::list_present_hardware_ids()
+                        .context("枚举当前 USB 控制器硬件 ID 失败")?;
+                    let packages = payload.select_usb3_packages(&hardware_ids, architecture)?;
+                    if packages.is_empty() {
+                        log::warn!("[ADVANCED] 当前硬件没有匹配的内置 Win7 USB3 驱动包，安全跳过");
+                    }
+                    for package in packages {
+                        log::info!(
+                            "[ADVANCED] Win7: 注入匹配的 USB3 驱动包: {}",
+                            package.display()
+                        );
+                        dism.add_drivers_offline(&image_path, &package.to_string_lossy())?;
+                    }
                 }
-                import_result?;
                 log::info!("[ADVANCED] Win7 USB3驱动注入成功");
                 Ok(())
             },
@@ -950,38 +968,44 @@ log=0
         system_hive: &str,
         default_hive: &str,
     ) -> anyhow::Result<()> {
-        let nvme_path = if !self.win7_nvme_driver_path.is_empty() {
-            Some(PathBuf::from(&self.win7_nvme_driver_path))
-        } else {
-            let (_, nvme_dir) = Self::get_win7_driver_dirs();
-            nvme_dir
-        };
-
-        let nvme_path = match nvme_path {
-            Some(p) if p.exists() => p,
-            Some(p) => anyhow::bail!("Win7 NVMe驱动目录不存在: {}", p.display()),
-            None => anyhow::bail!("无法获取 Win7 NVMe驱动目录"),
-        };
-
-        log::info!(
-            "[ADVANCED] Win7: 处理NVMe驱动目录: {}",
-            nvme_path.to_string_lossy()
-        );
+        let custom_path = (!self.win7_nvme_driver_path.trim().is_empty())
+            .then(|| PathBuf::from(&self.win7_nvme_driver_path));
+        let architecture = Self::target_win7_architecture(target_partition)?;
         with_offline_hives_unloaded(
             default_loaded,
             software_hive,
             system_hive,
             default_hive,
             || {
-                let processed_path = Self::prepare_win7_drivers(&nvme_path)?;
-                let dism = crate::core::dism::Dism::new();
                 let image_path = format!("{}\\", target_partition);
-                let import_result =
-                    dism.add_drivers_offline(&image_path, &processed_path.to_string_lossy());
-                if processed_path != nvme_path {
-                    let _ = std::fs::remove_dir_all(&processed_path);
+                if let Some(path) = custom_path.as_ref() {
+                    if !path.is_dir() {
+                        anyhow::bail!("Win7 NVMe驱动目录不存在: {}", path.display());
+                    }
+                    let processed = Self::prepare_win7_drivers(path)?;
+                    let dism = crate::core::dism::Dism::new();
+                    let result =
+                        dism.add_drivers_offline(&image_path, &processed.to_string_lossy());
+                    if processed != *path {
+                        let _ = std::fs::remove_dir_all(&processed);
+                    }
+                    result?;
+                } else {
+                    let root = Self::get_win7_drivers_root()
+                        .ok_or_else(|| anyhow::anyhow!("无法获取内置 Win7 驱动目录"))?;
+                    let payload =
+                        lr_core::win7_driver_package::verify_windows7_driver_payload(&root)?;
+                    let cabs = payload.nvme_cabs(architecture)?;
+                    let dism = crate::core::dism_cmd::DismCmd::new()
+                        .context("初始化 DISM 命令边界失败")?;
+                    for cab in cabs {
+                        log::info!(
+                            "[ADVANCED] Win7: 按依赖顺序安装 NVMe 更新: {}",
+                            cab.display()
+                        );
+                        dism.add_package_offline_simple(&image_path, &cab.to_string_lossy(), None)?;
+                    }
                 }
-                import_result?;
                 log::info!("[ADVANCED] Win7 NVMe驱动注入成功");
                 Ok(())
             },

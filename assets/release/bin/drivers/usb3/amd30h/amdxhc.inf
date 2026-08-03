@@ -1,0 +1,77 @@
+; ========================================================
+; Copyright (c) 2009-2018 Advanced Micro Devices, INC.
+; INF file for installing USB 3.0 host controller driver.
+; ========================================================
+
+[Version]
+ Signature="$Windows NT$"
+ Class=USB
+ ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+ Provider=%AMD%
+ DriverVer=12/04/2018,1.1.0.0276
+ CatalogFile=amdxhc.cat
+
+[SourceDisksNames]
+ 1 = %DISKID%
+
+[SourceDisksFiles.x86]
+ amdxhc.sys = 1, \x86
+
+[SourceDisksFiles.amd64]
+ amdxhc.sys = 1, \x64
+
+[DestinationDirs]
+ DefaultDestDir = 12 
+
+[Manufacturer]
+ %AMD% = AMD, NTx86.5.1.1, NTamd64.5.1.1
+
+[AMD.NTx86.5.1.1]
+ %AMDXHC.DeviceDesc% = AMDXHC, PCI\VEN_1022&DEV_7812
+ %AMDXHC.DeviceDesc% = AMDXHC, PCI\VEN_1022&DEV_7814
+ %AMDXHC.DeviceDesc% = AMDXHC, PCI\VEN_1022&DEV_7914
+
+[AMD.NTamd64.5.1.1]
+ %AMDXHC.DeviceDesc% = AMDXHC, PCI\VEN_1022&DEV_7812
+ %AMDXHC.DeviceDesc% = AMDXHC, PCI\VEN_1022&DEV_7814
+ %AMDXHC.DeviceDesc% = AMDXHC, PCI\VEN_1022&DEV_7914
+
+
+;---------------------
+; AMDXHC
+;---------------------
+[AMDXHC.NT]
+ CopyFiles = AMDXHC.CopyFiles
+
+[AMDXHC.CopyFiles]
+ amdxhc.sys
+
+[AMDXHC.NT.HW]
+ AddReg = AMDXHC.AddReg.HW
+
+[AMDXHC.AddReg.HW]
+ HKR,"Interrupt Management\MessageSignaledInterruptProperties",MSISupported,0x00010001,1
+
+[AMDXHC.NT.Services]
+ AddService = amdxhc, 0x00000002, AMDXHC.AddService, AMDXHC.EventLog
+
+[AMDXHC.AddService]
+ DisplayName    = %AMDXHC.SvcDesc%
+ ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+ StartType      = 3                 ; SERVICE_DEMAND_START 
+ ErrorControl   = 1                 ; SERVICE_ERROR_NORMAL
+ ServiceBinary  = %12%\amdxhc.sys
+ LoadOrderGroup = Base
+
+[AMDXHC.EventLog]
+ AddReg = AMDXHC.EventLog.AddReg
+
+[AMDXHC.EventLog.AddReg]
+ HKR,,"EventMessageFile",0x00020000,"%11%\iologmsg.dll;%12%\amdxhc.sys"
+ HKR,,"TypesSupported",0x00010001,7
+
+[Strings]
+ AMD               = "Advanced Micro Devices"
+ DISKID            = "AMD USB 3.0 Device Driver Installation Disk"
+ AMDXHC.SvcDesc    = "AMD USB 3.0 Host Controller Driver"
+ AMDXHC.DeviceDesc = "AMD USB 3.0 Host Controller"

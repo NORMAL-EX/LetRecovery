@@ -1,0 +1,99 @@
+; ========================================================
+; Copyright (c) 2009-2018 Advanced Micro Devices, INC.
+; INF file for installing USB 3.0 hub driver.
+; ========================================================
+
+[Version]
+ Signature="$Windows NT$"
+ Class=USB
+ ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
+ Provider=%AMD%
+ DriverVer=12/04/2018,1.1.0.0276
+ CatalogFile=amdhub30.cat
+
+[SourceDisksNames]
+ 1 = %DISKID%
+
+[SourceDisksFiles.x86]
+ amdhub30.sys = 1, \x86
+
+[SourceDisksFiles.amd64]
+ amdhub30.sys = 1, \x64
+
+[DestinationDirs]
+ DefaultDestDir = 12 
+
+[Manufacturer]
+ %AMD% = AMD, NTx86.6.1.1, NTx86.6.0.1, NTamd64.6.1.1, NTamd64.6.0.1
+
+[AMD.NTx86.6.0.1]
+ %AMDUSB30\ROOT_HUB30.DeviceDesc%                     = AMDHUB30, AMDUSB30\ROOT_HUB30
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03
+ %AMDUSB30\CLASS_09&SUBCLASS_01.DeviceDesc%           = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_01
+
+[AMD.NTx86.6.1.1]
+ %AMDUSB30\ROOT_HUB30.DeviceDesc%                     = AMDHUB30, AMDUSB30\ROOT_HUB30
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03
+ %AMDUSB30\CLASS_09&SUBCLASS_01.DeviceDesc%           = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_01
+
+[AMD.NTamd64.6.0.1]
+ %AMDUSB30\ROOT_HUB30.DeviceDesc%                     = AMDHUB30, AMDUSB30\ROOT_HUB30
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03
+ %AMDUSB30\CLASS_09&SUBCLASS_01.DeviceDesc%           = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_01
+
+[AMD.NTamd64.6.1.1]
+ %AMDUSB30\ROOT_HUB30.DeviceDesc%                     = AMDHUB30, AMDUSB30\ROOT_HUB30
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02
+ %AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc%   = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03
+ %AMDUSB30\CLASS_09&SUBCLASS_01.DeviceDesc%           = AMDHUB30, AMDUSB30\CLASS_09&SUBCLASS_01
+
+
+;---------------------
+; AMDHUB30
+;---------------------
+[AMDHUB30.NT]
+ CopyFiles = AMDHUB30.CopyFiles
+
+[AMDHUB30.CopyFiles]
+ amdhub30.sys
+
+[AMDHUB30.NT.Services]
+ AddService = amdhub30, 0x00000002, AMDHUB30.AddService, AMDHUB30.EventLog
+
+[AMDHUB30.AddService]
+ DisplayName    = %AMDHUB30.SvcDesc%
+ ServiceType    = 1                 ; SERVICE_KERNEL_DRIVER
+ StartType      = 3                 ; SERVICE_DEMAND_START
+ ErrorControl   = 1                 ; SERVICE_ERROR_NORMAL
+ ServiceBinary  = %12%\amdhub30.sys
+ LoadOrderGroup = Base
+
+[AMDHUB30.EventLog]
+ AddReg = AMDHUB30.EventLog.AddReg
+
+[AMDHUB30.EventLog.AddReg]
+ HKR,,"EventMessageFile",0x00020000,"%11%\iologmsg.dll;%12%\amdhub30.sys"
+ HKR,,"TypesSupported",0x00010001,7
+
+[Strings]
+ AMD                                              = "Advanced Micro Devices"
+ DISKID                                           = "AMD USB 3.0 Device Driver Installation Disk"
+ AMDHUB30.SvcDesc                                 = "AMD USB 3.0 Hub Driver"
+
+ AMDUSB30\ROOT_HUB30.DeviceDesc                   = "AMD USB 3.0 Root Hub"
+ AMDUSB30\CLASS_09&SUBCLASS_00&PROT_00.DeviceDesc = "AMD USB Hub"
+ AMDUSB30\CLASS_09&SUBCLASS_00&PROT_01.DeviceDesc = "AMD USB 2.0 Hub"
+ AMDUSB30\CLASS_09&SUBCLASS_00&PROT_02.DeviceDesc = "AMD USB 2.0 MTT Hub"
+ AMDUSB30\CLASS_09&SUBCLASS_00&PROT_03.DeviceDesc = "AMD USB 3.0 Hub"
+ AMDUSB30\CLASS_09&SUBCLASS_01.DeviceDesc         = "AMD USB Hub"
