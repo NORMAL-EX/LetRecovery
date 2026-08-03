@@ -2389,7 +2389,6 @@
     "无法继续系统安装": "Cannot continue system installation",
     "镜像已下载，但安装前一致性检查未通过。": "The image was downloaded, but its pre-installation consistency check failed.",
     "正在验证远程镜像链接、断点续传能力和分卷信息...": "Validating the remote image link, resume support, and volume metadata...",
-    "远程镜像支持断点续传；开始安装时将先下载镜像。": "The remote image supports resumed downloads. It will be downloaded before installation starts.",
     "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD/ISO 直链）：{}": "Failed to read the remote system image (only direct WIM/ESD/ISO links with resume support are accepted): {}",
     "无法可靠确定引导模式，已停止安装：{}": "The firmware boot mode could not be determined reliably, so installation was stopped: {}"
   }

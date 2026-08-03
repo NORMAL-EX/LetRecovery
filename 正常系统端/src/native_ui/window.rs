@@ -11671,10 +11671,7 @@ unsafe extern "system" fn window_proc(
                                 SendMessageW(handles.image_volume, 0x014E, WPARAM(0), LPARAM(0));
                             state.update_storage_driver_default();
                             state.update_advanced_install_context();
-                            set_text(
-                                handles.status,
-                                &crate::tr!("远程镜像支持断点续传；开始安装时将先下载镜像。"),
-                            );
+                            set_text(handles.status, "");
                         }
                         state.source_has_unattend = false;
                         state.apply_unattend_default();
