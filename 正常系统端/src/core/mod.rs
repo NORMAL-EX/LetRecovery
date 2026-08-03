@@ -54,6 +54,7 @@ pub mod pca_preflight;
 pub mod pe;
 pub mod quick_partition;
 pub mod registry;
+pub mod remote_wim_metadata;
 pub mod system_info;
 pub mod system_utils;
 mod tool_actions;

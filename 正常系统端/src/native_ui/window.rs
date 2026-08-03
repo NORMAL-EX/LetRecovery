@@ -275,6 +275,8 @@ const WM_TOOL_WORKER_READY: u32 = 0x8005;
 const WM_PARTITIONS_READY: u32 = 0x8006;
 const WM_INSTALL_PARTITION_SELECTION_CHANGED: u32 = 0x8007;
 const WM_AUTO_IMAGE_DISCOVERY_READY: u32 = 0x8008;
+const WM_EASY_CATALOGUE_READY: u32 = 0x8009;
+const WM_REMOTE_IMAGE_INFO_READY: u32 = 0x800a;
 const BACKUP_TIMER_ID: usize = 1;
 const DOWNLOAD_TIMER_ID: usize = 2;
 const INSTALL_TIMER_ID: usize = 3;
@@ -321,6 +323,14 @@ fn should_apply_auto_discovered_image(
     discovery_pending
         && current_generation == discovery_generation
         && current_text.trim().is_empty()
+}
+
+fn easy_catalogue_needs_resolution(config: &crate::download::config::EasyModeConfig) -> bool {
+    config
+        .system
+        .iter()
+        .flat_map(|entry| entry.values())
+        .any(|system| system.volume.is_empty() && !system.os_download.trim().is_empty())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -402,6 +412,30 @@ struct ImageInfoMessage {
 struct AutoImageDiscoveryMessage {
     generation: u64,
     path: Option<std::path::PathBuf>,
+}
+
+struct EasyCatalogueMessage {
+    generation: u64,
+    result: Result<crate::download::config::EasyModeConfig, String>,
+}
+
+struct RemoteImageInfoMessage {
+    generation: u64,
+    requested_url: String,
+    result: Result<Vec<lr_core::image_meta::ImageInfo>, String>,
+}
+
+#[derive(Clone, Debug)]
+struct RemoteImageDownload {
+    plan: crate::core::native_download_controller::DownloadPlan,
+    allow_insecure_http: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingRemoteInstall {
+    intent: crate::core::native_install_controller::StartInstallIntent,
+    expected_image: crate::core::dism::ImageInfo,
+    downloaded_path: std::path::PathBuf,
 }
 
 struct PartitionRefreshMessage {
@@ -1792,7 +1826,11 @@ struct NativeWindow {
     pe_catalogue: Vec<OnlinePE>,
     easy_page: Option<EasyModePage>,
     easy_controller: NativeEasyModeController,
+    pending_easy_catalogue: Option<crate::download::config::EasyModeConfig>,
+    easy_catalogue_generation: u64,
     pending_easy_install: Option<crate::core::native_easy_mode_controller::StartEasyInstallIntent>,
+    remote_image_download: Option<RemoteImageDownload>,
+    pending_remote_install: Option<PendingRemoteInstall>,
     pending_install_after_pe_download:
         Option<crate::core::native_install_controller::StartInstallIntent>,
     pending_backup_after_pe_download: Option<BackupLaunchIntent>,
@@ -1894,6 +1932,7 @@ impl NativeWindow {
             effective_easy_mode_enabled(app_config.easy_mode_enabled, is_pe_environment),
             app_config.easy_mode_settings_tip_dismissed,
         );
+        let mut pending_easy_catalogue = None;
         if let Some(remote) = &config.remote_config {
             let catalogue = ConfigManager {
                 systems: remote
@@ -1929,7 +1968,15 @@ impl NativeWindow {
                 .easy_content
                 .as_deref()
                 .and_then(|content| serde_json::from_str(content).ok());
-            easy_controller.set_catalogue(easy_config.as_ref(), false);
+            if easy_config
+                .as_ref()
+                .is_some_and(easy_catalogue_needs_resolution)
+            {
+                easy_controller.set_catalogue(None, true);
+                pending_easy_catalogue = easy_config;
+            } else {
+                easy_controller.set_catalogue(easy_config.as_ref(), false);
+            }
         }
         let (tool_worker_sender, tool_worker_messages) = std::sync::mpsc::channel();
         Self {
@@ -1977,7 +2024,11 @@ impl NativeWindow {
             pe_catalogue,
             easy_page: None,
             easy_controller,
+            pending_easy_catalogue,
+            easy_catalogue_generation: 0,
             pending_easy_install: None,
+            remote_image_download: None,
+            pending_remote_install: None,
             pending_install_after_pe_download: None,
             pending_backup_after_pe_download: None,
             pending_expand_after_pe_download: None,
@@ -2039,6 +2090,39 @@ impl NativeWindow {
 
     fn easy_mode_enabled(&self) -> bool {
         effective_easy_mode_enabled(self.app_config.easy_mode_enabled, self.is_pe_environment)
+    }
+
+    unsafe fn request_easy_catalogue_resolution(
+        &mut self,
+        hwnd: HWND,
+        config: crate::download::config::EasyModeConfig,
+    ) {
+        self.easy_catalogue_generation = self.easy_catalogue_generation.wrapping_add(1);
+        let generation = self.easy_catalogue_generation;
+        self.easy_controller.set_catalogue(None, true);
+        if let Some(page) = &mut self.easy_page {
+            page.update(&self.easy_controller.view());
+        }
+        let window = hwnd.0 as usize;
+        std::thread::spawn(move || {
+            // Easy-mode configuration originates from the fixed HTTPS catalogue.  Preserve its
+            // narrowly scoped compatibility with historical Microsoft HTTP payload URLs.
+            let result = crate::core::remote_wim_metadata::resolve_easy_mode_config(&config, true)
+                .map_err(|error| error.to_string());
+            let payload = Box::into_raw(Box::new(EasyCatalogueMessage { generation, result }));
+            unsafe {
+                if PostMessageW(
+                    HWND(window as *mut _),
+                    WM_EASY_CATALOGUE_READY,
+                    WPARAM(0),
+                    LPARAM(payload as isize),
+                )
+                .is_err()
+                {
+                    drop(Box::from_raw(payload));
+                }
+            }
+        });
     }
 
     fn has_active_long_task(&self) -> bool {
@@ -3260,15 +3344,20 @@ impl NativeWindow {
             self.scale(26),
             true,
         );
+        let mut visible_nav_row = 0i32;
         for (i, item) in h.nav.iter().enumerate() {
+            if self.easy_mode_enabled() && matches!(i, 2 | 3) {
+                continue;
+            }
             let _ = MoveWindow(
                 *item,
                 self.scale(10),
-                self.scale(58 + i as i32 * 34),
+                self.scale(58 + visible_nav_row * 34),
                 nav - self.scale(20),
                 self.scale(28),
                 true,
             );
+            visible_nav_row += 1;
         }
         let _ = MoveWindow(
             h.title,
@@ -3956,6 +4045,11 @@ impl NativeWindow {
             self.advanced_visible = false;
         }
         self.page = page;
+        for (index, control) in h.nav.into_iter().enumerate() {
+            let visible =
+                !(self.progress_visible || self.easy_mode_enabled() && matches!(index, 2 | 3));
+            let _ = ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE });
+        }
         let (title, description, primary) = match page {
             Page::Install => (
                 crate::tr!("系统安装"),
@@ -4826,6 +4920,7 @@ impl NativeWindow {
             return;
         }
         self.auto_image_discovery_pending = false;
+        self.remote_image_download = None;
         let Some(handles) = self.handles else { return };
         // A visible path must never remain associated with metadata from a previously inspected
         // source. Invalidate the generation immediately; a late result is discarded by the
@@ -4868,12 +4963,39 @@ impl NativeWindow {
         let path = get_text(handles.image_edit);
         let path = path.trim();
         if !path.is_empty() {
-            self.load_image_path(hwnd, std::path::PathBuf::from(path));
+            if path.to_ascii_lowercase().starts_with("https://")
+                || path.to_ascii_lowercase().starts_with("http://")
+            {
+                let download_directory = dirs::download_dir()
+                    .unwrap_or_else(|| std::env::temp_dir().join("LetRecovery"));
+                match crate::core::native_download_controller::plan_remote_system_image(
+                    path,
+                    download_directory,
+                    lr_core::download_integrity::IntegrityRequirement::NotProvided,
+                    self.app_config.allow_insecure_http_downloads,
+                    self.app_config.download_threads,
+                ) {
+                    Ok(plan) => self.load_remote_image_url(
+                        hwnd,
+                        RemoteImageDownload {
+                            plan,
+                            allow_insecure_http: self.app_config.allow_insecure_http_downloads,
+                        },
+                    ),
+                    Err(error) => set_text(
+                        handles.status,
+                        &crate::tr!("无法读取远程系统镜像：{}", error),
+                    ),
+                }
+            } else {
+                self.load_image_path(hwnd, std::path::PathBuf::from(path));
+            }
         }
     }
 
     unsafe fn load_image_path(&mut self, hwnd: HWND, path: std::path::PathBuf) {
         self.auto_image_discovery_pending = false;
+        self.remote_image_download = None;
         let Some(h) = self.handles else { return };
         if let Some(previous) = self.mounted_iso.take() {
             if let Err(error) =
@@ -4900,6 +5022,59 @@ impl NativeWindow {
             path.to_string_lossy().into_owned(),
             self.image_request_generation,
         );
+    }
+
+    unsafe fn load_remote_image_url(&mut self, hwnd: HWND, source: RemoteImageDownload) {
+        self.auto_image_discovery_pending = false;
+        let Some(handles) = self.handles else { return };
+        if let Some(previous) = self.mounted_iso.take() {
+            if let Err(error) =
+                crate::core::iso::IsoMounter::unmount_iso_by_path(&previous.to_string_lossy())
+            {
+                log::warn!("切换远程镜像前卸载 ISO 失败: {error}");
+            }
+        }
+        self.image_edit_programmatic_change = true;
+        set_text(handles.image_edit, &source.plan.url);
+        self.image_edit_programmatic_change = false;
+        self.image_volumes.clear();
+        self.effective_image_path = None;
+        self.xp_i386_source = None;
+        self.source_has_unattend = false;
+        self.clear_pca_target_detection();
+        self.update_advanced_install_context();
+        let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
+        self.set_install_volume_row_visible(hwnd, false);
+        let _ = EnableWindow(handles.primary, false);
+        set_text(handles.status, &crate::tr!("正在读取远程系统镜像卷..."));
+        self.image_request_generation = self.image_request_generation.wrapping_add(1);
+        let generation = self.image_request_generation;
+        let url = source.plan.url.clone();
+        let allow_insecure_http = source.allow_insecure_http;
+        self.remote_image_download = Some(source);
+        let window = hwnd.0 as usize;
+        std::thread::spawn(move || {
+            let result =
+                crate::core::remote_wim_metadata::read_remote_image_info(&url, allow_insecure_http)
+                    .map_err(|error| error.to_string());
+            let payload = Box::into_raw(Box::new(RemoteImageInfoMessage {
+                generation,
+                requested_url: url,
+                result,
+            }));
+            unsafe {
+                if PostMessageW(
+                    HWND(window as *mut _),
+                    WM_REMOTE_IMAGE_INFO_READY,
+                    WPARAM(0),
+                    LPARAM(payload as isize),
+                )
+                .is_err()
+                {
+                    drop(Box::from_raw(payload));
+                }
+            }
+        });
     }
 
     fn request_image_info(&self, hwnd: HWND, path: String, generation: u64) {
@@ -5276,6 +5451,27 @@ impl NativeWindow {
                             plan.filename,
                             plan.save_directory.display()
                         );
+                        if intent == DownloadIntent::InstallSelected
+                            && self.download_controller.category() == ResourceCategory::SystemImage
+                            && std::path::Path::new(&plan.filename)
+                                .extension()
+                                .and_then(|extension| extension.to_str())
+                                .is_some_and(|extension| {
+                                    matches!(extension.to_ascii_lowercase().as_str(), "wim" | "esd")
+                                })
+                        {
+                            self.select_page(hwnd, Page::Install);
+                            self.load_remote_image_url(
+                                hwnd,
+                                RemoteImageDownload {
+                                    plan,
+                                    // The plan came verbatim from the fixed HTTPS catalogue and
+                                    // already passed the controller's scoped legacy-HTTP policy.
+                                    allow_insecure_http: true,
+                                },
+                            );
+                            return;
+                        }
                         match NativeDownloadExecutor::start(plan) {
                             Ok(worker) => self.show_download_progress(hwnd, worker),
                             Err(error) => {
@@ -9516,8 +9712,15 @@ impl NativeWindow {
             .easy_content
             .as_deref()
             .and_then(crate::download::config::EasyModeConfig::parse);
-        self.easy_controller
-            .set_catalogue(easy_config.as_ref(), false);
+        if easy_config
+            .as_ref()
+            .is_some_and(easy_catalogue_needs_resolution)
+        {
+            self.request_easy_catalogue_resolution(hwnd, easy_config.expect("checked above"));
+        } else {
+            self.easy_controller
+                .set_catalogue(easy_config.as_ref(), false);
+        }
         let easy_mode_enabled = self.easy_mode_enabled();
         if let Some(page) = &mut self.easy_page {
             page.update(&self.easy_controller.view());
@@ -9669,6 +9872,7 @@ impl NativeWindow {
         let mut completion = None;
         let mut follow_up_result = None;
         let mut easy_install = None;
+        let mut remote_install = None;
         let mut pe_install = None;
         let mut pe_backup = None;
         let mut pe_expand = None;
@@ -9746,6 +9950,7 @@ impl NativeWindow {
                     );
                     follow_up_result = Some(follow_up);
                     easy_install = self.pending_easy_install.take();
+                    remote_install = self.pending_remote_install.take();
                     pe_install = self.pending_install_after_pe_download.take();
                     pe_backup = self.pending_backup_after_pe_download.take();
                     pe_expand = self.pending_expand_after_pe_download.take();
@@ -9753,6 +9958,7 @@ impl NativeWindow {
                 }
                 DownloadWorkerMessage::Cancelled => {
                     self.pending_easy_install = None;
+                    self.pending_remote_install = None;
                     self.pending_install_after_pe_download = None;
                     self.pending_backup_after_pe_download = None;
                     self.pending_expand_after_pe_download = None;
@@ -9765,6 +9971,7 @@ impl NativeWindow {
                 }
                 DownloadWorkerMessage::Failed(error) => {
                     self.pending_easy_install = None;
+                    self.pending_remote_install = None;
                     self.pending_install_after_pe_download = None;
                     self.pending_backup_after_pe_download = None;
                     self.pending_expand_after_pe_download = None;
@@ -9785,6 +9992,7 @@ impl NativeWindow {
         }
         if disconnected && !terminal {
             self.pending_easy_install = None;
+            self.pending_remote_install = None;
             self.pending_install_after_pe_download = None;
             self.pending_backup_after_pe_download = None;
             self.pending_expand_after_pe_download = None;
@@ -9825,6 +10033,8 @@ impl NativeWindow {
         }
         if let Some(intent) = easy_install {
             self.start_easy_install_after_download(hwnd, intent);
+        } else if let Some(pending) = remote_install {
+            self.start_remote_install_after_download(hwnd, pending);
         } else if let Some(intent) = pe_install {
             self.start_install_execution(hwnd, intent);
         } else if pe_backup.is_some() {
@@ -9835,6 +10045,104 @@ impl NativeWindow {
                 dialog.show_modeless();
             }
             self.start_expand_c_execution(hwnd, request);
+        }
+    }
+
+    unsafe fn start_remote_install_after_download(
+        &mut self,
+        hwnd: HWND,
+        pending: PendingRemoteInstall,
+    ) {
+        let inspected = match crate::core::native_image_source::inspect_image_source(
+            &pending.downloaded_path,
+        ) {
+            Ok(source) => source,
+            Err(error) => {
+                self.fail_remote_install_after_download(error.to_string());
+                return;
+            }
+        };
+        let crate::core::native_image_source::InspectedImageSource::WimFamily {
+            volumes,
+            mounted_iso,
+            ..
+        } = inspected
+        else {
+            discard_stale_inspected_source(inspected);
+            self.fail_remote_install_after_download(crate::tr!(
+                "下载完成的文件不是可用的 WIM 或 ESD 系统镜像。"
+            ));
+            return;
+        };
+        if let Some(path) = mounted_iso {
+            let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(&path.to_string_lossy());
+        }
+        let Some(actual) = volumes.iter().find(|image| {
+            image.index == pending.expected_image.index && is_installable_image(image)
+        }) else {
+            self.fail_remote_install_after_download(crate::tr!(
+                "下载后的镜像中已找不到先前选择的安装卷。"
+            ));
+            return;
+        };
+        if !remote_image_identity_matches(&pending.expected_image, actual) {
+            self.fail_remote_install_after_download(crate::tr!(
+                "下载后的镜像卷信息与下载前读取的元数据不一致，已停止安装。"
+            ));
+            return;
+        }
+        let selected_position = volumes
+            .iter()
+            .filter(|image| is_installable_image(image))
+            .position(|image| image.index == pending.expected_image.index)
+            .unwrap_or_default();
+        let mut intent = pending.intent;
+        intent.image_path = pending.downloaded_path.to_string_lossy().into_owned();
+        if let Some(handles) = self.handles {
+            self.image_edit_programmatic_change = true;
+            set_text(handles.image_edit, &intent.image_path);
+            self.image_edit_programmatic_change = false;
+            self.image_volumes = volumes.into_iter().filter(is_installable_image).collect();
+            let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
+            for volume in &self.image_volumes {
+                let label = wide(format!("{}. {}", volume.index, volume.name));
+                let _ = SendMessageW(
+                    handles.image_volume,
+                    0x0143,
+                    WPARAM(0),
+                    LPARAM(label.as_ptr() as isize),
+                );
+            }
+            let _ = SendMessageW(
+                handles.image_volume,
+                0x014E,
+                WPARAM(selected_position),
+                LPARAM(0),
+            );
+        }
+        self.effective_image_path = Some(intent.image_path.clone());
+        self.xp_i386_source = None;
+        self.mounted_iso = None;
+        self.source_has_unattend = false;
+        self.refresh_source_unattend();
+        self.update_unattend_conflict();
+        self.update_storage_driver_default();
+        self.update_advanced_install_context();
+        self.download_follow_up = None;
+        self.remote_image_download = None;
+        self.leave_progress_to(hwnd, Page::Install);
+        self.start_install_execution(hwnd, intent);
+    }
+
+    unsafe fn fail_remote_install_after_download(&mut self, detail: String) {
+        self.download_follow_up = None;
+        if let Some(page) = &mut self.progress_page {
+            let mut state = page.state().clone();
+            state.status = ProgressStatus::Failed;
+            state.current_step = crate::tr!("无法继续系统安装");
+            state.detail = detail;
+            state.status_text = crate::tr!("镜像已下载，但安装前一致性检查未通过。");
+            page.update(state);
         }
     }
 
@@ -9851,45 +10159,78 @@ impl NativeWindow {
                     return;
                 }
             };
-        let (effective_image_path, selected_image, mounted_iso) = match inspected {
-            crate::core::native_image_source::InspectedImageSource::WimFamily {
-                effective_image_path,
-                volumes,
-                mounted_iso,
-                ..
-            } => {
-                let Some(volume) = volumes.iter().find(|volume| {
-                    volume.index == intent.volume_number && is_installable_image(volume)
-                }) else {
-                    if let Some(path) = mounted_iso {
-                        let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(
-                            &path.to_string_lossy(),
-                        );
+        let (effective_image_path, selected_image, mounted_iso) =
+            match inspected {
+                crate::core::native_image_source::InspectedImageSource::WimFamily {
+                    effective_image_path,
+                    volumes,
+                    mounted_iso,
+                    ..
+                } => {
+                    let Some(volume) = volumes.iter().find(|volume| {
+                        volume.index == intent.volume_number && is_installable_image(volume)
+                    }) else {
+                        if let Some(path) = mounted_iso {
+                            let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(
+                                &path.to_string_lossy(),
+                            );
+                        }
+                        self.fail_easy_install_after_download(crate::tr!(
+                            "下载的系统镜像中不存在配置指定的可安装卷，请刷新在线资源后重试。"
+                        ));
+                        return;
+                    };
+                    let has_remote_identity = intent.expected_major_version.is_some()
+                        || intent.expected_minor_version.is_some()
+                        || intent.expected_build.is_some()
+                        || intent.expected_architecture.is_some()
+                        || intent.expected_installation_type.is_some();
+                    let remote_identity_matches =
+                        intent
+                            .expected_major_version
+                            .is_none_or(|expected| volume.major_version == Some(expected))
+                            && intent
+                                .expected_minor_version
+                                .is_none_or(|expected| volume.minor_version == Some(expected))
+                            && intent
+                                .expected_build
+                                .is_none_or(|expected| volume.build == Some(expected))
+                            && intent
+                                .expected_architecture
+                                .is_none_or(|expected| volume.architecture == Some(expected))
+                            && intent.expected_installation_type.as_deref().is_none_or(
+                                |expected| expected.eq_ignore_ascii_case(&volume.installation_type),
+                            );
+                    if has_remote_identity && !remote_identity_matches {
+                        if let Some(path) = mounted_iso {
+                            let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(
+                                &path.to_string_lossy(),
+                            );
+                        }
+                        self.fail_easy_install_after_download(crate::tr!(
+                            "下载后的镜像卷信息与下载前读取的元数据不一致，已停止安装。"
+                        ));
+                        return;
                     }
+                    (
+                        effective_image_path,
+                        SelectedImageMetadata {
+                            volume_index: volume.index,
+                            major_version: volume.major_version,
+                            minor_version: volume.minor_version,
+                            architecture: volume.architecture,
+                        },
+                        mounted_iso,
+                    )
+                }
+                other => {
+                    discard_stale_inspected_source(other);
                     self.fail_easy_install_after_download(crate::tr!(
-                        "下载的系统镜像中不存在配置指定的可安装卷，请刷新在线资源后重试。"
+                        "下载完成的文件不是可用的 WIM、ESD 或 SWM 系统镜像。"
                     ));
                     return;
-                };
-                (
-                    effective_image_path,
-                    SelectedImageMetadata {
-                        volume_index: volume.index,
-                        major_version: volume.major_version,
-                        minor_version: volume.minor_version,
-                        architecture: volume.architecture,
-                    },
-                    mounted_iso,
-                )
-            }
-            other => {
-                discard_stale_inspected_source(other);
-                self.fail_easy_install_after_download(crate::tr!(
-                    "下载完成的文件不是可用的 WIM、ESD 或 SWM 系统镜像。"
-                ));
-                return;
-            }
-        };
+                }
+            };
         if self.mounted_iso != mounted_iso {
             if let Some(previous) = self.mounted_iso.take() {
                 let _ =
@@ -10071,6 +10412,42 @@ impl NativeWindow {
                         intent.target_partition,
                         intent.volume_index
                     );
+                    if let Some(remote) = self.remote_image_download.clone() {
+                        let downloaded_path =
+                            remote.plan.save_directory.join(&remote.plan.filename);
+                        let selected = self.handles.and_then(|handles| {
+                            let index =
+                                SendMessageW(handles.image_volume, 0x0147, WPARAM(0), LPARAM(0)).0;
+                            self.image_volumes
+                                .get(usize::try_from(index).ok()?)
+                                .cloned()
+                        });
+                        let Some(expected_image) = selected else {
+                            if let Some(handles) = self.handles {
+                                set_text(handles.status, &crate::tr!("请选择要安装的镜像卷。"));
+                            }
+                            return;
+                        };
+                        match NativeDownloadExecutor::start(remote.plan) {
+                            Ok(worker) => {
+                                self.pending_remote_install = Some(PendingRemoteInstall {
+                                    intent,
+                                    expected_image,
+                                    downloaded_path,
+                                });
+                                self.show_download_progress(hwnd, worker);
+                            }
+                            Err(error) => {
+                                if let Some(handles) = self.handles {
+                                    set_text(
+                                        handles.status,
+                                        &crate::tr!("无法启动镜像下载：{}", error),
+                                    );
+                                }
+                            }
+                        }
+                        return;
+                    }
                     self.start_install_execution(hwnd, intent);
                 }
                 Err(error) => {
@@ -10662,6 +11039,35 @@ fn is_installable_image(volume: &crate::core::dism::ImageInfo) -> bool {
     true
 }
 
+fn dism_image_from_core(image: lr_core::image_meta::ImageInfo) -> crate::core::dism::ImageInfo {
+    crate::core::dism::ImageInfo {
+        index: image.index,
+        name: image.name,
+        size_bytes: image.size_bytes,
+        installation_type: image.installation_type,
+        major_version: image.major_version,
+        minor_version: image.minor_version,
+        build: image.build,
+        architecture: image.architecture,
+        image_type: image.image_type,
+        verified_installable: image.verified_installable,
+    }
+}
+
+fn remote_image_identity_matches(
+    expected: &crate::core::dism::ImageInfo,
+    actual: &crate::core::dism::ImageInfo,
+) -> bool {
+    expected.index == actual.index
+        && expected.major_version == actual.major_version
+        && expected.minor_version == actual.minor_version
+        && expected.build == actual.build
+        && expected.architecture == actual.architecture
+        && expected
+            .installation_type
+            .eq_ignore_ascii_case(&actual.installation_type)
+}
+
 unsafe fn discard_stale_inspected_source(
     source: crate::core::native_image_source::InspectedImageSource,
 ) {
@@ -10780,6 +11186,9 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
             HINSTANCE(instance.0),
             Some((&mut *state as *mut NativeWindow).cast()),
         )?;
+        if let Some(config) = state.pending_easy_catalogue.take() {
+            state.request_easy_catalogue_resolution(hwnd, config);
+        }
         let _ = SendMessageW(
             hwnd,
             WM_SETICON,
@@ -11201,6 +11610,107 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_REMOTE_IMAGE_INFO_READY => {
+            if let Some(state) = state {
+                let message = Box::from_raw(lparam.0 as *mut RemoteImageInfoMessage);
+                let current_url = state
+                    .handles
+                    .map(|handles| get_text(handles.image_edit))
+                    .unwrap_or_default();
+                if message.generation != state.image_request_generation
+                    || current_url != message.requested_url
+                {
+                    return LRESULT(0);
+                }
+                let Some(handles) = state.handles else {
+                    return LRESULT(0);
+                };
+                match message.result {
+                    Ok(images) => {
+                        state.image_volumes = images
+                            .into_iter()
+                            .map(dism_image_from_core)
+                            .filter(is_installable_image)
+                            .collect();
+                        let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
+                        for volume in &state.image_volumes {
+                            let label = wide(format!("{}. {}", volume.index, volume.name));
+                            let _ = SendMessageW(
+                                handles.image_volume,
+                                0x0143,
+                                WPARAM(0),
+                                LPARAM(label.as_ptr() as isize),
+                            );
+                        }
+                        if state.image_volumes.is_empty() {
+                            state.effective_image_path = None;
+                            state.remote_image_download = None;
+                            set_text(
+                                handles.status,
+                                &crate::tr!("远程系统镜像中没有可用的安装卷。"),
+                            );
+                        } else {
+                            state.effective_image_path = Some(message.requested_url);
+                            let _ =
+                                SendMessageW(handles.image_volume, 0x014E, WPARAM(0), LPARAM(0));
+                            state.update_storage_driver_default();
+                            state.update_advanced_install_context();
+                            set_text(
+                                handles.status,
+                                &crate::tr!("远程镜像卷读取完成；开始安装时将先下载镜像。"),
+                            );
+                        }
+                        state.source_has_unattend = false;
+                        state.apply_unattend_default();
+                        state.set_install_volume_row_visible(hwnd, !state.image_volumes.is_empty());
+                        state.update_unattend_conflict();
+                        state.request_pca_target_detection(hwnd);
+                        state.update_pca_detection_status();
+                        state.update_install_primary_state();
+                    }
+                    Err(error) => {
+                        state.image_volumes.clear();
+                        state.effective_image_path = None;
+                        state.remote_image_download = None;
+                        state.set_install_volume_row_visible(hwnd, false);
+                        state.clear_pca_target_detection();
+                        state.update_advanced_install_context();
+                        set_text(
+                            handles.status,
+                            &crate::tr!("读取远程系统镜像失败：{}", error),
+                        );
+                        let _ = EnableWindow(handles.primary, false);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_EASY_CATALOGUE_READY => {
+            if let Some(state) = state {
+                let message = Box::from_raw(lparam.0 as *mut EasyCatalogueMessage);
+                if message.generation == state.easy_catalogue_generation {
+                    match message.result {
+                        Ok(config) => state.easy_controller.set_catalogue(Some(&config), false),
+                        Err(error) => {
+                            log::warn!("远程系统镜像元数据读取失败: {error}");
+                            state.easy_controller.set_catalogue(None, false);
+                        }
+                    }
+                    let easy_mode_enabled = state.easy_mode_enabled();
+                    if let Some(page) = &mut state.easy_page {
+                        page.update(&state.easy_controller.view());
+                        if state.page != Page::Install
+                            || !easy_mode_enabled
+                            || state.advanced_visible
+                            || state.progress_visible
+                        {
+                            page.show(false);
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_COMMAND => {
             if let Some(state) = state {
                 let command_id = (wparam.0 & 0xffff) as u16;
@@ -11417,8 +11927,12 @@ unsafe extern "system" fn window_proc(
                 match command_id {
                     ID_NAV_INSTALL => state.select_page(hwnd, Page::Install),
                     ID_NAV_BACKUP => state.select_page(hwnd, Page::Backup),
-                    ID_NAV_DOWNLOAD => state.select_page(hwnd, Page::Download),
-                    ID_NAV_TOOLS => state.select_page(hwnd, Page::Tools),
+                    ID_NAV_DOWNLOAD if !state.easy_mode_enabled() => {
+                        state.select_page(hwnd, Page::Download)
+                    }
+                    ID_NAV_TOOLS if !state.easy_mode_enabled() => {
+                        state.select_page(hwnd, Page::Tools)
+                    }
                     ID_NAV_HARDWARE => state.select_page(hwnd, Page::Hardware),
                     ID_NAV_ABOUT => state.select_page(hwnd, Page::About),
                     ID_ADVANCED if state.page == Page::Hardware => state.save_hardware_report(hwnd),
@@ -12654,8 +13168,11 @@ unsafe fn draw_line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF
 #[cfg(test)]
 mod tests {
     use super::{
-        image_architecture_label, should_apply_auto_discovered_image, HardwareCopyFeedback,
+        easy_catalogue_needs_resolution, image_architecture_label,
+        should_apply_auto_discovered_image, HardwareCopyFeedback,
     };
+    use crate::download::config::{EasyModeConfig, EasyModeSystem};
+    use std::collections::HashMap;
 
     #[test]
     fn hardware_copy_feedback_expires_back_to_the_normal_caption() {
@@ -12687,5 +13204,20 @@ mod tests {
         ));
         assert!(!should_apply_auto_discovered_image(true, 5, 4, ""));
         assert!(!should_apply_auto_discovered_image(false, 0, 0, ""));
+    }
+
+    #[test]
+    fn url_only_easy_catalogue_requests_remote_volume_resolution() {
+        let config = EasyModeConfig {
+            system: vec![HashMap::from([(
+                "Windows".to_owned(),
+                EasyModeSystem {
+                    os_logo: String::new(),
+                    os_download: "https://example.com/install.wim".to_owned(),
+                    volume: Vec::new(),
+                },
+            )])],
+        };
+        assert!(easy_catalogue_needs_resolution(&config));
     }
 }

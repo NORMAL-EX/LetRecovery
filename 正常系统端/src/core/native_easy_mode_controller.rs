@@ -35,6 +35,11 @@ impl EasyLogoSource {
 pub struct EasyVolumeEntry {
     pub number: u32,
     pub name: String,
+    pub major_version: Option<u16>,
+    pub minor_version: Option<u16>,
+    pub build: Option<u32>,
+    pub architecture: Option<u16>,
+    pub installation_type: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +63,11 @@ impl EasySystemEntry {
                 .map(|volume| EasyVolumeEntry {
                     number: volume.number,
                     name: volume.name,
+                    major_version: volume.major_version,
+                    minor_version: volume.minor_version,
+                    build: volume.build,
+                    architecture: volume.architecture,
+                    installation_type: volume.installation_type,
                 })
                 .collect(),
         }
@@ -95,6 +105,11 @@ pub struct StartEasyInstallIntent {
     pub download_directory: PathBuf,
     pub download_path: PathBuf,
     pub volume_number: u32,
+    pub expected_major_version: Option<u16>,
+    pub expected_minor_version: Option<u16>,
+    pub expected_build: Option<u32>,
+    pub expected_architecture: Option<u16>,
+    pub expected_installation_type: Option<String>,
     pub system_partition_index: usize,
     pub download_then_install: bool,
     pub easy_mode_auto_install: bool,
@@ -301,8 +316,12 @@ impl NativeEasyModeController {
             system_partition_index.ok_or(EasyModeValidationError::MissingSystemPartition)?;
         let filename = system
             .download_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(&system.download_url)
             .split('/')
             .next_back()
+            .filter(|value| !value.is_empty())
             .unwrap_or("system.esd")
             .to_string();
         let username = current_username
@@ -334,6 +353,11 @@ impl NativeEasyModeController {
             filename,
             download_directory: download_directory.to_path_buf(),
             volume_number: volume.number,
+            expected_major_version: volume.major_version,
+            expected_minor_version: volume.minor_version,
+            expected_build: volume.build,
+            expected_architecture: volume.architecture,
+            expected_installation_type: volume.installation_type.clone(),
             system_partition_index,
             download_then_install: true,
             easy_mode_auto_install: true,
@@ -358,6 +382,7 @@ mod tests {
                     volume: vec![EasyModeVolume {
                         number: 6,
                         name: "专业版".to_string(),
+                        ..Default::default()
                     }],
                 },
             )])],
@@ -428,6 +453,19 @@ mod tests {
         );
         assert_eq!(intent.prefs.advanced_options.volume_label, "OS");
         assert_eq!(intent.prefs.advanced_options.username, "Alice");
+    }
+
+    #[test]
+    fn install_filename_does_not_include_url_query_or_fragment() {
+        let mut config = catalogue();
+        let system = config.system[0].values_mut().next().unwrap();
+        system.os_download = "https://example.com/windows7.wim?token=secret#ignored".to_owned();
+        let mut controller = NativeEasyModeController::new(true, false);
+        controller.set_catalogue(Some(&config), false);
+        let intent = controller
+            .start_install_intent(Some(0), Path::new("D:/downloads"), None)
+            .unwrap();
+        assert_eq!(intent.filename, "windows7.wim");
     }
 
     #[test]

@@ -3,6 +3,118 @@
 //! 从原 `core/wimgapi.rs` 抽取的纯逻辑部分（不依赖任何 DLL），用于解析
 //! WIM/ESD 的 XML 元数据并推断镜像类型。
 
+use std::fmt;
+
+pub const WIM_HEADER_SIZE: usize = 208;
+pub const MAX_WIM_XML_BYTES: u64 = 32 * 1024 * 1024;
+
+/// WIM header 中 XML data resource 的位置和长度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WimXmlResource {
+    pub offset: u64,
+    pub stored_size: u64,
+    pub original_size: u64,
+    pub flags: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WimHeaderError(&'static str);
+
+impl fmt::Display for WimHeaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for WimHeaderError {}
+
+/// Parse the XML resource descriptor from a complete v1 WIM header.
+///
+/// A resource header is a packed 56-bit stored size followed by 8 flag bits,
+/// then a 64-bit file offset and a 64-bit original size.  The XML descriptor
+/// starts at byte 72; bytes 48..64 belong to the lookup-table resource and
+/// must never be interpreted as XML coordinates.
+pub fn parse_wim_xml_resource(
+    header: &[u8],
+    file_size: Option<u64>,
+) -> Result<WimXmlResource, WimHeaderError> {
+    if header.len() < WIM_HEADER_SIZE {
+        return Err(WimHeaderError("WIM header is truncated"));
+    }
+    if &header[..8] != b"MSWIM\0\0\0" {
+        return Err(WimHeaderError("invalid WIM signature"));
+    }
+    let declared_header_size = u32::from_le_bytes(
+        header[8..12]
+            .try_into()
+            .map_err(|_| WimHeaderError("WIM header size is missing"))?,
+    ) as usize;
+    if declared_header_size < WIM_HEADER_SIZE || declared_header_size > header.len() {
+        return Err(WimHeaderError("unsupported WIM header size"));
+    }
+
+    let packed = u64::from_le_bytes(
+        header[72..80]
+            .try_into()
+            .map_err(|_| WimHeaderError("WIM XML resource size is missing"))?,
+    );
+    let stored_size = packed & 0x00ff_ffff_ffff_ffff;
+    let flags = (packed >> 56) as u8;
+    let offset = u64::from_le_bytes(
+        header[80..88]
+            .try_into()
+            .map_err(|_| WimHeaderError("WIM XML resource offset is missing"))?,
+    );
+    let original_size = u64::from_le_bytes(
+        header[88..96]
+            .try_into()
+            .map_err(|_| WimHeaderError("WIM XML resource length is missing"))?,
+    );
+    if offset == 0 || stored_size == 0 || original_size == 0 {
+        return Err(WimHeaderError("WIM XML resource is empty"));
+    }
+    if stored_size > MAX_WIM_XML_BYTES || original_size > MAX_WIM_XML_BYTES {
+        return Err(WimHeaderError("WIM XML resource exceeds the safety limit"));
+    }
+    // WIM XML is stored verbatim.  Compressed or spanned resource flags would
+    // require resource decompression and cannot be treated as UTF-16 bytes.
+    if flags & 0x0c != 0 || stored_size != original_size {
+        return Err(WimHeaderError(
+            "unsupported compressed or spanned WIM XML resource",
+        ));
+    }
+    let end = offset
+        .checked_add(stored_size)
+        .ok_or(WimHeaderError("WIM XML resource range overflows"))?;
+    if file_size.is_some_and(|size| end > size) {
+        return Err(WimHeaderError("WIM XML resource is outside the file"));
+    }
+    Ok(WimXmlResource {
+        offset,
+        stored_size,
+        original_size,
+        flags,
+    })
+}
+
+pub fn decode_wim_xml(data: &[u8]) -> Result<String, WimHeaderError> {
+    let data = data.strip_prefix(&[0xff, 0xfe]).unwrap_or(data);
+    if data.is_empty() || data.len() & 1 != 0 {
+        return Err(WimHeaderError("WIM XML is not valid UTF-16LE"));
+    }
+    let mut words = data
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    while words.last() == Some(&0) {
+        words.pop();
+    }
+    if words.is_empty() {
+        return Err(WimHeaderError("WIM XML is empty"));
+    }
+    String::from_utf16(&words).map_err(|_| WimHeaderError("WIM XML contains invalid UTF-16LE"))
+}
+
 /// 压缩类型常量（与 wimlib/wimgapi 取值一致：NONE=0 / XPRESS=1 / LZX=2 / LZMS=3）
 pub const WIM_COMPRESS_NONE: u32 = 0;
 pub const WIM_COMPRESS_XPRESS: u32 = 1;
@@ -423,6 +535,44 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_xml_resource_from_the_documented_header_slot() {
+        let mut header = [0u8; WIM_HEADER_SIZE];
+        header[..8].copy_from_slice(b"MSWIM\0\0\0");
+        header[8..12].copy_from_slice(&(WIM_HEADER_SIZE as u32).to_le_bytes());
+        header[72..80].copy_from_slice(&15_534u64.to_le_bytes());
+        header[80..88].copy_from_slice(&5_000u64.to_le_bytes());
+        header[88..96].copy_from_slice(&15_534u64.to_le_bytes());
+
+        let resource = parse_wim_xml_resource(&header, Some(20_534)).unwrap();
+        assert_eq!(resource.offset, 5_000);
+        assert_eq!(resource.stored_size, 15_534);
+        assert_eq!(resource.original_size, 15_534);
+    }
+
+    #[test]
+    fn rejects_compressed_xml_resource_and_out_of_file_range() {
+        let mut header = [0u8; WIM_HEADER_SIZE];
+        header[..8].copy_from_slice(b"MSWIM\0\0\0");
+        header[8..12].copy_from_slice(&(WIM_HEADER_SIZE as u32).to_le_bytes());
+        header[72..80].copy_from_slice(&(100u64 | (0x04u64 << 56)).to_le_bytes());
+        header[80..88].copy_from_slice(&200u64.to_le_bytes());
+        header[88..96].copy_from_slice(&100u64.to_le_bytes());
+        assert!(parse_wim_xml_resource(&header, Some(300)).is_err());
+
+        header[72..80].copy_from_slice(&100u64.to_le_bytes());
+        assert!(parse_wim_xml_resource(&header, Some(299)).is_err());
+    }
+
+    #[test]
+    fn decodes_utf16le_xml_with_bom() {
+        let xml = "<WIM><IMAGE INDEX=\"1\"/></WIM>";
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+        bytes.extend([0, 0, 0, 0]);
+        assert_eq!(decode_wim_xml(&bytes).unwrap(), xml);
+    }
 
     // 标准安装镜像（单卷，NAME 优先）
     #[test]

@@ -2366,6 +2366,17 @@
     "执行前目标分区大小溢出。": "Die Größe der Zielpartition ist vor der Ausführung übergelaufen.",
     "执行前供体分区大小溢出。": "Die Größe der Geberpartition ist vor der Ausführung übergelaufen.",
     "相邻分区转移的当前与最终总容量不一致，请重新检查分区布局。": "Die aktuelle und endgültige Gesamtkapazität der benachbarten Übertragung stimmen nicht überein. Prüfen Sie das Partitionslayout erneut.",
-    "执行前供体分区几何溢出。": "Die Geometrie der Geberpartition ist vor der Ausführung übergelaufen."
+    "执行前供体分区几何溢出。": "Die Geometrie der Geberpartition ist vor der Ausführung übergelaufen.",
+    "无法读取远程系统镜像：{}": "Das Remote-Systemabbild konnte nicht gelesen werden: {}",
+    "正在读取远程系统镜像卷...": "Volumes des Remote-Systemabbilds werden gelesen...",
+    "远程系统镜像中没有可用的安装卷。": "Das Remote-Systemabbild enthält kein installierbares Volume.",
+    "远程镜像卷读取完成；开始安装时将先下载镜像。": "Die Remote-Abbildvolumes sind bereit. Das Abbild wird vor der Installation heruntergeladen.",
+    "读取远程系统镜像失败：{}": "Remote-Systemabbild konnte nicht gelesen werden: {}",
+    "无法启动镜像下载：{}": "Der Abbild-Download konnte nicht gestartet werden: {}",
+    "下载完成的文件不是可用的 WIM 或 ESD 系统镜像。": "Die heruntergeladene Datei ist kein verwendbares WIM- oder ESD-Systemabbild.",
+    "下载后的镜像中已找不到先前选择的安装卷。": "Das zuvor ausgewählte Installationsvolume fehlt im heruntergeladenen Abbild.",
+    "下载后的镜像卷信息与下载前读取的元数据不一致，已停止安装。": "Die Metadaten des heruntergeladenen Abbilds stimmen nicht überein; die Installation wurde beendet.",
+    "无法继续系统安装": "Die Systeminstallation kann nicht fortgesetzt werden",
+    "镜像已下载，但安装前一致性检查未通过。": "Das Abbild wurde heruntergeladen, bestand aber die Konsistenzprüfung nicht."
   }
 }

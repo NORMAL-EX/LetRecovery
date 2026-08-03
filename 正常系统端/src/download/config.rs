@@ -485,22 +485,34 @@ impl ConfigManager {
 }
 
 /// 小白模式分卷信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EasyModeVolume {
     /// 实际分卷号（WIM索引）
     pub number: u32,
     /// 分卷显示名称
     pub name: String,
+    #[serde(default)]
+    pub major_version: Option<u16>,
+    #[serde(default)]
+    pub minor_version: Option<u16>,
+    #[serde(default)]
+    pub build: Option<u32>,
+    #[serde(default)]
+    pub architecture: Option<u16>,
+    #[serde(default)]
+    pub installation_type: Option<String>,
 }
 
 /// 小白模式系统信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EasyModeSystem {
     /// 系统Logo URL
+    #[serde(default)]
     pub os_logo: String,
     /// 系统下载链接
     pub os_download: String,
     /// 分卷列表
+    #[serde(default)]
     pub volume: Vec<EasyModeVolume>,
 }
 
@@ -537,7 +549,7 @@ impl EasyModeConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ConfigManager;
+    use super::{ConfigManager, EasyModeConfig};
 
     const MD5: &str = "900150983CD24FB0D6963F7D28E17F72";
     const SHA256: &str = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
@@ -566,5 +578,16 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].md5, None);
         assert_eq!(parsed[0].sha256, None);
+    }
+
+    #[test]
+    fn easy_mode_accepts_url_only_entries_without_volume_metadata() {
+        let parsed = EasyModeConfig::parse(
+            r#"{"system":[{"Windows":{"os_download":"https://example.com/install.esd"}}]}"#,
+        )
+        .unwrap();
+        let systems = parsed.get_systems();
+        assert_eq!(systems.len(), 1);
+        assert!(systems[0].1.volume.is_empty());
     }
 }

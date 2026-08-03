@@ -878,20 +878,13 @@ impl Dism {
         log::debug!("[Dism] 尝试直接解析 WIM XML 元数据: {}", image_file);
 
         let mut file = File::open(image_file)?;
-        let mut header = [0u8; 208];
+        let file_size = file.metadata()?.len();
+        let mut header = [0u8; lr_core::image_meta::WIM_HEADER_SIZE];
         file.read_exact(&mut header)?;
-
-        let signature = &header[0..8];
-        if signature != b"MSWIM\0\0\0" {
-            anyhow::bail!("{}", tr!("不是有效的 WIM 文件"));
-        }
-
-        let xml_offset = u64::from_le_bytes(header[48..56].try_into().unwrap());
-        let xml_size = u64::from_le_bytes(header[56..64].try_into().unwrap());
-
-        if xml_offset == 0 || xml_size == 0 || xml_size > 100_000_000 {
-            anyhow::bail!("{}", tr!("XML 元数据位置无效"));
-        }
+        let resource = lr_core::image_meta::parse_wim_xml_resource(&header, Some(file_size))
+            .map_err(|error| anyhow::anyhow!("{}: {error}", tr!("XML 元数据位置无效")))?;
+        let xml_offset = resource.offset;
+        let xml_size = resource.stored_size;
 
         log::debug!("[Dism] XML 偏移: {}, 大小: {}", xml_offset, xml_size);
 
@@ -899,7 +892,8 @@ impl Dism {
         let mut xml_data = vec![0u8; xml_size as usize];
         file.read_exact(&mut xml_data)?;
 
-        Self::decode_utf16le(&xml_data)
+        lr_core::image_meta::decode_wim_xml(&xml_data)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", tr!("UTF-16 解码失败")))
     }
 
     fn extract_image_block(xml: &str, target_index: u32) -> Option<String> {
@@ -923,39 +917,6 @@ impl Dism {
             }
         }
         None
-    }
-
-    /// 将 UTF-16LE 编码的字节数组转换为 UTF-8 字符串
-    fn decode_utf16le(data: &[u8]) -> Result<String> {
-        if data.len() < 2 {
-            anyhow::bail!("{}", tr!("数据太短"));
-        }
-
-        // 检查并跳过 BOM (0xFF 0xFE)
-        let start = if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xFE {
-            2
-        } else {
-            0
-        };
-
-        let len = (data.len() - start) / 2;
-        let mut utf16_data = Vec::with_capacity(len);
-
-        for i in 0..len {
-            let offset = start + i * 2;
-            if offset + 1 < data.len() {
-                let code_unit = u16::from_le_bytes([data[offset], data[offset + 1]]);
-                utf16_data.push(code_unit);
-            }
-        }
-
-        // 去除尾部的空字符
-        while utf16_data.last() == Some(&0) {
-            utf16_data.pop();
-        }
-
-        String::from_utf16(&utf16_data)
-            .map_err(|e| anyhow::anyhow!("{}", tr!("UTF-16 解码失败: {}", e)))
     }
 
     /// 解析 WIM XML 元数据字符串

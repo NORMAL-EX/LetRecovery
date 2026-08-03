@@ -364,10 +364,7 @@ impl ProductionInstallBackend {
             )
         })?;
         let pe = entries.get(pe_index).ok_or_else(|| {
-            InstallBackendError::new(
-                "invalid_pe_index",
-                "automatic PE index is no longer valid",
-            )
+            InstallBackendError::new("invalid_pe_index", "automatic PE index is no longer valid")
         })?;
         let status = super::pe::PeManager::check_cached_pe(
             &pe.filename,

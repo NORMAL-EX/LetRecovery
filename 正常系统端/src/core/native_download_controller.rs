@@ -64,6 +64,31 @@ pub struct DownloadPlan {
     pub download_threads: u8,
 }
 
+pub fn plan_remote_system_image(
+    url: &str,
+    save_directory: impl AsRef<Path>,
+    integrity: IntegrityRequirement,
+    allow_insecure_http: bool,
+    download_threads: u8,
+) -> Result<DownloadPlan, DownloadPlanError> {
+    let save_directory = save_directory.as_ref();
+    if save_directory.as_os_str().is_empty() {
+        return Err(DownloadPlanError::EmptySaveDirectory);
+    }
+    let validated =
+        validate_download_url(url, allow_insecure_http).map_err(DownloadPlanError::InvalidUrl)?;
+    let filename = filename_from_url(validated.as_str(), "system.esd")?;
+    let downloaded_path = save_directory.join(&filename);
+    Ok(DownloadPlan {
+        url: validated.into_string(),
+        save_directory: save_directory.to_path_buf(),
+        filename,
+        integrity,
+        completion: DownloadCompletion::OpenSystemImage(downloaded_path),
+        download_threads: crate::core::app_config::normalize_download_threads(download_threads),
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceRow {
     pub name: String,
@@ -503,6 +528,36 @@ mod tests {
             plan.completion,
             DownloadCompletion::OpenSystemImage(PathBuf::from(r"D:\Downloads\Windows11.iso"))
         );
+    }
+
+    #[test]
+    fn remote_install_plan_preserves_url_and_download_destination() {
+        let plan = plan_remote_system_image(
+            "https://example.com/install.esd?token=redacted",
+            r"D:\Downloads",
+            IntegrityRequirement::NotProvided,
+            false,
+            32,
+        )
+        .unwrap();
+        assert_eq!(plan.filename, "install.esd");
+        assert_eq!(plan.url, "https://example.com/install.esd?token=redacted");
+        assert_eq!(
+            plan.completion,
+            DownloadCompletion::OpenSystemImage(PathBuf::from(r"D:\Downloads\install.esd"))
+        );
+    }
+
+    #[test]
+    fn arbitrary_remote_install_plan_rejects_http_without_opt_in() {
+        assert!(plan_remote_system_image(
+            "http://example.com/install.wim",
+            r"D:\Downloads",
+            IntegrityRequirement::NotProvided,
+            false,
+            16,
+        )
+        .is_err());
     }
 
     #[test]
