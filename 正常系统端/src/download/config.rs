@@ -79,12 +79,10 @@ impl PeCache {
 
     /// 保存PE配置（不含下载链接），写入 config.json 的 pe_cache 字段
     pub fn save(pe_list: &[OnlinePE]) -> Result<()> {
-        let mut app_config = crate::core::app_config::AppConfig::load();
-        app_config.pe_cache = PeCache {
+        crate::core::app_config::AppConfig::replace_pe_cache(PeCache {
             pe_list: pe_list.iter().map(CachedPE::from).collect(),
             version: Self::CACHE_VERSION,
-        };
-        app_config.save()?;
+        })?;
 
         log::info!("PE配置已缓存到 config.json, 共 {} 项", pe_list.len());
         Ok(())

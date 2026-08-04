@@ -3,9 +3,16 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::utils::path::get_exe_dir;
+
+static CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn config_write_lock() -> &'static Mutex<()> {
+    CONFIG_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,9 +178,7 @@ impl AppConfig {
         }
     }
 
-    /// 保存配置到文件
-    pub fn save(&self) -> anyhow::Result<()> {
-        let config_path = Self::get_config_path();
+    fn write_atomic(&self, config_path: &Path) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
         let directory = config_path
             .parent()
@@ -185,9 +190,41 @@ impl AppConfig {
         file.flush()?;
         file.sync_all()?;
         drop(file);
-        temporary.persist_replace(&config_path)?;
+        temporary.persist_replace(config_path)?;
         log::info!("配置文件已保存");
         Ok(())
+    }
+
+    fn merge_latest_pe_cache(&self, latest: Self) -> Self {
+        let mut merged = self.clone();
+        merged.pe_cache = latest.pe_cache;
+        merged
+    }
+
+    /// 保存普通应用配置。
+    ///
+    /// PE 目录由异步在线目录刷新独立维护，因此这里必须在同一写锁内重新读取并
+    /// 保留磁盘上的最新 PE 缓存，避免窗口持有的旧快照把刚写入的目录覆盖为空。
+    pub fn save(&self) -> anyhow::Result<()> {
+        let _guard = config_write_lock()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("config.json write lock is poisoned"))?;
+        let config_path = Self::get_config_path();
+        self.merge_latest_pe_cache(Self::load_silent())
+            .write_atomic(&config_path)
+    }
+
+    /// 只替换 PE 目录缓存，同时保留磁盘上最新的用户偏好。
+    pub(crate) fn replace_pe_cache(
+        pe_cache: crate::download::config::PeCache,
+    ) -> anyhow::Result<()> {
+        let _guard = config_write_lock()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("config.json write lock is poisoned"))?;
+        let config_path = Self::get_config_path();
+        let mut latest = Self::load_silent();
+        latest.pe_cache = pe_cache;
+        latest.write_atomic(&config_path)
     }
 
     fn normalized(mut self) -> Self {
@@ -383,5 +420,27 @@ mod tests {
                 .advanced_options
                 .disable_windows_defender
         );
+    }
+
+    #[test]
+    fn stale_ui_snapshot_cannot_erase_a_newer_pe_catalogue() {
+        let mut stale_ui = AppConfig::default();
+        stale_ui.language = "en-US".to_owned();
+
+        let mut latest = AppConfig::default();
+        latest.pe_cache = crate::download::config::PeCache {
+            pe_list: vec![crate::download::config::CachedPE {
+                display_name: "LetRecovery PE".to_owned(),
+                filename: "LetRecovery_PE.wim".to_owned(),
+                md5: Some("900150983CD24FB0D6963F7D28E17F72".to_owned()),
+                sha256: None,
+            }],
+            version: 1,
+        };
+
+        let merged = stale_ui.merge_latest_pe_cache(latest);
+        assert_eq!(merged.language, "en-US");
+        assert_eq!(merged.pe_cache.pe_list.len(), 1);
+        assert_eq!(merged.pe_cache.pe_list[0].filename, "LetRecovery_PE.wim");
     }
 }
