@@ -13,6 +13,8 @@ const MICROSOFT_ROOT_CA_2010_SHA256: &str =
     "df545bf919a2439c36983b54cdfc903dfa4f37d3996d8d84b4c31eec6f3c163e";
 const MICROSOFT_WINDOWS_THIRD_PARTY_COMPONENT_CA_2012_SHA256: &str =
     "9d08973e4d108da40a1a0b274180e17371134b4dd1621fa5c1f131b739b4b823";
+const MICROSOFT_TIME_STAMP_PCA_2010_SHA256: &str =
+    "ebec1edd9e140d9c105cc62b15a915c5443ddc514a35e5773c09afb0274c7ba5";
 
 // Microsoft Root Certificate Authority 2010, SHA-1 thumbprint
 // 3B1EFD3A66EA28B16697394703A72CA340A05BD5, valid 2010-06-23 through 2035-06-23.
@@ -84,6 +86,50 @@ const MICROSOFT_WINDOWS_THIRD_PARTY_COMPONENT_CA_2012_DER_BASE64: &str = concat!
     "Oqp8MxUpDSZeAVinTqk9eoRvdD9gn+QyTzYAr21x0z6mRmVfgXTx/sFx2kygQVqC3fEf",
 );
 
+// Microsoft Time-Stamp PCA 2010, SHA-1 thumbprint
+// 36056A5662DCADECF82CC14C8B80EC5E0BCC59A6, valid 2021-09-30 through 2030-09-30.
+// A current WHCP leaf can expire before an exported driver is restored. Authenticode then needs
+// the countersignature chain to prove that the package was signed while the leaf was valid. Full
+// Windows can obtain/cache this intermediate, but an offline WinPE commonly cannot.
+const MICROSOFT_TIME_STAMP_PCA_2010_DER_BASE64: &str = concat!(
+    "MIIHcTCCBVmgAwIBAgITMwAAABXF52ueAptJmQAAAAAAFTANBgkqhkiG9w0BAQsFADCBiDEL",
+    "MAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAc",
+    "BgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFJvb3Qg",
+    "Q2VydGlmaWNhdGUgQXV0aG9yaXR5IDIwMTAwHhcNMjEwOTMwMTgyMjI1WhcNMzAwOTMwMTgz",
+    "MjI1WjB8MQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVk",
+    "bW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3Nv",
+    "ZnQgVGltZS1TdGFtcCBQQ0EgMjAxMDCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIB",
+    "AOThpkzntHIhC3miy9ckeb0O1YLT/e6cBwfSqWxOdcjKNVf2AX9sSuDivbk+F2Az/1xPx2b3",
+    "lVNxWuJ+Slr+uDZnhUYjDLWNE893MsAQGOhgfWpSg0S3po5GawcU88V29YZQ3MFEyHFcUTE3",
+    "oAo4bo3t1w/YJlN8OWECesSq/XJprx2rrPY2vjUmZNqYO7oaezOtgFt+jBAcnVL+tuhiJdxq",
+    "D89d9P6OU8/W7IVWTe/dvI2k45GPsjksUZzpcGkNyjYtcI4xyDUoveO0hyTD4MmPfrVUj9z6",
+    "BVWYbWg7mka97aSueik3rMvrg0XnRm7KMtXAhjBcTyziYrLNueKNiOSWrAFKu75xqRdbZ2De",
+    "+JKRHh09/SDPc31BmkZ1zcRfNN0Sidb9pSB9fvzZnkXftnIv231fgLrbqn427DZM9ituqBJR",
+    "6L8FA6PRc6ZNN3SUHDSCD/AQ8rdHGO2n6Jl8P0zbr17C89XYcz1DTsEzOUyOArxCaC4Q6oRR",
+    "RuLRvWoYWmEBc8pnol7XKHYC4jMYctenIPDC+hIK12NvDMk2ZItboKaDIV1fMHSRlJTYuVD5",
+    "C4lh8zYGNRiER9vcG9H9stQcxWv2XFJRXRLbJbqvUAV6bMURHXLvjflSxIUXk8A8FdsaN8cI",
+    "FRg/eKtFtvUeh17aj54WcmnGrnu3tz5q4i6tAgMBAAGjggHdMIIB2TASBgkrBgEEAYI3FQEE",
+    "BQIDAQABMCMGCSsGAQQBgjcVAgQWBBQqp1L+ZMSavoKRPEY1Kc8Q/y8E7jAdBgNVHQ4EFgQU",
+    "n6cVXQBeYl2D9OXSZacbUzUZ6XIwXAYDVR0gBFUwUzBRBgwrBgEEAYI3TIN9AQEwQTA/Bggr",
+    "BgEFBQcCARYzaHR0cDovL3d3dy5taWNyb3NvZnQuY29tL3BraW9wcy9Eb2NzL1JlcG9zaXRv",
+    "cnkuaHRtMBMGA1UdJQQMMAoGCCsGAQUFBwMIMBkGCSsGAQQBgjcUAgQMHgoAUwB1AGIAQwBB",
+    "MAsGA1UdDwQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB8GA1UdIwQYMBaAFNX2VsuP6KJcYmjR",
+    "PZSQW9fOmhjEMFYGA1UdHwRPME0wS6BJoEeGRWh0dHA6Ly9jcmwubWljcm9zb2Z0LmNvbS9w",
+    "a2kvY3JsL3Byb2R1Y3RzL01pY1Jvb0NlckF1dF8yMDEwLTA2LTIzLmNybDBaBggrBgEFBQcB",
+    "AQROMEwwSgYIKwYBBQUHMAKGPmh0dHA6Ly93d3cubWljcm9zb2Z0LmNvbS9wa2kvY2VydHMv",
+    "TWljUm9vQ2VyQXV0XzIwMTAtMDYtMjMuY3J0MA0GCSqGSIb3DQEBCwUAA4ICAQCdVX38Kq3h",
+    "LB9nATEkW+Geckv8qW/qXBS2Pk5HZHixBpOXPTEztTnXwnE2P9pkbHzQdTltuw8x5MKP+2zR",
+    "oZQYIu7pZmc6U03dmLq2HnjYNi6cqYJWAAOwBb6J6Gngugnue99qb74py27YP0h1AdkY3m2C",
+    "DPVtI1TkeFN1JFe53Z/zjj3G82jfZfakVqr3lbYoVSfQJL1AoL8ZthISEV09J+BAljis9/kp",
+    "icO8F7BUhUKz/AyeixmJ5/ALaoHCgRlCGVJ1ijbCHcNhcy4sa3tuPywJeBTpkbKpW99Jo3QM",
+    "vOyRgNI95ko+ZjtPu4b6MhrZlvSP9pEB9s7GdP32THJvEKt1MMU0sHrYUP4KWN1APMdUbZ1j",
+    "dEgssU5HLcEUBHG/ZPkkvnNtyo4JvbMBV0lUZNlz138eW0QBjloZkWsNn6Qo3GcZKCS6OEua",
+    "bvshVGtqRRFHqfG3rsjoiV5PndLQTHa1V1QJsWkBRH58oWFsc/4Ku+xBZj1p/cvBQUl+fpO+",
+    "y/g75LcVv7TOPqUxUYS8vwLBgqJ7Fx0ViY1w/ue10CgaiQuPNtq6TPmb/wrpNPgkNWcr4A24",
+    "5oyZ1uEi6vAnQj0llOZ0dFtq0Z4+7X6gMTN9vMvpe784cETRkPHIqzqKOghif9lwY1NNje6C",
+    "baUFEMFxBmoQtB1VM1izoXBm8g==",
+);
+
 fn pinned_microsoft_root_ca_2010() -> Result<Vec<u8>> {
     let der = base64::engine::general_purpose::STANDARD
         .decode(MICROSOFT_ROOT_CA_2010_DER_BASE64)
@@ -106,14 +152,26 @@ fn pinned_microsoft_windows_third_party_component_ca_2012() -> Result<Vec<u8>> {
     Ok(der)
 }
 
+fn pinned_microsoft_time_stamp_pca_2010() -> Result<Vec<u8>> {
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(MICROSOFT_TIME_STAMP_PCA_2010_DER_BASE64)
+        .context("decode embedded Microsoft Time-Stamp PCA 2010")?;
+    let actual = crate::hash::sha256_bytes(&der);
+    if actual != MICROSOFT_TIME_STAMP_PCA_2010_SHA256 {
+        bail!("embedded Microsoft Time-Stamp PCA 2010 hash mismatch: {actual}");
+    }
+    Ok(der)
+}
+
 /// Adds the pinned Microsoft root and intermediate needed by WHCP driver packages to WinPE's
 /// volatile LocalMachine ROOT/CA stores. The operation is idempotent and must fail before DISM.
 #[cfg(windows)]
 pub fn ensure_pe_driver_signing_trust() -> Result<()> {
     use windows::Win32::Security::Cryptography::{
-        CertAddEncodedCertificateToStore, CertCloseStore, CertOpenStore, CERT_OPEN_STORE_FLAGS,
-        CERT_STORE_ADD_USE_EXISTING, CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_LOCAL_MACHINE,
-        HCERTSTORE, HCRYPTPROV_LEGACY, X509_ASN_ENCODING,
+        CertAddEncodedCertificateToStore, CertCloseStore, CertFreeCertificateContext,
+        CertOpenStore, CERT_CONTEXT, CERT_OPEN_STORE_FLAGS, CERT_STORE_ADD_USE_EXISTING,
+        CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_LOCAL_MACHINE, HCERTSTORE, HCRYPTPROV_LEGACY,
+        X509_ASN_ENCODING,
     };
 
     struct CertificateStore(HCERTSTORE);
@@ -121,6 +179,15 @@ pub fn ensure_pe_driver_signing_trust() -> Result<()> {
         fn drop(&mut self) {
             unsafe {
                 let _ = CertCloseStore(self.0, 0);
+            }
+        }
+    }
+
+    struct CertificateContext(*mut CERT_CONTEXT);
+    impl Drop for CertificateContext {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CertFreeCertificateContext(Some(self.0));
             }
         }
     }
@@ -138,16 +205,30 @@ pub fn ensure_pe_driver_signing_trust() -> Result<()> {
         }
         .with_context(|| format!("open WinPE LocalMachine {store_name} certificate store"))?;
         let store = CertificateStore(store);
+        let mut certificate_context = std::ptr::null_mut();
         unsafe {
             CertAddEncodedCertificateToStore(
                 store.0,
                 X509_ASN_ENCODING,
                 der,
                 CERT_STORE_ADD_USE_EXISTING,
-                None,
+                Some(&mut certificate_context),
             )
         }
         .with_context(|| format!("add pinned {description} to WinPE {store_name} store"))?;
+        if certificate_context.is_null() {
+            bail!("WinPE {store_name} store returned no context for pinned {description}");
+        }
+        let certificate_context = CertificateContext(certificate_context);
+        let stored = unsafe {
+            std::slice::from_raw_parts(
+                (*certificate_context.0).pbCertEncoded,
+                (*certificate_context.0).cbCertEncoded as usize,
+            )
+        };
+        if stored != der {
+            bail!("WinPE {store_name} store read-back mismatch for pinned {description}");
+        }
         Ok(())
     }
 
@@ -159,6 +240,17 @@ pub fn ensure_pe_driver_signing_trust() -> Result<()> {
         &intermediate,
         "Microsoft Windows Third Party Component CA 2012",
     )?;
+    let timestamp_intermediate = pinned_microsoft_time_stamp_pca_2010()?;
+    add_pinned_certificate(
+        "CA",
+        &timestamp_intermediate,
+        "Microsoft Time-Stamp PCA 2010",
+    )?;
+    log::info!(
+        "WinPE driver trust ready: root=3B1EFD3A66EA28B16697394703A72CA340A05BD5; \
+         whcp_ca=77A10EBF07542725218CD83A01B521C57BC67F73; \
+         timestamp_ca=36056A5662DCADECF82CC14C8B80EC5E0BCC59A6"
+    );
     Ok(())
 }
 
@@ -191,6 +283,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn embedded_microsoft_timestamp_intermediate_is_exactly_pinned() {
+        let der = pinned_microsoft_time_stamp_pca_2010().unwrap();
+        assert!(der.starts_with(&[0x30, 0x82]));
+        assert_eq!(
+            crate::hash::sha256_bytes(&der),
+            MICROSOFT_TIME_STAMP_PCA_2010_SHA256
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn cryptoapi_accepts_the_pinned_der_without_touching_system_stores() {
@@ -203,6 +305,7 @@ mod tests {
         let certificates = [
             pinned_microsoft_root_ca_2010().unwrap(),
             pinned_microsoft_windows_third_party_component_ca_2012().unwrap(),
+            pinned_microsoft_time_stamp_pca_2010().unwrap(),
         ];
         let store = unsafe {
             CertOpenStore(

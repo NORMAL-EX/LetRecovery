@@ -107,11 +107,12 @@ The retired blanket storage-controller package directories (`18`, `19`, `20`,
 ## Microsoft WHCP driver signing chain
 
 `lr-core/src/driver_trust.rs` embeds the DER form of Microsoft Root Certificate
-Authority 2010 and Microsoft Windows Third Party Component CA 2012 for one
-narrowly scoped purpose: older WinPE bases can omit part of this still-required
-chain and consequently reject valid WHCP catalogs or embedded boot-driver
+Authority 2010, Microsoft Windows Third Party Component CA 2012 and the renewed
+Microsoft Time-Stamp PCA 2010 for one narrowly scoped purpose: older WinPE bases
+can omit part of these still-required code-signing and countersignature chains
+and consequently reject valid, timestamped WHCP catalogs or embedded boot-driver
 signatures when DISM applies its stricter boot-critical-driver policy. The root
-and intermediate are added only to the running WinPE `LocalMachine\ROOT` and
+and intermediates are added only to the running WinPE `LocalMachine\ROOT` and
 `LocalMachine\CA` stores through CryptoAPI; they are never copied into the
 installed Windows image and do not permit unsigned drivers.
 
@@ -134,13 +135,24 @@ installed Windows image and do not permit unsigned drivers.
 | DER SHA-256 | `9D08973E4D108DA40A1A0B274180E17371134B4DD1621FA5C1F131B739B4B823` |
 | Official AIA URL | `http://www.microsoft.com/pkiops/certs/Microsoft%20Windows%20Third%20Party%20Component%20CA%202012.crt` |
 
+| Field | Value |
+| --- | --- |
+| Subject | `CN=Microsoft Time-Stamp PCA 2010, O=Microsoft Corporation, L=Redmond, S=Washington, C=US` |
+| Issuer | `CN=Microsoft Root Certificate Authority 2010, O=Microsoft Corporation, L=Redmond, S=Washington, C=US` |
+| Serial number | `3300000015C5E76B9E029B4999000000000015` |
+| Validity | 2021-09-30 through 2030-09-30 UTC |
+| SHA-1 thumbprint | `36056A5662DCADECF82CC14C8B80EC5E0BCC59A6` |
+| DER SHA-256 | `EBEC1EDD9E140D9C105CC62B15A915C5443DDC514A35E5773C09AFB0274C7BA5` |
+| Official status reference | [Microsoft PKI repository audit](https://www.microsoft.com/pkiops/docs/Content/seals/Microsoft%20TRP%20WTNS%20Independent%20Accountant%27s%20Opinion%20Report%20and%20Management%20Assertion%20July%202025.pdf) |
+
 The exact DER values were obtained from Windows' validated certificate chain and
 checked against their identities, serial numbers, validity periods and Microsoft
-issuer relationship. Runtime code rechecks both fixed SHA-256 values before
+issuer relationship. Runtime code rechecks all fixed SHA-256 values before
 opening either machine store, uses `CERT_STORE_ADD_USE_EXISTING` for idempotence,
-and fails before `drvload.exe` or DISM if decoding, pin verification, store opening
-or insertion fails. Do not replace these values with certificates discovered
-beside an exported driver package or with `/ForceUnsigned`.
+reads the returned certificate contexts back byte-for-byte, and fails before
+`drvload.exe` or DISM if decoding, pin verification, store opening, insertion or
+read-back fails. Do not replace these values with certificates discovered beside
+an exported driver package or with `/ForceUnsigned`.
 
 Windows 7 USB3 compatibility support is sourced from the user-supplied legacy
 LetRecovery package, but only the 13 package directories whose catalogs validate
