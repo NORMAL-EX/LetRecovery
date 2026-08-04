@@ -1,16 +1,18 @@
 //! Controlled WinPE trust initialization for signed boot-critical driver packages.
 //!
-//! Some older WinPE bases do not carry Microsoft Root Certificate Authority 2010 even though
-//! currently installed WHCP driver catalogs still chain to it. DISM applies a stricter signature
-//! check to boot-critical drivers, so a missing root can reject an otherwise valid exported
-//! package. This module adds only the pinned Microsoft root to the volatile WinPE machine store;
-//! it never modifies the offline target Windows installation and never enables unsigned drivers.
+//! Some older WinPE bases do not carry the complete Microsoft WHCP signing chain used by current
+//! OEM drivers. DISM applies a stricter signature check to boot-critical drivers, so a missing
+//! root *or intermediate CA* can reject an otherwise valid exported package. This module adds
+//! only the pinned Microsoft chain to the volatile WinPE machine stores; it never modifies the
+//! offline target Windows installation and never enables unsigned drivers.
 
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 
 const MICROSOFT_ROOT_CA_2010_SHA256: &str =
     "df545bf919a2439c36983b54cdfc903dfa4f37d3996d8d84b4c31eec6f3c163e";
+const MICROSOFT_WINDOWS_THIRD_PARTY_COMPONENT_CA_2012_SHA256: &str =
+    "9d08973e4d108da40a1a0b274180e17371134b4dd1621fa5c1f131b739b4b823";
 
 // Microsoft Root Certificate Authority 2010, SHA-1 thumbprint
 // 3B1EFD3A66EA28B16697394703A72CA340A05BD5, valid 2010-06-23 through 2035-06-23.
@@ -46,6 +48,42 @@ const MICROSOFT_ROOT_CA_2010_DER_BASE64: &str = concat!(
     "YbRA/1mGcdHVM2l8qXOKONdkDPFp"
 );
 
+// Microsoft Windows Third Party Component CA 2012, SHA-1 thumbprint
+// 77A10EBF07542725218CD83A01B521C57BC67F73, valid 2012-04-18 through 2027-04-18.
+// Current WHCP-signed packages, including boot-start VMware VMCI packages, can chain through
+// this intermediate. A full Windows installation can cache/download it, while an offline WinPE
+// may only contain the 2010 root.
+const MICROSOFT_WINDOWS_THIRD_PARTY_COMPONENT_CA_2012_DER_BASE64: &str = concat!(
+    "MIIF4TCCA8mgAwIBAgIKYQuqwQAAAAAACTANBgkqhkiG9w0BAQsFADCBiDELMAkGA1UEBhMC",
+    "VVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1p",
+    "Y3Jvc29mdCBDb3Jwb3JhdGlvbjEyMDAGA1UEAxMpTWljcm9zb2Z0IFJvb3QgQ2VydGlmaWNh",
+    "dGUgQXV0aG9yaXR5IDIwMTAwHhcNMTIwNDE4MjM0ODM4WhcNMjcwNDE4MjM1ODM4WjCBjjEL",
+    "MAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAc",
+    "BgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjE4MDYGA1UEAxMvTWljcm9zb2Z0IFdpbmRv",
+    "d3MgVGhpcmQgUGFydHkgQ29tcG9uZW50IENBIDIwMTIwggEiMA0GCSqGSIb3DQEBAQUAA4IB",
+    "DwAwggEKAoIBAQCjnDCECadjLs8KR/DqJPmjMCAPXlcxJoGaMQeyUNTOZwkIZQpapUuu1e0Q",
+    "LuelmbWfaC+Yi1gCrCC0KcRxvSgcpf08m2TkxevfYSW88O5ov9Gny34qAoFOZFwMU4Z5Vxk3",
+    "YbeY+QygTiJZm/kbLWc8JzxWkGbj/X9lfQ+GvTVH6IrM9NqO6WpOq6dV7KKJHtUzRVPL+Z53",
+    "vc0s+QW4f3QBHej7GOFD0Q3pqtw3b73+uA/tHU0BRk4KrPyC6OxWgxOOOgHtFGR06mSyZhC2",
+    "aG3IcAB9UEguPUPu4CSVxs2Ox/245JXP3X77lV6hAc1DsQfXpDDum4YaKm7BC1midG+LAgMB",
+    "AAGjggFDMIIBPzAQBgkrBgEEAYI3FQEEAwIBADAdBgNVHQ4EFgQUYXGnh6//adUhdk9SkygA",
+    "vnkSq4QwGQYJKwYBBAGCNxQCBAweCgBTAHUAYgBDAEEwCwYDVR0PBAQDAgGGMA8GA1UdEwEB",
+    "/wQFMAMBAf8wHwYDVR0jBBgwFoAU1fZWy4/oolxiaNE9lJBb186aGMQwVgYDVR0fBE8wTTBL",
+    "oEmgR4ZFaHR0cDovL2NybC5taWNyb3NvZnQuY29tL3BraS9jcmwvcHJvZHVjdHMvTWljUm9v",
+    "Q2VyQXV0XzIwMTAtMDYtMjMuY3JsMFoGCCsGAQUFBwEBBE4wTDBKBggrBgEFBQcwAoY+aHR0",
+    "cDovL3d3dy5taWNyb3NvZnQuY29tL3BraS9jZXJ0cy9NaWNSb29DZXJBdXRfMjAxMC0wNi0y",
+    "My5jcnQwDQYJKoZIhvcNAQELBQADggIBAFqKZ9rM1f0NJkF3vwpGeLSz3hJpK3cjwmUvAV/S",
+    "A/RhulCdLow5cvNsPmqxHnZt7LfzgtzMu8VpcChzZhc/VOvuARZIxEbZG4CugTqND3ltaLCe",
+    "6i0/OdPKOH69XnwIbhncxsL0ODNoYeJSR4PhAAFW0rrLh4IFMQpBi07nf19f7V/TOS1F66IT",
+    "v/0ewphBcWEWX8gKcCV8WWkxJORx5wq7BBf3n3IeydK7Gr49Av4JDLJDtFkamVOTliFf4Na3",
+    "JgFClTasJ/2+9IV3aD0YvfS+mIgiEYZSFvNF7AOXEHCHo3BDcTzbyYYDFwz1c1vGfeFcZO3X",
+    "xUjX7TLi0arTz6f2V05h+XfrZ/KIs94A2gOP0Io0Nz4d2GK40rHz4S+LcjuBlnxv/OxmdnJg",
+    "GyTyoIltW20ALu8o3YaHBcK0ueW+ZMIq8koVXJjixCeF/1LjYn4PsgIL12bHCrLTPSAEFFAy",
+    "WYMKfZvtWjgSAVK6L14gco5K8f3ncQKMO+EHvslz9N1H2LTvtKSzMLmJPnbKuQCYVn6r6oq4",
+    "pdA4q2l3EwsUL+mqQR/3ur06KzSK7gqrY+Zj94gkjiANKzud48JJUqyfHw45O13UblBq5n1S",
+    "Oqp8MxUpDSZeAVinTqk9eoRvdD9gn+QyTzYAr21x0z6mRmVfgXTx/sFx2kygQVqC3fEf",
+);
+
 fn pinned_microsoft_root_ca_2010() -> Result<Vec<u8>> {
     let der = base64::engine::general_purpose::STANDARD
         .decode(MICROSOFT_ROOT_CA_2010_DER_BASE64)
@@ -57,8 +95,19 @@ fn pinned_microsoft_root_ca_2010() -> Result<Vec<u8>> {
     Ok(der)
 }
 
-/// Adds the pinned Microsoft root needed by older WHCP driver catalogs to WinPE's volatile
-/// LocalMachine ROOT store. The operation is idempotent and must fail before DISM is started.
+fn pinned_microsoft_windows_third_party_component_ca_2012() -> Result<Vec<u8>> {
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(MICROSOFT_WINDOWS_THIRD_PARTY_COMPONENT_CA_2012_DER_BASE64)
+        .context("decode embedded Microsoft Windows Third Party Component CA 2012")?;
+    let actual = crate::hash::sha256_bytes(&der);
+    if actual != MICROSOFT_WINDOWS_THIRD_PARTY_COMPONENT_CA_2012_SHA256 {
+        bail!("embedded Microsoft Windows Third Party Component CA 2012 hash mismatch: {actual}");
+    }
+    Ok(der)
+}
+
+/// Adds the pinned Microsoft root and intermediate needed by WHCP driver packages to WinPE's
+/// volatile LocalMachine ROOT/CA stores. The operation is idempotent and must fail before DISM.
 #[cfg(windows)]
 pub fn ensure_pe_driver_signing_trust() -> Result<()> {
     use windows::Win32::Security::Cryptography::{
@@ -76,29 +125,40 @@ pub fn ensure_pe_driver_signing_trust() -> Result<()> {
         }
     }
 
-    let der = pinned_microsoft_root_ca_2010()?;
-    let store_name: Vec<u16> = "ROOT\0".encode_utf16().collect();
-    let store = unsafe {
-        CertOpenStore(
-            CERT_STORE_PROV_SYSTEM_W,
-            X509_ASN_ENCODING,
-            HCRYPTPROV_LEGACY::default(),
-            CERT_OPEN_STORE_FLAGS(CERT_SYSTEM_STORE_LOCAL_MACHINE),
-            Some(store_name.as_ptr().cast()),
-        )
+    fn add_pinned_certificate(store_name: &str, der: &[u8], description: &str) -> Result<()> {
+        let wide_store_name: Vec<u16> = store_name.encode_utf16().chain(Some(0)).collect();
+        let store = unsafe {
+            CertOpenStore(
+                CERT_STORE_PROV_SYSTEM_W,
+                X509_ASN_ENCODING,
+                HCRYPTPROV_LEGACY::default(),
+                CERT_OPEN_STORE_FLAGS(CERT_SYSTEM_STORE_LOCAL_MACHINE),
+                Some(wide_store_name.as_ptr().cast()),
+            )
+        }
+        .with_context(|| format!("open WinPE LocalMachine {store_name} certificate store"))?;
+        let store = CertificateStore(store);
+        unsafe {
+            CertAddEncodedCertificateToStore(
+                store.0,
+                X509_ASN_ENCODING,
+                der,
+                CERT_STORE_ADD_USE_EXISTING,
+                None,
+            )
+        }
+        .with_context(|| format!("add pinned {description} to WinPE {store_name} store"))?;
+        Ok(())
     }
-    .context("open WinPE LocalMachine ROOT certificate store")?;
-    let store = CertificateStore(store);
-    unsafe {
-        CertAddEncodedCertificateToStore(
-            store.0,
-            X509_ASN_ENCODING,
-            &der,
-            CERT_STORE_ADD_USE_EXISTING,
-            None,
-        )
-    }
-    .context("add pinned Microsoft Root Certificate Authority 2010 to WinPE trust store")?;
+
+    let root = pinned_microsoft_root_ca_2010()?;
+    add_pinned_certificate("ROOT", &root, "Microsoft Root Certificate Authority 2010")?;
+    let intermediate = pinned_microsoft_windows_third_party_component_ca_2012()?;
+    add_pinned_certificate(
+        "CA",
+        &intermediate,
+        "Microsoft Windows Third Party Component CA 2012",
+    )?;
     Ok(())
 }
 
@@ -121,6 +181,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn embedded_microsoft_whcp_intermediate_is_exactly_pinned() {
+        let der = pinned_microsoft_windows_third_party_component_ca_2012().unwrap();
+        assert!(der.starts_with(&[0x30, 0x82]));
+        assert_eq!(
+            crate::hash::sha256_bytes(&der),
+            MICROSOFT_WINDOWS_THIRD_PARTY_COMPONENT_CA_2012_SHA256
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn cryptoapi_accepts_the_pinned_der_without_touching_system_stores() {
@@ -130,7 +200,10 @@ mod tests {
             X509_ASN_ENCODING,
         };
 
-        let der = pinned_microsoft_root_ca_2010().unwrap();
+        let certificates = [
+            pinned_microsoft_root_ca_2010().unwrap(),
+            pinned_microsoft_windows_third_party_component_ca_2012().unwrap(),
+        ];
         let store = unsafe {
             CertOpenStore(
                 CERT_STORE_PROV_MEMORY,
@@ -142,14 +215,16 @@ mod tests {
         }
         .unwrap();
         unsafe {
-            CertAddEncodedCertificateToStore(
-                store,
-                X509_ASN_ENCODING,
-                &der,
-                CERT_STORE_ADD_USE_EXISTING,
-                None,
-            )
-            .unwrap();
+            for der in certificates {
+                CertAddEncodedCertificateToStore(
+                    store,
+                    X509_ASN_ENCODING,
+                    &der,
+                    CERT_STORE_ADD_USE_EXISTING,
+                    None,
+                )
+                .unwrap();
+            }
             CertCloseStore(store, 0).unwrap();
         }
     }

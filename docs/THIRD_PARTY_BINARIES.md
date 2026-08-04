@@ -104,15 +104,16 @@ WIM read-only to repeat the same hash and signature checks.
 The retired blanket storage-controller package directories (`18`, `19`, `20`,
 `AMD`, `Applessd`, `iastorE` and `viostor`) and UefiSeven must not be restored.
 
-## Microsoft Root Certificate Authority 2010
+## Microsoft WHCP driver signing chain
 
 `lr-core/src/driver_trust.rs` embeds the DER form of Microsoft Root Certificate
-Authority 2010 for one narrowly scoped purpose: older WinPE bases can omit this
-still-required Microsoft root and consequently reject valid WHCP catalogs when
-DISM applies its stricter boot-critical-driver signature policy. The certificate
-is added only to the running WinPE `LocalMachine\ROOT` store through CryptoAPI;
-it is never copied into the installed Windows image and does not permit unsigned
-drivers.
+Authority 2010 and Microsoft Windows Third Party Component CA 2012 for one
+narrowly scoped purpose: older WinPE bases can omit part of this still-required
+chain and consequently reject valid WHCP catalogs or embedded boot-driver
+signatures when DISM applies its stricter boot-critical-driver policy. The root
+and intermediate are added only to the running WinPE `LocalMachine\ROOT` and
+`LocalMachine\CA` stores through CryptoAPI; they are never copied into the
+installed Windows image and do not permit unsigned drivers.
 
 | Field | Value |
 | --- | --- |
@@ -123,13 +124,23 @@ drivers.
 | DER SHA-256 | `DF545BF919A2439C36983B54CDFC903DFA4F37D3996D8D84B4C31EEC6F3C163E` |
 | Official status reference | [Microsoft required trusted roots](https://learn.microsoft.com/en-us/troubleshoot/windows-server/certificates-and-public-key-infrastructure-pki/trusted-root-certificates-are-required) |
 
-The exact DER was exported from the Windows Local Machine trusted-root store and
-checked against the identity, serial number, validity and name published by
-Microsoft. Runtime code rechecks the fixed SHA-256 before opening the machine
-store, uses `CERT_STORE_ADD_USE_EXISTING` for idempotence, and fails before
-`drvload.exe` or DISM if decoding, pin verification, store opening or insertion
-fails. Do not replace this with a certificate discovered beside an exported
-driver package or with `/ForceUnsigned`.
+| Field | Value |
+| --- | --- |
+| Subject | `CN=Microsoft Windows Third Party Component CA 2012, O=Microsoft Corporation, L=Redmond, S=Washington, C=US` |
+| Issuer | `CN=Microsoft Root Certificate Authority 2010, O=Microsoft Corporation, L=Redmond, S=Washington, C=US` |
+| Serial number | `610BAAC1000000000009` |
+| Validity | 2012-04-18 through 2027-04-18 UTC |
+| SHA-1 thumbprint | `77A10EBF07542725218CD83A01B521C57BC67F73` |
+| DER SHA-256 | `9D08973E4D108DA40A1A0B274180E17371134B4DD1621FA5C1F131B739B4B823` |
+| Official AIA URL | `http://www.microsoft.com/pkiops/certs/Microsoft%20Windows%20Third%20Party%20Component%20CA%202012.crt` |
+
+The exact DER values were obtained from Windows' validated certificate chain and
+checked against their identities, serial numbers, validity periods and Microsoft
+issuer relationship. Runtime code rechecks both fixed SHA-256 values before
+opening either machine store, uses `CERT_STORE_ADD_USE_EXISTING` for idempotence,
+and fails before `drvload.exe` or DISM if decoding, pin verification, store opening
+or insertion fails. Do not replace these values with certificates discovered
+beside an exported driver package or with `/ForceUnsigned`.
 
 Windows 7 USB3 compatibility support is sourced from the user-supplied legacy
 LetRecovery package, but only the 13 package directories whose catalogs validate
