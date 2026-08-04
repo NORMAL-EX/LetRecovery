@@ -104,6 +104,33 @@ WIM read-only to repeat the same hash and signature checks.
 The retired blanket storage-controller package directories (`18`, `19`, `20`,
 `AMD`, `Applessd`, `iastorE` and `viostor`) and UefiSeven must not be restored.
 
+## Microsoft Root Certificate Authority 2010
+
+`lr-core/src/driver_trust.rs` embeds the DER form of Microsoft Root Certificate
+Authority 2010 for one narrowly scoped purpose: older WinPE bases can omit this
+still-required Microsoft root and consequently reject valid WHCP catalogs when
+DISM applies its stricter boot-critical-driver signature policy. The certificate
+is added only to the running WinPE `LocalMachine\ROOT` store through CryptoAPI;
+it is never copied into the installed Windows image and does not permit unsigned
+drivers.
+
+| Field | Value |
+| --- | --- |
+| Subject / issuer | `CN=Microsoft Root Certificate Authority 2010, O=Microsoft Corporation, L=Redmond, S=Washington, C=US` |
+| Serial number | `28CC3A25BFBA44AC449A9B586B4339AA` |
+| Validity | 2010-06-23 through 2035-06-23 UTC |
+| SHA-1 thumbprint | `3B1EFD3A66EA28B16697394703A72CA340A05BD5` |
+| DER SHA-256 | `DF545BF919A2439C36983B54CDFC903DFA4F37D3996D8D84B4C31EEC6F3C163E` |
+| Official status reference | [Microsoft required trusted roots](https://learn.microsoft.com/en-us/troubleshoot/windows-server/certificates-and-public-key-infrastructure-pki/trusted-root-certificates-are-required) |
+
+The exact DER was exported from the Windows Local Machine trusted-root store and
+checked against the identity, serial number, validity and name published by
+Microsoft. Runtime code rechecks the fixed SHA-256 before opening the machine
+store, uses `CERT_STORE_ADD_USE_EXISTING` for idempotence, and fails before
+`drvload.exe` or DISM if decoding, pin verification, store opening or insertion
+fails. Do not replace this with a certificate discovered beside an exported
+driver package or with `/ForceUnsigned`.
+
 Windows 7 USB3 compatibility support is sourced from the user-supplied legacy
 LetRecovery package, but only the 13 package directories whose catalogs validate
 as Microsoft Windows Hardware Compatibility Publisher are retained. Modified or

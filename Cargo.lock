@@ -1524,6 +1524,7 @@ name = "lr-core"
 version = "2026.2.6"
 dependencies = [
  "anyhow",
+ "base64",
  "encoding_rs",
  "libloading",
  "log",

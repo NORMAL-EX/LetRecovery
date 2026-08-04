@@ -295,8 +295,19 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     log::info!("目标分区: {}", config.target_partition);
     log::info!("镜像文件: {}", config.image_path);
+    let pca_compat_target_arch =
+        if config.pca_compat_target_build == 0 && config.pca_compat_target_architecture == 0 {
+            "未提供"
+        } else {
+            match config.pca_compat_target_architecture {
+                0 => "x86",
+                9 => "x64",
+                12 => "ARM64",
+                _ => "未知",
+            }
+        };
     log::info!(
-        "[诊断环境] PE 安装任务: target={} | image_file={} | volume_index={} | format={} | boot_mode={} | boot_signature={:?} | target_build={} | target_arch={}",
+        "[诊断环境] PE 安装任务: target={} | image_file={} | volume_index={} | format={} | boot_mode={} | boot_signature={:?} | pca_compat_target_build={} | pca_compat_target_arch={}",
         config.target_partition,
         config.image_path,
         config.volume_index,
@@ -314,12 +325,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         },
         config.boot_pca_mode,
         config.pca_compat_target_build,
-        match config.pca_compat_target_architecture {
-            0 => "x86",
-            9 => "x64",
-            12 => "ARM64",
-            _ => "未知",
-        }
+        pca_compat_target_arch,
     );
 
     let data_dir = ConfigFileManager::get_data_dir(&data_partition);
@@ -607,6 +613,13 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     if config.should_import_drivers() && driver_path_exists {
         let _ = tx.send(WorkerMessage::SetStatus(tr!("正在导入驱动...")));
+
+        if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
+            log::error!("初始化 PE 驱动签名信任链失败，安装停止: {error}");
+            let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
+            return;
+        }
+        log::info!("PE 驱动签名信任链已核验并初始化");
 
         // 创建进度通道
         let (driver_progress_tx, driver_progress_rx) = channel::<DismProgress>();

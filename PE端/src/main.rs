@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use anyhow::Context;
+
 mod app;
 mod core;
 #[cfg(target_os = "windows")]
@@ -108,6 +110,10 @@ fn load_matching_vmd_driver_into_running_pe() -> anyhow::Result<()> {
         log::info!("[VMD/PE] no supported Intel VMD controller is present");
         return Ok(());
     }
+
+    lr_core::driver_trust::ensure_pe_driver_signing_trust()
+        .context("initialize WinPE trust before loading the matched VMD package")?;
+    log::info!("[VMD/PE] PE driver signing trust is ready");
 
     let package_root = utils::path::get_exe_dir()
         .join("drivers")
@@ -681,6 +687,12 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         let driver_path_exists = std::path::Path::new(&driver_path).exists();
 
         if config.should_import_drivers() && driver_path_exists {
+            if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
+                log::error!("[PE INSTALL] 初始化 PE 驱动签名信任链失败: {error}");
+                show_error_message(&tr!("离线驱动导入失败: {}", error));
+                return Ok(());
+            }
+            log::info!("[PE INSTALL] PE 驱动签名信任链已核验并初始化");
             let dism = Dism::new();
             if let Err(error) =
                 dism.add_drivers_offline_with_progress(&apply_dir, &driver_path, None)

@@ -239,6 +239,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `lr-core/src/diskpart.rs`：已停用任意 DiskPart/批处理脚本的配置兼容守卫；缺失或空目录安全跳过，发现 `.txt/.cmd/.bat` 时列出文件并失败关闭，严禁重新启动 `diskpart.exe`、`cmd.exe` 或把任意脚本文本伪装成可等价转换的 WinAPI 操作。
 - `lr-core/src/download_integrity.rs`：MD5/SHA-256 选择策略、哈希验证、HTTPS/HTTP URL 策略和下载文件名验证。
 - `lr-core/src/driver.rs`：SetupAPI 驱动枚举、严格导出、在线导入及 DISM 离线驱动服务的共享 Windows 实现；按官方两次调用契约读取完整 `REG_MULTI_SZ`，SetupAPI 以字节返回的 Unicode 长度必须转换到对齐的 `u16` 缓冲区并复核返回边界，禁止把 `Vec<u8>` 强转为 UTF-16；设备信息集由 RAII 保证所有错误路径都释放，设备枚举只有 `ERROR_NO_MORE_ITEMS` 可正常结束。已绑定驱动的 INF 名称必须读取 `DEVPKEY_Device_DriverInfPath`，禁止把 `SPDRP_UI_NUMBER (0x10)` 当作 INF 路径；Vista 及以上必须使用 `DiInstallDriverW` 完成真实安装，只有明确探测为 pre-Vista 的系统可采用 `SetupCopyOEMInfW` 暂存兼容路径，`DiInstallDriverW` 只能传 `0` 或 `DIIRFLAG_FORCE_INF`，真实安装失败不得用仅暂存 INF 的回退伪装成功。在线 OEM 导出失败不得伪装成部分成功，离线导入/导出统一调用 DISM，禁止手工拼装 DriverStore、猜服务注册表或按 FileRepository 目录名猜测第三方包；另负责原子生成当前 OEM 启动存储驱动清单，并在 PE 导入后回读离线 DriverStore 逐硬件 ID 验证覆盖。
+- `lr-core/src/driver_trust.rs`：WinPE 运行时存储驱动加载和离线驱动导入前的受控签名信任初始化；只允许把源码内 DER 与固定 SHA-256 完全一致的 Microsoft Root Certificate Authority 2010 通过 CryptoAPI 加入 WinPE 本机 ROOT 存储，使用 `CERT_STORE_ADD_USE_EXISTING` 保持幂等，不得导入驱动目录携带的任意证书、不得写入离线目标系统证书库、不得启用 `/ForceUnsigned` 或把签名失败降级为成功。
 - `lr-core/src/encoding.rs`：Windows GBK 与 UTF-8 转换。
 - `lr-core/src/format_command.rs`：共享格式化请求的盘符、文件系统和卷标纯验证；只描述意图，不构造或执行 `format.com`，实际格式化统一进入 `windows_storage`。
 - `lr-core/src/fveapi.rs`：动态加载 FVEAPI 的 BitLocker 卷访问、状态、解锁和恢复密钥格式处理。
@@ -337,7 +338,7 @@ PCA2023 离线资源必须从已维护的微软官方介质或动态更新包制
 - `正常系统端/src/core/cabinet.rs`：兼容再导出共享 `lr-core::windows_cabinet`，正常端不得另建 `expand.exe` 或本地化输出解析路径。
 - `正常系统端/src/core/cli_install.rs`：解析命令行无人值守安装配置并启动与 GUI 相同的安装入口。
 - `正常系统端/src/core/disk.rs`：分区枚举、样式和磁盘关系查询、SSD/HDD 与内外置介质探测、ViaPE 暂存策略接入，以及通过共享 WinAPI 边界缩小/创建/删除/回收暂存与恢复分区；枚举结果还必须从物理磁盘 IOCTL 库存补齐磁盘容量、分区偏移和精确长度，缺失这些几何身份时安装意图失败关闭。当前运行 Windows 卷必须由共享 `GetWindowsDirectoryW` 边界确定，禁止读取可能陈旧的 `SystemDrive` 或回退写死 `C:`/`X:`。ViaPE 暂存可在固定存储不足时回退到可写外置存储，但必须在候选入口排除光驱、网络盘、RAM 盘和只读卷；自动缩卷前必须复核当前启动会话内的物理磁盘和分区身份，创建失败时只允许按已验证的实际回收量回滚扩容。
-- `正常系统端/src/core/dism.rs`：正常端高层镜像查询、释放、捕获和进度模型，完整透传版本、Build、架构元数据并接入统一 WIM 引擎，同时把安装执行器持有的原子取消标记传递到可取消的镜像应用入口；在线驱动导出优先走受支持的 DISM 命令并验证非零 INF，失败时才严格回退 SetupAPI，离线导出只允许 DISM 且不得回退手工复制 DriverStore。
+- `正常系统端/src/core/dism.rs`：正常端高层镜像查询、释放、捕获和进度模型，完整透传版本、Build、架构元数据并接入统一 WIM 引擎，同时把安装执行器持有的原子取消标记传递到可取消的镜像应用入口；在线驱动导出优先走受支持的 DISM 命令并验证非零 INF，失败时才严格回退 SetupAPI，离线导出只允许 DISM 且不得回退手工复制 DriverStore；在线与 PE 离线导出都必须在覆盖验证后原子生成启动存储驱动清单，禁止出现“导出成功但后续必需清单缺失”的半完成状态，错误必须保留底层 DISM 命令链以便日志定位。
 - `正常系统端/src/core/dism_cmd.rs`：DISM.exe 参数封装、进度解析、在线/离线驱动导出、离线驱动和更新包操作；优先使用当前 Windows/WinPE 自带 DISM，仅在不可用时回退随包兼容副本；stdout/stderr 必须并发持续排空以避免管道互锁，逐行按 UTF-8/GBK 解码，错误摘要有界且非零退出必须携带可用诊断；驱动源目录枚举拒绝重解析根并传播遍历错误，INF/CAB 混合目录或多 CAB 处理只要任一子操作失败就整体返回失败，禁止部分成功伪装成导入完成；离线驱动边界拒绝 `/ForceUnsigned`，避免把部署期签名错误推迟成 Secure Boot 启动失败。
 - `正常系统端/src/core/driver.rs`：共享驱动实现的兼容再导出，以及只允许 DISM、任何失败均停止的离线驱动导入策略。
 - `正常系统端/src/core/ghost.rs`：Ghost 镜像信息、备份、还原、进度、取消和错误分类。

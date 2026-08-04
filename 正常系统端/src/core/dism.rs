@@ -542,49 +542,53 @@ impl Dism {
         Ok(count)
     }
 
+    fn prepare_storage_driver_manifest(
+        destination: &Path,
+    ) -> Result<Vec<lr_core::driver::StorageDriverRequirement>> {
+        let manifest_path = destination.join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE);
+        if manifest_path.exists() {
+            std::fs::remove_file(&manifest_path)
+                .with_context(|| format!("无法清理旧存储驱动清单: {}", manifest_path.display()))?;
+        }
+        let requirements = lr_core::driver::list_present_oem_storage_driver_requirements()
+            .context("无法枚举当前硬件已绑定的 OEM 启动存储控制器驱动，已拒绝继续导出")?;
+        log::info!(
+            "[Dism] 导出前确认 {} 个当前硬件已绑定的 OEM 启动存储驱动包",
+            requirements.len()
+        );
+        Ok(requirements)
+    }
+
+    fn finalize_driver_export(
+        destination: &Path,
+        storage_requirements: &[lr_core::driver::StorageDriverRequirement],
+    ) -> Result<usize> {
+        let count = Self::require_exported_drivers(destination)?;
+        lr_core::driver::write_storage_driver_requirements(destination, storage_requirements)
+            .context("驱动导出完成，但启动存储驱动清单生成或覆盖验证失败")?;
+        Ok(count)
+    }
+
     /// 导出当前在线 Windows 的第三方驱动。
     /// 在正常环境下导出当前系统的第三方驱动（在线映像）
     pub fn export_drivers(&self, destination: &str) -> Result<usize> {
         std::fs::create_dir_all(destination)?;
 
         let destination_path = Path::new(destination);
-        let manifest_path =
-            destination_path.join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE);
-        if manifest_path.exists() {
-            std::fs::remove_file(&manifest_path)
-                .with_context(|| format!("无法清理旧存储驱动清单: {}", manifest_path.display()))?;
-        }
-        let storage_requirements = lr_core::driver::list_present_oem_storage_driver_requirements()
-            .context("无法枚举当前系统已绑定的启动存储控制器驱动，已拒绝继续导出")?;
-        log::info!(
-            "[Dism] 导出前确认 {} 个已绑定 OEM 启动存储驱动包",
-            storage_requirements.len()
-        );
+        let storage_requirements = Self::prepare_storage_driver_manifest(destination_path)?;
 
         if self.is_pe {
             anyhow::bail!("{}", tr!("PE环境下无法导出当前系统驱动，请使用 export_drivers_from_system 并指定目标系统分区"));
         }
 
         match DismCmd::new().and_then(|dism| dism.export_drivers_online(destination, None)) {
-            Ok(()) => match Self::require_exported_drivers(destination_path) {
+            Ok(()) => match Self::finalize_driver_export(destination_path, &storage_requirements) {
                 Ok(count) => {
-                    match lr_core::driver::write_storage_driver_requirements(
-                        destination_path,
-                        &storage_requirements,
-                    ) {
-                        Ok(()) => {
-                            log::info!(
-                                "[Dism] DISM 在线导出完成，共 {} 个 INF；启动存储驱动覆盖验证通过",
-                                count
-                            );
-                            return Ok(count);
-                        }
-                        Err(error) => {
-                            log::warn!(
-                                "[Dism] DISM 导出缺少当前启动存储驱动覆盖: {error}，回退 SetupAPI"
-                            );
-                        }
-                    }
+                    log::info!(
+                        "[Dism] DISM 在线导出完成，共 {} 个 INF；启动存储驱动覆盖验证通过",
+                        count
+                    );
+                    return Ok(count);
                 }
                 Err(error) => {
                     log::warn!("[Dism] DISM 在线导出返回空目录: {error}，回退 SetupAPI");
@@ -605,8 +609,7 @@ impl Dism {
         if count == 0 {
             anyhow::bail!("{}", tr!("未找到可导出的第三方驱动"));
         }
-        lr_core::driver::write_storage_driver_requirements(destination_path, &storage_requirements)
-            .context("SetupAPI 导出完成，但启动存储驱动覆盖验证失败")?;
+        Self::finalize_driver_export(destination_path, &storage_requirements)?;
         log::info!("[Dism] 成功导出 {} 个驱动", count);
         Ok(count)
     }
@@ -637,11 +640,21 @@ impl Dism {
             return self.export_drivers(destination);
         }
 
-        DismCmd::new()
+        let destination_path = Path::new(destination);
+        let storage_requirements = Self::prepare_storage_driver_manifest(destination_path)?;
+
+        if let Err(error) = DismCmd::new()
             .and_then(|dism| dism.export_drivers_offline(system_partition, destination, None))
-            .context("DISM 离线驱动导出失败，已拒绝使用不完整的手工 DriverStore 回退")?;
-        let count = Self::require_exported_drivers(Path::new(destination))?;
-        log::info!("[Dism] DISM 离线驱动导出完成，共 {} 个 INF", count);
+        {
+            anyhow::bail!(
+                "DISM 离线驱动导出失败，已拒绝使用不完整的手工 DriverStore 回退: {error:#}"
+            );
+        }
+        let count = Self::finalize_driver_export(destination_path, &storage_requirements)?;
+        log::info!(
+            "[Dism] DISM 离线驱动导出完成，共 {} 个 INF；启动存储驱动清单已原子写入并验证",
+            count
+        );
         Ok(count)
     }
 
@@ -1105,5 +1118,32 @@ mod tests {
         std::fs::write(nested.join("OEM42.INF"), b"[Version]\r\n").unwrap();
         std::fs::write(nested.join("readme.txt"), b"ignored").unwrap();
         assert_eq!(Dism::count_exported_inf_files(temporary.path()), 1);
+    }
+
+    #[test]
+    fn finalized_export_always_publishes_a_storage_manifest() {
+        let temporary =
+            lr_core::scoped_temp_file::ScopedTempDir::create_in(&std::env::temp_dir(), "lr-dism")
+                .expect("temporary driver directory");
+        let nested = temporary.path().join("driver");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("OEM42.INF"), b"[Version]\r\n").unwrap();
+
+        assert_eq!(
+            Dism::finalize_driver_export(temporary.path(), &[]).unwrap(),
+            1
+        );
+        let manifest = temporary
+            .path()
+            .join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE);
+        assert!(manifest.is_file());
+        assert_eq!(
+            lr_core::driver::verify_offline_storage_driver_requirements(
+                temporary.path(),
+                temporary.path(),
+            )
+            .unwrap(),
+            Vec::<lr_core::driver::StorageDriverRequirement>::new()
+        );
     }
 }

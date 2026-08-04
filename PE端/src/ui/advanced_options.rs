@@ -81,6 +81,8 @@ pub fn inject_user_drivers_from_data(target_partition: &str, data_dir: &str) -> 
         version,
         target_partition
     );
+    lr_core::driver_trust::ensure_pe_driver_signing_trust()
+        .context("初始化 PE 用户驱动签名信任链失败")?;
     let dism = Dism::new();
     let image_path = format!("{}\\", target_partition);
     dism.add_drivers_offline(&image_path, &dir)?;

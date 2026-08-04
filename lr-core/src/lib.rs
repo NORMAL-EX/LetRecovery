@@ -17,6 +17,7 @@ pub mod defender_removal;
 pub mod diskpart;
 pub mod download_integrity;
 pub mod driver;
+pub mod driver_trust;
 pub mod encoding;
 pub mod format_command;
 pub mod fveapi;
