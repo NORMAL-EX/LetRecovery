@@ -854,6 +854,54 @@ fn minimum_window_size(dpi: i32, work_width: i32, work_height: i32) -> (i32, i32
     )
 }
 
+fn centered_window_origin(
+    work_left: i32,
+    work_top: i32,
+    work_width: i32,
+    work_height: i32,
+    window_width: i32,
+    window_height: i32,
+) -> (i32, i32) {
+    (
+        work_left + (work_width - window_width).max(0) / 2,
+        work_top + (work_height - window_height).max(0) / 2,
+    )
+}
+
+unsafe fn center_window_in_nearest_work_area(hwnd: HWND, width: i32, height: i32) {
+    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut monitor_info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let (left, top, work_width, work_height) =
+        if GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
+            (
+                monitor_info.rcWork.left,
+                monitor_info.rcWork.top,
+                monitor_info.rcWork.right - monitor_info.rcWork.left,
+                monitor_info.rcWork.bottom - monitor_info.rcWork.top,
+            )
+        } else {
+            (
+                0,
+                0,
+                GetSystemMetrics(SM_CXSCREEN),
+                GetSystemMetrics(SM_CYSCREEN),
+            )
+        };
+    let (x, y) = centered_window_origin(left, top, work_width, work_height, width, height);
+    let _ = SetWindowPos(
+        hwnd,
+        HWND::default(),
+        x,
+        y,
+        width,
+        height,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+}
+
 fn localized_bitlocker_status(status: &crate::core::bitlocker::VolumeStatus) -> String {
     crate::tr!(status.as_str())
 }
@@ -889,6 +937,21 @@ struct CommandBarLayout {
 
 const fn effective_easy_mode_enabled(configured: bool, is_pe_environment: bool) -> bool {
     configured && !is_pe_environment
+}
+
+const fn navigation_visibility(easy_mode_enabled: bool, progress_visible: bool) -> [bool; 6] {
+    if progress_visible {
+        [false; 6]
+    } else {
+        [
+            true,
+            true,
+            !easy_mode_enabled,
+            !easy_mode_enabled,
+            true,
+            true,
+        ]
+    }
 }
 
 const fn command_bar_visibility(
@@ -1003,11 +1066,12 @@ impl InstallVolumeLayoutTransition {
 mod layout_tests {
     use super::{
         bitlocker_gate_completion, catalogue_status_message, centered_command_button_x,
-        command_bar_layout, command_bar_visibility, command_button_role, command_status_right_edge,
-        confirmed_tool_backend_request, device_change_requests_partition_refresh,
-        download_failure_message, effective_easy_mode_enabled, initial_mutating_tool_state,
-        install_partition_heading_y, list_view_selection_state_changed, may_publish_install_chrome,
-        minimum_window_size, page_switch_requires_full_layout, pca_pending_status,
+        centered_window_origin, command_bar_layout, command_bar_visibility, command_button_role,
+        command_status_right_edge, confirmed_tool_backend_request,
+        device_change_requests_partition_refresh, download_failure_message,
+        effective_easy_mode_enabled, initial_mutating_tool_state, install_partition_heading_y,
+        list_view_selection_state_changed, may_publish_install_chrome, minimum_window_size,
+        navigation_visibility, page_switch_requires_full_layout, pca_pending_status,
         pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
         pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
         reusable_pca_target_result, shared_install_mode_label_width, tool_backend_result_succeeded,
@@ -1143,6 +1207,32 @@ mod layout_tests {
             command_bar_visibility(Page::Install, false, false, true),
             [false, false, false]
         );
+    }
+
+    #[test]
+    fn easy_mode_navigation_hides_download_and_tools_without_leaving_other_rows_hidden() {
+        assert_eq!(
+            navigation_visibility(false, false),
+            [true, true, true, true, true, true]
+        );
+        assert_eq!(
+            navigation_visibility(true, false),
+            [true, true, false, false, true, true]
+        );
+        assert_eq!(navigation_visibility(true, true), [false; 6]);
+    }
+
+    #[test]
+    fn startup_window_is_centered_inside_monitor_work_area() {
+        assert_eq!(
+            centered_window_origin(0, 0, 1920, 1040, 1280, 900),
+            (320, 70)
+        );
+        assert_eq!(
+            centered_window_origin(-1920, 40, 1920, 1040, 1280, 900),
+            (-1600, 110)
+        );
+        assert_eq!(centered_window_origin(0, 0, 800, 600, 860, 640), (0, 0));
     }
 
     #[test]
@@ -2100,6 +2190,31 @@ impl NativeWindow {
 
     fn easy_mode_enabled(&self) -> bool {
         effective_easy_mode_enabled(self.app_config.easy_mode_enabled, self.is_pe_environment)
+    }
+
+    unsafe fn relayout_navigation_for_current_mode(&self, hwnd: HWND) {
+        let Some(handles) = self.handles else {
+            return;
+        };
+        let redraw = redraw::suspend(hwnd);
+        let visibility = navigation_visibility(self.easy_mode_enabled(), self.progress_visible);
+        for (index, control) in handles.nav.into_iter().enumerate() {
+            let _ = ShowWindow(control, if visibility[index] { SW_SHOW } else { SW_HIDE });
+        }
+        self.layout(hwnd);
+        for control in handles.nav {
+            let _ = InvalidateRect(control, None, false);
+        }
+        if redraw.is_some() {
+            redraw::resume_client(hwnd, redraw);
+        } else {
+            let _ = RedrawWindow(
+                hwnd,
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            );
+        }
     }
 
     unsafe fn request_easy_catalogue_resolution(
@@ -3355,8 +3470,9 @@ impl NativeWindow {
             true,
         );
         let mut visible_nav_row = 0i32;
+        let navigation_visibility = navigation_visibility(self.easy_mode_enabled(), false);
         for (i, item) in h.nav.iter().enumerate() {
-            if self.easy_mode_enabled() && matches!(i, 2 | 3) {
+            if !navigation_visibility[i] {
                 continue;
             }
             let _ = MoveWindow(
@@ -3660,13 +3776,6 @@ impl NativeWindow {
             second_y + self.scale(34)
         };
         let pca_y = third_y;
-        let open_width = measured_button_width(
-            hwnd,
-            self.font,
-            &crate::tr!("打开目录"),
-            self.dpi,
-            self.scale(75),
-        );
         let edit_width = measured_button_width(
             hwnd,
             self.font,
@@ -3674,15 +3783,11 @@ impl NativeWindow {
             self.dpi,
             self.scale(96),
         );
-        let run_width = measure_text(hwnd, self.font, &crate::tr!("运行Diskpart脚本"), None).width
-            + self.scale(26);
         let advanced_inline_x = unattend_x;
-        let advanced_inline_width =
-            run_width + metrics.tight_gap + open_width + metrics.control_gap + edit_width;
-        // The unattended file controls are conditional. Once the checkbox is cleared, repack the
-        // following advanced actions into the released part of the boot-mode row instead of
-        // retaining an invisible browse/hint slot. Keep a separate row when the translated labels
-        // do not fit.
+        let advanced_inline_width = edit_width;
+        // Arbitrary DiskPart scripts are permanently disabled. Lay out only the supported boot
+        // command editor, otherwise the widths of the two hidden legacy controls push the visible
+        // button into the middle of an otherwise empty row.
         let advanced_follows_boot = !unattended_enabled
             && self.app_config.enable_advanced_options
             && advanced_inline_x + advanced_inline_width <= content_right;
@@ -3696,24 +3801,9 @@ impl NativeWindow {
         } else {
             pca_y
         };
-        let _ = MoveWindow(
-            h.run_diskpart,
-            advanced_row_x,
-            advanced_row_y,
-            run_width,
-            self.scale(24),
-            true,
-        );
-        let _ = MoveWindow(
-            h.open_diskpart_dir,
-            advanced_row_x + run_width + metrics.tight_gap,
-            advanced_row_y,
-            open_width,
-            self.scale(24),
-            true,
-        );
-        let edit_x =
-            advanced_row_x + run_width + metrics.tight_gap + open_width + metrics.control_gap;
+        let _ = MoveWindow(h.run_diskpart, 0, 0, 0, 0, false);
+        let _ = MoveWindow(h.open_diskpart_dir, 0, 0, 0, 0, false);
+        let edit_x = advanced_row_x;
         let _ = MoveWindow(
             h.edit_boot_commands,
             edit_x,
@@ -3722,10 +3812,8 @@ impl NativeWindow {
             self.scale(24),
             true,
         );
-        // When advanced install options are enabled, keep all advanced install actions on one
-        // scan line: DiskPart, its adjacent directory action, boot-command editing, then the
-        // image-dependent PCA selector at the end. When the actions are disabled, the PCA selector
-        // naturally starts at the left edge instead of reserving invisible gaps.
+        // When the action needs its own row, the image-dependent PCA selector may use the remaining
+        // space on that row. Otherwise PCA starts at the left edge on the following row.
         let pca_row_y = if advanced_follows_boot {
             third_y
         } else {
@@ -4055,9 +4143,10 @@ impl NativeWindow {
             self.advanced_visible = false;
         }
         self.page = page;
+        let navigation_visibility =
+            navigation_visibility(self.easy_mode_enabled(), self.progress_visible);
         for (index, control) in h.nav.into_iter().enumerate() {
-            let visible =
-                !(self.progress_visible || self.easy_mode_enabled() && matches!(index, 2 | 3));
+            let visible = navigation_visibility[index];
             let _ = ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE });
         }
         let (title, description, primary) = match page {
@@ -11273,19 +11362,14 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
         // Reconcile the size after the HWND is assigned to its actual monitor. On some
         // per-monitor-v2 configurations `GetDpiForSystem` still reports 96 during startup.
         let actual_dpi = GetDpiForWindow(hwnd).max(96) as i32;
-        if actual_dpi != initial_dpi {
-            let (corrected_width, corrected_height) =
-                preferred_window_size(actual_dpi, screen_width, screen_height);
-            let _ = SetWindowPos(
-                hwnd,
-                HWND::default(),
-                0,
-                0,
-                corrected_width,
-                corrected_height,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
+        let (corrected_width, corrected_height) = if actual_dpi != initial_dpi {
+            preferred_window_size(actual_dpi, screen_width, screen_height)
+        } else {
+            (window_width, window_height)
+        };
+        // Startup placement is deliberately stateless: always center the new window in the
+        // nearest monitor work area instead of inheriting a prior drag position from the shell.
+        center_window_in_nearest_work_area(hwnd, corrected_width, corrected_height);
         // Keep the first child-control paint transaction outside the visible DWM surface. A
         // non-zero alpha still owns hit testing, unlike alpha=0, while making USER32's stock
         // white Edit/Combo/STATIC intermediate pixels effectively invisible. Reduced WinPE
@@ -12140,6 +12224,7 @@ unsafe extern "system" fn window_proc(
                                 .system_info
                                 .as_ref()
                                 .is_some_and(|info| info.is_pe_environment);
+                            let mut changed = false;
                             if !is_pe {
                                 if let Some(page) = &state.about_page {
                                     let enabled = page.easy_mode_enabled();
@@ -12155,7 +12240,14 @@ unsafe extern "system" fn window_proc(
                                         // the page-level visibility invariant.
                                         easy.show(false);
                                     }
+                                    changed = true;
                                 }
+                            }
+                            if changed {
+                                // The setting is immediate. Hide/show the real navigation HWNDs and
+                                // compact their rows in one redraw transaction instead of waiting for
+                                // a restart or another page click.
+                                state.relayout_navigation_for_current_mode(hwnd);
                             }
                         }
                         Some(InfoIntent::SelectLanguage)
