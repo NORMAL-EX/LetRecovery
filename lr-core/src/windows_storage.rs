@@ -206,8 +206,9 @@ mod platform {
         CloseHandle, BOOLEAN, E_UNEXPECTED, HANDLE, RPC_E_CHANGED_MODE,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, DeleteVolumeMountPointW, GetLogicalDrives, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, DefineDosDeviceW, GetLogicalDrives, QueryDosDeviceW,
+        DDD_EXACT_MATCH_ON_REMOVE, DDD_RAW_TARGET_PATH, DDD_REMOVE_DEFINITION, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows::Win32::Storage::VirtualDiskService::{
         CLSID_VdsLoader, IEnumVdsObject, IVdsAdvancedDisk, IVdsAsync, IVdsCreatePartitionEx,
@@ -1544,13 +1545,12 @@ mod platform {
         Ok(())
     }
 
-    pub unsafe fn remove_drive_letter(drive_letter: char) -> Result<(), StorageError> {
-        let letter = normalize_letter(drive_letter)?;
-        let path = wide(&format!("{letter}:\\"));
-        DeleteVolumeMountPointW(PCWSTR(path.as_ptr()))
-            .map_err(|error| api_error("remove drive letter mount point", error))?;
+    fn drive_letter_bit(letter: char) -> u32 {
+        1_u32 << (u32::from(letter as u8) - u32::from(b'A'))
+    }
 
-        let bit = 1_u32 << (u32::from(letter as u8) - u32::from(b'A'));
+    unsafe fn wait_for_drive_letter_removal(letter: char) -> Result<bool, StorageError> {
+        let bit = drive_letter_bit(letter);
         for _ in 0..20 {
             let mask = GetLogicalDrives();
             if mask == 0 {
@@ -1560,14 +1560,88 @@ mod platform {
                 ));
             }
             if mask & bit == 0 {
-                return Ok(());
+                return Ok(true);
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        Err(StorageError::new(
-            "verify removed drive letter",
-            format!("{letter}: remains assigned after DeleteVolumeMountPointW succeeded"),
-        ))
+        Ok(false)
+    }
+
+    fn first_dos_device_target(buffer: &[u16], length: u32) -> Result<Vec<u16>, StorageError> {
+        let length = usize::try_from(length)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let end = buffer[..length]
+            .iter()
+            .position(|value| *value == 0)
+            .ok_or_else(|| {
+                StorageError::new(
+                    "query drive letter DOS target",
+                    "QueryDosDeviceW returned an unterminated target",
+                )
+            })?;
+        if end == 0 {
+            return Err(StorageError::new(
+                "query drive letter DOS target",
+                "QueryDosDeviceW returned an empty target",
+            ));
+        }
+        let mut target = buffer[..end].to_vec();
+        target.push(0);
+        Ok(target)
+    }
+
+    unsafe fn query_dos_device_target(letter: char) -> Result<Vec<u16>, StorageError> {
+        let device_name = wide(&format!("{letter}:"));
+        let mut buffer = vec![0_u16; 32_768];
+        let length = QueryDosDeviceW(PCWSTR(device_name.as_ptr()), Some(&mut buffer));
+        if length == 0 {
+            return Err(StorageError::new(
+                "query drive letter DOS target",
+                windows::core::Error::from_win32().to_string(),
+            ));
+        }
+        first_dos_device_target(&buffer, length)
+    }
+
+    unsafe fn remove_exact_dos_device_mapping(
+        letter: char,
+        target: &[u16],
+    ) -> Result<(), StorageError> {
+        let device_name = wide(&format!("{letter}:"));
+        let flags = DDD_RAW_TARGET_PATH | DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE;
+        DefineDosDeviceW(flags, PCWSTR(device_name.as_ptr()), PCWSTR(target.as_ptr()))
+            .map_err(|error| api_error("remove exact drive letter DOS mapping", error))
+    }
+
+    unsafe fn remove_drive_letter_via_vds(
+        drive_letter: char,
+        force: bool,
+    ) -> Result<(), StorageError> {
+        let letter = normalize_letter(drive_letter)?;
+        let vds = Vds::connect()?;
+        let volume = vds.find_volume_by_letter(letter)?;
+        let formatter = volume
+            .cast::<IVdsVolumeMF>()
+            .map_err(|error| api_error("open VDS volume access-path interface", error))?;
+        let path = wide(&format!("{letter}:\\"));
+        formatter
+            .DeleteAccessPath(PCWSTR(path.as_ptr()), force)
+            .map_err(|error| api_error("remove drive letter access path", error))?;
+        vds.refresh()
+    }
+
+    pub unsafe fn remove_drive_letter(drive_letter: char) -> Result<(), StorageError> {
+        let letter = normalize_letter(drive_letter)?;
+        remove_drive_letter_via_vds(letter, false)?;
+        if wait_for_drive_letter_removal(letter)? {
+            Ok(())
+        } else {
+            Err(StorageError::new(
+                "verify removed drive letter",
+                format!("{letter}: remains assigned after the access-path removal completed"),
+            ))
+        }
     }
 
     pub unsafe fn remove_drive_letter_if_matches(
@@ -1588,7 +1662,33 @@ mod platform {
                 ),
             ));
         }
-        remove_drive_letter(drive_letter)
+        let letter = normalize_letter(drive_letter)?;
+        let dos_target = query_dos_device_target(letter)?;
+        let vds_error = remove_drive_letter_via_vds(letter, true).err();
+        if wait_for_drive_letter_removal(letter)? {
+            return Ok(());
+        }
+
+        remove_exact_dos_device_mapping(letter, &dos_target).map_err(|dos_error| {
+            let vds_context = vds_error
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    "VDS reported success but the drive letter remained".to_string()
+                });
+            StorageError::new(
+                "remove temporary drive letter",
+                format!("{vds_context}; exact DOS mapping cleanup also failed: {dos_error}"),
+            )
+        })?;
+        if wait_for_drive_letter_removal(letter)? {
+            Ok(())
+        } else {
+            Err(StorageError::new(
+                "verify removed temporary drive letter",
+                format!("{letter}: remains assigned after exact DOS mapping cleanup"),
+            ))
+        }
     }
 
     pub unsafe fn assign_partition_drive_letter(
@@ -1622,6 +1722,33 @@ mod platform {
             assert_eq!(physical_drive_number(r"\\.\PhysicalDrive123"), Some(123));
             assert_eq!(physical_drive_number(r"PhysicalDriveX"), None);
             assert_eq!(physical_drive_number(r"PhysicalDrive1\Partition2"), None);
+        }
+
+        #[test]
+        fn dos_device_cleanup_uses_only_the_current_exact_mapping() {
+            let buffer = [
+                b'\\' as u16,
+                b'D' as u16,
+                b'e' as u16,
+                b'v' as u16,
+                b'i' as u16,
+                b'c' as u16,
+                b'e' as u16,
+                b'1' as u16,
+                0,
+                b'\\' as u16,
+                b'D' as u16,
+                b'e' as u16,
+                b'v' as u16,
+                b'i' as u16,
+                b'c' as u16,
+                b'e' as u16,
+                b'2' as u16,
+                0,
+                0,
+            ];
+            let target = first_dos_device_target(&buffer, buffer.len() as u32).unwrap();
+            assert_eq!(String::from_utf16_lossy(&target), "\\Device1\0");
         }
 
         #[test]
