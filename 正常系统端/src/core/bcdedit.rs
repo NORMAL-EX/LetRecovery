@@ -80,7 +80,10 @@ impl BootManager {
     }
 
     /// 查找目标 Windows 分区所在磁盘的 ESP 分区
-    pub fn find_esp_on_same_disk(&self, windows_partition: &str) -> Result<String> {
+    pub fn find_esp_on_same_disk(
+        &self,
+        windows_partition: &str,
+    ) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
         let _mount_lock = ESP_MOUNT_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -118,6 +121,19 @@ impl BootManager {
             esp.offset_bytes
         );
 
+        let existing_letters = lr_core::windows_storage::assigned_drive_letters_for_partition(
+            disk_num,
+            esp.offset_bytes,
+        )?;
+        if let Some(letter) = existing_letters.first().copied() {
+            log::info!(
+                "[BOOT] ESP 已有盘符 {}:，只读复用且不会在探测后移除",
+                letter
+            );
+            return lr_core::boot_pca::TemporaryEspMountGuard::existing(&letter.to_string())
+                .map_err(anyhow::Error::msg);
+        }
+
         // Step 3: 使用真正空闲的盘符挂载 ESP，不能覆盖用户已有的 S: 等盘符。
         let mount_letter = lr_core::boot_pca::find_available_drive_letter()
             .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
@@ -127,6 +143,8 @@ impl BootManager {
             esp.offset_bytes,
             mount_letter,
         )?;
+        let mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&mount_letter.to_string())
+            .map_err(anyhow::Error::msg)?;
 
         let mount_root = format!("{}:\\", mount_letter);
         for _ in 0..20 {
@@ -138,9 +156,8 @@ impl BootManager {
         if Path::new(&mount_root).exists() {
             let mounted = format!("{}:", mount_letter);
             log::info!("[BOOT] ESP 已挂载到 {}", mounted);
-            Ok(mounted)
+            Ok(mount_guard)
         } else {
-            let _ = lr_core::boot_pca::unmount_esp(&mount_letter.to_string());
             anyhow::bail!("{}", tr!("ESP 盘符分配失败"))
         }
     }
@@ -152,32 +169,40 @@ impl BootManager {
         &self,
         windows_partition: &str,
     ) -> Result<lr_core::boot_pca::EfiSignatureInfo> {
-        let esp_letter = self.find_esp_on_same_disk(windows_partition)?;
-        let esp_mount = lr_core::boot_pca::TemporaryEspMountGuard::new(&esp_letter)
-            .map_err(anyhow::Error::msg)?;
+        let esp_mount = self.find_esp_on_same_disk(windows_partition)?;
         let esp_root = format!("{}\\", esp_mount.letter().trim_end_matches('\\'));
         let result = lr_core::boot_pca::inspect_esp_generation(Path::new(&esp_root));
         Ok(result)
     }
 
     /// 查找并挂载 EFI 系统分区（旧方法，作为备选）
-    pub fn find_and_mount_esp(&self) -> Result<String> {
+    pub fn find_and_mount_esp(&self) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
         let _mount_lock = ESP_MOUNT_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!("[BOOT] 查找 EFI 系统分区...");
 
-        let mount_letter = lr_core::boot_pca::find_available_drive_letter()
-            .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
-
         // 通过 IOCTL/VDS 枚举全部物理磁盘上的 ESP 并分配访问路径。
-        self.find_esp_with_windows_api(mount_letter)
+        self.find_esp_with_windows_api()
     }
 
-    fn find_esp_with_windows_api(&self, mount_letter: char) -> Result<String> {
+    fn find_esp_with_windows_api(&self) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
         log::info!("[BOOT] 使用 WinAPI 查找 ESP");
         for disk in crate::core::quick_partition::get_physical_disks() {
             for partition in disk.partitions.iter().filter(|partition| partition.is_esp) {
+                let existing_letters =
+                    lr_core::windows_storage::assigned_drive_letters_for_partition(
+                        disk.disk_number,
+                        partition.offset_bytes,
+                    )?;
+                if let Some(letter) = existing_letters.first().copied() {
+                    return lr_core::boot_pca::TemporaryEspMountGuard::existing(
+                        &letter.to_string(),
+                    )
+                    .map_err(anyhow::Error::msg);
+                }
+                let mount_letter = lr_core::boot_pca::find_available_drive_letter()
+                    .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
                 if let Err(error) = lr_core::windows_storage::assign_partition_drive_letter(
                     disk.disk_number,
                     partition.offset_bytes,
@@ -191,6 +216,9 @@ impl BootManager {
                     );
                     continue;
                 }
+                let mount_guard =
+                    lr_core::boot_pca::TemporaryEspMountGuard::new(&mount_letter.to_string())
+                        .map_err(anyhow::Error::msg)?;
                 let mount_root = format!("{}:\\", mount_letter);
                 for _ in 0..20 {
                     if Path::new(&mount_root).exists() {
@@ -199,7 +227,7 @@ impl BootManager {
                             disk.disk_number,
                             partition.partition_number
                         );
-                        return Ok(format!("{}:", mount_letter));
+                        return Ok(mount_guard);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
@@ -451,12 +479,8 @@ impl BootManager {
         } else {
             None
         };
-        let _esp_mount_guard = mounted_esp
-            .as_deref()
-            .map(lr_core::boot_pca::TemporaryEspMountGuard::new)
-            .transpose()
-            .map_err(anyhow::Error::msg)?;
-        let existing_esp_hint = mounted_esp.as_deref().map(|esp_letter| {
+        let existing_esp_hint = mounted_esp.as_ref().map(|mount| {
+            let esp_letter = mount.letter();
             let esp_root = format!("{}\\", esp_letter.trim_end_matches('\\'));
             let info = lr_core::boot_pca::inspect_esp_generation(Path::new(&esp_root));
             if info.signature_valid {
@@ -466,38 +490,10 @@ impl BootManager {
             }
         });
 
-        // 用户可编辑的修复引导脚本（bin\repair_boot.txt）仅在「高级选项」开启时启用。
-        // Legacy 成功后可直接完成；UEFI 命令作为前置步骤，随后仍由内置逻辑按所选 PCA
-        // 重新写入并校验，避免自定义命令绕过 Secure Boot 兼容性检查。
-        let allow_custom_repair =
-            crate::core::app_config::AppConfig::load().enable_advanced_options;
-        let repair_script = get_bin_dir().join("repair_boot.txt");
-        if allow_custom_repair && repair_script.exists() {
-            log::info!(
-                "[BOOT] 检测到自定义修复引导脚本: {}",
-                repair_script.display()
-            );
-            match lr_core::boot::run_repair_script(
-                &repair_script,
-                &get_bin_dir(),
-                windows_partition,
-                use_uefi,
-                mounted_esp.as_deref(),
-            ) {
-                Ok(out) => {
-                    log::info!("[BOOT] 自定义修复引导脚本执行完成:\n{}", out);
-                    if !use_uefi {
-                        return Ok(());
-                    }
-                    log::info!("[BOOT PCA] 将继续执行内置 UEFI 写入与签名验证");
-                }
-                Err(e) => log::warn!("[BOOT] 自定义修复引导脚本失败，回退默认逻辑: {}", e),
-            }
-        }
-
         if use_uefi {
             let esp_letter = mounted_esp
-                .as_deref()
+                .as_ref()
+                .map(lr_core::boot_pca::TemporaryEspMountGuard::letter)
                 .expect("UEFI repair always mounts the target-disk ESP first");
 
             let firmware = lr_core::boot_pca::inspect_firmware_pca();
@@ -628,7 +624,7 @@ impl BootManager {
     }
 
     /// 查找 EFI 分区
-    pub fn find_efi_partition(&self) -> Result<String> {
+    pub fn find_efi_partition(&self) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
         self.find_and_mount_esp()
     }
 
@@ -653,12 +649,10 @@ impl BootManager {
         let esp = self
             .find_esp_on_same_disk(windows_partition)
             .map_err(|e| anyhow::anyhow!("{}", tr!("未找到 ESP，无法写 UEFI 引导: {}", e)))?;
-        let _esp_mount_guard =
-            lr_core::boot_pca::TemporaryEspMountGuard::new(&esp).map_err(anyhow::Error::msg)?;
-        log::info!("[BOOT] 使用 ESP: {}", esp);
+        log::info!("[BOOT] 使用 ESP: {}", esp.letter());
         match lr_core::xp::write_xp_uefi_gpt_boot(
             windows_partition,
-            &esp,
+            esp.letter(),
             Path::new(&self.bcdedit_path),
         ) {
             Ok(out) => {

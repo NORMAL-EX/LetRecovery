@@ -3,7 +3,7 @@
 //! Hardware values are presented as a responsive category/item/value report ListView;
 //! the page also retains a complete tab-separated representation for copying. The about page
 //! exposes the existing persisted language, logging, easy-mode, download-connection,
-//! image-engine, and advanced-mode preferences. Link and settings controls emit intents; this
+//! image-engine preferences. Link and settings controls emit intents; this
 //! module never starts a browser or opens filesystem locations.
 
 use std::cell::RefCell;
@@ -44,7 +44,6 @@ const ID_ABOUT_LANGUAGE: u16 = 5_250;
 const ID_ABOUT_REFRESH_LANGUAGES: u16 = 5_251;
 const ID_ABOUT_LOGGING: u16 = 5_252;
 const ID_ABOUT_WIM_ENGINE: u16 = 5_253;
-const ID_ABOUT_ADVANCED: u16 = 5_254;
 const ID_ABOUT_DOWNLOAD_THREADS: u16 = 5_259;
 const DOWNLOAD_THREAD_OPTIONS: [u8; 3] = [8, 16, 32];
 // Unlike SS_LEFT (zero), this stock STATIC style never wraps a single-line settings label.  A
@@ -72,7 +71,6 @@ pub enum InfoIntent {
     ToggleLogging,
     SelectWimEngine,
     SelectDownloadThreads,
-    ToggleAdvancedOptions,
     OpenLogDirectory,
 }
 
@@ -135,7 +133,6 @@ pub struct AboutLabels<'a> {
     pub log_enabled: bool,
     pub wim_engine: u8,
     pub download_threads: u8,
-    pub advanced_options_enabled: bool,
 }
 
 pub struct HardwareInfoPage {
@@ -814,7 +811,6 @@ pub struct AboutPage {
     pub wim_engine: HWND,
     pub download_threads_label: HWND,
     pub download_threads: HWND,
-    pub advanced_options: HWND,
     pub settings_help: HWND,
     pub credits: HWND,
     pub link_buttons: [HWND; 3],
@@ -940,15 +936,6 @@ impl AboutPage {
             WPARAM(selected_threads),
             LPARAM(0),
         );
-        let advanced_options = child(
-            parent,
-            w!("BUTTON"),
-            &crate::tr!("启用高级选项"),
-            BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
-            ID_ABOUT_ADVANCED,
-        )?;
-        set_checked(advanced_options, labels.advanced_options_enabled);
-        let _ = EnableWindow(advanced_options, !labels.easy_mode_enabled);
         let settings_help = child(
             parent,
             w!("STATIC"),
@@ -1003,7 +990,6 @@ impl AboutPage {
             wim_engine,
             download_threads_label,
             download_threads,
-            advanced_options,
             settings_help,
             credits,
             link_buttons,
@@ -1024,7 +1010,6 @@ impl AboutPage {
             ID_ABOUT_LOGGING => return Some(InfoIntent::ToggleLogging),
             ID_ABOUT_WIM_ENGINE => return Some(InfoIntent::SelectWimEngine),
             ID_ABOUT_DOWNLOAD_THREADS => return Some(InfoIntent::SelectDownloadThreads),
-            ID_ABOUT_ADVANCED => return Some(InfoIntent::ToggleAdvancedOptions),
             _ => {}
         }
         if command_id == ID_ABOUT_EASY_MODE {
@@ -1059,17 +1044,9 @@ impl AboutPage {
         );
     }
 
-    pub unsafe fn advanced_options_enabled(&self) -> bool {
-        is_checked(self.advanced_options)
-    }
-
     pub unsafe fn set_easy_mode_state(&self, enabled: bool, available: bool) {
         set_checked(self.easy_mode, enabled);
         let _ = EnableWindow(self.easy_mode, available);
-        if enabled {
-            set_checked(self.advanced_options, false);
-        }
-        let _ = EnableWindow(self.advanced_options, available && !enabled);
     }
 
     pub unsafe fn selected_wim_engine(&self) -> u8 {
@@ -1124,7 +1101,6 @@ impl AboutPage {
         set_text(self.logging, &crate::tr!("启用日志记录"));
         set_text(self.wim_engine_label, &crate::tr!("WIM 引擎:"));
         set_text(self.download_threads_label, &crate::tr!("下载线程:"));
-        set_text(self.advanced_options, &crate::tr!("启用高级选项"));
         set_text(
             self.settings_help,
             &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n下载线程数从下一个下载任务开始生效；镜像引擎同时用于正常系统端和 PE 端。"),
@@ -1324,16 +1300,7 @@ impl AboutPage {
             s(300),
             true,
         );
-        let advanced_y = download_threads_y + threads_row_height + gap;
-        let _ = MoveWindow(
-            self.advanced_options,
-            settings_x,
-            advanced_y,
-            width,
-            s(26),
-            true,
-        );
-        let help_y = advanced_y + s(26) + gap;
+        let help_y = download_threads_y + threads_row_height + gap;
         let help_height = s(48);
         let _ = MoveWindow(
             self.settings_help,
@@ -1402,12 +1369,7 @@ impl AboutPage {
     }
 
     pub unsafe fn apply_theme(&self, palette: Palette) {
-        for control in [
-            self.easy_mode,
-            self.logging,
-            self.advanced_options,
-            self.refresh_languages,
-        ] {
+        for control in [self.easy_mode, self.logging, self.refresh_languages] {
             apply_control_theme(control, palette, NativeControlKind::General);
         }
         for control in [self.language, self.wim_engine, self.download_threads] {
@@ -1438,7 +1400,6 @@ impl AboutPage {
             self.wim_engine,
             self.download_threads_label,
             self.download_threads,
-            self.advanced_options,
             self.settings_help,
             self.credits,
         ]
@@ -1527,7 +1488,6 @@ mod tests {
             (ID_ABOUT_LOGGING, InfoIntent::ToggleLogging),
             (ID_ABOUT_WIM_ENGINE, InfoIntent::SelectWimEngine),
             (ID_ABOUT_DOWNLOAD_THREADS, InfoIntent::SelectDownloadThreads),
-            (ID_ABOUT_ADVANCED, InfoIntent::ToggleAdvancedOptions),
         ] {
             assert_eq!(AboutPage::command_intent(command), Some(intent));
         }

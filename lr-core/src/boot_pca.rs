@@ -54,14 +54,40 @@ pub fn unmount_esp(esp_letter: &str) -> Result<(), String> {
 #[derive(Debug)]
 pub struct TemporaryEspMountGuard {
     letter: Option<String>,
+    identity: Option<crate::windows_storage::VolumeIdentity>,
 }
 
 impl TemporaryEspMountGuard {
+    /// Adopt a drive letter created by the caller and remove it when the guard closes.
     pub fn new(esp_letter: &str) -> Result<Self, String> {
+        let letter = normalize_drive_letter(esp_letter)
+            .ok_or_else(|| format!("无效的 ESP 盘符: {esp_letter}"))?;
+        let identity = match crate::windows_storage::volume_identity(letter) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let cleanup = unmount_esp(&letter.to_string());
+                return Err(match cleanup {
+                    Ok(()) => format!("无法确认临时 ESP {letter}: 的卷身份，已撤销盘符: {error}"),
+                    Err(cleanup_error) => format!(
+                        "无法确认临时 ESP {letter}: 的卷身份，且撤销盘符失败: {error}; {cleanup_error}"
+                    ),
+                });
+            }
+        };
+        Ok(Self {
+            letter: Some(format!("{letter}:")),
+            identity: Some(identity),
+        })
+    }
+
+    /// Borrow an ESP that already had a drive letter before the probe started.
+    /// Borrowed letters are never removed by this guard.
+    pub fn existing(esp_letter: &str) -> Result<Self, String> {
         let letter = normalize_drive_letter(esp_letter)
             .ok_or_else(|| format!("无效的 ESP 盘符: {esp_letter}"))?;
         Ok(Self {
             letter: Some(format!("{letter}:")),
+            identity: None,
         })
     }
 
@@ -76,18 +102,33 @@ impl TemporaryEspMountGuard {
             .letter
             .take()
             .expect("ESP mount guard can only be closed once");
-        unmount_esp(&letter)
+        match self.identity {
+            Some(identity) => unmount_owned_esp(&letter, identity),
+            None => Ok(()),
+        }
     }
 }
 
 impl Drop for TemporaryEspMountGuard {
     fn drop(&mut self) {
         if let Some(letter) = self.letter.take() {
-            if let Err(error) = unmount_esp(&letter) {
-                log::warn!("[BOOT PCA] 卸载临时 ESP {} 失败: {}", letter, error);
+            if let Some(identity) = self.identity {
+                if let Err(error) = unmount_owned_esp(&letter, identity) {
+                    log::warn!("[BOOT PCA] 卸载临时 ESP {} 失败: {}", letter, error);
+                }
             }
         }
     }
+}
+
+fn unmount_owned_esp(
+    esp_letter: &str,
+    identity: crate::windows_storage::VolumeIdentity,
+) -> Result<(), String> {
+    let letter = normalize_drive_letter(esp_letter)
+        .ok_or_else(|| format!("无效的 ESP 盘符: {esp_letter}"))?;
+    crate::windows_storage::remove_drive_letter_if_matches(letter, identity)
+        .map_err(|error| format!("卸载 ESP {letter}: 失败: {error}"))
 }
 
 #[cfg(not(windows))]
@@ -1392,6 +1433,14 @@ mod tests {
         assert_eq!(normalize_drive_letter("z:\\"), Some('Z'));
         assert_eq!(normalize_drive_letter("S:"), Some('S'));
         assert_eq!(normalize_drive_letter("system"), None);
+    }
+
+    #[test]
+    fn existing_esp_letter_is_borrowed_without_cleanup_ownership() {
+        let guard = TemporaryEspMountGuard::existing("x:\\").unwrap();
+        assert_eq!(guard.letter(), "X:");
+        assert!(guard.identity.is_none());
+        drop(guard);
     }
 
     #[test]

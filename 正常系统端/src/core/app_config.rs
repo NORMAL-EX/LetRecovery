@@ -42,10 +42,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub wim_engine: u8,
 
-    /// 是否启用「高级选项」（设置页总开关）。默认关闭，需在设置里或 config.json 显式置 true。
-    /// 开启后解锁：安装 XP 时可选 UEFI 引导（魔改镜像用）、
-    /// 以及自定义修复引导脚本 bin\repair_boot.txt。面向高级用户，小白不要开。
-    #[serde(default)]
+    /// 旧版高级模式开关，仅用于读取旧配置；加载后固定关闭且保存时不再写回。
+    #[serde(default, skip_serializing)]
     pub enable_advanced_options: bool,
 
     /// Compatibility switch for trusted deployments that still publish HTTP
@@ -111,10 +109,6 @@ impl Default for AppConfig {
             install_prefs: crate::core::ui_state::InstallPrefs::default(),
         }
     }
-}
-
-const fn advanced_options_allowed(requested: bool, easy_mode_enabled: bool) -> bool {
-    requested && !easy_mode_enabled
 }
 
 impl AppConfig {
@@ -198,21 +192,19 @@ impl AppConfig {
 
     fn normalized(mut self) -> Self {
         self.download_threads = normalize_download_threads(self.download_threads);
+        // Advanced mode is no longer user-visible. Keep legacy fields readable so old config.json
+        // files continue to load, but never let stale destructive preferences affect a new session.
+        self.enable_advanced_options = false;
+        self.install_prefs.advanced_options = Default::default();
         self.install_prefs.advanced_options.apply_runtime_defaults();
-        // Easy mode deliberately exposes a reduced, fixed installation policy.  Old config files
-        // can contain both switches after upgrading from builds where the two settings were
-        // independent; normalize that impossible UI state before any page is created.
-        self.enable_advanced_options =
-            advanced_options_allowed(self.enable_advanced_options, self.easy_mode_enabled);
+        self.install_prefs.run_diskpart_scripts = false;
         self
     }
 
     /// 设置小白模式状态并保存
     pub fn set_easy_mode(&mut self, enabled: bool) {
         self.easy_mode_enabled = enabled;
-        if enabled {
-            self.enable_advanced_options = false;
-        }
+        self.enable_advanced_options = false;
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }
@@ -269,16 +261,6 @@ impl AppConfig {
     /// 将当前配置中的引擎选择应用到进程级全局（启动时调用一次）
     pub fn apply_wim_engine(&self) {
         lr_core::set_active_engine(lr_core::WimEngine::from_u8(self.wim_engine));
-    }
-
-    /// 设置「高级选项」总开关并保存
-    pub fn set_advanced_options(&mut self, enabled: bool) {
-        // The disabled About-page checkbox is the first line of defence, but keep the persisted
-        // invariant here as well so keyboard notifications or a stale caller cannot enable both.
-        self.enable_advanced_options = advanced_options_allowed(enabled, self.easy_mode_enabled);
-        if let Err(e) = self.save() {
-            log::warn!("保存配置失败: {}", e);
-        }
     }
 
     /// 设置单个下载任务的并行连接数。新值从下一个下载任务开始生效。
@@ -379,19 +361,27 @@ mod tests {
     }
 
     #[test]
-    fn easy_mode_normalizes_legacy_advanced_option_conflict() {
+    fn legacy_advanced_mode_is_always_discarded() {
         let config: AppConfig =
-            serde_json::from_str(r#"{"easy_mode_enabled":true,"enable_advanced_options":true}"#)
+            serde_json::from_str(r#"{"easy_mode_enabled":false,"enable_advanced_options":true}"#)
                 .unwrap();
         let normalized = config.normalized();
-        assert!(normalized.easy_mode_enabled);
         assert!(!normalized.enable_advanced_options);
     }
 
     #[test]
-    fn advanced_options_cannot_be_enabled_while_easy_mode_is_active() {
-        assert!(!advanced_options_allowed(true, true));
-        assert!(advanced_options_allowed(true, false));
-        assert!(!advanced_options_allowed(false, false));
+    fn legacy_advanced_preferences_are_reset_before_use() {
+        let config: AppConfig = serde_json::from_str(
+            r#"{"install_prefs":{"run_diskpart_scripts":true,"advanced_options":{"disable_windows_defender":true}}}"#,
+        )
+        .unwrap();
+        let normalized = config.normalized();
+        assert!(!normalized.install_prefs.run_diskpart_scripts);
+        assert!(
+            !normalized
+                .install_prefs
+                .advanced_options
+                .disable_windows_defender
+        );
     }
 }

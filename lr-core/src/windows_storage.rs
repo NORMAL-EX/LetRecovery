@@ -98,6 +98,10 @@ pub struct VolumeIdentity {
     pub extent_length_bytes: u64,
 }
 
+fn same_physical_partition(left: VolumeIdentity, right: VolumeIdentity) -> bool {
+    left.disk_number == right.disk_number && left.offset_bytes == right.offset_bytes
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PartitionRecord {
     pub partition_number: u32,
@@ -202,8 +206,8 @@ mod platform {
         CloseHandle, BOOLEAN, E_UNEXPECTED, HANDLE, RPC_E_CHANGED_MODE,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, GetLogicalDrives, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, DeleteVolumeMountPointW, GetLogicalDrives, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows::Win32::Storage::VirtualDiskService::{
         CLSID_VdsLoader, IEnumVdsObject, IVdsAdvancedDisk, IVdsAsync, IVdsCreatePartitionEx,
@@ -1541,17 +1545,50 @@ mod platform {
     }
 
     pub unsafe fn remove_drive_letter(drive_letter: char) -> Result<(), StorageError> {
-        let vds = Vds::connect()?;
         let letter = normalize_letter(drive_letter)?;
-        let volume = vds.find_volume_by_letter(letter)?;
-        let formatter = volume
-            .cast::<IVdsVolumeMF>()
-            .map_err(|error| api_error("open VDS volume access-path interface", error))?;
         let path = wide(&format!("{letter}:\\"));
-        formatter
-            .DeleteAccessPath(PCWSTR(path.as_ptr()), false)
-            .map_err(|error| api_error("remove drive letter", error))?;
-        vds.refresh()
+        DeleteVolumeMountPointW(PCWSTR(path.as_ptr()))
+            .map_err(|error| api_error("remove drive letter mount point", error))?;
+
+        let bit = 1_u32 << (u32::from(letter as u8) - u32::from(b'A'));
+        for _ in 0..20 {
+            let mask = GetLogicalDrives();
+            if mask == 0 {
+                return Err(StorageError::new(
+                    "verify removed drive letter",
+                    windows::core::Error::from_win32().to_string(),
+                ));
+            }
+            if mask & bit == 0 {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Err(StorageError::new(
+            "verify removed drive letter",
+            format!("{letter}: remains assigned after DeleteVolumeMountPointW succeeded"),
+        ))
+    }
+
+    pub unsafe fn remove_drive_letter_if_matches(
+        drive_letter: char,
+        expected: VolumeIdentity,
+    ) -> Result<(), StorageError> {
+        let actual = volume_identity(drive_letter)?;
+        if !same_physical_partition(actual, expected) {
+            return Err(StorageError::new(
+                "verify temporary drive letter ownership",
+                format!(
+                    "{}: now maps to disk {} offset {}, expected disk {} offset {}",
+                    drive_letter.to_ascii_uppercase(),
+                    actual.disk_number,
+                    actual.offset_bytes,
+                    expected.disk_number,
+                    expected.offset_bytes
+                ),
+            ));
+        }
+        remove_drive_letter(drive_letter)
     }
 
     pub unsafe fn assign_partition_drive_letter(
@@ -1717,6 +1754,16 @@ pub fn remove_drive_letter(drive_letter: char) -> Result<(), StorageError> {
     unsafe { platform::remove_drive_letter(drive_letter) }
 }
 
+/// Remove a temporary drive letter only while it still identifies the volume that was mounted.
+/// This prevents a delayed cleanup from deleting a different volume's newly reused drive letter.
+#[cfg(windows)]
+pub fn remove_drive_letter_if_matches(
+    drive_letter: char,
+    expected: VolumeIdentity,
+) -> Result<(), StorageError> {
+    unsafe { platform::remove_drive_letter_if_matches(drive_letter, expected) }
+}
+
 #[cfg(windows)]
 pub fn assign_partition_drive_letter(
     disk_number: u32,
@@ -1734,6 +1781,32 @@ pub fn current_windows_drive_letter() -> Result<char, StorageError> {
 #[cfg(windows)]
 pub fn assigned_drive_letter_mask() -> Result<u32, StorageError> {
     platform::assigned_drive_letter_mask()
+}
+
+/// Return every currently assigned drive letter that resolves to the requested physical
+/// partition. Individual inaccessible roots (for example empty optical drives) are skipped after
+/// `GetLogicalDrives` has provided the authoritative assignment mask.
+#[cfg(windows)]
+pub fn assigned_drive_letters_for_partition(
+    disk_number: u32,
+    offset_bytes: u64,
+) -> Result<Vec<char>, StorageError> {
+    let mask = assigned_drive_letter_mask()?;
+    let expected = VolumeIdentity {
+        disk_number,
+        offset_bytes,
+        extent_length_bytes: 0,
+    };
+    Ok((b'C'..=b'Z')
+        .filter(|letter| mask & (1_u32 << u32::from(*letter - b'A')) != 0)
+        .filter_map(|letter| {
+            let letter = char::from(letter);
+            volume_identity(letter)
+                .ok()
+                .filter(|actual| same_physical_partition(*actual, expected))
+                .map(|_| letter)
+        })
+        .collect())
 }
 
 #[cfg(not(windows))]
@@ -1826,5 +1899,29 @@ mod tests {
         value.drive_letter = Some('D');
         value.label = "bad\nlabel".into();
         assert!(validate_create_request(&value).is_err());
+    }
+
+    #[test]
+    fn temporary_mount_cleanup_requires_the_same_disk_and_partition_offset() {
+        let expected = VolumeIdentity {
+            disk_number: 2,
+            offset_bytes: 1_048_576,
+            extent_length_bytes: 268_435_456,
+        };
+        assert!(same_physical_partition(expected, expected));
+        assert!(!same_physical_partition(
+            expected,
+            VolumeIdentity {
+                disk_number: 3,
+                ..expected
+            }
+        ));
+        assert!(!same_physical_partition(
+            expected,
+            VolumeIdentity {
+                offset_bytes: 2_097_152,
+                ..expected
+            }
+        ));
     }
 }

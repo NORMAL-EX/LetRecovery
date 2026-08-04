@@ -968,7 +968,7 @@ const fn command_bar_visibility(
         let easy_visible = matches!(page, Page::Install) && easy_mode_enabled;
         let install_visible = matches!(page, Page::Install) && !easy_visible;
         [
-            install_visible || matches!(page, Page::Hardware),
+            matches!(page, Page::Hardware),
             install_visible,
             !matches!(page, Page::Download | Page::Tools) && !easy_visible,
         ]
@@ -1193,7 +1193,7 @@ mod layout_tests {
     fn command_visibility_matches_every_install_shell_state() {
         assert_eq!(
             command_bar_visibility(Page::Install, false, false, false),
-            [true, true, true]
+            [false, true, true]
         );
         assert_eq!(
             command_bar_visibility(Page::Install, true, false, false),
@@ -2986,19 +2986,6 @@ impl NativeWindow {
         backup.apply_theme(self.palette);
         self.backup_page = Some(backup);
 
-        let advanced = AdvancedPage::create(
-            hwnd,
-            &self.app_config.install_prefs.advanced_options,
-            AdvancedPageContext {
-                unattended_enabled: self.app_config.install_prefs.unattended_install,
-                ..AdvancedPageContext::default()
-            },
-        )?;
-        advanced.apply_font(self.font, self.font_bold);
-        advanced.apply_theme(self.palette);
-        advanced.show(false);
-        self.advanced_page = Some(advanced);
-
         let download = DownloadPage::create(
             hwnd,
             self.font,
@@ -3119,7 +3106,6 @@ impl NativeWindow {
                 log_enabled: self.app_config.log_enabled,
                 wim_engine: self.app_config.wim_engine,
                 download_threads: self.app_config.download_threads,
-                advanced_options_enabled: self.app_config.enable_advanced_options,
             },
         )?;
         about.apply_theme(self.palette);
@@ -4240,15 +4226,7 @@ impl NativeWindow {
                 windows::Win32::UI::WindowsAndMessaging::SW_HIDE
             },
         );
-        let show_install_advanced = install_visible && self.app_config.enable_advanced_options;
-        let _ = ShowWindow(
-            h.edit_boot_commands,
-            if show_install_advanced {
-                SW_SHOW
-            } else {
-                SW_HIDE
-            },
-        );
+        let _ = ShowWindow(h.edit_boot_commands, SW_HIDE);
         for control in [h.run_diskpart, h.open_diskpart_dir] {
             let _ = ShowWindow(control, SW_HIDE);
         }
@@ -4421,6 +4399,9 @@ impl NativeWindow {
     }
 
     unsafe fn toggle_advanced_page(&mut self, hwnd: HWND) {
+        if self.advanced_page.is_none() {
+            return;
+        }
         if !self.advanced_visible
             && self
                 .app_config
@@ -9160,7 +9141,7 @@ impl NativeWindow {
             partition_refresh_error: self.partition_refresh_error.clone(),
             pca_detection_pending: self.pca_detection_pending || self.pca_target_detection_pending,
             pca_selection_error: self.pca_selection_error(),
-            advanced_options_enabled: self.app_config.enable_advanced_options,
+            advanced_options_enabled: false,
             prefs: self.app_config.install_prefs.clone(),
         }
         .start_intent()
@@ -12288,13 +12269,6 @@ unsafe extern "system" fn window_proc(
                                 state
                                     .app_config
                                     .set_download_threads(page.selected_download_threads());
-                            }
-                        }
-                        Some(InfoIntent::ToggleAdvancedOptions) => {
-                            if let Some(page) = &state.about_page {
-                                state
-                                    .app_config
-                                    .set_advanced_options(page.advanced_options_enabled());
                             }
                         }
                         Some(InfoIntent::OpenLogDirectory) => state.open_log_directory(hwnd),

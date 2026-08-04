@@ -820,11 +820,10 @@ pub fn apply_uefiseven_patch(data_partition: &str, target_partition: &str) -> an
 
     // 只挂载目标 Windows 所在磁盘的 ESP，不能改写其它硬盘的引导。
     let boot_manager = BootManager::new();
-    let esp_letter = boot_manager
+    let esp_mount = boot_manager
         .find_esp_on_same_disk(target_partition)
         .map_err(|e| anyhow::anyhow!("查找目标磁盘 EFI 分区失败: {}", e))?;
-    let _esp_mount_guard =
-        lr_core::boot_pca::TemporaryEspMountGuard::new(&esp_letter).map_err(anyhow::Error::msg)?;
+    let esp_letter = esp_mount.letter();
 
     log::info!("[UEFISEVEN] EFI 分区: {}", esp_letter);
 

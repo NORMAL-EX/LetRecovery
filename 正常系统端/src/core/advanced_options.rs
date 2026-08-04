@@ -253,11 +253,10 @@ impl AdvancedOptions {
 
         // UefiSeven 必须跟随目标 Windows 所在磁盘，不能改写其它硬盘的 ESP。
         let boot_manager = crate::core::bcdedit::BootManager::new();
-        let efi_mount_point = boot_manager
+        let esp_mount = boot_manager
             .find_esp_on_same_disk(target_partition)
             .map_err(|error| anyhow::anyhow!("查找目标磁盘 EFI 分区失败: {}", error))?;
-        let _esp_mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&efi_mount_point)
-            .map_err(anyhow::Error::msg)?;
+        let efi_mount_point = esp_mount.letter();
         log::info!("[UEFISEVEN] EFI 分区挂载点: {}", efi_mount_point);
 
         // Microsoft Boot 目录
