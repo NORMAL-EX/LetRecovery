@@ -105,7 +105,7 @@ LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]
 | `win7_uefi_patch` | bool | Win7 UEFI 补丁（UefiSeven）。 |
 | `win7_inject_usb3_driver` | bool | Win7 注入 USB3 驱动。 |
 | `win7_inject_nvme_driver` | bool | Win7 注入 NVMe 驱动。 |
-| `win7_fix_acpi_bsod` | bool | Win7 修复 ACPI 蓝屏。 |
+| `win7_fix_acpi_bsod` | bool | Windows 7 手工兼容尝试；仅禁用离线系统的 `intelppm`、`amdppm` 和 `Processor` 服务，不修改 ACPI 表或 `acpi.sys`，默认关闭。 |
 | `win7_fix_storage_bsod` | bool | Win7 修复存储控制器蓝屏。 |
 
 示例：

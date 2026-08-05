@@ -946,7 +946,7 @@ impl AboutPage {
         let credits = child(
             parent,
             w!("STATIC"),
-            &crate::tr!("© 2026-present Cloud-PE Dev.  © 2026-present NORMAL-EX.\r\n部分系统镜像及 PE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
+            &crate::tr!("© 2026-present Cloud-PE Dev.  © 2026-present NORMAL-EX.\r\nPE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
             0,
             5_258,
         )?;
@@ -1107,7 +1107,7 @@ impl AboutPage {
         );
         set_text(
             self.credits,
-            &crate::tr!("© 2026-present Cloud-PE Dev.  © 2026-present NORMAL-EX.\r\n部分系统镜像及 PE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
+            &crate::tr!("© 2026-present Cloud-PE Dev.  © 2026-present NORMAL-EX.\r\nPE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
         );
         let link_labels = [
             crate::tr!("项目主页"),

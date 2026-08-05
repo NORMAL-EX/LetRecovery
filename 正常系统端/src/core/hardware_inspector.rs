@@ -174,77 +174,67 @@ impl StorageDeviceDetails {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn collect_cpuid() -> CpuIdDetails {
-    use std::arch::x86_64::{__cpuid, __cpuid_count};
-
     let mut details = CpuIdDetails::default();
-    // SAFETY: CPUID is available on every x86-64 processor.
-    unsafe {
-        let root = __cpuid(0);
-        details.vendor = bytes_to_ascii(&[
-            root.ebx.to_le_bytes(),
-            root.edx.to_le_bytes(),
-            root.ecx.to_le_bytes(),
-        ]);
-        if root.eax >= 1 {
-            let leaf = __cpuid(1);
-            let base_family = (leaf.eax >> 8) & 0x0f;
-            let extended_family = (leaf.eax >> 20) & 0xff;
-            details.family = if base_family == 0x0f {
-                base_family + extended_family
-            } else {
-                base_family
-            };
-            let base_model = (leaf.eax >> 4) & 0x0f;
-            let extended_model = (leaf.eax >> 16) & 0x0f;
-            details.model = if matches!(base_family, 0x06 | 0x0f) {
-                base_model | (extended_model << 4)
-            } else {
-                base_model
-            };
-            details.stepping = leaf.eax & 0x0f;
-            push_feature(&mut details.features, leaf.edx, 23, "MMX");
-            push_feature(&mut details.features, leaf.edx, 25, "SSE");
-            push_feature(&mut details.features, leaf.edx, 26, "SSE2");
-            push_feature(&mut details.features, leaf.ecx, 0, "SSE3");
-            push_feature(&mut details.features, leaf.ecx, 9, "SSSE3");
-            push_feature(&mut details.features, leaf.ecx, 19, "SSE4.1");
-            push_feature(&mut details.features, leaf.ecx, 20, "SSE4.2");
-            push_feature(&mut details.features, leaf.ecx, 25, "AES");
-            push_feature(&mut details.features, leaf.ecx, 28, "AVX");
-        }
-        if root.eax >= 7 {
-            let leaf = __cpuid_count(7, 0);
+    let Some(identity) = lr_core::windows_hardware::read_processor_identity() else {
+        return details;
+    };
+    details.vendor = identity.vendor;
+    details.family = identity.family;
+    details.model = identity.model;
+    details.stepping = identity.stepping;
+
+    let Some(root) = lr_core::windows_hardware::cpuid(0, 0) else {
+        return details;
+    };
+    if let Some(leaf) = lr_core::windows_hardware::cpuid(1, 0) {
+        push_feature(&mut details.features, leaf.edx, 23, "MMX");
+        push_feature(&mut details.features, leaf.edx, 25, "SSE");
+        push_feature(&mut details.features, leaf.edx, 26, "SSE2");
+        push_feature(&mut details.features, leaf.ecx, 0, "SSE3");
+        push_feature(&mut details.features, leaf.ecx, 9, "SSSE3");
+        push_feature(&mut details.features, leaf.ecx, 19, "SSE4.1");
+        push_feature(&mut details.features, leaf.ecx, 20, "SSE4.2");
+        push_feature(&mut details.features, leaf.ecx, 25, "AES");
+        push_feature(&mut details.features, leaf.ecx, 28, "AVX");
+    }
+    if root.eax >= 7 {
+        if let Some(leaf) = lr_core::windows_hardware::cpuid(7, 0) {
             push_feature(&mut details.features, leaf.ebx, 3, "BMI1");
             push_feature(&mut details.features, leaf.ebx, 5, "AVX2");
             push_feature(&mut details.features, leaf.ebx, 8, "BMI2");
             push_feature(&mut details.features, leaf.ebx, 16, "AVX-512F");
             push_feature(&mut details.features, leaf.ebx, 29, "SHA");
         }
-        let extended = __cpuid(0x8000_0000).eax;
-        if extended >= 0x8000_0004 {
-            let mut brand = Vec::with_capacity(48);
-            for leaf in 0x8000_0002..=0x8000_0004 {
-                let value = __cpuid(leaf);
+    }
+    let extended = lr_core::windows_hardware::cpuid(0x8000_0000, 0)
+        .map(|value| value.eax)
+        .unwrap_or_default();
+    if extended >= 0x8000_0004 {
+        let mut brand = Vec::with_capacity(48);
+        for leaf in 0x8000_0002..=0x8000_0004 {
+            if let Some(value) = lr_core::windows_hardware::cpuid(leaf, 0) {
                 brand.extend_from_slice(&value.eax.to_le_bytes());
                 brand.extend_from_slice(&value.ebx.to_le_bytes());
                 brand.extend_from_slice(&value.ecx.to_le_bytes());
                 brand.extend_from_slice(&value.edx.to_le_bytes());
             }
-            details.brand = String::from_utf8_lossy(&brand)
-                .trim_matches(char::from(0))
-                .trim()
-                .to_owned();
         }
-        if extended >= 0x8000_0001 {
-            let leaf = __cpuid(0x8000_0001);
+        details.brand = String::from_utf8_lossy(&brand)
+            .trim_matches(char::from(0))
+            .trim()
+            .to_owned();
+    }
+    if extended >= 0x8000_0001 {
+        if let Some(leaf) = lr_core::windows_hardware::cpuid(0x8000_0001, 0) {
             push_feature(&mut details.features, leaf.ecx, 5, "ABM");
             push_feature(&mut details.features, leaf.edx, 20, "NX");
             push_feature(&mut details.features, leaf.edx, 29, "x86-64");
         }
-        if extended >= 0x8000_0006 {
-            let cache = __cpuid(0x8000_0006);
+    }
+    if extended >= 0x8000_0006 {
+        if let Some(cache) = lr_core::windows_hardware::cpuid(0x8000_0006, 0) {
             details.l2_cache_bytes = u64::from((cache.ecx >> 16) & 0xffff) * 1024;
             details.l3_cache_bytes = u64::from((cache.edx >> 18) & 0x3fff) * 512 * 1024;
         }
@@ -260,7 +250,7 @@ fn collect_cpuid() -> CpuIdDetails {
     details
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn collect_cpuid() -> CpuIdDetails {
     CpuIdDetails::default()
 }
@@ -269,17 +259,6 @@ fn push_feature(features: &mut Vec<String>, register: u32, bit: u32, name: &str)
     if register & (1 << bit) != 0 {
         features.push(name.to_owned());
     }
-}
-
-fn bytes_to_ascii(words: &[[u8; 4]; 3]) -> String {
-    let mut bytes = Vec::with_capacity(12);
-    for word in words {
-        bytes.extend_from_slice(word);
-    }
-    String::from_utf8_lossy(&bytes)
-        .trim_matches(char::from(0))
-        .trim()
-        .to_owned()
 }
 
 fn read_smbios() -> Result<Vec<u8>, String> {
@@ -806,18 +785,6 @@ fn nvme_counter(value: [u8; 16]) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cpuid_vendor_word_order_matches_architecture_contract() {
-        assert_eq!(
-            bytes_to_ascii(&[
-                u32::from_le_bytes(*b"Genu").to_le_bytes(),
-                u32::from_le_bytes(*b"ineI").to_le_bytes(),
-                u32::from_le_bytes(*b"ntel").to_le_bytes(),
-            ]),
-            "GenuineIntel"
-        );
-    }
 
     #[test]
     fn raw_smbios_provider_signature_matches_windows_multichar_constant() {

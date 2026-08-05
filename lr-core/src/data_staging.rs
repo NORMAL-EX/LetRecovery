@@ -43,7 +43,8 @@ pub struct ShrinkCandidate {
     pub total_bytes: u64,
     pub is_current_system: bool,
     pub max_shrink_bytes: u64,
-    /// Set only after the caller confirms NTFS/basic-volume and BitLocker safety.
+    /// Set only after the caller confirms NTFS/basic-volume and a stable BitLocker state. Windows
+    /// permits shrinking the currently unlocked system volume without first decrypting it.
     pub shrink_is_safe: bool,
 }
 
@@ -332,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_or_unknown_target_is_never_selected_for_shrink() {
+    fn caller_marked_unsafe_target_is_never_selected_for_shrink() {
         let mut target = shrink_target(StorageMedia::SolidState, 60, 100);
         target.shrink_is_safe = false;
         assert_eq!(

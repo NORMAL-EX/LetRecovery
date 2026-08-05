@@ -595,6 +595,42 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             }
         };
 
+        // Keep CLI installs on the same pre-destructive structural audit as the native UI.
+        if config.should_import_drivers() {
+            let driver_path = std::path::Path::new(&data_dir).join("drivers");
+            if !driver_path.is_dir() {
+                show_error_message(&tr!("驱动路径不存在: {}", driver_path.display()));
+                return Ok(());
+            }
+            if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
+                log::warn!(
+                    "[PE INSTALL] trust bootstrap failed; normal DISM verification remains active and controlled fallback may be unavailable: {error}"
+                );
+            }
+            match lr_core::driver_package_trust::audit_driver_directory(&driver_path) {
+                Ok(report) => {
+                    for failure in report.rejected() {
+                        log::warn!(
+                            "[PE INSTALL] optional driver deferred to exact-INF import: {}: {}",
+                            failure.inf_path().display(),
+                            failure.reason()
+                        );
+                    }
+                    log::info!(
+                        "[PE INSTALL] driver preflight: total={} independently_trusted={} deferred={}",
+                        report.total(),
+                        report.verified(),
+                        report.rejected().len()
+                    );
+                }
+                Err(error) => {
+                    log::error!("[PE INSTALL] unsafe driver directory before disk write: {error}");
+                    show_error_message(&tr!("驱动包预检失败: {}", error));
+                    return Ok(());
+                }
+            }
+        }
+
         if config.run_diskpart_scripts {
             log::info!("[PE INSTALL] Step 0.5: 检查已停用的旧分区脚本");
             let scripts_dir = std::path::Path::new(&data_dir).join("diskpart");
@@ -686,6 +722,7 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         let driver_path = format!("{}\\drivers", data_dir);
         let driver_path_exists = std::path::Path::new(&driver_path).exists();
 
+        let mut vmd_recovery_warning: Option<String> = None;
         if config.should_import_drivers() && driver_path_exists {
             if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
                 log::error!("[PE INSTALL] 初始化 PE 驱动签名信任链失败: {error}");
@@ -694,22 +731,47 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             }
             log::info!("[PE INSTALL] PE 驱动签名信任链已核验并初始化");
             let dism = Dism::new();
-            if let Err(error) =
-                dism.add_drivers_offline_with_progress(&apply_dir, &driver_path, None)
-            {
-                log::error!("[PE INSTALL] 驱动导入失败，安装停止: {error}");
-                show_error_message(&tr!("离线驱动导入失败: {}", error));
-                return Ok(());
+            let optional_failures = match dism.add_preserved_drivers_offline_with_progress(
+                &apply_dir,
+                &driver_path,
+                None,
+            ) {
+                Ok(failures) => failures,
+                Err(error) => {
+                    log::error!("[PE INSTALL] 驱动导入失败，安装停止: {error}");
+                    show_error_message(&tr!("离线驱动导入失败: {}", error));
+                    return Ok(());
+                }
+            };
+            for failure in &optional_failures {
+                log::warn!("[PE INSTALL] 可选驱动包未能导入，不阻断安装: {failure}");
             }
             if let Err(error) = lr_core::driver::verify_offline_storage_driver_requirements(
                 std::path::Path::new(&apply_dir),
                 std::path::Path::new(&driver_path),
             ) {
-                log::error!("[PE INSTALL] 启动存储驱动导入后验证失败: {error}");
-                show_error_message(&tr!("离线驱动导入失败: {}", error));
-                return Ok(());
+                let requirements = lr_core::driver::load_storage_driver_requirements(
+                    std::path::Path::new(&driver_path),
+                );
+                if requirements
+                    .as_ref()
+                    .map(|items| lr_core::driver::requirements_are_only_intel_vmd(items))
+                    .unwrap_or(false)
+                {
+                    let warning = tr!("系统已安装，但 Intel VMD 驱动未能导入。程序不会自动重启；请先在 BIOS 中关闭 VMD/Intel RST 后再启动新系统。");
+                    log::error!("[PE INSTALL] VMD driver verification failed; finishing installation without automatic restart: {error}");
+                    vmd_recovery_warning = Some(warning);
+                } else {
+                    log::error!("[PE INSTALL] 启动存储驱动导入后验证失败: {error}");
+                    show_error_message(&tr!("离线驱动导入失败: {}", error));
+                    return Ok(());
+                }
+            } else {
+                log::info!(
+                    "[PE INSTALL] 驱动导入完成，启动存储驱动覆盖验证通过；跳过可选包 {} 个",
+                    optional_failures.len()
+                );
             }
-            log::info!("[PE INSTALL] 驱动导入成功，启动存储驱动覆盖验证通过");
 
             match dism.add_packages_offline_from_dir(&apply_dir, &driver_path, None) {
                 Ok((success, _)) if success > 0 => {
@@ -895,7 +957,10 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
 
         log::info!("[PE INSTALL] 安装完成!");
 
-        if config.auto_reboot {
+        if let Some(warning) = vmd_recovery_warning {
+            log::warn!("[PE INSTALL] VMD recovery is required; automatic restart is suppressed");
+            show_error_message(&warning);
+        } else if config.auto_reboot {
             log::info!("[PE INSTALL] 即将重启...");
             if let Err(error) = lr_core::windows_shutdown::schedule_restart(
                 10,

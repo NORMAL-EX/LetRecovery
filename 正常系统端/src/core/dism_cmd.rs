@@ -230,11 +230,18 @@ impl DismCmd {
         force_unsigned: bool,
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
-        // Do not defer an invalid boot-start driver to Boot Manager. DISM's /ForceUnsigned can
-        // report success while Secure Boot later stops the installed OS with 0xc0000428.
-        if force_unsigned {
-            bail!("refusing to add unsigned offline drivers");
-        }
+        let verified_package = if force_unsigned {
+            if recurse {
+                bail!("controlled signed-driver fallback cannot use /Recurse");
+            }
+            let package =
+                lr_core::driver_package_trust::verify_driver_package(Path::new(driver_path.trim()))
+                    .context("driver package did not pass independent SetupAPI verification")?;
+            package.revalidate()?;
+            Some(package)
+        } else {
+            None
+        };
         // 规范化路径（确保以反斜杠结尾，与 PE 端保持一致）
         let image_path = Self::normalize_image_path(image_path);
         let driver_path_normalized = driver_path.trim().to_string();
@@ -270,6 +277,14 @@ impl DismCmd {
         if recurse {
             args.push("/Recurse".to_string());
         }
+        if let Some(package) = verified_package {
+            log::warn!(
+                "[DismCmd] DISM signature false-negative fallback for {} (signer: {})",
+                package.inf_path().display(),
+                package.signer()
+            );
+            args.push("/ForceUnsigned".to_string());
+        }
 
         // 执行命令
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -291,7 +306,56 @@ impl DismCmd {
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
         // 直接使用 /Recurse 参数一次性添加整个目录
-        self.add_driver_offline(image_path, driver_dir, true, false, progress_tx)
+        match self.add_driver_offline(image_path, driver_dir, true, false, progress_tx.clone()) {
+            Ok(()) => return Ok(()),
+            Err(batch_error) => log::warn!(
+                "[DismCmd] recursive driver import failed; retrying exact INF packages: {}",
+                batch_error
+            ),
+        }
+
+        let mut inf_files = Vec::new();
+        for entry in walkdir::WalkDir::new(driver_dir).follow_links(false) {
+            let entry = entry
+                .with_context(|| format!("failed to enumerate driver directory: {}", driver_dir))?;
+            if entry.file_type().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(|value| value.eq_ignore_ascii_case("inf"))
+                    == Some(true)
+            {
+                inf_files.push(entry.path().to_path_buf());
+            }
+        }
+        inf_files.sort();
+        if inf_files.is_empty() {
+            bail!("driver directory contains no INF files: {}", driver_dir);
+        }
+
+        for inf in inf_files {
+            let inf_text = inf.to_string_lossy();
+            if let Err(normal_error) =
+                self.add_driver_offline(image_path, &inf_text, false, false, progress_tx.clone())
+            {
+                if !lr_core::driver_package_trust::is_known_dism_signature_false_negative(
+                    &normal_error.to_string(),
+                ) {
+                    return Err(normal_error).with_context(|| {
+                        format!("DISM rejected driver package: {}", inf.display())
+                    });
+                }
+                self.add_driver_offline(image_path, &inf_text, false, true, progress_tx.clone())
+                    .with_context(|| {
+                        format!(
+                            "verified signed-driver fallback failed for {}",
+                            inf.display()
+                        )
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     // ========================================================================
@@ -1028,12 +1092,12 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_driver_override_is_rejected_before_path_or_process_access() {
+    fn unsigned_driver_override_rejects_recursive_directories() {
         let dism = DismCmd::new().expect("DISM command boundary should initialize");
         let error = dism
             .add_driver_offline(r"Z:\missing-image", r"Z:\missing-driver", true, true, None)
-            .expect_err("/ForceUnsigned must be rejected");
-        assert!(error.to_string().contains("unsigned offline drivers"));
+            .expect_err("verified fallback must reject /Recurse");
+        assert!(error.to_string().contains("cannot use /Recurse"));
     }
 
     #[test]

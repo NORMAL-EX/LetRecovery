@@ -517,13 +517,14 @@ impl Dism {
         let dism_exe =
             DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
 
-        dism_exe.add_driver_offline(image_path, driver_path, true, false, None)?;
+        dism_exe.add_drivers_from_directory_resilient(image_path, driver_path, None)?;
 
         log::info!("[Dism] 离线驱动导入完成");
         Ok(())
     }
 
     /// 导入驱动到离线系统（带进度回调）
+    #[allow(dead_code)] // Retained as the strict/manual counterpart to tolerant automatic restore.
     pub fn add_drivers_offline_with_progress(
         &self,
         image_path: &str,
@@ -556,7 +557,7 @@ impl Dism {
         });
 
         let result =
-            dism_exe.add_driver_offline(image_path, driver_path, true, false, Some(exe_tx));
+            dism_exe.add_drivers_from_directory_resilient(image_path, driver_path, Some(exe_tx));
 
         // 等待转发线程结束
         let _ = forward_thread.join();
@@ -570,6 +571,37 @@ impl Dism {
                 anyhow::bail!("{}", tr!("离线驱动导入失败: {}", e))
             }
         }
+    }
+
+    /// Imports an exported driver backup while deferring the final boot-storage decision to the
+    /// manifest verification performed by the installation flow.
+    pub fn add_preserved_drivers_offline_with_progress(
+        &self,
+        image_path: &str,
+        driver_path: &str,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<Vec<String>> {
+        let dism_exe =
+            DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
+        let (exe_tx, exe_rx) = std::sync::mpsc::channel::<DismExeProgress>();
+        let progress_tx_clone = progress_tx.clone();
+        let forward_thread = std::thread::spawn(move || {
+            while let Ok(progress) = exe_rx.recv() {
+                if let Some(ref tx) = progress_tx_clone {
+                    let _ = tx.send(DismProgress {
+                        percentage: progress.percentage,
+                        status: progress.status,
+                    });
+                }
+            }
+        });
+        let result = dism_exe.add_preserved_drivers_from_directory_resilient(
+            image_path,
+            driver_path,
+            Some(exe_tx),
+        );
+        let _ = forward_thread.join();
+        result
     }
 
     /// 添加 CAB 更新包到离线系统

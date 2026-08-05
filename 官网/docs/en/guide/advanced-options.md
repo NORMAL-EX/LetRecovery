@@ -47,7 +47,7 @@ The following extra switches appear for Win7 images:
 
 - **UEFI patch (UefiSeven)**—lets Win7, which has no native UEFI support, boot via UEFI.
 - **Inject USB3 / NVMe drivers**—required for Win7 install/boot on modern motherboards.
-- **Fix ACPI BSOD (0xA5)**—disables processor power services such as `intelppm`/`amdppm`/`Processor`.
+- **Try the 0xA5 workaround (Windows 7)**—when manually enabled, disables only the offline `intelppm`, `amdppm`, and `Processor` power services. It is off by default and does not modify ACPI tables, `acpi.sys`, or firmware, so it is not a general 0xA5 fix.
 - **Fix storage controller BSOD (0x7B)**—sets a long list of storage services like `msahci`/`storahci`/`pciide`/`iaStor*`/`stornvme`
   to boot-start (writing to both `ControlSet001` and `ControlSet002`).
 

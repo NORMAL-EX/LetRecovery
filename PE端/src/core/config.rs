@@ -802,17 +802,17 @@ impl ConfigFileManager {
                     }
                     "VolumeLabel" => config.volume_label = value.to_string(),
                     "CustomUnattendFile" => config.custom_unattend_file = value.to_string(),
-                    "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
+                    "Win7UefiPatch" => config.win7_uefi_patch = false,
                     "Win7InjectUsb3Driver" => {
                         config.win7_inject_usb3_driver = value.parse().unwrap_or(false)
                     }
                     "Win7InjectNvmeDriver" => {
                         config.win7_inject_nvme_driver = value.parse().unwrap_or(false)
                     }
+                    // Historical opt-in processor-power workaround. It is not an ACPI table patch,
+                    // but remains available for compatibility with explicitly selected Win7 jobs.
                     "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
-                    "Win7FixStorageBsod" => {
-                        config.win7_fix_storage_bsod = value.parse().unwrap_or(false)
-                    }
+                    "Win7FixStorageBsod" => config.win7_fix_storage_bsod = false,
                     "XpInjectUsb3Driver" => {
                         config.xp_inject_usb3_driver = value.parse().unwrap_or(false)
                     }
@@ -922,6 +922,21 @@ mod tests {
         assert_eq!(config.pca_compat_image_index, 1);
         assert_eq!(config.pca_compat_target_build, 19045);
         assert_eq!(config.pca_compat_target_architecture, 9);
+    }
+
+    #[test]
+    fn legacy_win7_processor_workaround_is_preserved_but_retired_flags_are_ignored() {
+        let config = ConfigFileManager::deserialize_install_config(concat!(
+            "[Install]\r\n",
+            "Win7UefiPatch=true\r\n",
+            "Win7FixAcpiBsod=true\r\n",
+            "Win7FixStorageBsod=true\r\n"
+        ))
+        .unwrap();
+
+        assert!(!config.win7_uefi_patch);
+        assert!(config.win7_fix_acpi_bsod);
+        assert!(!config.win7_fix_storage_bsod);
     }
 
     #[test]

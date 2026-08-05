@@ -47,7 +47,7 @@ description: 驱动、无人值守、注册表优化与系统优化。
 
 - **UEFI 补丁（UefiSeven）**——让不原生支持 UEFI 的 Win7 也能 UEFI 引导。
 - **注入 USB3 / NVMe 驱动**——现代主板上 Win7 安装/启动所需。
-- **修复 ACPI 蓝屏（0xA5）**——禁用 `intelppm`/`amdppm`/`Processor` 等处理器电源服务。
+- **尝试修复 0xA5（Windows 7）**——手工启用后仅禁用离线系统的 `intelppm`、`amdppm` 和 `Processor` 处理器电源服务。此选项默认关闭，不修改 ACPI 表、`acpi.sys` 或固件，因此不是通用的 0xA5 修复。
 - **修复存储控制器蓝屏（0x7B）**——把 `msahci`/`storahci`/`pciide`/`iaStor*`/`stornvme` 等一长串存储服务设为 boot-start（同时写入 `ControlSet001` 与 `ControlSet002`）。
 
 ::: tip Win7 驱动目录里的 CAB

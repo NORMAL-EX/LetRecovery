@@ -203,12 +203,12 @@ mod platform {
 
     use windows::core::{IUnknown, Interface, GUID, HRESULT, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, BOOLEAN, E_UNEXPECTED, HANDLE, RPC_E_CHANGED_MODE,
+        CloseHandle, BOOLEAN, ERROR_NO_MORE_FILES, E_UNEXPECTED, HANDLE, RPC_E_CHANGED_MODE,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, DefineDosDeviceW, GetLogicalDrives, QueryDosDeviceW,
-        DDD_EXACT_MATCH_ON_REMOVE, DDD_RAW_TARGET_PATH, DDD_REMOVE_DEFINITION, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, DefineDosDeviceW, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose,
+        GetLogicalDrives, QueryDosDeviceW, DDD_EXACT_MATCH_ON_REMOVE, DDD_RAW_TARGET_PATH,
+        DDD_REMOVE_DEFINITION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows::Win32::Storage::VirtualDiskService::{
         CLSID_VdsLoader, IEnumVdsObject, IVdsAdvancedDisk, IVdsAsync, IVdsCreatePartitionEx,
@@ -237,6 +237,16 @@ mod platform {
 
     struct ComApartment {
         uninitialize: bool,
+    }
+
+    struct VolumeSearchHandle(HANDLE);
+
+    impl Drop for VolumeSearchHandle {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = FindVolumeClose(self.0);
+            }
+        }
     }
 
     impl ComApartment {
@@ -545,13 +555,14 @@ mod platform {
         Ok(mask)
     }
 
-    pub unsafe fn volume_identity(drive_letter: char) -> Result<VolumeIdentity, StorageError> {
+    unsafe fn volume_identity_from_device_path(
+        device_path: &str,
+    ) -> Result<VolumeIdentity, StorageError> {
         use windows::Win32::Storage::FileSystem::IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS;
         use windows::Win32::System::Ioctl::VOLUME_DISK_EXTENTS;
         use windows::Win32::System::IO::DeviceIoControl;
 
-        let letter = normalize_letter(drive_letter)?;
-        let path = wide(&format!(r"\\.\{letter}:"));
+        let path = wide(device_path);
         let handle = CreateFileW(
             PCWSTR(path.as_ptr()),
             0,
@@ -607,6 +618,75 @@ mod platform {
             offset_bytes,
             extent_length_bytes,
         })
+    }
+
+    pub unsafe fn volume_identity(drive_letter: char) -> Result<VolumeIdentity, StorageError> {
+        let letter = normalize_letter(drive_letter)?;
+        volume_identity_from_device_path(&format!(r"\\.\{letter}:"))
+    }
+
+    fn volume_name_from_buffer(buffer: &[u16]) -> Result<String, StorageError> {
+        let end = buffer.iter().position(|value| *value == 0).ok_or_else(|| {
+            StorageError::new(
+                "enumerate volume GUID paths",
+                "FindFirstVolumeW/FindNextVolumeW returned an unterminated path",
+            )
+        })?;
+        let volume_name = String::from_utf16(&buffer[..end]).map_err(|error| {
+            StorageError::new(
+                "enumerate volume GUID paths",
+                format!("volume GUID path is not valid UTF-16: {error}"),
+            )
+        })?;
+        if !volume_name.starts_with(r"\\?\Volume{") || !volume_name.ends_with(r"}\") {
+            return Err(StorageError::new(
+                "enumerate volume GUID paths",
+                format!("unexpected volume path returned by Windows: {volume_name}"),
+            ));
+        }
+        Ok(volume_name)
+    }
+
+    /// Resolve an exact physical partition to its existing volume GUID root without assigning a
+    /// drive letter. Microsoft documents volume GUID paths as directly usable absolute roots; the
+    /// trailing slash is removed only while opening the volume for the extent identity IOCTL.
+    pub unsafe fn volume_guid_path_for_partition(
+        disk_number: u32,
+        offset_bytes: u64,
+    ) -> Result<String, StorageError> {
+        let expected = VolumeIdentity {
+            disk_number,
+            offset_bytes,
+            extent_length_bytes: 0,
+        };
+        let mut buffer = vec![0_u16; 1_024];
+        let search = FindFirstVolumeW(&mut buffer)
+            .map(VolumeSearchHandle)
+            .map_err(|error| api_error("begin volume GUID enumeration", error))?;
+
+        loop {
+            let volume_name = volume_name_from_buffer(&buffer)?;
+            let device_path = volume_name.trim_end_matches('\\');
+            if let Ok(actual) = volume_identity_from_device_path(device_path) {
+                if same_physical_partition(actual, expected) {
+                    return Ok(volume_name);
+                }
+            }
+
+            buffer.fill(0);
+            match FindNextVolumeW(search.0, &mut buffer) {
+                Ok(()) => {}
+                Err(error) if error.code() == HRESULT::from_win32(ERROR_NO_MORE_FILES.0) => break,
+                Err(error) => {
+                    return Err(api_error("continue volume GUID enumeration", error));
+                }
+            }
+        }
+
+        Err(StorageError::new(
+            "resolve partition volume GUID path",
+            format!("no volume maps to disk {disk_number} offset {offset_bytes}"),
+        ))
     }
 
     pub unsafe fn mbr_signature(disk_number: u32) -> Result<Option<u32>, StorageError> {
@@ -1752,6 +1832,33 @@ mod platform {
         }
 
         #[test]
+        fn volume_enumeration_accepts_only_terminated_guid_roots() {
+            let expected = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\";
+            let mut valid: Vec<u16> = expected.encode_utf16().chain(std::iter::once(0)).collect();
+            valid.resize(128, 0);
+            assert_eq!(volume_name_from_buffer(&valid).unwrap(), expected);
+
+            let unterminated: Vec<u16> = expected.encode_utf16().collect();
+            assert!(volume_name_from_buffer(&unterminated).is_err());
+
+            let invalid: Vec<u16> = r"Z:\".encode_utf16().chain(std::iter::once(0)).collect();
+            assert!(volume_name_from_buffer(&invalid).is_err());
+        }
+
+        #[test]
+        #[ignore = "requires an explicit read-only Windows volume-enumeration integration test"]
+        fn volume_guid_resolution_does_not_change_drive_letters() {
+            let before = assigned_drive_letter_mask().unwrap();
+            let letter = current_windows_drive_letter().unwrap();
+            let identity = unsafe { volume_identity(letter).unwrap() };
+            let volume_root = unsafe {
+                volume_guid_path_for_partition(identity.disk_number, identity.offset_bytes).unwrap()
+            };
+            assert!(std::path::Path::new(&volume_root).is_dir());
+            assert_eq!(assigned_drive_letter_mask().unwrap(), before);
+        }
+
+        #[test]
         fn selects_an_aligned_first_fit_without_crossing_extent_end() {
             let extents = [
                 VDS_DISK_EXTENT {
@@ -1947,6 +2054,14 @@ pub fn assigned_drive_letter_mask() -> Result<u32, StorageError> {
 #[cfg(windows)]
 pub fn volume_identity(drive_letter: char) -> Result<VolumeIdentity, StorageError> {
     unsafe { platform::volume_identity(drive_letter) }
+}
+
+#[cfg(windows)]
+pub fn volume_guid_path_for_partition(
+    disk_number: u32,
+    offset_bytes: u64,
+) -> Result<String, StorageError> {
+    unsafe { platform::volume_guid_path_for_partition(disk_number, offset_bytes) }
 }
 
 #[cfg(windows)]

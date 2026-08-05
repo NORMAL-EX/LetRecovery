@@ -83,12 +83,13 @@ pub struct DefaultUnattendOptions<'a> {
 /// The caller writes the returned text to Panther/Sysprep only after image
 /// application succeeds. User text is XML-escaped before interpolation.
 pub fn render_default_unattend(options: &DefaultUnattendOptions<'_>) -> Result<String, String> {
-    let username = xml_escape(
-        options
-            .username
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("User"),
-    );
+    let raw_username = options
+        .username
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("User");
+    lr_core::unattend_account::validate_unattended_local_account_name(raw_username)
+        .map_err(|error| format!("invalid unattended local account name: {error}"))?;
+    let username = xml_escape(raw_username);
     let mut first_logon_commands = String::from(
         r#"
                 <SynchronousCommand wcm:action="add">
@@ -337,18 +338,18 @@ mod tests {
     }
 
     #[test]
-    fn unattend_varies_oobe_and_escapes_username() {
+    fn unattend_varies_oobe_and_accepts_valid_username() {
         let win7 = render_default_unattend(&DefaultUnattendOptions {
             architecture: UnattendArchitecture::Amd64,
             family: WindowsFamily::Windows7,
-            username: Some("A&B<User>"),
+            username: Some("A-B_User"),
             builtin_administrator: None,
             remove_uwp_apps: true,
             international: None,
         })
         .unwrap();
         assert!(win7.contains("processorArchitecture=\"amd64\""));
-        assert!(win7.contains("A&amp;B&lt;User&gt;"));
+        assert!(win7.contains("A-B_User"));
         assert!(!win7.contains("HideOnlineAccountScreens"));
         assert!(!win7.contains("remove_uwp.ps1"));
 
@@ -375,6 +376,28 @@ mod tests {
         assert!(win11.contains("<InputLocale>0804:00000804</InputLocale>"));
         assert!(win11.contains("<TimeZone>China Standard Time</TimeZone>"));
         assert!(!win11.contains("HideLocalAccountScreen"));
+    }
+
+    #[test]
+    fn unattended_rendering_rejects_windows_owned_account_names() {
+        let international = OfflineInternationalSettings {
+            ui_language: "zh-CN".to_string(),
+            system_locale: "zh-CN".to_string(),
+            user_locale: "zh-CN".to_string(),
+            input_locale: "0804:00000804".to_string(),
+            time_zone: "China Standard Time".to_string(),
+        };
+        for username in ["SYSTEM", "TrustedInstaller", "UMFD-0"] {
+            let result = render_default_unattend(&DefaultUnattendOptions {
+                architecture: UnattendArchitecture::Amd64,
+                family: WindowsFamily::Windows11,
+                username: Some(username),
+                builtin_administrator: None,
+                remove_uwp_apps: false,
+                international: Some(&international),
+            });
+            assert!(result.is_err(), "{username}");
+        }
     }
 
     #[test]

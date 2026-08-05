@@ -25,4 +25,4 @@ Once a system image finishes downloading, switch to the **System Installation** 
 
 ## Where Do the Resources Come From?
 
-The online list is served by `https://letrecovery.cloud-pe.cn/v2/`, which includes multiple manifests for system images, software, graphics drivers, and more. Some system image and PE download services are provided by **Cloud-PE Cloud Storage** (see the project acknowledgments).
+The online list is served by `https://letrecovery.cloud-pe.cn/v2/`, which includes multiple manifests for system images, software, graphics drivers, and more. The PE download service is provided by **Cloud-PE Cloud Storage** (see the project acknowledgments).

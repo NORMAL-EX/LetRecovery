@@ -41,7 +41,9 @@ use super::super::controls::{
 };
 use super::super::scrollbar_compositor;
 use super::super::theme::{apply_control_theme, NativeControlKind, Palette};
-use crate::core::ui_state::{default_install_username, AdvancedOptionsData};
+use crate::core::ui_state::{
+    default_install_username, AdvancedOptionCapabilities, AdvancedOptionsData,
+};
 
 const ID_FIRST: u16 = 700;
 const MIN_THREE_COLUMN_WIDTH: i32 = 320;
@@ -536,9 +538,7 @@ pub struct AdvancedPageContext {
     pub unattended_enabled: bool,
     pub builtin_administrator_available: bool,
     pub wifi_available: bool,
-    pub show_windows_7: bool,
-    pub show_windows_7_uefi: bool,
-    pub show_xp: bool,
+    pub target_capabilities: AdvancedOptionCapabilities,
 }
 
 impl Default for AdvancedPageContext {
@@ -547,9 +547,7 @@ impl Default for AdvancedPageContext {
             unattended_enabled: true,
             builtin_administrator_available: true,
             wifi_available: false,
-            show_windows_7: false,
-            show_windows_7_uefi: false,
-            show_xp: false,
+            target_capabilities: AdvancedOptionCapabilities::unknown(),
         }
     }
 }
@@ -820,7 +818,11 @@ impl AdvancedPage {
             next_id(),
             Some((next_id(), AdvancedBrowseTarget::Windows7NvmeDrivers)),
         )?;
-        let windows_7_acpi = checkbox(parent, &crate::tr!("修复 ACPI 兼容蓝屏"), next_id())?;
+        let windows_7_acpi = checkbox(
+            parent,
+            &crate::tr!("尝试修复 0xA5（禁用处理器电源驱动）"),
+            next_id(),
+        )?;
         let windows_7_storage =
             checkbox(parent, &crate::tr!("修复 0x7B 存储控制器蓝屏"), next_id())?;
         let windows_7_uefi = checkbox(parent, &crate::tr!("启用 Windows 7 UEFI 补丁"), next_id())?;
@@ -931,7 +933,10 @@ impl AdvancedPage {
         set_text(h.windows_7_header, &crate::tr!("Windows 7 兼容选项"));
         relocalize_check_edit(h.windows_7_usb3, &crate::tr!("注入 USB 3.x 驱动"));
         relocalize_check_edit(h.windows_7_nvme, &crate::tr!("注入 NVMe 驱动"));
-        set_text(h.windows_7_acpi, &crate::tr!("修复 ACPI 兼容蓝屏"));
+        set_text(
+            h.windows_7_acpi,
+            &crate::tr!("尝试修复 0xA5（禁用处理器电源驱动）"),
+        );
         set_text(h.windows_7_storage, &crate::tr!("修复 0x7B 存储控制器蓝屏"));
         set_text(h.windows_7_uefi, &crate::tr!("启用 Windows 7 UEFI 补丁"));
         set_text(h.xp_header, &crate::tr!("Windows XP / 2003 选项"));
@@ -1056,23 +1061,19 @@ impl AdvancedPage {
     /// one-shot marker already held by the controller.
     pub unsafe fn read_into(&self, data: &mut AdvancedOptionsData) {
         let h = &self.handles;
-        data.remove_shortcut_arrow = is_checked(h.system_checks[0]);
-        data.restore_classic_context_menu = is_checked(h.system_checks[1]);
-        data.bypass_nro = is_checked(h.system_checks[2]);
-        data.disable_windows_update = is_checked(h.system_checks[3]);
-        data.disable_windows_defender = is_checked(h.system_checks[4]);
-        data.disable_reserved_storage = is_checked(h.system_checks[5]);
-        data.disable_uac = is_checked(h.system_checks[6]);
-        data.disable_device_encryption = is_checked(h.system_checks[7]);
-        data.remove_uwp_apps = is_checked(h.system_checks[8]);
-        data.migrate_wifi = is_checked(h.system_checks[9]);
+        data.update_supported_system_options(
+            self.context.target_capabilities,
+            h.system_checks.map(|control| is_checked(control)),
+        );
         (data.run_script_during_deploy, data.deploy_script_path) =
             read_required_pair(h.deploy_script);
         (data.run_script_first_login, data.first_login_script_path) =
             read_required_pair(h.first_login_script);
         (data.import_custom_drivers, data.custom_drivers_path) =
             read_required_pair(h.custom_drivers);
-        data.import_storage_controller_drivers = is_checked(h.storage_drivers);
+        if self.context.target_capabilities.storage_controller_drivers {
+            data.import_storage_controller_drivers = is_checked(h.storage_drivers);
+        }
         (data.import_registry_file, data.registry_file_path) = read_required_pair(h.registry_file);
         (data.import_custom_files, data.custom_files_path) = read_required_pair(h.custom_files);
         data.builtin_administrator.enabled = is_checked(h.builtin_administrator);
@@ -1095,20 +1096,40 @@ impl AdvancedPage {
         data.builtin_administrator.auto_logon =
             data.builtin_administrator.enabled || is_checked(h.builtin_administrator_auto_logon);
         (data.custom_volume_label, data.volume_label) = read_required_pair(h.volume_label);
-        (data.win7_inject_usb3_driver, data.win7_usb3_driver_path) =
-            read_required_pair(h.windows_7_usb3);
-        (data.win7_inject_nvme_driver, data.win7_nvme_driver_path) =
-            read_required_pair(h.windows_7_nvme);
-        data.win7_fix_acpi_bsod = is_checked(h.windows_7_acpi);
-        data.win7_fix_storage_bsod = is_checked(h.windows_7_storage);
-        data.win7_uefi_patch = is_checked(h.windows_7_uefi);
-        data.xp_inject_usb3_driver = is_checked(h.xp_usb3);
-        data.xp_inject_nvme_driver = is_checked(h.xp_nvme);
+        // USB3/NVMe selection is controller-owned. Preserve only the explicit historical
+        // processor-power workaround; the broad storage mutation and UefiSeven remain retired.
+        data.win7_fix_acpi_bsod =
+            self.context.target_capabilities.windows_7 && is_checked(h.windows_7_acpi);
+        data.win7_fix_storage_bsod = false;
+        data.win7_uefi_patch = false;
+        if self.context.target_capabilities.xp {
+            data.xp_inject_usb3_driver = is_checked(h.xp_usb3);
+            data.xp_inject_nvme_driver = is_checked(h.xp_nvme);
+        }
     }
 
     pub unsafe fn set_context(&mut self, context: AdvancedPageContext) {
         self.context = context;
         self.apply_context();
+        // Image selection can change while this page already exists. Reflow immediately so
+        // newly hidden target-specific rows do not leave holes until the next WM_SIZE.
+        let width = self.width.get();
+        let height = self.height.get();
+        if width > 0 && height > 0 {
+            let dpi = self.dpi.get().max(1);
+            let content_height = self.layout_content(width, dpi, 0);
+            self.content_height.set(content_height);
+            let model = ScrollModel {
+                offset: self.scroll_offset.get(),
+                content_height,
+                viewport_height: height,
+            };
+            self.scroll_offset
+                .set(model.clamped_offset(self.scroll_offset.get()));
+            self.target_scroll_offset.set(self.scroll_offset.get());
+            self.layout_content(width, dpi, -self.scroll_offset.get());
+            self.update_scrollbar();
+        }
     }
 
     pub unsafe fn update_dependencies(&self) {
@@ -1300,7 +1321,12 @@ impl AdvancedPage {
             dpi,
         );
         for (index, check) in h.system_checks.into_iter().enumerate() {
-            if index != 9 || self.context.wifi_available {
+            if self
+                .context
+                .target_capabilities
+                .supports_system_option(index)
+                && (index != 9 || self.context.wifi_available)
+            {
                 layout_check(check, x, &mut bottoms[column], grid.column_width, dpi);
             }
         }
@@ -1347,13 +1373,15 @@ impl AdvancedPage {
             grid.column_width,
             dpi,
         );
-        layout_check(
-            h.storage_drivers,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
+        if self.context.target_capabilities.storage_controller_drivers {
+            layout_check(
+                h.storage_drivers,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+        }
         layout_pair(
             h.registry_file,
             x,
@@ -1419,25 +1447,14 @@ impl AdvancedPage {
         );
         bottoms[column] += section_gap;
 
-        if self.context.show_windows_7 {
+        // Windows 7 USB3/NVMe support is selected automatically from the locked built-in payload,
+        // image architecture and target disk bus. Preserve the old processor-power workaround as
+        // an explicit compatibility attempt; the broad 0x7B mutation and UefiSeven stay hidden.
+        if self.context.target_capabilities.windows_7 {
             let column = shortest_column(&bottoms);
             let x = grid.x(0, column);
             layout_heading(
                 h.windows_7_header,
-                x,
-                &mut bottoms[column],
-                grid.column_width,
-                dpi,
-            );
-            layout_pair(
-                h.windows_7_usb3,
-                x,
-                &mut bottoms[column],
-                grid.column_width,
-                dpi,
-            );
-            layout_pair(
-                h.windows_7_nvme,
                 x,
                 &mut bottoms[column],
                 grid.column_width,
@@ -1450,26 +1467,10 @@ impl AdvancedPage {
                 grid.column_width,
                 dpi,
             );
-            layout_check(
-                h.windows_7_storage,
-                x,
-                &mut bottoms[column],
-                grid.column_width,
-                dpi,
-            );
-            if self.context.show_windows_7_uefi {
-                layout_check(
-                    h.windows_7_uefi,
-                    x,
-                    &mut bottoms[column],
-                    grid.column_width,
-                    dpi,
-                );
-            }
             bottoms[column] += section_gap;
         }
 
-        if self.context.show_xp {
+        if self.context.target_capabilities.xp {
             let column = shortest_column(&bottoms);
             let x = grid.x(0, column);
             layout_heading(h.xp_header, x, &mut bottoms[column], grid.column_width, dpi);
@@ -1687,17 +1688,16 @@ impl AdvancedPage {
     unsafe fn apply_context(&self) {
         let h = &self.handles;
         let unattended = self.context.unattended_enabled;
-        for control in [h.system_checks[2], h.system_checks[8], h.system_checks[9]] {
-            let _ = EnableWindow(control, unattended);
+        for (index, control) in h.system_checks.into_iter().enumerate() {
+            let supported = self
+                .context
+                .target_capabilities
+                .supports_system_option(index);
+            let visible = supported && (index != 9 || self.context.wifi_available);
+            let _ = ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE });
+            let requires_unattended = matches!(index, 2 | 8 | 9);
+            let _ = EnableWindow(control, supported && (!requires_unattended || unattended));
         }
-        let _ = ShowWindow(
-            h.system_checks[9],
-            if self.context.wifi_available {
-                SW_SHOW
-            } else {
-                SW_HIDE
-            },
-        );
         if !unattended {
             for control in [h.system_checks[2], h.system_checks[8], h.system_checks[9]] {
                 set_checked(control, false);
@@ -1710,28 +1710,32 @@ impl AdvancedPage {
             set_checked(h.username.check, true);
         }
 
+        let storage_supported = self.context.target_capabilities.storage_controller_drivers;
+        let _ = ShowWindow(
+            h.storage_drivers,
+            if storage_supported { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = EnableWindow(h.storage_drivers, storage_supported);
+
         for control in self.windows_7_controls() {
+            let _ = ShowWindow(control, SW_HIDE);
+        }
+        let win7_compat_visible = self.context.target_capabilities.windows_7;
+        for control in [h.windows_7_header, h.windows_7_acpi] {
             let _ = ShowWindow(
                 control,
-                if self.context.show_windows_7 {
+                if win7_compat_visible {
                     SW_SHOW
                 } else {
                     SW_HIDE
                 },
             );
         }
-        let _ = ShowWindow(
-            h.windows_7_uefi,
-            if self.context.show_windows_7 && self.context.show_windows_7_uefi {
-                SW_SHOW
-            } else {
-                SW_HIDE
-            },
-        );
+        let _ = EnableWindow(h.windows_7_acpi, win7_compat_visible);
         for control in self.xp_controls() {
             let _ = ShowWindow(
                 control,
-                if self.context.show_xp {
+                if self.context.target_capabilities.xp {
                     SW_SHOW
                 } else {
                     SW_HIDE
@@ -2976,12 +2980,14 @@ mod tests {
         assert!(context.unattended_enabled);
         assert!(context.builtin_administrator_available);
         assert!(!context.wifi_available);
-        assert!(!context.show_windows_7);
-        assert!(!context.show_xp);
+        assert_eq!(
+            context.target_capabilities,
+            AdvancedOptionCapabilities::unknown()
+        );
     }
 
     #[test]
-    fn every_advanced_data_field_has_a_native_control_mapping() {
+    fn every_user_selectable_advanced_flag_has_a_native_control_mapping() {
         let data = AdvancedOptionsData {
             remove_shortcut_arrow: true,
             restore_classic_context_menu: true,
@@ -3029,11 +3035,6 @@ mod tests {
             data.import_custom_files,
             data.custom_username,
             data.custom_volume_label,
-            data.win7_inject_usb3_driver,
-            data.win7_inject_nvme_driver,
-            data.win7_fix_acpi_bsod,
-            data.win7_fix_storage_bsod,
-            data.win7_uefi_patch,
             data.xp_inject_usb3_driver,
             data.xp_inject_nvme_driver,
         ];

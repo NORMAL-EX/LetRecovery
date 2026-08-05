@@ -110,7 +110,7 @@ The following fields **take effect** during the PE installation process (identic
 | `win7_uefi_patch` | bool | Win7 UEFI patch (UefiSeven). |
 | `win7_inject_usb3_driver` | bool | Inject USB3 drivers for Win7. |
 | `win7_inject_nvme_driver` | bool | Inject NVMe drivers for Win7. |
-| `win7_fix_acpi_bsod` | bool | Fix the ACPI BSOD on Win7. |
+| `win7_fix_acpi_bsod` | bool | Manual Windows 7 compatibility attempt; disables only the offline `intelppm`, `amdppm`, and `Processor` services, does not modify ACPI tables or `acpi.sys`, and is off by default. |
 | `win7_fix_storage_bsod` | bool | Fix the storage-controller BSOD on Win7. |
 
 Example:

@@ -15,6 +15,7 @@ These project-specific terms supplement the [PolyForm Noncommercial License 1.0.
 ### 商业定制与装机服务
 
 - 用户可以自行修改 LetRecovery，也可以联系官方进行定制。官方定制的具体范围、费用和授权以双方另行确认的约定为准。
+- 除项目官方或已另行取得书面商业授权的主体外，任何第三方不得使用 LetRecovery 官方源码或其修改、衍生版本，为他人提供收费定制、收费改版、代开发、代编译、交付或其他直接或间接营利的定制服务。本条不禁止完全免费且不收取任何费用、财物或其他经济对价的非商业协助；以广告、赞助、返佣、捆绑销售、付费引流或其他方式取得间接收益的，不视为免费协助。免费协助仍须遵守本条款中的修改与分发要求。
 - 使用 LetRecovery 提供装机服务时：
   - 月营业额不超过（含）**10,000 RMB**，使用 LetRecovery 原版或自行定制版，无需向官方支付许可费用；
   - 月营业额超过 **10,000 RMB**，使用自行定制版或官方定制版，必须联系官方并支付双方约定的费用；
@@ -39,6 +40,7 @@ These project-specific terms supplement the [PolyForm Noncommercial License 1.0.
 ### Commercial Customization and Computer-Installation Services
 
 - You may customize LetRecovery yourself or contact the official project team for customization. The scope, fee, and license for official customization are subject to a separate agreement between the parties.
+- Except for the official project team or a party holding separate written commercial authorization, no third party may use the official LetRecovery source code or any modified or derivative version to provide paid customization, paid rebranding, contract development, compilation, delivery, or any other customization service for direct or indirect profit. This restriction does not prohibit genuinely noncommercial assistance provided entirely free of charge and without receiving money, property, or any other economic consideration. Assistance supported by advertising, sponsorship, commissions, bundled sales, paid referrals, or other indirect revenue is not considered free. All free assistance remains subject to the modification and distribution requirements in these terms.
 - When LetRecovery is used to provide computer-installation services:
   - if monthly revenue is **RMB 10,000 or less**, no license fee is owed to the official project team for use of either the unmodified official version or a self-customized version;
   - if monthly revenue exceeds **RMB 10,000**, use of a self-customized or officially customized version requires contacting the official project team and paying the fee agreed by both parties; and

@@ -135,6 +135,7 @@ use crate::core::native_tool_executor::{
     plan_execution, NativeToolExecutor, ReadOnlyToolRequest, ReadOnlyToolResult,
     ToolExecutionEvent, ToolExecutionPlan, ToolExecutionRequest,
 };
+use crate::core::ui_state::AdvancedOptionCapabilities;
 use crate::download::config::{ConfigManager, OnlinePE, PeCache};
 use crate::PreloadedConfig;
 
@@ -968,7 +969,7 @@ const fn command_bar_visibility(
         let easy_visible = matches!(page, Page::Install) && easy_mode_enabled;
         let install_visible = matches!(page, Page::Install) && !easy_visible;
         [
-            matches!(page, Page::Hardware),
+            install_visible || matches!(page, Page::Hardware),
             install_visible,
             !matches!(page, Page::Download | Page::Tools) && !easy_visible,
         ]
@@ -1193,7 +1194,7 @@ mod layout_tests {
     fn command_visibility_matches_every_install_shell_state() {
         assert_eq!(
             command_bar_visibility(Page::Install, false, false, false),
-            [false, true, true]
+            [true, true, true]
         );
         assert_eq!(
             command_bar_visibility(Page::Install, true, false, false),
@@ -2687,15 +2688,21 @@ impl NativeWindow {
         };
         self.handles = Some(handles);
         #[cfg(feature = "non-elevated-tests")]
-        if std::env::var_os("LETRECOVERY_UI_TEST_IMAGE_VOLUME").is_some() {
+        if let Some(fixture) = std::env::var_os("LETRECOVERY_UI_TEST_IMAGE_VOLUME") {
+            let windows_7 = fixture.to_string_lossy().eq_ignore_ascii_case("windows7");
+            let (name, major_version, minor_version, build) = if windows_7 {
+                ("Windows 7 Professional (UI fixture)", 6, 1, 7_601)
+            } else {
+                ("Windows 11 Professional (UI fixture)", 10, 0, 26_100)
+            };
             self.image_volumes = vec![crate::core::dism::ImageInfo {
                 index: 1,
-                name: "Windows 11 Professional (UI fixture)".to_owned(),
+                name: name.to_owned(),
                 size_bytes: 8 * 1024 * 1024 * 1024,
                 installation_type: "Client".to_owned(),
-                major_version: Some(10),
-                minor_version: Some(0),
-                build: Some(26_100),
+                major_version: Some(major_version),
+                minor_version: Some(minor_version),
+                build: Some(build),
                 architecture: Some(9),
                 image_type: lr_core::image_meta::WimImageType::StandardInstall,
                 verified_installable: true,
@@ -2703,7 +2710,7 @@ impl NativeWindow {
             self.effective_image_path = Some(r"C:\UI-Fixture\sources\install.wim".to_owned());
             self.install_volume_row_presented = true;
             set_text(image_edit, r"C:\UI-Fixture\sources\install.wim");
-            let label = wide("1. Windows 11 Professional (UI fixture)");
+            let label = wide(name);
             let _ = SendMessageW(
                 image_volume,
                 0x0143, // CB_ADDSTRING
@@ -2762,6 +2769,13 @@ impl NativeWindow {
         }
         self.update_pca_combo_labels();
         self.create_secondary_pages(hwnd)?;
+        #[cfg(feature = "non-elevated-tests")]
+        if std::env::var_os("LETRECOVERY_UI_TEST_IMAGE_VOLUME").is_some() {
+            // The deterministic image fixture is installed before secondary pages exist. Publish
+            // its version capability mask now so visual QA exercises the same advanced-page state
+            // that a real completed image scan would produce.
+            self.update_advanced_install_context();
+        }
         // The firmware probe already started alongside process preloading. Attach its receiver
         // before the initial page transaction so a preloaded install intent can never become
         // briefly actionable while PCA compatibility is still unknown.
@@ -2985,6 +2999,19 @@ impl NativeWindow {
         backup.apply_font(self.font);
         backup.apply_theme(self.palette);
         self.backup_page = Some(backup);
+
+        let advanced = AdvancedPage::create(
+            hwnd,
+            &self.app_config.install_prefs.advanced_options,
+            AdvancedPageContext {
+                unattended_enabled: self.app_config.install_prefs.unattended_install,
+                ..AdvancedPageContext::default()
+            },
+        )?;
+        advanced.apply_font(self.font, self.font_bold);
+        advanced.apply_theme(self.palette);
+        advanced.show(false);
+        self.advanced_page = Some(advanced);
 
         let download = DownloadPage::create(
             hwnd,
@@ -4762,14 +4789,23 @@ impl NativeWindow {
         let selected = usize::try_from(selected_index)
             .ok()
             .and_then(|index| self.image_volumes.get(index));
-        let show_windows_7 = selected.is_some_and(|image| {
-            matches!(
-                (image.major_version, image.minor_version),
-                (Some(6), Some(1))
-            )
-        });
-        let show_xp = self.xp_i386_source.is_some()
-            || selected.is_some_and(|image| image.major_version == Some(5));
+        let capabilities = AdvancedOptionCapabilities::for_target(
+            selected.and_then(|image| image.major_version),
+            selected.and_then(|image| image.minor_version),
+            selected.and_then(|image| image.build),
+            self.xp_i386_source.is_some(),
+        );
+        #[cfg(feature = "non-elevated-tests")]
+        let capabilities = if std::env::var_os("LETRECOVERY_UI_TEST_IMAGE_VOLUME")
+            .is_some_and(|fixture| fixture.to_string_lossy().eq_ignore_ascii_case("windows7"))
+        {
+            // Startup inventory reconciliation intentionally owns the production vector. The
+            // non-elevated visual fixture has no real image worker, so keep its declared version
+            // available after that reconciliation solely for deterministic pixel QA.
+            AdvancedOptionCapabilities::for_target(Some(6), Some(1), Some(7_601), false)
+        } else {
+            capabilities
+        };
         let show_pca = self.page == Page::Install
             && !self.easy_mode_enabled()
             && !self.advanced_visible
@@ -4792,7 +4828,7 @@ impl NativeWindow {
                 unattended_enabled,
                 builtin_administrator_available: unattended_enabled
                     && self.custom_unattend_path.trim().is_empty()
-                    && !show_xp
+                    && !capabilities.xp
                     && !source_is_gho,
                 wifi_available: self
                     .app_config
@@ -4800,11 +4836,7 @@ impl NativeWindow {
                     .advanced_options
                     .wifi_detected
                     .unwrap_or(false),
-                show_windows_7,
-                // UefiSeven remains retired; restoring the independently verified USB3/NVMe
-                // driver payload must not make the unrelated boot patch visible again.
-                show_windows_7_uefi: false,
-                show_xp,
+                target_capabilities: capabilities,
             });
         }
     }
@@ -4876,6 +4908,7 @@ impl NativeWindow {
             volume_index: image.index,
             major_version: image.major_version,
             minor_version: image.minor_version,
+            build: image.build,
             architecture: image.architecture,
         });
         let target_disk_number = self
@@ -4912,7 +4945,6 @@ impl NativeWindow {
         advanced.win7_usb3_driver_path.clear();
         advanced.win7_inject_nvme_driver = win7_nvme;
         advanced.win7_nvme_driver_path.clear();
-        advanced.win7_fix_acpi_bsod = false;
         advanced.win7_fix_storage_bsod = false;
         advanced.win7_uefi_patch = false;
         advanced.import_storage_controller_drivers =
@@ -9086,6 +9118,17 @@ impl NativeWindow {
         let handles = self.handles.as_ref()?;
         let selected = SendMessageW(handles.partitions, 0x100C, WPARAM(usize::MAX), LPARAM(2)).0;
         let partition = self.partitions.get(usize::try_from(selected).ok()?)?;
+        let disk_bus_type = partition.disk_number.and_then(|disk_number| {
+            match lr_core::windows_storage::disk_bus_type(disk_number) {
+                Ok(bus) => Some(bus),
+                Err(error) => {
+                    log::warn!(
+                        "[INSTALL TARGET] cannot confirm bus type for physical disk {disk_number}: {error}"
+                    );
+                    None
+                }
+            }
+        });
         Some(InstallTarget {
             partition: partition.letter.clone(),
             disk_number: partition.disk_number,
@@ -9093,6 +9136,7 @@ impl NativeWindow {
             disk_size_bytes: partition.disk_size_bytes,
             partition_offset_bytes: partition.partition_offset_bytes,
             partition_size_bytes: partition.partition_size_bytes,
+            disk_bus_type,
             style: partition.partition_style,
             is_current_system: partition.is_system_partition,
             has_windows: partition.has_windows,
@@ -9126,6 +9170,7 @@ impl NativeWindow {
                         volume_index: image.index,
                         major_version: image.major_version,
                         minor_version: image.minor_version,
+                        build: image.build,
                         architecture: image.architecture,
                     })
             },
@@ -9141,7 +9186,7 @@ impl NativeWindow {
             partition_refresh_error: self.partition_refresh_error.clone(),
             pca_detection_pending: self.pca_detection_pending || self.pca_target_detection_pending,
             pca_selection_error: self.pca_selection_error(),
-            advanced_options_enabled: false,
+            advanced_options_enabled: self.advanced_page.is_some(),
             prefs: self.app_config.install_prefs.clone(),
         }
         .start_intent()
@@ -10331,6 +10376,7 @@ impl NativeWindow {
                             volume_index: volume.index,
                             major_version: volume.major_version,
                             minor_version: volume.minor_version,
+                            build: volume.build,
                             architecture: volume.architecture,
                         },
                         mounted_iso,
@@ -10378,6 +10424,17 @@ impl NativeWindow {
                 disk_size_bytes: partition.disk_size_bytes,
                 partition_offset_bytes: partition.partition_offset_bytes,
                 partition_size_bytes: partition.partition_size_bytes,
+                disk_bus_type: partition.disk_number.and_then(|disk_number| {
+                    match lr_core::windows_storage::disk_bus_type(disk_number) {
+                        Ok(bus) => Some(bus),
+                        Err(error) => {
+                            log::warn!(
+                                "[EASY INSTALL TARGET] cannot confirm bus type for physical disk {disk_number}: {error}"
+                            );
+                            None
+                        }
+                    }
+                }),
                 style: partition.partition_style,
                 is_current_system: partition.is_system_partition,
                 has_windows: partition.has_windows,

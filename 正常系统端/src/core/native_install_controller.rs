@@ -24,6 +24,8 @@ pub struct InstallTarget {
     pub disk_size_bytes: Option<u64>,
     pub partition_offset_bytes: Option<u64>,
     pub partition_size_bytes: Option<u64>,
+    /// Bus type captured from the same physical disk identity as this target snapshot.
+    pub disk_bus_type: Option<lr_core::windows_storage::DiskBusType>,
     pub style: PartitionStyle,
     pub is_current_system: bool,
     pub has_windows: bool,
@@ -34,6 +36,7 @@ pub struct SelectedImageMetadata {
     pub volume_index: u32,
     pub major_version: Option<u16>,
     pub minor_version: Option<u16>,
+    pub build: Option<u32>,
     pub architecture: Option<u16>,
 }
 
@@ -99,6 +102,7 @@ pub enum InstallValidationError {
     BuiltInAdministratorUnsupportedSource,
     BuiltInAdministratorConflictsWithCustomUnattend,
     ConflictingAdministratorOptions,
+    InvalidCustomUsername,
     InvalidBuiltInAdministratorName,
     InvalidBuiltInAdministratorPassword,
     PartitionRefreshPending,
@@ -135,6 +139,9 @@ impl std::fmt::Display for InstallValidationError {
             Self::ConflictingAdministratorOptions => {
                 crate::tr!("“自定义用户名”和“启用内置 Administrator 账户”不能同时启用。")
             }
+            Self::InvalidCustomUsername => crate::tr!(
+                "自定义用户名无效：请使用普通本地账户名，不能使用 SYSTEM、TrustedInstaller 等系统保留账户，且不得包含 Windows 禁止字符。"
+            ),
             Self::InvalidBuiltInAdministratorName => {
                 crate::tr!("内置 Administrator 账户名无效：不能为空、不得超过 20 个字符或包含 Windows 禁止字符。")
             }
@@ -233,6 +240,14 @@ impl NativeInstallState {
         let is_xp_i386 = self.xp_i386_source.is_some();
         let is_gho = has_extension(&self.image_path, &["gho", "ghs"]);
         let builtin = &self.prefs.advanced_options.builtin_administrator;
+        if self.prefs.advanced_options.custom_username
+            && lr_core::unattend_account::validate_unattended_local_account_name(
+                &self.prefs.advanced_options.username,
+            )
+            .is_err()
+        {
+            return Err(InstallValidationError::InvalidCustomUsername);
+        }
         if builtin.enabled {
             if !self.prefs.unattended_install {
                 return Err(InstallValidationError::BuiltInAdministratorRequiresUnattended);
@@ -335,15 +350,39 @@ impl NativeInstallState {
             advanced_options.xp_inject_nvme_driver = true;
             advanced_options.xp_defaults_applied = true;
         }
+        advanced_options.retain_supported_for_target(
+            crate::core::ui_state::AdvancedOptionCapabilities::for_target(
+                self.selected_image.and_then(|image| image.major_version),
+                self.selected_image.and_then(|image| image.minor_version),
+                self.selected_image.and_then(|image| image.build),
+                is_xp_i386,
+            ),
+        );
+        // Windows 7 compatibility payloads are bundled, locked and selected by hardware policy.
+        // They are not user-supplied advanced options: USB3 is considered for every identified
+        // Windows 7 image, while the NVMe hotfix pair is allowed only for x64 plus a positively
+        // identified native NVMe target. The historical processor-power workaround remains an
+        // explicit Windows 7 choice; the broad storage registry hack and UefiSeven stay retired.
+        let (win7_usb3, win7_nvme) =
+            windows7_driver_defaults(self.selected_image, target.disk_bus_type);
+        advanced_options.win7_inject_usb3_driver = win7_usb3;
+        advanced_options.win7_usb3_driver_path.clear();
+        advanced_options.win7_inject_nvme_driver = win7_nvme;
+        advanced_options.win7_nvme_driver_path.clear();
+        advanced_options.win7_fix_storage_bsod = false;
+        advanced_options.win7_uefi_patch = false;
         let boot_pca_mode = if self.image_supports_pca(is_gho, is_xp_i386) {
             self.prefs.boot_pca_mode
         } else {
             BootPcaMode::Auto
         };
-        let export_drivers = matches!(
-            self.prefs.driver_action,
-            DriverAction::SaveOnly | DriverAction::AutoImport
-        );
+        // A freshly partitioned target has no host DriverStore to preserve. Scheduling an offline
+        // DISM export in that state makes a valid clean install fail before formatting/image apply.
+        let export_drivers = target.has_windows
+            && matches!(
+                self.prefs.driver_action,
+                DriverAction::SaveOnly | DriverAction::AutoImport
+            );
         let options = InstallOptions {
             format_partition: self.prefs.format_partition,
             repair_boot: self.prefs.repair_boot,
@@ -462,8 +501,10 @@ impl StartInstallIntent {
             win7_uefi_patch: advanced.win7_uefi_patch,
             win7_inject_usb3_driver: advanced.win7_inject_usb3_driver,
             win7_inject_nvme_driver: advanced.win7_inject_nvme_driver,
+            // Keep the historical processor-power workaround available to both direct and PE
+            // installs. It remains opt-in and is filtered out for every non-Windows 7 target.
             win7_fix_acpi_bsod: advanced.win7_fix_acpi_bsod,
-            win7_fix_storage_bsod: advanced.win7_fix_storage_bsod,
+            win7_fix_storage_bsod: false,
             wim_engine,
             is_xp: self.options.is_xp,
             is_xp_i386: self.options.is_xp_i386,
@@ -504,6 +545,7 @@ mod tests {
             volume_index: 1,
             major_version: Some(major),
             minor_version: Some(minor),
+            build: (major >= 10).then_some(26_100),
             architecture: Some(9),
         }
     }
@@ -555,6 +597,7 @@ mod tests {
                 volume_index: 3,
                 major_version: Some(10),
                 minor_version: Some(0),
+                build: Some(26_100),
                 architecture: Some(9),
             }),
             xp_i386_source: None,
@@ -565,6 +608,7 @@ mod tests {
                 disk_size_bytes: Some(1_000_000_000_000),
                 partition_offset_bytes: Some(1_048_576),
                 partition_size_bytes: Some(500_000_000_000),
+                disk_bus_type: Some(lr_core::windows_storage::DiskBusType::Other),
                 style: PartitionStyle::GPT,
                 is_current_system: false,
                 has_windows: false,
@@ -587,6 +631,97 @@ mod tests {
         let intent = base_state().start_intent().unwrap();
         assert_eq!(intent.mode, InstallMode::Direct);
         assert_eq!(intent.volume_index, 3);
+        assert!(!intent.options.export_drivers);
+    }
+
+    #[test]
+    fn windows_7_install_intent_cannot_carry_hidden_modern_windows_options() {
+        let mut state = base_state();
+        state.selected_image = Some(image(6, 1));
+        state.prefs.advanced_options.restore_classic_context_menu = true;
+        state.prefs.advanced_options.disable_windows_defender = true;
+        state.prefs.advanced_options.remove_uwp_apps = true;
+        state
+            .prefs
+            .advanced_options
+            .import_storage_controller_drivers = true;
+        state.prefs.advanced_options.win7_inject_usb3_driver = true;
+
+        let options = state.start_intent().unwrap().options.advanced_options;
+        assert!(options.remove_shortcut_arrow);
+        assert!(!options.restore_classic_context_menu);
+        assert!(!options.bypass_nro);
+        assert!(!options.disable_windows_defender);
+        assert!(!options.disable_reserved_storage);
+        assert!(!options.disable_device_encryption);
+        assert!(!options.remove_uwp_apps);
+        assert!(!options.import_storage_controller_drivers);
+        assert!(options.win7_inject_usb3_driver);
+    }
+
+    #[test]
+    fn windows_7_driver_policy_overrides_legacy_user_choices() {
+        let mut state = base_state();
+        state.selected_image = Some(image(6, 1));
+        state.target.as_mut().unwrap().disk_bus_type =
+            Some(lr_core::windows_storage::DiskBusType::Nvme);
+        state.prefs.advanced_options.win7_inject_usb3_driver = false;
+        state.prefs.advanced_options.win7_usb3_driver_path = "D:\\custom-usb3".to_string();
+        state.prefs.advanced_options.win7_inject_nvme_driver = false;
+        state.prefs.advanced_options.win7_nvme_driver_path = "D:\\custom-nvme".to_string();
+        state.prefs.advanced_options.win7_fix_acpi_bsod = true;
+        state.prefs.advanced_options.win7_fix_storage_bsod = true;
+        state.prefs.advanced_options.win7_uefi_patch = true;
+
+        let options = state.start_intent().unwrap().options.advanced_options;
+        assert!(options.win7_inject_usb3_driver);
+        assert!(options.win7_inject_nvme_driver);
+        assert!(options.win7_usb3_driver_path.is_empty());
+        assert!(options.win7_nvme_driver_path.is_empty());
+        assert!(options.win7_fix_acpi_bsod);
+        assert!(!options.win7_fix_storage_bsod);
+        assert!(!options.win7_uefi_patch);
+    }
+
+    #[test]
+    fn windows_7_nvme_hotfix_is_not_guessed_for_unknown_or_raid_bus() {
+        for bus in [None, Some(lr_core::windows_storage::DiskBusType::Other)] {
+            let mut state = base_state();
+            state.selected_image = Some(image(6, 1));
+            state.target.as_mut().unwrap().disk_bus_type = bus;
+            state.prefs.advanced_options.win7_inject_nvme_driver = true;
+            let options = state.start_intent().unwrap().options.advanced_options;
+            assert!(options.win7_inject_usb3_driver);
+            assert!(!options.win7_inject_nvme_driver);
+        }
+    }
+
+    #[test]
+    fn host_drivers_are_exported_only_when_the_target_contains_windows() {
+        let mut state = base_state();
+        state.prefs.driver_action = DriverAction::AutoImport;
+        assert!(!state.start_intent().unwrap().options.export_drivers);
+
+        state.target.as_mut().unwrap().has_windows = true;
+        assert!(state.start_intent().unwrap().options.export_drivers);
+    }
+
+    #[test]
+    fn reserved_custom_username_is_rejected_before_install_dispatch() {
+        for reserved in ["SYSTEM", "TrustedInstaller", "DWM-1"] {
+            let mut state = base_state();
+            state.prefs.advanced_options.custom_username = true;
+            state.prefs.advanced_options.username = reserved.to_string();
+            assert_eq!(
+                state.start_intent().unwrap_err(),
+                InstallValidationError::InvalidCustomUsername,
+                "{reserved}"
+            );
+        }
+
+        let mut state = base_state();
+        state.prefs.advanced_options.username = "Terry".to_string();
+        assert!(state.start_intent().is_ok());
     }
 
     #[test]

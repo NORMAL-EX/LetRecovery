@@ -134,9 +134,7 @@ fn validate_direct_advanced_request(
         || options.custom_username
         || options.custom_volume_label
         || options.win7_inject_usb3_driver
-        || options.win7_inject_nvme_driver
-        || options.win7_fix_acpi_bsod
-        || options.win7_fix_storage_bsod)
+        || options.win7_inject_nvme_driver)
 }
 
 fn run_requested_direct_operation<E, F>(requested: bool, operation: F) -> Result<(), E>

@@ -111,31 +111,34 @@ impl AdvancedOptionsSummary {
         } else if config.win7_uefi_patch
             || config.win7_inject_usb3_driver
             || config.win7_inject_nvme_driver
-            || config.win7_fix_acpi_bsod
-            || config.win7_fix_storage_bsod
         {
-            rows.extend([
-                row(
-                    crate::tr!("Windows 7 UEFI 补丁"),
-                    enabled_text(config.win7_uefi_patch),
-                ),
-                row(
-                    crate::tr!("Windows 7 注入 USB3 驱动"),
-                    enabled_text(config.win7_inject_usb3_driver),
-                ),
-                row(
-                    crate::tr!("Windows 7 注入 NVMe 驱动"),
-                    enabled_text(config.win7_inject_nvme_driver),
-                ),
-                row(
-                    crate::tr!("Windows 7 修复 ACPI 蓝屏"),
-                    enabled_text(config.win7_fix_acpi_bsod),
-                ),
-                row(
-                    crate::tr!("Windows 7 修复存储控制器蓝屏"),
-                    enabled_text(config.win7_fix_storage_bsod),
-                ),
-            ]);
+            rows.extend(
+                [
+                    row(
+                        crate::tr!("Windows 7 UEFI 补丁"),
+                        enabled_text(config.win7_uefi_patch),
+                    ),
+                    row(
+                        crate::tr!("Windows 7 注入 USB3 驱动"),
+                        enabled_text(config.win7_inject_usb3_driver),
+                    ),
+                    row(
+                        crate::tr!("Windows 7 注入 NVMe 驱动"),
+                        enabled_text(config.win7_inject_nvme_driver),
+                    ),
+                    row(
+                        crate::tr!("尝试修复 0xA5（禁用处理器电源驱动）"),
+                        enabled_text(config.win7_fix_acpi_bsod),
+                    ),
+                    row(
+                        crate::tr!("Windows 7 修复存储控制器蓝屏"),
+                        enabled_text(config.win7_fix_storage_bsod),
+                    ),
+                ]
+                .into_iter()
+                .skip(1)
+                .take(2),
+            );
         }
         Self { rows }
     }

@@ -1113,18 +1113,83 @@ impl DriverManager {
         let outcome =
             crate::command::execute_request(&crate::command::SystemCommandExecutor, &request)
                 .context("failed to start DISM offline driver import")?;
-        if !outcome.succeeded() {
-            bail!(
-                "DISM offline driver import failed (exit {:?}): stdout={} stderr={}",
-                outcome.exit_code(),
-                String::from_utf8_lossy(outcome.stdout()).trim(),
-                String::from_utf8_lossy(outcome.stderr()).trim()
+        if outcome.succeeded() {
+            log::info!(
+                "[DriverManager] DISM imported {} offline driver packages",
+                inf_files.len()
             );
+            return Ok((inf_files.len(), 0));
         }
-        log::info!(
-            "[DriverManager] DISM imported {} offline driver packages",
-            inf_files.len()
+
+        log::warn!(
+            "[DriverManager] recursive DISM import failed; retrying exact INF packages: exit {:?}, stdout={}, stderr={}",
+            outcome.exit_code(),
+            String::from_utf8_lossy(outcome.stdout()).trim(),
+            String::from_utf8_lossy(outcome.stderr()).trim()
         );
+
+        for inf in &inf_files {
+            let normal_request = crate::command::CommandRequest::new("dism.exe")
+                .arg(format!("/Image:{}", offline_root.display()))
+                .arg("/Add-Driver")
+                .arg(format!("/Driver:{}", inf.display()));
+            let normal_outcome = crate::command::execute_request(
+                &crate::command::SystemCommandExecutor,
+                &normal_request,
+            )
+            .with_context(|| format!("failed to start DISM for {}", inf.display()))?;
+            if normal_outcome.succeeded() {
+                continue;
+            }
+
+            let normal_error = format!(
+                "exit {:?}: stdout={} stderr={}",
+                normal_outcome.exit_code(),
+                String::from_utf8_lossy(normal_outcome.stdout()).trim(),
+                String::from_utf8_lossy(normal_outcome.stderr()).trim()
+            );
+            if !crate::driver_package_trust::is_known_dism_signature_false_negative(&normal_error) {
+                bail!(
+                    "DISM rejected driver package {}: {}",
+                    inf.display(),
+                    normal_error
+                );
+            }
+
+            let verified =
+                crate::driver_package_trust::verify_driver_package(inf).with_context(|| {
+                    format!(
+                        "driver package is not independently trusted: {}",
+                        inf.display()
+                    )
+                })?;
+            verified.revalidate()?;
+            log::warn!(
+                "[DriverManager] signature false-negative fallback for {} (signer: {})",
+                inf.display(),
+                verified.signer()
+            );
+            let fallback_request = crate::command::CommandRequest::new("dism.exe")
+                .arg(format!("/Image:{}", offline_root.display()))
+                .arg("/Add-Driver")
+                .arg(format!("/Driver:{}", inf.display()))
+                .arg("/ForceUnsigned");
+            let fallback_outcome = crate::command::execute_request(
+                &crate::command::SystemCommandExecutor,
+                &fallback_request,
+            )
+            .with_context(|| format!("failed to start verified fallback for {}", inf.display()))?;
+            if !fallback_outcome.succeeded() {
+                bail!(
+                    "verified driver fallback failed for {} (exit {:?}): stdout={} stderr={}",
+                    inf.display(),
+                    fallback_outcome.exit_code(),
+                    String::from_utf8_lossy(fallback_outcome.stdout()).trim(),
+                    String::from_utf8_lossy(fallback_outcome.stderr()).trim()
+                );
+            }
+        }
+
         Ok((inf_files.len(), 0))
     }
 
@@ -1306,7 +1371,7 @@ pub fn verify_offline_storage_driver_requirements(
     offline_root: &Path,
     exported_root: &Path,
 ) -> Result<Vec<StorageDriverRequirement>> {
-    let requirements = read_storage_driver_requirements(exported_root)?;
+    let requirements = load_storage_driver_requirements(exported_root)?;
     let driver_store = offline_root
         .join("Windows")
         .join("System32")
@@ -1344,7 +1409,9 @@ pub fn validate_storage_driver_requirements(
     Ok(())
 }
 
-fn read_storage_driver_requirements(exported_root: &Path) -> Result<Vec<StorageDriverRequirement>> {
+pub fn load_storage_driver_requirements(
+    exported_root: &Path,
+) -> Result<Vec<StorageDriverRequirement>> {
     let manifest_path = exported_root.join(STORAGE_DRIVER_REQUIREMENTS_FILE);
     let metadata = manifest_path.symlink_metadata().with_context(|| {
         format!(
@@ -1382,6 +1449,28 @@ fn read_storage_driver_requirements(exported_root: &Path) -> Result<Vec<StorageD
     }
     validate_requirement_values(&manifest.requirements)?;
     Ok(manifest.requirements)
+}
+
+/// Returns true only when every captured boot-storage requirement is an Intel VMD controller for
+/// which disabling VMD/RST in firmware is a valid recovery route after a failed import.
+pub fn requirements_are_only_intel_vmd(requirements: &[StorageDriverRequirement]) -> bool {
+    const VMD_IDS: [&str; 6] = ["09AB", "9A0B", "467F", "A77F", "7D0B", "AD0B"];
+    let hardware_ids = requirements
+        .iter()
+        .flat_map(|requirement| requirement.hardware_ids.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    !hardware_ids.is_empty()
+        && crate::storage_driver_match::select_builtin_storage_driver_packages(
+            hardware_ids.iter().copied(),
+        )
+        .map(|packages| !packages.is_empty())
+        .unwrap_or(false)
+        && hardware_ids.iter().all(|hardware_id| {
+            let normalized = hardware_id.to_ascii_uppercase();
+            VMD_IDS
+                .iter()
+                .any(|device| normalized.contains(&format!("PCI\\VEN_8086&DEV_{device}")))
+        })
 }
 
 fn validate_requirement_values(requirements: &[StorageDriverRequirement]) -> Result<()> {
@@ -1561,5 +1650,30 @@ mod tests {
             &[incomplete]
         )
         .is_err());
+    }
+
+    #[test]
+    fn only_exact_intel_vmd_requirements_have_a_firmware_recovery_route() {
+        let vmd = StorageDriverRequirement {
+            description: "Intel VMD".into(),
+            source_inf: "iastorvd.inf".into(),
+            hardware_ids: vec!["PCI\\VEN_8086&DEV_A77F&SUBSYS_12341043".into()],
+        };
+        assert!(requirements_are_only_intel_vmd(std::slice::from_ref(&vmd)));
+        let mut vmd_with_managed_function = vmd.clone();
+        vmd_with_managed_function
+            .hardware_ids
+            .push("PCI\\VEN_8086&DEV_09AB".into());
+        assert!(requirements_are_only_intel_vmd(&[
+            vmd_with_managed_function
+        ]));
+        assert!(!requirements_are_only_intel_vmd(&[]));
+
+        let nvme = StorageDriverRequirement {
+            description: "NVMe".into(),
+            source_inf: "stornvme.inf".into(),
+            hardware_ids: vec!["PCI\\VEN_144D&DEV_A80A".into()],
+        };
+        assert!(!requirements_are_only_intel_vmd(&[vmd, nvme]));
     }
 }

@@ -6,7 +6,7 @@ use walkdir::WalkDir;
 
 use crate::core::registry::OfflineRegistry;
 use lr_core::unattend_account::BuiltInAdministratorOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 struct OfflineHiveCleanup(Vec<&'static str>);
 
@@ -167,6 +167,17 @@ impl AdvancedOptions {
                 anyhow::bail!("无法确认 Windows 7 目标系统架构，拒绝注入驱动: {architecture:?}")
             }
         }
+    }
+
+    fn target_is_windows_7(target_partition: &str) -> bool {
+        let ntdll = Path::new(target_partition)
+            .join("Windows")
+            .join("System32")
+            .join("ntdll.dll");
+        matches!(
+            crate::core::system_utils::get_file_version(&ntdll),
+            Some((6, 1, _, _))
+        )
     }
 
     /// 获取 XP 驱动目录（bin\drivers\xp\{usb3|nvme|ahci}）
@@ -522,17 +533,17 @@ log=0
             )?;
         }
 
-        // 20. Win7 修复 ACPI_BIOS_ERROR (0xA5) 蓝屏
-        if self.win7_fix_acpi_bsod {
+        // 20. Win7 旧式处理器电源驱动兼容尝试。它不会修补 ACPI 表，只在用户明确
+        // 选择时禁用历史上可能导致启动冲突的处理器电源服务。
+        if self.win7_fix_acpi_bsod && Self::target_is_windows_7(target_partition) {
             self.apply_win7_fix_acpi_bsod()?;
+        } else if self.win7_fix_acpi_bsod {
+            log::warn!(
+                "[ADVANCED] 已选择旧式处理器电源驱动兼容尝试，但目标不是 Windows 7，安全跳过"
+            );
         }
-
         // 21. Win7 修复 INACCESSIBLE_BOOT_DEVICE (0x7B) 蓝屏
         // 这是Win7在现代硬件上最常见的蓝屏问题，原因是存储控制器驱动未启用
-        if self.win7_fix_storage_bsod {
-            self.apply_win7_fix_storage_bsod()?;
-        }
-
         // ============ Windows XP 专用：离线注入存储/USB3 驱动 ============
         // 直接写已加载的 SYSTEM 配置单元(pc-sys)，不走 DISM。AHCI 始终注入；NVMe/USB3 按勾选。
         if is_xp {
@@ -901,8 +912,9 @@ log=0
         system_hive: &str,
         default_hive: &str,
     ) -> anyhow::Result<()> {
-        let custom_path = (!self.win7_usb3_driver_path.trim().is_empty())
-            .then(|| PathBuf::from(&self.win7_usb3_driver_path));
+        // User-supplied Windows 7 compatibility paths are retired. Only the release-locked,
+        // hash-verified payload may enter this boot-critical path; fields remain for config ABI.
+        let custom_path: Option<PathBuf> = None;
         let architecture = Self::target_win7_architecture(target_partition)?;
         with_offline_hives_unloaded(
             default_loaded,
@@ -959,8 +971,7 @@ log=0
         system_hive: &str,
         default_hive: &str,
     ) -> anyhow::Result<()> {
-        let custom_path = (!self.win7_nvme_driver_path.trim().is_empty())
-            .then(|| PathBuf::from(&self.win7_nvme_driver_path));
+        let custom_path: Option<PathBuf> = None;
         let architecture = Self::target_win7_architecture(target_partition)?;
         with_offline_hives_unloaded(
             default_loaded,
@@ -1003,9 +1014,9 @@ log=0
         )
     }
 
-    /// 20. Win7 修复 ACPI_BIOS_ERROR (0xA5) 蓝屏
+    /// 20. Win7 旧式处理器电源驱动兼容尝试。
     fn apply_win7_fix_acpi_bsod(&self) -> anyhow::Result<()> {
-        log::info!("[ADVANCED] Win7: 修复ACPI蓝屏问题");
+        log::info!("[ADVANCED] Win7: 尝试禁用旧式处理器电源驱动以提高启动兼容性");
 
         // 禁用 intelppm 服务 (Intel 电源管理)
         OfflineRegistry::set_dword(
@@ -1037,7 +1048,7 @@ log=0
             4,
         )?;
 
-        log::info!("[ADVANCED] Win7 ACPI蓝屏修复设置完成");
+        log::info!("[ADVANCED] Win7 旧式处理器电源驱动兼容设置完成");
         Ok(())
     }
 

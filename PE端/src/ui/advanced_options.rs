@@ -430,9 +430,10 @@ pub fn apply_advanced_options(
         log::info!("[ADVANCED] Win7 NVMe驱动注入成功");
     }
 
-    // 14. Win7 修复 ACPI_BIOS_ERROR (0xA5) 蓝屏
-    if config.win7_fix_acpi_bsod {
-        log::info!("[ADVANCED] Win7: 修复ACPI蓝屏问题");
+    // 14. Win7 旧式处理器电源驱动兼容尝试。它不修补 ACPI 表，只在目标确认为
+    // Windows 7 时按用户选择禁用历史处理器电源服务。
+    if config.win7_fix_acpi_bsod && detect_user_driver_version(target_partition) == Some("win7") {
+        log::info!("[ADVANCED] Win7: 尝试禁用旧式处理器电源驱动以提高启动兼容性");
 
         // 禁用 intelppm 服务 (Intel 电源管理)
         let _ = OfflineRegistry::set_dword(
@@ -466,7 +467,9 @@ pub fn apply_advanced_options(
             4,
         );
 
-        log::info!("[ADVANCED] Win7 ACPI蓝屏修复设置完成");
+        log::info!("[ADVANCED] Win7 旧式处理器电源驱动兼容设置完成");
+    } else if config.win7_fix_acpi_bsod {
+        log::warn!("[ADVANCED] 已选择旧式处理器电源驱动兼容尝试，但目标不是 Windows 7，安全跳过");
     }
 
     // 15. Win7 修复 INACCESSIBLE_BOOT_DEVICE (0x7B) 蓝屏

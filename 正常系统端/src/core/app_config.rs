@@ -229,10 +229,10 @@ impl AppConfig {
 
     fn normalized(mut self) -> Self {
         self.download_threads = normalize_download_threads(self.download_threads);
-        // Advanced mode is no longer user-visible. Keep legacy fields readable so old config.json
-        // files continue to load, but never let stale destructive preferences affect a new session.
+        // The removed global Advanced Mode and DiskPart switches remain readable for compatibility
+        // but can never be re-enabled. Supported installation advanced options keep their ordinary
+        // persisted preferences; sensitive and session-only fields are already `serde(skip)`.
         self.enable_advanced_options = false;
-        self.install_prefs.advanced_options = Default::default();
         self.install_prefs.advanced_options.apply_runtime_defaults();
         self.install_prefs.run_diskpart_scripts = false;
         self
@@ -333,7 +333,7 @@ pub fn get_current_username() -> Option<String> {
 
     // 尝试从环境变量获取
     if let Ok(username) = std::env::var("USERNAME") {
-        if !username.is_empty() && username.to_lowercase() != "system" {
+        if lr_core::unattend_account::validate_unattended_local_account_name(&username).is_ok() {
             return Some(username);
         }
     }
@@ -351,7 +351,7 @@ pub fn get_current_username() -> Option<String> {
         if GetUserNameW(buffer.as_mut_ptr(), &mut size) != 0 {
             let username = OsString::from_wide(&buffer[..size as usize - 1]);
             if let Some(name) = username.to_str() {
-                if !name.is_empty() && name.to_lowercase() != "system" {
+                if lr_core::unattend_account::validate_unattended_local_account_name(name).is_ok() {
                     return Some(name.to_string());
                 }
             }
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_advanced_preferences_are_reset_before_use() {
+    fn supported_advanced_preferences_survive_while_legacy_diskpart_is_reset() {
         let config: AppConfig = serde_json::from_str(
             r#"{"install_prefs":{"run_diskpart_scripts":true,"advanced_options":{"disable_windows_defender":true}}}"#,
         )
@@ -415,7 +415,7 @@ mod tests {
         let normalized = config.normalized();
         assert!(!normalized.install_prefs.run_diskpart_scripts);
         assert!(
-            !normalized
+            normalized
                 .install_prefs
                 .advanced_options
                 .disable_windows_defender

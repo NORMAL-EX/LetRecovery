@@ -1074,7 +1074,7 @@ Language={}
                     }
                     "VolumeLabel" => config.volume_label = value.to_string(),
                     "CustomUnattendFile" => config.custom_unattend_path = value.to_string(),
-                    "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
+                    "Win7UefiPatch" => config.win7_uefi_patch = false,
                     "Win7InjectUsb3Driver" => {
                         config.win7_inject_usb3_driver = value.parse().unwrap_or(false)
                     }
@@ -1082,9 +1082,7 @@ Language={}
                         config.win7_inject_nvme_driver = value.parse().unwrap_or(false)
                     }
                     "Win7FixAcpiBsod" => config.win7_fix_acpi_bsod = value.parse().unwrap_or(false),
-                    "Win7FixStorageBsod" => {
-                        config.win7_fix_storage_bsod = value.parse().unwrap_or(false)
-                    }
+                    "Win7FixStorageBsod" => config.win7_fix_storage_bsod = false,
                     "XpInjectUsb3Driver" => {
                         config.xp_inject_usb3_driver = value.parse().unwrap_or(false)
                     }
@@ -1209,6 +1207,21 @@ mod tests {
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
         assert!(!config.is_xp_i386);
         assert!(config.xp_source_arch.is_empty());
+    }
+
+    #[test]
+    fn legacy_win7_processor_workaround_is_preserved_but_retired_flags_are_ignored() {
+        let config = ConfigFileManager::deserialize_install_config(concat!(
+            "[Install]\r\n",
+            "Win7UefiPatch=true\r\n",
+            "Win7FixAcpiBsod=true\r\n",
+            "Win7FixStorageBsod=true\r\n"
+        ))
+        .unwrap();
+
+        assert!(!config.win7_uefi_patch);
+        assert!(config.win7_fix_acpi_bsod);
+        assert!(!config.win7_fix_storage_bsod);
     }
 
     #[test]

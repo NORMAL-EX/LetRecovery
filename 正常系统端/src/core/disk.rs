@@ -47,6 +47,22 @@ fn classify_staging_drive_type(drive_type: u32) -> Option<StagingDriveKind> {
     }
 }
 
+/// Windows supports shrinking an online NTFS BitLocker volume without decrypting it first.  Keep
+/// that path limited to the current Windows volume while its conversion state is stable and the
+/// volume is unlocked.  Locked, converting and unknown states remain fail-closed.
+fn auto_shrink_target_is_safe(
+    file_system: Option<&str>,
+    bitlocker_status: VolumeStatus,
+    attachment: StorageAttachment,
+    is_current_system: bool,
+) -> bool {
+    let bitlocker_is_safe = bitlocker_status == VolumeStatus::NotEncrypted
+        || (is_current_system && bitlocker_status == VolumeStatus::EncryptedUnlocked);
+    bitlocker_is_safe
+        && file_system.is_some_and(|name| name.eq_ignore_ascii_case("NTFS"))
+        && attachment != StorageAttachment::External
+}
+
 /// 自动创建分区的标志文件名
 pub const AUTO_CREATED_PARTITION_MARKER: &str = "LetRecovery_AutoCreated.marker";
 
@@ -1095,6 +1111,8 @@ impl DiskManager {
         pre_queried_max_mb: Option<u64>,
         expected_disk_number: u32,
         expected_partition_number: u32,
+        expected_bitlocker_status: VolumeStatus,
+        is_current_system: bool,
     ) -> Result<char> {
         let source_letter = source_letter.to_ascii_uppercase();
         let current_identity = Self::get_device_number(source_letter);
@@ -1105,6 +1123,29 @@ impl DiskManager {
                 expected_disk_number,
                 expected_partition_number,
                 current_identity
+            );
+        }
+
+        let refreshed_bitlocker_status = BitLockerManager::new().get_status(source_letter);
+        if refreshed_bitlocker_status != expected_bitlocker_status
+            || !matches!(
+                refreshed_bitlocker_status,
+                VolumeStatus::NotEncrypted | VolumeStatus::EncryptedUnlocked
+            )
+            || (refreshed_bitlocker_status == VolumeStatus::EncryptedUnlocked && !is_current_system)
+        {
+            anyhow::bail!(
+                "BitLocker 状态已变化或不允许自动缩卷，拒绝缩小 {}:：预期={}，当前={}，当前系统卷={}",
+                source_letter,
+                expected_bitlocker_status.as_str(),
+                refreshed_bitlocker_status.as_str(),
+                is_current_system
+            );
+        }
+        if refreshed_bitlocker_status == VolumeStatus::EncryptedUnlocked {
+            log::info!(
+                "[DISK] {}: 为已解锁且转换状态稳定的 BitLocker 当前系统卷，使用 Windows 原生缩卷而不执行完整解密",
+                source_letter
             );
         }
 
@@ -1374,11 +1415,12 @@ impl DiskManager {
                     .entry(disk_number)
                     .or_insert_with(|| Self::get_storage_profile(disk_number));
                 let file_system = Self::get_volume_file_system(exclude_letter);
-                let shrink_is_safe = target.bitlocker_status == VolumeStatus::NotEncrypted
-                    && file_system
-                        .as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case("NTFS"))
-                    && attachment != StorageAttachment::External;
+                let shrink_is_safe = auto_shrink_target_is_safe(
+                    file_system.as_deref(),
+                    target.bitlocker_status,
+                    attachment,
+                    target.is_system_partition,
+                );
                 if !shrink_is_safe {
                     log::warn!(
                         "[DISK] 不自动缩小 {}:：文件系统={:?} BitLocker={} 接口={:?}",
@@ -1479,6 +1521,8 @@ impl DiskManager {
                     max_shrink_mb,
                     disk_number,
                     partition_number,
+                    target.bitlocker_status,
+                    target.is_system_partition,
                 )?;
                 Ok(Some((format!("{}:", new_letter), true)))
             }
@@ -1496,9 +1540,11 @@ impl DiskManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_staging_drive_type, StagingDriveKind, DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK,
-        DRIVE_REMOTE, DRIVE_REMOVABLE,
+        auto_shrink_target_is_safe, classify_staging_drive_type, StagingDriveKind, DRIVE_CDROM,
+        DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOTE, DRIVE_REMOVABLE,
     };
+    use crate::core::bitlocker::VolumeStatus;
+    use lr_core::data_staging::StorageAttachment;
 
     #[test]
     fn staging_drive_types_exclude_optical_remote_and_ram_disks() {
@@ -1513,5 +1559,56 @@ mod tests {
         assert_eq!(classify_staging_drive_type(DRIVE_CDROM), None);
         assert_eq!(classify_staging_drive_type(DRIVE_REMOTE), None);
         assert_eq!(classify_staging_drive_type(DRIVE_RAMDISK), None);
+    }
+
+    #[test]
+    fn stable_unlocked_bitlocker_current_system_volume_can_be_shrunk() {
+        assert!(auto_shrink_target_is_safe(
+            Some("NTFS"),
+            VolumeStatus::EncryptedUnlocked,
+            StorageAttachment::Internal,
+            true,
+        ));
+        assert!(auto_shrink_target_is_safe(
+            Some("ntfs"),
+            VolumeStatus::NotEncrypted,
+            StorageAttachment::Internal,
+            false,
+        ));
+    }
+
+    #[test]
+    fn unsafe_bitlocker_and_storage_states_remain_fail_closed() {
+        for status in [
+            VolumeStatus::EncryptedLocked,
+            VolumeStatus::Encrypting,
+            VolumeStatus::Decrypting,
+            VolumeStatus::Unknown,
+        ] {
+            assert!(!auto_shrink_target_is_safe(
+                Some("NTFS"),
+                status,
+                StorageAttachment::Internal,
+                true,
+            ));
+        }
+        assert!(!auto_shrink_target_is_safe(
+            Some("NTFS"),
+            VolumeStatus::EncryptedUnlocked,
+            StorageAttachment::Internal,
+            false,
+        ));
+        assert!(!auto_shrink_target_is_safe(
+            Some("NTFS"),
+            VolumeStatus::EncryptedUnlocked,
+            StorageAttachment::External,
+            true,
+        ));
+        assert!(!auto_shrink_target_is_safe(
+            Some("FAT32"),
+            VolumeStatus::EncryptedUnlocked,
+            StorageAttachment::Internal,
+            true,
+        ));
     }
 }

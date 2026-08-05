@@ -8,6 +8,7 @@ version = "2026.2.6"
 dependencies = [
  "anyhow",
  "aria2-ws",
+ "base64",
  "blake3",
  "chrono",
  "clipboard-win",

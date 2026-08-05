@@ -10,9 +10,9 @@ use windows::Win32::Foundation::{
     CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, DeleteObject, EndPaint, FillRect, GdiFlush, GetDC, InvalidateRect, ReleaseDC,
-    SetBkColor, SetBkMode, SetTextColor, UpdateWindow, HBRUSH, HDC, HFONT, PAINTSTRUCT,
-    TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+    EndPaint, FillRect, InvalidateRect, SelectObject, SetBkColor, SetBkMode, SetTextColor, HBRUSH,
+    HDC, HFONT, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
@@ -621,11 +621,10 @@ impl NativeProgressWindow {
             }
             // Row labels are child STATIC windows. Repainting only the parent-owned icon slot leaves
             // the child text in its previous color after InProgress -> Completed transitions.
-            // Publish the new presentation first, then synchronously repaint every affected label so
-            // WM_CTLCOLORSTATIC observes the new semantic state.
+            // Publish the new presentation first, then enqueue one erase/paint pass. Synchronous
+            // UpdateWindow calls here used to stall the UI thread during rapid DISM transitions.
             for label in &self.row_labels {
                 let _ = InvalidateRect(*label, None, true);
-                let _ = UpdateWindow(*label);
             }
         }
         if terminal_changed {
@@ -1295,6 +1294,108 @@ fn detail_page_label(page: NativePage) -> String {
     }
 }
 
+fn offset_rect(rect: RECT, x: i32, y: i32) -> RECT {
+    RECT {
+        left: rect.left + x,
+        top: rect.top + y,
+        right: rect.right + x,
+        bottom: rect.bottom + y,
+    }
+}
+
+fn rects_intersect(left: RECT, right: RECT) -> bool {
+    left.left < right.right
+        && left.right > right.left
+        && left.top < right.bottom
+        && left.bottom > right.top
+}
+
+/// Paint every parent-owned progress primitive into one target surface. `offset_x`/`offset_y`
+/// translate client coordinates into an off-screen bitmap whose origin is the invalid rectangle.
+unsafe fn paint_progress_surface(
+    window: &NativeProgressWindow,
+    hwnd: HWND,
+    dc: HDC,
+    paint_rect: RECT,
+    offset_x: i32,
+    offset_y: i32,
+) {
+    let _ = FillRect(dc, &paint_rect, window.brushes.window);
+    let dirty_client = offset_rect(paint_rect, -offset_x, -offset_y);
+    if window.state.page == NativePage::Progress
+        && window.step_bar.right > window.step_bar.left
+        && window.step_bar.bottom > window.step_bar.top
+        && rects_intersect(window.step_bar, dirty_client)
+    {
+        draw_progress(
+            dc,
+            offset_rect(window.step_bar, offset_x, offset_y),
+            window.presentation.step_progress,
+            window.theme.palette,
+        );
+    }
+    if window.state.page == NativePage::Progress {
+        if rects_intersect(window.overall_bar, dirty_client) {
+            draw_progress(
+                dc,
+                offset_rect(window.overall_bar, offset_x, offset_y),
+                window.presentation.overall_progress,
+                window.theme.palette,
+            );
+        }
+        for (icon, row) in window.row_icons.iter().zip(&window.presentation.rows) {
+            if icon.right <= icon.left
+                || icon.bottom <= icon.top
+                || !rects_intersect(*icon, dirty_client)
+            {
+                continue;
+            }
+            let icon = offset_rect(*icon, offset_x, offset_y);
+            if row.status == StepStatus::InProgress
+                && window.presentation.terminal == ProgressTerminal::Running
+            {
+                draw_indeterminate_ring(
+                    dc,
+                    icon,
+                    window.spinner_started.elapsed().as_secs_f64(),
+                    window.theme.palette,
+                );
+            } else {
+                draw_step_status_icon(dc, icon, step_status_icon(row.status), window.theme.palette);
+            }
+        }
+    }
+    if window.state.page != NativePage::Progress {
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let layout = progress_geometry(
+            client.right,
+            client.bottom,
+            window.theme.dpi,
+            scaled(52, window.theme.dpi),
+            window.presentation.workflow != WorkflowKind::Expand,
+            window.presentation.rows.len(),
+            true,
+        );
+        let separator_brush =
+            windows::Win32::Graphics::Gdi::CreateSolidBrush(window.theme.palette.separator);
+        let separator = offset_rect(
+            RECT {
+                left: 0,
+                top: layout.command.y,
+                right: client.right,
+                bottom: layout.command.y + window.theme.metrics.separator_thickness,
+            },
+            offset_x,
+            offset_y,
+        );
+        if rects_intersect(offset_rect(separator, -offset_x, -offset_y), dirty_client) {
+            let _ = FillRect(dc, &separator, separator_brush);
+        }
+        let _ = DeleteObject(separator_brush);
+    }
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -1329,21 +1430,9 @@ unsafe extern "system" fn window_proc(
                     && window.presentation.terminal == ProgressTerminal::Running
                     && window.spinner_rect.right > window.spinner_rect.left
                 {
-                    // The 16 px parent-owned status slot is not a child HWND, and WinPE can omit
-                    // its tiny invalid region from the composed parent paint. Draw the complete
-                    // opaque frame directly, then flush the GDI batch before releasing the DC so
-                    // every elapsed-time frame becomes visible in VMware as well as full Windows.
-                    let dc = GetDC(hwnd);
-                    if !dc.is_invalid() {
-                        draw_indeterminate_ring(
-                            dc,
-                            window.spinner_rect,
-                            window.spinner_started.elapsed().as_secs_f64(),
-                            window.theme.palette,
-                        );
-                        let _ = GdiFlush();
-                        let _ = ReleaseDC(hwnd, dc);
-                    }
+                    // Never mix GetDC drawing with WM_PAINT. Queue the tiny dirty region and let the
+                    // same off-screen composition path publish the complete opaque frame.
+                    let _ = InvalidateRect(hwnd, Some(&window.spinner_rect), false);
                 }
             }
             LRESULT(0)
@@ -1450,67 +1539,48 @@ unsafe extern "system" fn window_proc(
             if let Some(window) = window {
                 let mut paint = PAINTSTRUCT::default();
                 let dc = BeginPaint(hwnd, &mut paint);
-                let _ = FillRect(dc, &paint.rcPaint, window.brushes.window);
-                if window.state.page == NativePage::Progress
-                    && window.step_bar.right > window.step_bar.left
-                    && window.step_bar.bottom > window.step_bar.top
-                {
-                    draw_progress(
-                        dc,
-                        window.step_bar,
-                        window.presentation.step_progress,
-                        window.theme.palette,
-                    );
-                }
-                if window.state.page == NativePage::Progress {
-                    draw_progress(
-                        dc,
-                        window.overall_bar,
-                        window.presentation.overall_progress,
-                        window.theme.palette,
-                    );
-                    for (icon, row) in window.row_icons.iter().zip(&window.presentation.rows) {
-                        if icon.right <= icon.left || icon.bottom <= icon.top {
-                            continue;
-                        }
-                        if row.status == StepStatus::InProgress
-                            && window.presentation.terminal == ProgressTerminal::Running
-                        {
-                            draw_indeterminate_ring(
-                                dc,
-                                *icon,
-                                window.spinner_started.elapsed().as_secs_f64(),
-                                window.theme.palette,
-                            );
-                        } else {
-                            let status = step_status_icon(row.status);
-                            draw_step_status_icon(dc, *icon, status, window.theme.palette);
-                        }
+                let width = (paint.rcPaint.right - paint.rcPaint.left).max(0);
+                let height = (paint.rcPaint.bottom - paint.rcPaint.top).max(0);
+                if width > 0 && height > 0 {
+                    let memory_dc = CreateCompatibleDC(dc);
+                    let bitmap = CreateCompatibleBitmap(dc, width, height);
+                    if !memory_dc.is_invalid() && !bitmap.is_invalid() {
+                        let old_bitmap = SelectObject(memory_dc, bitmap);
+                        paint_progress_surface(
+                            window,
+                            hwnd,
+                            memory_dc,
+                            RECT {
+                                left: 0,
+                                top: 0,
+                                right: width,
+                                bottom: height,
+                            },
+                            -paint.rcPaint.left,
+                            -paint.rcPaint.top,
+                        );
+                        let _ = BitBlt(
+                            dc,
+                            paint.rcPaint.left,
+                            paint.rcPaint.top,
+                            width,
+                            height,
+                            memory_dc,
+                            0,
+                            0,
+                            SRCCOPY,
+                        );
+                        let _ = SelectObject(memory_dc, old_bitmap);
+                    } else {
+                        // Resource exhaustion must not leave the invalid region unpainted.
+                        paint_progress_surface(window, hwnd, dc, paint.rcPaint, 0, 0);
                     }
-                }
-                if window.state.page != NativePage::Progress {
-                    let mut client = RECT::default();
-                    let _ = GetClientRect(hwnd, &mut client);
-                    let layout = progress_geometry(
-                        client.right,
-                        client.bottom,
-                        window.theme.dpi,
-                        scaled(52, window.theme.dpi),
-                        window.presentation.workflow != WorkflowKind::Expand,
-                        window.presentation.rows.len(),
-                        true,
-                    );
-                    let separator_brush = windows::Win32::Graphics::Gdi::CreateSolidBrush(
-                        window.theme.palette.separator,
-                    );
-                    let separator = RECT {
-                        left: 0,
-                        top: layout.command.y,
-                        right: client.right,
-                        bottom: layout.command.y + window.theme.metrics.separator_thickness,
-                    };
-                    let _ = FillRect(dc, &separator, separator_brush);
-                    let _ = DeleteObject(separator_brush);
+                    if !bitmap.is_invalid() {
+                        let _ = DeleteObject(bitmap);
+                    }
+                    if !memory_dc.is_invalid() {
+                        let _ = DeleteDC(memory_dc);
+                    }
                 }
                 let _ = EndPaint(hwnd, &paint);
                 return LRESULT(0);
@@ -1547,6 +1617,24 @@ mod tests {
         assert_eq!(SS_RIGHT_STYLE, 0x0000_0002);
         assert_eq!(SS_CENTERIMAGE_STYLE, 0x0000_0200);
         assert_eq!(progress_window_style().0 & WS_MAXIMIZEBOX.0, 0);
+    }
+
+    #[test]
+    fn dirty_region_filter_excludes_unrelated_progress_primitives() {
+        let progress = RECT {
+            left: 100,
+            top: 40,
+            right: 360,
+            bottom: 52,
+        };
+        let spinner = RECT {
+            left: 28,
+            top: 180,
+            right: 44,
+            bottom: 196,
+        };
+        assert!(!rects_intersect(progress, spinner));
+        assert!(rects_intersect(progress, progress));
     }
 
     #[test]

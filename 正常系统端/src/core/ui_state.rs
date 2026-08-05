@@ -39,7 +39,7 @@ pub enum DriverAction {
 
 /// Serializable installation options shared by the native UI, config file and CLI.
 /// Runtime-only Wi-Fi material and the current-session username are deliberately skipped.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdvancedOptionsData {
     pub remove_shortcut_arrow: bool,
@@ -90,6 +90,129 @@ pub struct AdvancedOptionsData {
     pub xp_defaults_applied: bool,
 }
 
+pub const ADVANCED_SYSTEM_OPTION_COUNT: usize = 10;
+
+/// Target-version capability mask for installation advanced options.
+///
+/// The persisted preferences intentionally remain target-independent so switching images does not
+/// destroy a user's choices.  The native page uses this mask for visibility, while the install
+/// controller applies it again to its cloned intent so hidden options can never reach the offline
+/// writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvancedOptionCapabilities {
+    pub system_options: [bool; ADVANCED_SYSTEM_OPTION_COUNT],
+    pub storage_controller_drivers: bool,
+    pub windows_7: bool,
+    pub xp: bool,
+}
+
+impl AdvancedOptionCapabilities {
+    pub const fn unknown() -> Self {
+        Self {
+            system_options: [false; ADVANCED_SYSTEM_OPTION_COUNT],
+            storage_controller_drivers: false,
+            windows_7: false,
+            xp: false,
+        }
+    }
+
+    pub fn for_target(
+        major_version: Option<u16>,
+        minor_version: Option<u16>,
+        build: Option<u32>,
+        is_xp_i386: bool,
+    ) -> Self {
+        let xp = is_xp_i386 || major_version == Some(5);
+        if xp {
+            return Self {
+                xp: true,
+                ..Self::unknown()
+            };
+        }
+
+        let windows_7 = matches!((major_version, minor_version), (Some(6), Some(1)));
+        let vista_or_later = major_version.is_some_and(|major| major >= 6);
+        let windows_7_or_later = major_version.is_some_and(|major| major > 6)
+            || matches!((major_version, minor_version), (Some(6), Some(minor)) if minor >= 1);
+        let windows_8_or_later = major_version.is_some_and(|major| major > 6)
+            || matches!((major_version, minor_version), (Some(6), Some(minor)) if minor >= 2);
+        let windows_81_or_later = major_version.is_some_and(|major| major > 6)
+            || matches!((major_version, minor_version), (Some(6), Some(minor)) if minor >= 3);
+        let windows_10_family = major_version.is_some_and(|major| major >= 10);
+        let windows_11 = windows_10_family && build.is_some_and(|build| build >= 22_000);
+        let reserved_storage = windows_10_family && build.is_some_and(|build| build >= 18_362);
+
+        Self {
+            // Order matches AdvancedPageHandles::system_checks.
+            system_options: [
+                vista_or_later,                           // remove shortcut arrow
+                windows_11,                               // restore classic context menu
+                windows_11,                               // bypass NRO
+                vista_or_later,                           // disable Windows Update
+                windows_10_family || windows_8_or_later,  // remove Defender engine
+                reserved_storage,                         // disable reserved storage
+                vista_or_later,                           // disable UAC
+                windows_10_family || windows_81_or_later, // disable device encryption
+                windows_10_family || windows_8_or_later,  // remove provisioned UWP apps
+                windows_7_or_later,                       // migrate Wi-Fi profile
+            ],
+            storage_controller_drivers: windows_10_family,
+            windows_7,
+            xp: false,
+        }
+    }
+
+    pub fn supports_system_option(self, index: usize) -> bool {
+        self.system_options.get(index).copied().unwrap_or(false)
+    }
+}
+
+impl Default for AdvancedOptionsData {
+    fn default() -> Self {
+        Self {
+            remove_shortcut_arrow: true,
+            restore_classic_context_menu: false,
+            bypass_nro: true,
+            disable_windows_update: false,
+            disable_windows_defender: false,
+            disable_reserved_storage: true,
+            disable_uac: false,
+            disable_device_encryption: true,
+            remove_uwp_apps: false,
+            migrate_wifi: false,
+            wifi_profile_xml: String::new(),
+            wifi_ssid: String::new(),
+            wifi_detected: None,
+            run_script_during_deploy: false,
+            deploy_script_path: String::new(),
+            run_script_first_login: false,
+            first_login_script_path: String::new(),
+            import_custom_drivers: false,
+            custom_drivers_path: String::new(),
+            import_storage_controller_drivers: false,
+            import_registry_file: false,
+            registry_file_path: String::new(),
+            import_custom_files: false,
+            custom_files_path: String::new(),
+            custom_username: true,
+            username: String::new(),
+            builtin_administrator: BuiltInAdministratorOptions::default(),
+            custom_volume_label: false,
+            volume_label: String::new(),
+            win7_inject_usb3_driver: false,
+            win7_usb3_driver_path: String::new(),
+            win7_inject_nvme_driver: false,
+            win7_nvme_driver_path: String::new(),
+            win7_fix_acpi_bsod: false,
+            win7_fix_storage_bsod: false,
+            win7_uefi_patch: false,
+            xp_inject_usb3_driver: false,
+            xp_inject_nvme_driver: false,
+            xp_defaults_applied: false,
+        }
+    }
+}
+
 impl AdvancedOptionsData {
     /// Restores non-persistent defaults after config deserialization.
     ///
@@ -107,6 +230,102 @@ impl AdvancedOptionsData {
         }
         self.custom_username = !self.builtin_administrator.enabled;
     }
+
+    /// Removes options that are not supported by the selected target from an install-intent copy.
+    /// Persisted preferences are left untouched by callers so selecting another image can restore
+    /// the user's prior choices.
+    pub fn retain_supported_for_target(&mut self, capabilities: AdvancedOptionCapabilities) {
+        // Keep the historical processor-power workaround available only for Windows 7. It is an
+        // opt-in compatibility attempt, not a general ACPI firmware repair. The broad 0x7B
+        // registry mutation and UefiSeven remain retired because storage drivers and boot mode
+        // must be selected from verified hardware and image metadata.
+        self.win7_fix_storage_bsod = false;
+        self.win7_uefi_patch = false;
+        let supported = capabilities.system_options;
+        if !supported[0] {
+            self.remove_shortcut_arrow = false;
+        }
+        if !supported[1] {
+            self.restore_classic_context_menu = false;
+        }
+        if !supported[2] {
+            self.bypass_nro = false;
+        }
+        if !supported[3] {
+            self.disable_windows_update = false;
+        }
+        if !supported[4] {
+            self.disable_windows_defender = false;
+        }
+        if !supported[5] {
+            self.disable_reserved_storage = false;
+        }
+        if !supported[6] {
+            self.disable_uac = false;
+        }
+        if !supported[7] {
+            self.disable_device_encryption = false;
+        }
+        if !supported[8] {
+            self.remove_uwp_apps = false;
+        }
+        if !supported[9] {
+            self.migrate_wifi = false;
+            self.wifi_profile_xml.clear();
+            self.wifi_ssid.clear();
+        }
+        if !capabilities.storage_controller_drivers {
+            self.import_storage_controller_drivers = false;
+        }
+        if !capabilities.windows_7 {
+            self.win7_inject_usb3_driver = false;
+            self.win7_inject_nvme_driver = false;
+            self.win7_fix_acpi_bsod = false;
+            self.win7_fix_storage_bsod = false;
+            self.win7_uefi_patch = false;
+        }
+        if !capabilities.xp {
+            self.xp_inject_usb3_driver = false;
+            self.xp_inject_nvme_driver = false;
+        }
+    }
+
+    pub fn update_supported_system_options(
+        &mut self,
+        capabilities: AdvancedOptionCapabilities,
+        checked: [bool; ADVANCED_SYSTEM_OPTION_COUNT],
+    ) {
+        if capabilities.supports_system_option(0) {
+            self.remove_shortcut_arrow = checked[0];
+        }
+        if capabilities.supports_system_option(1) {
+            self.restore_classic_context_menu = checked[1];
+        }
+        if capabilities.supports_system_option(2) {
+            self.bypass_nro = checked[2];
+        }
+        if capabilities.supports_system_option(3) {
+            self.disable_windows_update = checked[3];
+        }
+        if capabilities.supports_system_option(4) {
+            self.disable_windows_defender = checked[4];
+        }
+        if capabilities.supports_system_option(5) {
+            self.disable_reserved_storage = checked[5];
+        }
+        if capabilities.supports_system_option(6) {
+            self.disable_uac = checked[6];
+        }
+        if capabilities.supports_system_option(7) {
+            self.disable_device_encryption = checked[7];
+        }
+        if capabilities.supports_system_option(8) {
+            self.remove_uwp_apps = checked[8];
+        }
+        if capabilities.supports_system_option(9) {
+            self.migrate_wifi = checked[9];
+        }
+    }
 }
 
 /// Returns a safe default name for the ordinary local account created by Windows Setup.
@@ -115,7 +334,13 @@ impl AdvancedOptionsData {
 /// manufacturer token such as ASUS or VMware, and finally the stable `User` fallback.
 pub(crate) fn default_install_username() -> String {
     windows_login_username()
+        .filter(|username| {
+            lr_core::unattend_account::validate_unattended_local_account_name(username).is_ok()
+        })
         .or_else(system_manufacturer_username)
+        .filter(|username| {
+            lr_core::unattend_account::validate_unattended_local_account_name(username).is_ok()
+        })
         .unwrap_or_else(|| "User".to_string())
 }
 
@@ -307,6 +532,10 @@ mod tests {
         assert!(prefs.unattended_install);
         assert!(prefs.auto_reboot);
         assert_eq!(prefs.driver_action, DriverAction::AutoImport);
+        assert!(prefs.advanced_options.remove_shortcut_arrow);
+        assert!(prefs.advanced_options.bypass_nro);
+        assert!(prefs.advanced_options.disable_reserved_storage);
+        assert!(prefs.advanced_options.disable_device_encryption);
         assert!(prefs.advanced_options.custom_username);
         assert!(!prefs.advanced_options.username.is_empty());
         assert_eq!(prefs.advanced_options.volume_label, "OS");
@@ -356,5 +585,110 @@ mod tests {
         data.apply_runtime_defaults();
         assert!(!data.custom_username);
         assert_eq!(data.builtin_administrator.account_name, "Administrator");
+    }
+
+    #[test]
+    fn advanced_defaults_enable_the_four_safe_install_preferences() {
+        let data = AdvancedOptionsData::default();
+        assert!(data.remove_shortcut_arrow);
+        assert!(data.bypass_nro);
+        assert!(data.disable_reserved_storage);
+        assert!(data.disable_device_encryption);
+        assert!(!data.disable_windows_update);
+        assert!(!data.disable_windows_defender);
+    }
+
+    #[test]
+    fn windows_7_capabilities_exclude_newer_windows_options() {
+        let capabilities =
+            AdvancedOptionCapabilities::for_target(Some(6), Some(1), Some(7_601), false);
+        assert_eq!(
+            capabilities.system_options,
+            [true, false, false, true, false, false, true, false, false, true]
+        );
+        assert!(capabilities.windows_7);
+        assert!(!capabilities.storage_controller_drivers);
+        assert!(!capabilities.xp);
+    }
+
+    #[test]
+    fn windows_11_capabilities_include_current_system_options() {
+        let capabilities =
+            AdvancedOptionCapabilities::for_target(Some(10), Some(0), Some(26_100), false);
+        assert!(capabilities.system_options.into_iter().all(|value| value));
+        assert!(capabilities.storage_controller_drivers);
+        assert!(!capabilities.windows_7);
+        assert!(!capabilities.xp);
+    }
+
+    #[test]
+    fn intermediate_windows_versions_expose_only_options_the_target_supports() {
+        let windows_8 =
+            AdvancedOptionCapabilities::for_target(Some(6), Some(2), Some(9_200), false);
+        assert_eq!(
+            windows_8.system_options,
+            [true, false, false, true, true, false, true, false, true, true]
+        );
+
+        let windows_81 =
+            AdvancedOptionCapabilities::for_target(Some(6), Some(3), Some(9_600), false);
+        assert_eq!(
+            windows_81.system_options,
+            [true, false, false, true, true, false, true, true, true, true]
+        );
+
+        let windows_10_1809 =
+            AdvancedOptionCapabilities::for_target(Some(10), Some(0), Some(17_763), false);
+        assert_eq!(
+            windows_10_1809.system_options,
+            [true, false, false, true, true, false, true, true, true, true]
+        );
+
+        let windows_10_1903 =
+            AdvancedOptionCapabilities::for_target(Some(10), Some(0), Some(18_362), false);
+        assert!(windows_10_1903.system_options[5]);
+        assert!(!windows_10_1903.system_options[1]);
+        assert!(!windows_10_1903.system_options[2]);
+    }
+
+    #[test]
+    fn intent_filter_clears_hidden_windows_7_incompatible_defaults() {
+        let capabilities =
+            AdvancedOptionCapabilities::for_target(Some(6), Some(1), Some(7_601), false);
+        let mut data = AdvancedOptionsData {
+            restore_classic_context_menu: true,
+            disable_windows_defender: true,
+            remove_uwp_apps: true,
+            import_storage_controller_drivers: true,
+            xp_inject_usb3_driver: true,
+            ..AdvancedOptionsData::default()
+        };
+        data.retain_supported_for_target(capabilities);
+
+        assert!(data.remove_shortcut_arrow);
+        assert!(!data.restore_classic_context_menu);
+        assert!(!data.bypass_nro);
+        assert!(!data.disable_windows_defender);
+        assert!(!data.disable_reserved_storage);
+        assert!(!data.disable_device_encryption);
+        assert!(!data.remove_uwp_apps);
+        assert!(!data.import_storage_controller_drivers);
+        assert!(!data.xp_inject_usb3_driver);
+    }
+
+    #[test]
+    fn hidden_controls_do_not_destroy_preferences_for_another_image() {
+        let capabilities =
+            AdvancedOptionCapabilities::for_target(Some(6), Some(1), Some(7_601), false);
+        let mut data = AdvancedOptionsData::default();
+        data.update_supported_system_options(capabilities, [false; 10]);
+
+        assert!(!data.remove_shortcut_arrow);
+        assert!(!data.disable_windows_update);
+        assert!(!data.disable_uac);
+        assert!(!data.migrate_wifi);
+        assert!(data.bypass_nro);
+        assert!(data.disable_reserved_storage);
+        assert!(data.disable_device_encryption);
     }
 }

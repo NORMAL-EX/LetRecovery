@@ -23,6 +23,10 @@ pub(crate) enum WorkerMessage {
     SetProgress(u8),
     /// 更新状态消息
     SetStatus(String),
+    /// Atomically publish one external-tool progress sample. DISM commonly emits a percentage and
+    /// status line together; keeping them in one message halves channel pressure and prevents the
+    /// UI from briefly presenting a percentage from one sample with text from another.
+    SetProgressStatus { progress: u8, status: String },
     /// 标记完成
     Completed,
     /// 标记失败
@@ -155,6 +159,8 @@ impl WorkflowSession {
         let poll_started = Instant::now();
         let mut processed = 0usize;
         let mut disconnected = false;
+        let mut pending_progress = None;
+        let mut pending_status = None;
         if let Some(ref rx) = self.message_rx {
             loop {
                 let msg = match rx.try_recv() {
@@ -165,40 +171,70 @@ impl WorkflowSession {
                         break;
                     }
                 };
-                if matches!(msg, WorkerMessage::Completed | WorkerMessage::Failed(_)) {
-                    self.terminal_message_seen = true;
-                }
-                if let Some(journal) = self.workflow_journal.as_mut() {
-                    let result = match &msg {
-                        WorkerMessage::SetInstallStep(step) => journal.observe_install_step(*step),
-                        WorkerMessage::SetBackupStep(step) => journal.observe_backup_step(*step),
-                        WorkerMessage::Completed => journal.complete(),
-                        WorkerMessage::Failed(error) => journal.fail(error),
-                        WorkerMessage::SetProgress(_) | WorkerMessage::SetStatus(_) => Ok(()),
-                    };
-                    if let Err(error) = result {
-                        log::warn!("[CHECKPOINT] 记录工作流状态失败，将继续原流程: {}", error);
+                match msg {
+                    WorkerMessage::SetProgress(progress) => {
+                        pending_progress = Some(progress);
                     }
-                }
-                if let Ok(mut state) = self.progress_state.lock() {
-                    match msg {
-                        WorkerMessage::SetInstallStep(step) => {
-                            state.set_install_step(step);
+                    WorkerMessage::SetStatus(status) => {
+                        pending_status = Some(status);
+                    }
+                    WorkerMessage::SetProgressStatus { progress, status } => {
+                        pending_progress = Some(progress);
+                        pending_status = Some(status);
+                    }
+                    transition => {
+                        // Preserve ordering at semantic boundaries while collapsing a flood of
+                        // intermediate tool samples to the newest visible value.
+                        flush_pending_worker_update(
+                            &self.progress_state,
+                            &mut pending_progress,
+                            &mut pending_status,
+                        );
+                        if matches!(
+                            transition,
+                            WorkerMessage::Completed | WorkerMessage::Failed(_)
+                        ) {
+                            self.terminal_message_seen = true;
                         }
-                        WorkerMessage::SetBackupStep(step) => {
-                            state.set_backup_step(step);
+                        if let Some(journal) = self.workflow_journal.as_mut() {
+                            let result = match &transition {
+                                WorkerMessage::SetInstallStep(step) => {
+                                    journal.observe_install_step(*step)
+                                }
+                                WorkerMessage::SetBackupStep(step) => {
+                                    journal.observe_backup_step(*step)
+                                }
+                                WorkerMessage::Completed => journal.complete(),
+                                WorkerMessage::Failed(error) => journal.fail(error),
+                                WorkerMessage::SetProgress(_)
+                                | WorkerMessage::SetStatus(_)
+                                | WorkerMessage::SetProgressStatus { .. } => unreachable!(),
+                            };
+                            if let Err(error) = result {
+                                log::warn!(
+                                    "[CHECKPOINT] 记录工作流状态失败，将继续原流程: {}",
+                                    error
+                                );
+                            }
                         }
-                        WorkerMessage::SetProgress(p) => {
-                            state.set_step_progress(p);
-                        }
-                        WorkerMessage::SetStatus(s) => {
-                            state.status_message = s;
-                        }
-                        WorkerMessage::Completed => {
-                            state.mark_completed();
-                        }
-                        WorkerMessage::Failed(e) => {
-                            state.mark_failed(&e);
+                        if let Ok(mut state) = self.progress_state.lock() {
+                            match transition {
+                                WorkerMessage::SetInstallStep(step) => {
+                                    state.set_install_step(step);
+                                }
+                                WorkerMessage::SetBackupStep(step) => {
+                                    state.set_backup_step(step);
+                                }
+                                WorkerMessage::Completed => {
+                                    state.mark_completed();
+                                }
+                                WorkerMessage::Failed(error) => {
+                                    state.mark_failed(&error);
+                                }
+                                WorkerMessage::SetProgress(_)
+                                | WorkerMessage::SetStatus(_)
+                                | WorkerMessage::SetProgressStatus { .. } => unreachable!(),
+                            }
                         }
                     }
                 }
@@ -210,6 +246,11 @@ impl WorkflowSession {
                 }
             }
         }
+        flush_pending_worker_update(
+            &self.progress_state,
+            &mut pending_progress,
+            &mut pending_status,
+        );
         if disconnected && !self.terminal_message_seen && !self.channel_failure_reported {
             self.channel_failure_reported = true;
             self.terminal_message_seen = true;
@@ -261,6 +302,24 @@ impl WorkflowSession {
         }
         self.worker_finished = true;
         true
+    }
+}
+
+fn flush_pending_worker_update(
+    progress_state: &Arc<Mutex<ProgressState>>,
+    progress: &mut Option<u8>,
+    status: &mut Option<String>,
+) {
+    if progress.is_none() && status.is_none() {
+        return;
+    }
+    if let Ok(mut state) = progress_state.lock() {
+        if let Some(progress) = progress.take() {
+            state.set_step_progress(progress);
+        }
+        if let Some(status) = status.take() {
+            state.status_message = status;
+        }
     }
 }
 
@@ -407,8 +466,10 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         let tx_v = tx.clone();
         let verify_handle = thread::spawn(move || {
             while let Ok(progress) = verify_rx.recv() {
-                let _ = tx_v.send(WorkerMessage::SetProgress(progress.percentage));
-                let _ = tx_v.send(WorkerMessage::SetStatus(progress.status));
+                let _ = tx_v.send(WorkerMessage::SetProgressStatus {
+                    progress: progress.percentage,
+                    status: progress.status,
+                });
             }
         });
 
@@ -462,6 +523,46 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             }
         }
     };
+
+    // Audit the driver tree before formatting. Unsafe traversal is fatal, but a rejected optional
+    // package is recorded and later isolated by the exact-INF importer.
+    if config.should_import_drivers() {
+        let driver_path = std::path::Path::new(&data_dir).join("drivers");
+        if !driver_path.is_dir() {
+            let _ = tx.send(WorkerMessage::Failed(tr!(
+                "驱动路径不存在: {}",
+                driver_path.display()
+            )));
+            return;
+        }
+        if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
+            log::warn!(
+                "PE 驱动签名信任链初始化失败；继续使用 DISM 正常签名校验，独立签名回退可能不可用: {error}"
+            );
+        }
+        match lr_core::driver_package_trust::audit_driver_directory(&driver_path) {
+            Ok(report) => {
+                for failure in report.rejected() {
+                    log::warn!(
+                        "可选驱动包写盘前独立验证未通过，稍后由 DISM 精确隔离且不会阻断安装: {}: {}",
+                        failure.inf_path().display(),
+                        failure.reason()
+                    );
+                }
+                log::info!(
+                    "驱动目录预检完成: total={} independently_trusted={} deferred={}",
+                    report.total(),
+                    report.verified(),
+                    report.rejected().len()
+                );
+            }
+            Err(error) => {
+                log::error!("驱动目录写盘前结构预检失败，目标分区尚未修改: {error}");
+                let _ = tx.send(WorkerMessage::Failed(tr!("驱动包预检失败: {}", error)));
+                return;
+            }
+        }
+    }
 
     // Historical compatibility gate: arbitrary partition scripts are no longer executable.
     if config.run_diskpart_scripts {
@@ -610,16 +711,18 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     // 0 = 无, 1 = 仅保存（不导入）, 2 = 自动导入
     let driver_path = format!("{}\\drivers", data_dir);
     let driver_path_exists = std::path::Path::new(&driver_path).exists();
+    let mut vmd_recovery_warning: Option<String> = None;
 
     if config.should_import_drivers() && driver_path_exists {
         let _ = tx.send(WorkerMessage::SetStatus(tr!("正在导入驱动...")));
 
         if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
-            log::error!("初始化 PE 驱动签名信任链失败，安装停止: {error}");
-            let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
-            return;
+            log::warn!(
+                "初始化 PE 驱动签名信任链失败；继续使用 DISM 正常导入，受控签名回退可能跳过可选包: {error}"
+            );
+        } else {
+            log::info!("PE 驱动签名信任链已核验并初始化");
         }
-        log::info!("PE 驱动签名信任链已核验并初始化");
 
         // 创建进度通道
         let (driver_progress_tx, driver_progress_rx) = channel::<DismProgress>();
@@ -628,16 +731,15 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         // 启动进度监控线程
         let driver_progress_handle = thread::spawn(move || {
             while let Ok(progress) = driver_progress_rx.recv() {
-                let _ = tx_driver.send(WorkerMessage::SetProgress(progress.percentage));
-                let _ = tx_driver.send(WorkerMessage::SetStatus(tr!(
-                    "导入驱动: {}",
-                    progress.status
-                )));
+                let _ = tx_driver.send(WorkerMessage::SetProgressStatus {
+                    progress: progress.percentage,
+                    status: tr!("导入驱动: {}", progress.status),
+                });
             }
         });
 
         let dism = Dism::new();
-        let import_result = dism.add_drivers_offline_with_progress(
+        let import_result = dism.add_preserved_drivers_offline_with_progress(
             &apply_dir,
             &driver_path,
             Some(driver_progress_tx),
@@ -645,20 +747,42 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
         // 等待进度监控线程结束
         let _ = driver_progress_handle.join();
-        if let Err(error) = import_result {
-            log::error!("导入驱动失败，安装停止: {}", error);
-            let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
-            return;
+        let optional_failures = match import_result {
+            Ok(failures) => failures,
+            Err(error) => {
+                log::error!("导入驱动失败，安装停止: {}", error);
+                let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
+                return;
+            }
+        };
+        for failure in &optional_failures {
+            log::warn!("可选驱动包未能导入，不阻断安装: {failure}");
         }
         if let Err(error) = lr_core::driver::verify_offline_storage_driver_requirements(
             Path::new(&apply_dir),
             Path::new(&driver_path),
         ) {
-            log::error!("启动存储驱动导入后验证失败，安装停止: {}", error);
-            let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
-            return;
+            let requirements =
+                lr_core::driver::load_storage_driver_requirements(Path::new(&driver_path));
+            if requirements
+                .as_ref()
+                .map(|items| lr_core::driver::requirements_are_only_intel_vmd(items))
+                .unwrap_or(false)
+            {
+                let warning = tr!("系统已安装，但 Intel VMD 驱动未能导入。程序不会自动重启；请先在 BIOS 中关闭 VMD/Intel RST 后再启动新系统。");
+                log::error!("启动存储驱动验证失败，继续完成安装并禁止自动重启: {error}");
+                vmd_recovery_warning = Some(warning);
+            } else {
+                log::error!("启动存储驱动导入后验证失败，安装停止: {}", error);
+                let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
+                return;
+            }
+        } else {
+            log::info!(
+                "驱动导入完成，启动存储驱动覆盖验证通过；跳过可选包 {} 个",
+                optional_failures.len()
+            );
         }
-        log::info!("驱动导入成功，启动存储驱动覆盖验证通过");
 
         // The DISM boundary performs the only recursive CAB scan. It rejects reparse roots,
         // propagates enumeration failures, and returns zero cleanly when this driver tree has no
@@ -667,11 +791,10 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
         let tx_cab = tx.clone();
         let cab_progress_handle = thread::spawn(move || {
             while let Ok(progress) = cab_progress_rx.recv() {
-                let _ = tx_cab.send(WorkerMessage::SetProgress(progress.percentage));
-                let _ = tx_cab.send(WorkerMessage::SetStatus(tr!(
-                    "安装CAB: {}",
-                    progress.status
-                )));
+                let _ = tx_cab.send(WorkerMessage::SetProgressStatus {
+                    progress: progress.percentage,
+                    status: tr!("安装CAB: {}", progress.status),
+                });
             }
         });
         let dism = Dism::new();
@@ -726,11 +849,10 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             // 启动进度监控线程
             let cab_progress_handle = thread::spawn(move || {
                 while let Ok(progress) = cab_progress_rx.recv() {
-                    let _ = tx_cab.send(WorkerMessage::SetProgress(progress.percentage));
-                    let _ = tx_cab.send(WorkerMessage::SetStatus(tr!(
-                        "安装更新: {}",
-                        progress.status
-                    )));
+                    let _ = tx_cab.send(WorkerMessage::SetProgressStatus {
+                        progress: progress.percentage,
+                        status: tr!("安装更新: {}", progress.status),
+                    });
                 }
             });
 
@@ -941,6 +1063,11 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     // 完成
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Complete));
     let _ = tx.send(WorkerMessage::Completed);
+    if let Some(warning) = vmd_recovery_warning {
+        let _ = tx.send(WorkerMessage::SetStatus(warning));
+        log::warn!("VMD recovery is required; automatic restart is suppressed");
+        return;
+    }
 
     log::info!("========== PE安装流程完成 ==========");
 
@@ -987,11 +1114,6 @@ pub(crate) fn generate_unattend_xml(
     use crate::ui::advanced_options::get_scripts_dir_name;
     use std::path::Path;
 
-    let username = if config.custom_username.is_empty() {
-        escape_xml_text("User")
-    } else {
-        escape_xml_text(&config.custom_username)
-    };
     let builtin = lr_core::unattend_account::render_builtin_administrator_unattend(
         &config.builtin_administrator,
         2,
@@ -1008,6 +1130,14 @@ pub(crate) fn generate_unattend_xml(
             builtin.auto_logon,
         )
     } else {
+        let raw_username = if config.custom_username.is_empty() {
+            "User"
+        } else {
+            &config.custom_username
+        };
+        lr_core::unattend_account::validate_unattended_local_account_name(raw_username)
+            .map_err(|error| anyhow::anyhow!("自定义用户名无效: {error}"))?;
+        let username = escape_xml_text(raw_username);
         (
             String::new(),
             format!(
@@ -1481,6 +1611,44 @@ mod workflow_session_tests {
         let state = session.snapshot();
         assert!(state.has_current_step);
         assert_eq!(state.current_install_step, InstallStep::ApplyImage);
+    }
+
+    #[test]
+    fn worker_poll_collapses_tool_samples_to_the_latest_atomic_update() {
+        let (mut session, tx) = WorkflowSession::new_message_preview(OperationType::Install);
+        tx.send(WorkerMessage::SetInstallStep(InstallStep::ImportDrivers))
+            .unwrap();
+        for percentage in 1..=80 {
+            tx.send(WorkerMessage::SetProgressStatus {
+                progress: percentage,
+                status: format!("driver-sample-{percentage}"),
+            })
+            .unwrap();
+        }
+
+        session.process_messages();
+
+        let state = session.snapshot();
+        assert_eq!(state.current_install_step, InstallStep::ImportDrivers);
+        assert_eq!(state.step_progress, 80);
+        assert_eq!(state.status_message, "driver-sample-80");
+    }
+
+    #[test]
+    fn progress_coalescing_preserves_step_boundary_order() {
+        let (mut session, tx) = WorkflowSession::new_message_preview(OperationType::Install);
+        tx.send(WorkerMessage::SetInstallStep(InstallStep::VerifyImage))
+            .unwrap();
+        tx.send(WorkerMessage::SetProgress(100)).unwrap();
+        tx.send(WorkerMessage::SetInstallStep(InstallStep::FormatPartition))
+            .unwrap();
+        tx.send(WorkerMessage::SetProgress(25)).unwrap();
+
+        session.process_messages();
+
+        let state = session.snapshot();
+        assert_eq!(state.current_install_step, InstallStep::FormatPartition);
+        assert_eq!(state.step_progress, 25);
     }
 
     #[test]

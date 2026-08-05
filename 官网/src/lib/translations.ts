@@ -147,7 +147,7 @@ const zh: Dict = {
     source: '开源地址',
     ackTitle: '致谢',
     acks: [
-      '部分系统镜像及 PE 下载服务由 Cloud-PE 云盘提供',
+      'PE 下载服务由 Cloud-PE 云盘提供',
       '感谢 电脑病毒爱好者 提供 WinPE 及制作宣传视频',
       '以及 Cloud-PE 项目的全体贡献人员',
     ],
@@ -247,7 +247,7 @@ const en: Dict = {
     source: 'Source',
     ackTitle: 'Acknowledgements',
     acks: [
-      'System images and PE download service partly provided by Cloud-PE Drive',
+      'PE download service provided by Cloud-PE Drive',
       'Thanks to 电脑病毒爱好者 for the WinPE and the promo video',
       'And all contributors of the Cloud-PE project',
     ],

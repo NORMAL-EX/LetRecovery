@@ -18,6 +18,8 @@ English | [简体中文](README.md)
 
 > 💡 **LetRecovery is source-available and free to use within the PolyForm Noncommercial 1.0.0 terms.** This is not an OSI-approved open-source license, and commercial use is prohibited. Obtain releases only from the official channels below.
 
+> ⚠️ **Using this project in any manner that violates the [User Terms](USER_TERMS.md) is strictly prohibited.** The author reserves the right to pursue legal remedies for infringement, unauthorized distribution, unauthorized commercial customization, and other violations. Subject to applicable law and licenses already granted, the author also reserves the right to change the licensing of future versions or cease publishing their source code at any time.
+
 ## ✨ Features
 
 ### 🖥️ System Installation
@@ -166,7 +168,7 @@ Report security issues privately as described in [SECURITY.md](SECURITY.md). See
 
 ## 🙏 Acknowledgments
 
-- System images and PE download services provided by **Cloud-PE**
+- PE download services provided by **Cloud-PE**
 - Thanks to **[电脑病毒爱好者](https://github.com/HelloWin10-19045)** for providing WinPE
 
 ---

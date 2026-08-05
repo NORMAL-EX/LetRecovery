@@ -11,6 +11,95 @@ const DEFAULT_ADMINISTRATOR_NAME: &str = "Administrator";
 const MAX_LOCAL_ACCOUNT_NAME_UTF16: usize = 20;
 const MAX_PASSWORD_UTF16: usize = 127;
 
+/// Validation failures for an ordinary local account created by Windows Setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalAccountNameValidationError {
+    MissingAccountName,
+    AccountNameTooLong,
+    InvalidAccountName,
+    ReservedAccountName,
+}
+
+impl fmt::Display for LocalAccountNameValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::MissingAccountName => "local account name is required",
+            Self::AccountNameTooLong => "local account name exceeds 20 UTF-16 code units",
+            Self::InvalidAccountName => "local account name contains invalid text",
+            Self::ReservedAccountName => "local account name is reserved by Windows",
+        })
+    }
+}
+
+impl std::error::Error for LocalAccountNameValidationError {}
+
+/// Validates a normal local account name used by the built-in unattended file.
+///
+/// Besides the documented local-account syntax, the policy excludes Windows-owned identities.
+/// The numbered DWM/UMFD virtual accounts are matched narrowly so ordinary names beginning with
+/// the same letters remain valid.
+pub fn validate_unattended_local_account_name(
+    account_name: &str,
+) -> Result<(), LocalAccountNameValidationError> {
+    let name = account_name.trim();
+    if name.is_empty() {
+        return Err(LocalAccountNameValidationError::MissingAccountName);
+    }
+    if name.encode_utf16().count() > MAX_LOCAL_ACCOUNT_NAME_UTF16 {
+        return Err(LocalAccountNameValidationError::AccountNameTooLong);
+    }
+    if name != account_name
+        || name.ends_with('.')
+        || name.chars().any(|character| {
+            character.is_control()
+                || !is_xml_1_0_character(character)
+                || r#"\/"[]:|<>+=;,?*%@"#.contains(character)
+        })
+    {
+        return Err(LocalAccountNameValidationError::InvalidAccountName);
+    }
+    if is_reserved_unattended_account_name(name) {
+        return Err(LocalAccountNameValidationError::ReservedAccountName);
+    }
+    Ok(())
+}
+
+fn is_reserved_unattended_account_name(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "NONE",
+        "Administrator",
+        "Guest",
+        "DefaultAccount",
+        "defaultuser0",
+        "WDAGUtilityAccount",
+        "WSIAccount",
+        "DSMA",
+        "HelpAssistant",
+        "krbtgt",
+        "SYSTEM",
+        "LocalSystem",
+        "Local System",
+        "LocalService",
+        "Local Service",
+        "NetworkService",
+        "Network Service",
+        "TrustedInstaller",
+    ];
+    if RESERVED
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+
+    let lower = name.to_ascii_lowercase();
+    ["dwm-", "umfd-"].iter().any(|prefix| {
+        lower.strip_prefix(prefix).is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
 /// A runtime secret whose debug representation never exposes its contents.
 ///
 /// This wrapper is intentionally not serializable. Callers must opt in explicitly when writing the
@@ -327,6 +416,56 @@ mod tests {
         assert_eq!(
             enabled("Ops", "line1\nline2", false).validate(),
             Err(BuiltInAdministratorValidationError::InvalidPassword)
+        );
+    }
+
+    #[test]
+    fn ordinary_unattended_accounts_reject_windows_owned_identities_without_broad_prefixes() {
+        for reserved in [
+            "SYSTEM",
+            "system",
+            "Local Service",
+            "NetworkService",
+            "TrustedInstaller",
+            "Administrator",
+            "Guest",
+            "DefaultAccount",
+            "defaultuser0",
+            "WDAGUtilityAccount",
+            "WSIAccount",
+            "NONE",
+            "DWM-1",
+            "umfd-0",
+        ] {
+            assert_eq!(
+                validate_unattended_local_account_name(reserved),
+                Err(LocalAccountNameValidationError::ReservedAccountName),
+                "{reserved}"
+            );
+        }
+
+        for ordinary in ["Tom", "Terry", "SystemBuilder", "Alice", "张三"] {
+            assert_eq!(validate_unattended_local_account_name(ordinary), Ok(()));
+        }
+    }
+
+    #[test]
+    fn ordinary_unattended_accounts_follow_windows_name_syntax() {
+        assert_eq!(
+            validate_unattended_local_account_name(""),
+            Err(LocalAccountNameValidationError::MissingAccountName)
+        );
+        assert_eq!(
+            validate_unattended_local_account_name("bad/name"),
+            Err(LocalAccountNameValidationError::InvalidAccountName)
+        );
+        assert_eq!(
+            validate_unattended_local_account_name("trailing."),
+            Err(LocalAccountNameValidationError::InvalidAccountName)
+        );
+        assert_eq!(
+            validate_unattended_local_account_name("123456789012345678901"),
+            Err(LocalAccountNameValidationError::AccountNameTooLong)
         );
     }
 

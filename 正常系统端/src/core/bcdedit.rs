@@ -79,14 +79,7 @@ impl BootManager {
         anyhow::bail!("Could not find current boot GUID")
     }
 
-    /// 查找目标 Windows 分区所在磁盘的 ESP 分区
-    pub fn find_esp_on_same_disk(
-        &self,
-        windows_partition: &str,
-    ) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
-        let _mount_lock = ESP_MOUNT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn esp_on_same_disk(&self, windows_partition: &str) -> Result<(u32, u32, u64)> {
         log::info!("[BOOT] 查找 {} 所在磁盘的 ESP 分区...", windows_partition);
 
         let drive_letter = windows_partition
@@ -121,10 +114,21 @@ impl BootManager {
             esp.offset_bytes
         );
 
-        let existing_letters = lr_core::windows_storage::assigned_drive_letters_for_partition(
-            disk_num,
-            esp.offset_bytes,
-        )?;
+        Ok((disk_num, esp.partition_number, esp.offset_bytes))
+    }
+
+    /// 查找目标 Windows 分区所在磁盘的 ESP 分区
+    pub fn find_esp_on_same_disk(
+        &self,
+        windows_partition: &str,
+    ) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
+        let _mount_lock = ESP_MOUNT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (disk_num, _partition_number, esp_offset) = self.esp_on_same_disk(windows_partition)?;
+
+        let existing_letters =
+            lr_core::windows_storage::assigned_drive_letters_for_partition(disk_num, esp_offset)?;
         if let Some(letter) = existing_letters.first().copied() {
             log::info!(
                 "[BOOT] ESP 已有盘符 {}:，只读复用且不会在探测后移除",
@@ -140,7 +144,7 @@ impl BootManager {
 
         lr_core::windows_storage::assign_partition_drive_letter(
             disk_num,
-            esp.offset_bytes,
+            esp_offset,
             mount_letter,
         )?;
         let mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&mount_letter.to_string())
@@ -163,14 +167,19 @@ impl BootManager {
     }
 
     /// Inspect the existing Windows boot manager on the ESP that belongs to
-    /// `windows_partition`. This is used only as an automatic-selection signal;
-    /// the installer performs a fresh source and firmware check before writing.
+    /// `windows_partition`. This read-only automatic-selection signal resolves the ESP through its
+    /// volume GUID root and never assigns a user-visible drive letter. The installer performs a
+    /// fresh source and firmware check before writing.
     pub fn inspect_existing_esp_pca(
         &self,
         windows_partition: &str,
     ) -> Result<lr_core::boot_pca::EfiSignatureInfo> {
-        let esp_mount = self.find_esp_on_same_disk(windows_partition)?;
-        let esp_root = format!("{}\\", esp_mount.letter().trim_end_matches('\\'));
+        let (disk_number, _partition_number, offset_bytes) =
+            self.esp_on_same_disk(windows_partition)?;
+        let esp_root =
+            lr_core::windows_storage::volume_guid_path_for_partition(disk_number, offset_bytes)
+                .map_err(anyhow::Error::msg)?;
+        log::info!("[BOOT PCA] 通过卷 GUID 路径只读检测目标 ESP，不分配盘符");
         let result = lr_core::boot_pca::inspect_esp_generation(Path::new(&esp_root));
         Ok(result)
     }
