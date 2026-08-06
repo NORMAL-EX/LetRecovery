@@ -106,6 +106,15 @@ jobs:
           test -f "pkg/LetRecovery.exe"            || { echo "底包缺少 LetRecovery.exe"; exit 1; }
           test -f "pkg/bin/pe/LetRecovery_PE.wim"  || { echo "底包缺少 bin/pe/LetRecovery_PE.wim"; exit 1; }
 
+      - name: Rebuild package config from tracked release defaults
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\.github\scripts\normalize-release-config.ps1 `
+            -TemplatePath .\config.json `
+            -PackageConfigPath .\pkg\config.json `
+            -RequirePeEntries
+
       - name: Strip runtime junk from package
         shell: bash
         run: |
@@ -756,29 +765,15 @@ jobs:
             throw "LetRecovery update API rejected the request"
           }
 
-      - name: Force safe defaults in config.json (easy mode and advanced options OFF)
-        shell: bash
+      - name: Reassert complete release defaults in config.json
+        shell: pwsh
         run: |
-          set -euo pipefail
-          # 正式 release 的新装配置必须固定进入完整安装页；小白模式和高级选项都由
-          # 用户在软件内主动开启，不能继承外部底包仓库中的维护机偏好。
-          test -f pkg/config.json || { echo "pkg/config.json 不存在"; exit 1; }
-          python - <<'PY'
-          import json, io
-          p = "pkg/config.json"
-          d = json.load(open(p, encoding="utf-8"))
-          before_easy = d.get("easy_mode_enabled")
-          before_advanced = d.get("enable_advanced_options")
-          d["easy_mode_enabled"] = False
-          d["enable_advanced_options"] = False
-          io.open(p, "w", encoding="utf-8", newline="\n").write(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
-          check = json.load(open(p, encoding="utf-8"))
-          if check.get("easy_mode_enabled") is not False or check.get("enable_advanced_options") is not False:
-              raise SystemExit("failed to normalize release defaults")
-          print("easy_mode_enabled:", before_easy, "-> False")
-          print("enable_advanced_options:", before_advanced, "-> False")
-          PY
-          echo "已强制 easy_mode_enabled=False, enable_advanced_options=False"
+          $ErrorActionPreference = "Stop"
+          & .\.github\scripts\normalize-release-config.ps1 `
+            -TemplatePath .\config.json `
+            -PackageConfigPath .\pkg\config.json `
+            -RequirePeEntries `
+            -RequirePeHashes
 
       - name: Prepare package README
         shell: bash
@@ -794,12 +789,43 @@ jobs:
           ls -la pkg/README.txt 2>/dev/null || true
 
       - name: Repackage into LetRecovery.7z
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          rm -f LetRecovery.7z
-          ( cd pkg && 7z a -t7z -mx=9 -m0=lzma2 -ms=on ../LetRecovery.7z ./* >/dev/null )
-          ls -la LetRecovery.7z
+          $ErrorActionPreference = "Stop"
+          Remove-Item -LiteralPath .\LetRecovery.7z -Force -ErrorAction SilentlyContinue
+          Push-Location .\pkg
+          try {
+            & 7z a -t7z -mx=9 -m0=lzma2 -ms=on ..\LetRecovery.7z .\*
+            if ($LASTEXITCODE -ne 0) {
+              throw "7z package creation failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $audit = Join-Path $env:RUNNER_TEMP ("release-config-audit-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $audit | Out-Null
+          try {
+            & 7z x .\LetRecovery.7z config.json "-o$audit" -y
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not extract config.json from LetRecovery.7z"
+            }
+            $archivedConfig = Join-Path $audit "config.json"
+            & .\.github\scripts\normalize-release-config.ps1 `
+              -TemplatePath .\config.json `
+              -PackageConfigPath $archivedConfig `
+              -RequirePeEntries `
+              -RequirePeHashes `
+              -VerifyOnly
+            $sourceHash = (Get-FileHash -LiteralPath .\pkg\config.json -Algorithm SHA256).Hash
+            $archiveHash = (Get-FileHash -LiteralPath $archivedConfig -Algorithm SHA256).Hash
+            if ($sourceHash -ne $archiveHash) {
+              throw "Archived config.json differs from the audited package config"
+            }
+          } finally {
+            Remove-Item -LiteralPath $audit -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          Get-Item -LiteralPath .\LetRecovery.7z
 
       - name: Install Inno Setup 6.7.1
         shell: pwsh

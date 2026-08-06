@@ -200,8 +200,9 @@ mod platform {
     use super::*;
     use std::ffi::c_void;
     use std::mem::{size_of, ManuallyDrop};
+    use std::sync::OnceLock;
 
-    use windows::core::{IUnknown, Interface, GUID, HRESULT, PCWSTR, PWSTR};
+    use windows::core::{w, IUnknown, Interface, GUID, HRESULT, PCSTR, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
         CloseHandle, BOOLEAN, ERROR_NO_MORE_FILES, E_UNEXPECTED, HANDLE, RPC_E_CHANGED_MODE,
     };
@@ -224,9 +225,10 @@ mod platform {
         VDS_QUERY_SOFTWARE_PROVIDERS,
     };
     use windows::Win32::System::Com::{
-        CoCreateGuid, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-        CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED,
+        CoCreateGuid, CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
+        COINIT_MULTITHREADED,
     };
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 
     const ALIGNMENT: u64 = 1024 * 1024;
@@ -234,6 +236,27 @@ mod platform {
     const GPT_ESP: GUID = GUID::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);
     const GPT_MSR: GUID = GUID::from_u128(0xe3c9e316_0b5c_4db8_817d_f92df00215ae);
     const GPT_RECOVERY: GUID = GUID::from_u128(0xde94bba4_06d1_4d40_a16a_bfd50179d6ac);
+
+    type CoTaskMemFreeFn = unsafe extern "system" fn(*const c_void);
+
+    unsafe fn co_task_mem_free(pointer: *mut c_void) {
+        if !pointer.is_null() {
+            // Current Windows SDK import libraries redirect this legacy API through combase.dll,
+            // which does not exist on an unmodified Windows 7 installation. Resolve the documented
+            // ole32.dll export explicitly so the process loader never acquires a combase dependency.
+            static FUNCTION: OnceLock<CoTaskMemFreeFn> = OnceLock::new();
+            let function = FUNCTION.get_or_init(|| {
+                let module = GetModuleHandleW(w!("ole32.dll"))
+                    .expect("ole32.dll must be loaded before VDS returns COM memory");
+                let address = GetProcAddress(module, PCSTR(c"CoTaskMemFree".as_ptr().cast()))
+                    .expect("ole32.dll must export CoTaskMemFree on supported Windows versions");
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, CoTaskMemFreeFn>(
+                    address,
+                )
+            });
+            function(pointer.cast_const());
+        }
+    }
 
     struct ComApartment {
         uninitialize: bool,
@@ -488,7 +511,7 @@ mod platform {
 
     unsafe fn free_pwstr(value: &mut PWSTR) {
         if !value.is_null() {
-            CoTaskMemFree(Some(value.0.cast::<c_void>()));
+            co_task_mem_free(value.0.cast::<c_void>());
             *value = PWSTR::null();
         }
     }
@@ -747,7 +770,7 @@ mod platform {
         } else {
             std::slice::from_raw_parts(pointer, count as usize).to_vec()
         };
-        CoTaskMemFree((!pointer.is_null()).then_some(pointer.cast::<c_void>()));
+        co_task_mem_free(pointer.cast::<c_void>());
         properties
             .into_iter()
             .map(|property| {
@@ -1043,7 +1066,7 @@ mod platform {
         } else {
             std::slice::from_raw_parts(pointer, count as usize).to_vec()
         };
-        CoTaskMemFree((!pointer.is_null()).then_some(pointer.cast::<c_void>()));
+        co_task_mem_free(pointer.cast::<c_void>());
         Ok(values
             .into_iter()
             .filter(|extent| extent.r#type == VDS_DET_FREE)

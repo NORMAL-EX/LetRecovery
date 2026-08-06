@@ -21,7 +21,8 @@ $patterns = @(
     '\.get(?:\s*::<[^>]+>)?\s*\(\s*b"([^"\\]+)(?:\\0)?"',
     '(?:req!|opt!|load_sym!|load_optional_sym(?:\s*::<[^>]+>)?)\s*\([\s\S]{0,300}?b"([^"\\]+)(?:\\0)?"',
     'procedure\s*\(\s*b"([^"\\]+)(?:\\0)?"',
-    'load_catalog_proc\s*\([^,]+,\s*b"([^"\\]+)(?:\\0)?"'
+    'load_catalog_proc\s*\([^,]+,\s*b"([^"\\]+)(?:\\0)?"',
+    'GetProcAddress\s*\([^,]+,\s*PCSTR\s*\(\s*c"([^"]+)"'
 )
 $declared = [System.IO.File]::ReadAllText($inventory)
 $unregistered = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)

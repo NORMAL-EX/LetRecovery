@@ -38,6 +38,7 @@ static const DYNAMIC_API dynamic_apis[] = {
     {"kernel32.dll", "GetCurrentProcess", DYNAMIC_FEATURE, "BitLocker privilege enablement"},
     {"kernel32.dll", "GetLastError", DYNAMIC_OPTIONAL, "BitLocker diagnostics"},
     {"kernel32.dll", "GetFirmwareType", DYNAMIC_OPTIONAL, "firmware mode probe"},
+    {"ole32.dll", "CoTaskMemFree", DYNAMIC_FEATURE, "VDS COM memory release"},
 
     {"wimgapi.dll", "WIMCreateFile", DYNAMIC_FEATURE, "Microsoft WIMGAPI engine"},
     {"wimgapi.dll", "WIMCloseHandle", DYNAMIC_FEATURE, "Microsoft WIMGAPI engine"},

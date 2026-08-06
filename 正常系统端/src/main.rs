@@ -6,6 +6,7 @@ mod core;
 mod download;
 mod native_ui;
 mod utils;
+mod win7_import_compat;
 
 use std::sync::Arc;
 use std::sync::{mpsc::Receiver, Mutex};

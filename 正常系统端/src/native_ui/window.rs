@@ -4,7 +4,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use crate::native_ui::{GetDpiForSystem, GetDpiForWindow, SetBestProcessDpiAwareness};
-use windows::core::{w, PCWSTR};
+use windows::core::{w, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
@@ -26,23 +26,22 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetClientRect, GetMessageW,
-    GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, IsWindowVisible,
-    KillTimer, LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SendMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW,
-    CBN_SELCHANGE, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    EN_CHANGE, EN_KILLFOCUS, ES_AUTOHSCROLL, GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG,
-    ICON_SMALL, IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE, LR_SHARED, LWA_ALPHA, MINMAXINFO, MSG,
-    SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect,
+    GetMessageW, GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW,
+    IsWindowVisible, KillTimer, LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE, CBS_DROPDOWNLIST,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, EN_KILLFOCUS, ES_AUTOHSCROLL,
+    GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON,
+    LBN_SELCHANGE, LR_SHARED, MINMAXINFO, MSG, SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON,
+    SM_CYSCREEN, SM_CYSMICON, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
     WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE,
     WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL,
     WM_NCCREATE, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE,
     WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_LAYERED, WS_OVERLAPPEDWINDOW,
-    WS_TABSTOP, WS_VISIBLE,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::controls::{center_single_line_edit_in_row, child, draw_inno_button, wide, ButtonRole};
@@ -866,6 +865,11 @@ fn centered_window_origin(
     )
 }
 
+const fn main_window_ex_style_owns_input(ex_style: isize) -> bool {
+    let input_passthrough_bits = WS_EX_LAYERED.0 as isize | WS_EX_TRANSPARENT.0 as isize;
+    ex_style & input_passthrough_bits == 0
+}
+
 unsafe fn center_window_in_nearest_work_area(hwnd: HWND, width: i32, height: i32) {
     let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     let mut monitor_info = MONITORINFO {
@@ -1068,15 +1072,17 @@ mod layout_tests {
         command_status_right_edge, confirmed_tool_backend_request,
         device_change_requests_partition_refresh, download_failure_message,
         effective_easy_mode_enabled, initial_mutating_tool_state, install_partition_heading_y,
-        list_view_selection_state_changed, may_publish_install_chrome, minimum_window_size,
-        navigation_visibility, page_switch_requires_full_layout, pca_pending_status,
-        pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
-        pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
-        reusable_pca_target_result, shared_install_mode_label_width, tool_backend_result_succeeded,
+        list_view_selection_state_changed, main_window_ex_style_owns_input,
+        may_publish_install_chrome, minimum_window_size, navigation_visibility,
+        page_switch_requires_full_layout, pca_pending_status, pca_target_error_blocks,
+        pca_target_probe_required, pca_target_result_is_current, pca_target_uses_uefi,
+        preferred_window_size, primary_state_refresh_for_page, reusable_pca_target_result,
+        shared_install_mode_label_width, tool_backend_result_succeeded,
         unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
         Page, PcaPendingStatus, PcaTargetCacheEntry, PcaTargetContext, PcaTargetKey,
         PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
         DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
+        WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_controller::CatalogueState;
@@ -1119,6 +1125,19 @@ mod layout_tests {
         assert_eq!(minimum_window_size(96, 1920, 1080), (800, 600));
         assert_eq!(minimum_window_size(144, 1280, 720), (1200, 720));
         assert_eq!(minimum_window_size(192, 1280, 720), (1280, 720));
+    }
+
+    #[test]
+    fn main_window_rejects_every_click_through_extended_style() {
+        assert!(main_window_ex_style_owns_input(0));
+        assert!(main_window_ex_style_owns_input(0x0001_0000));
+        assert!(!main_window_ex_style_owns_input(WS_EX_LAYERED.0 as isize));
+        assert!(!main_window_ex_style_owns_input(
+            WS_EX_TRANSPARENT.0 as isize
+        ));
+        assert!(!main_window_ex_style_owns_input(
+            (WS_EX_LAYERED | WS_EX_TRANSPARENT).0 as isize
+        ));
     }
 
     #[test]
@@ -11414,19 +11433,17 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
         // Startup placement is deliberately stateless: always center the new window in the
         // nearest monitor work area instead of inheriting a prior drag position from the shell.
         center_window_in_nearest_work_area(hwnd, corrected_width, corrected_height);
-        // Keep the first child-control paint transaction outside the visible DWM surface. A
-        // non-zero alpha still owns hit testing, unlike alpha=0, while making USER32's stock
-        // white Edit/Combo/STATIC intermediate pixels effectively invisible. Reduced WinPE
-        // implementations may reject layered attributes; in that case the synchronous redraw
-        // below remains the supported fallback.
-        let original_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let _ = SetWindowLongPtrW(
-            hwnd,
-            GWL_EXSTYLE,
-            original_ex_style | WS_EX_LAYERED.0 as isize,
-        );
-        let first_frame_layered =
-            SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA).is_ok();
+        // The main shell must remain a normal opaque input owner from creation onward. A temporary
+        // WS_EX_LAYERED first-frame barrier proved capable of leaking hit testing to a window
+        // behind LetRecovery on both Windows 7 and Windows 11. Build the complete child tree while
+        // hidden, then publish one synchronous ordinary-window frame instead.
+        if !main_window_ex_style_owns_input(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)) {
+            let _ = DestroyWindow(hwnd);
+            return Err(windows::core::Error::new(
+                HRESULT(0x8000_4005_u32 as i32),
+                "LetRecovery main window has an unsafe click-through extended style",
+            ));
+        }
         let _ = ShowWindow(hwnd, SW_SHOW);
         // WinPE's reduced USER32/UxTheme implementation can defer the first paint of child
         // controls until later messages. If we enter the message loop immediately, the
@@ -11441,24 +11458,12 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
             None,
             RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         );
-        if first_frame_layered {
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, original_ex_style);
-            let _ = SetWindowPos(
-                hwnd,
-                HWND::default(),
-                0,
-                0,
-                0,
-                0,
-                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-            let _ = RedrawWindow(
-                hwnd,
-                None,
-                None,
-                RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-            );
+        if !main_window_ex_style_owns_input(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)) {
+            let _ = DestroyWindow(hwnd);
+            return Err(windows::core::Error::new(
+                HRESULT(0x8000_4005_u32 as i32),
+                "LetRecovery main window entered an unsafe click-through state",
+            ));
         }
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
