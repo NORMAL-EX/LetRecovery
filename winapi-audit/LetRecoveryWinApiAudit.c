@@ -21,10 +21,23 @@ typedef struct PE_VIEW {
 
 typedef struct AUDIT_STATE {
     HANDLE log;
+    DWORD images;
     DWORD libraries;
     DWORD procedures;
     DWORD missing;
+    DWORD dynamic_procedures;
+    DWORD dynamic_feature_missing;
+    DWORD dynamic_optional_missing;
 } AUDIT_STATE;
+
+typedef struct DYNAMIC_API {
+    const char *library;
+    const char *procedure;
+    BOOL feature_required;
+    const char *feature;
+} DYNAMIC_API;
+
+#include "LetRecoveryWinApiDynamicApis.inc"
 
 static SIZE_T ascii_len(const char *value) {
     SIZE_T length = 0;
@@ -374,16 +387,144 @@ static HANDLE open_log(const WCHAR *directory, WCHAR *log_path, DWORD capacity) 
                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 }
 
-int wmain(int argc, WCHAR **argv) {
-    WCHAR directory[MAX_PATH];
-    WCHAR target[MAX_PATH];
-    WCHAR log_path[MAX_PATH];
-    HANDLE log = INVALID_HANDLE_VALUE;
+static BOOL copy_wide(WCHAR *target, DWORD capacity, const WCHAR *source) {
+    SIZE_T length = wide_len(source);
+    if (length >= capacity) return FALSE;
+    CopyMemory(target, source, (length + 1) * sizeof(WCHAR));
+    return TRUE;
+}
+
+static BOOL audit_pe_file(const WCHAR *path, AUDIT_STATE *state, BOOL required) {
     HANDLE file = INVALID_HANDLE_VALUE;
     HANDLE mapping = NULL;
     const BYTE *mapped = NULL;
     LARGE_INTEGER file_size;
     PE_VIEW view;
+    BOOL success = FALSE;
+
+    write_ascii(state->log, "--- Static/delay imports: ");
+    write_wide_utf8(state->log, path);
+    write_ascii(state->log, " ---\r\n");
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (required) {
+            write_ascii(state->log, "MISSING [module] required package module is unavailable (GetLastError=");
+            write_u32(state->log, GetLastError());
+            write_ascii(state->log, ")\r\n");
+            ++state->missing;
+        } else {
+            write_ascii(state->log, "SKIPPED: package module is not present.\r\n");
+        }
+        goto cleanup;
+    }
+    if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart <= 0 ||
+        (ULONGLONG)file_size.QuadPart > (ULONGLONG)(SIZE_T)-1) {
+        write_ascii(state->log, "FATAL: cannot size the PE image.\r\n");
+        goto cleanup;
+    }
+    mapping = CreateFileMappingW(file, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (mapping == NULL) {
+        write_ascii(state->log, "FATAL: cannot map the PE image.\r\n");
+        goto cleanup;
+    }
+    mapped = (const BYTE *)MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (mapped == NULL || !parse_pe(mapped, (SIZE_T)file_size.QuadPart, &view)) {
+        write_ascii(state->log, "FATAL: invalid or unsupported PE32/PE32+ image.\r\n");
+        goto cleanup;
+    }
+    ++state->images;
+    if (!audit_imports(&view, state) || !audit_delay_imports(&view, state)) {
+        write_ascii(state->log, "FATAL: malformed or out-of-range import data was rejected.\r\n");
+        goto cleanup;
+    }
+    success = TRUE;
+
+cleanup:
+    if (mapped != NULL) UnmapViewOfFile(mapped);
+    if (mapping != NULL) CloseHandle(mapping);
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    return success;
+}
+
+static HMODULE load_dynamic_library(const WCHAR *app_directory, const char *name, DWORD *error) {
+    WCHAR path[MAX_PATH];
+    WCHAR component[MAX_PATH];
+    const char *actual = name;
+    SIZE_T index;
+    SIZE_T length;
+    DWORD base_length;
+
+    *error = ERROR_SUCCESS;
+    if (name[0] == '@' && name[1] == 'a' && name[2] == 'p' && name[3] == 'p' && name[4] == ':') {
+        actual = name + 5;
+        if (!copy_wide(path, MAX_PATH, app_directory)) {
+            *error = ERROR_INSUFFICIENT_BUFFER;
+            return NULL;
+        }
+    } else {
+        base_length = GetSystemDirectoryW(path, MAX_PATH);
+        if (base_length == 0 || base_length >= MAX_PATH) {
+            *error = GetLastError();
+            return NULL;
+        }
+    }
+    length = ascii_len(actual);
+    if (length == 0 || length >= MAX_PATH) {
+        *error = ERROR_INVALID_NAME;
+        return NULL;
+    }
+    for (index = 0; index <= length; ++index) component[index] = (WCHAR)(BYTE)actual[index];
+    if (!append_component(path, MAX_PATH, component)) {
+        *error = ERROR_INSUFFICIENT_BUFFER;
+        return NULL;
+    }
+    SetLastError(ERROR_SUCCESS);
+    {
+        HMODULE module = LoadLibraryExW(path, NULL, DONT_RESOLVE_DLL_REFERENCES);
+        if (module == NULL) *error = GetLastError();
+        return module;
+    }
+}
+
+static void audit_dynamic_apis(const WCHAR *app_directory, AUDIT_STATE *state) {
+    SIZE_T index;
+    write_ascii(state->log, "--- Runtime-resolved APIs declared by LetRecovery source ---\r\n");
+    for (index = 0; index < sizeof(dynamic_apis) / sizeof(dynamic_apis[0]); ++index) {
+        const DYNAMIC_API *api = &dynamic_apis[index];
+        DWORD error = 0;
+        HMODULE module = load_dynamic_library(app_directory, api->library, &error);
+        FARPROC procedure = NULL;
+        ++state->dynamic_procedures;
+        if (module != NULL) procedure = GetProcAddress(module, api->procedure);
+        if (procedure == NULL) {
+            write_ascii(state->log, "MISSING [dynamic ");
+            write_ascii(state->log, api->feature_required ? "feature" : "optional");
+            write_ascii(state->log, "] ");
+            write_ascii(state->log, api->library);
+            write_ascii(state->log, "!");
+            write_ascii(state->log, api->procedure);
+            write_ascii(state->log, " (feature: ");
+            write_ascii(state->log, api->feature);
+            if (module == NULL) {
+                write_ascii(state->log, ", DLL unavailable, GetLastError=");
+                write_u32(state->log, error);
+            } else {
+                write_ascii(state->log, ", procedure unavailable");
+            }
+            write_ascii(state->log, ")\r\n");
+            if (api->feature_required) ++state->dynamic_feature_missing;
+            else ++state->dynamic_optional_missing;
+        }
+        if (module != NULL) FreeLibrary(module);
+    }
+}
+
+int wmain(int argc, WCHAR **argv) {
+    WCHAR directory[MAX_PATH];
+    WCHAR target[MAX_PATH];
+    WCHAR log_path[MAX_PATH];
+    HANDLE log = INVALID_HANDLE_VALUE;
     AUDIT_STATE state;
     SYSTEMTIME time;
     int result = 1;
@@ -407,44 +548,47 @@ int wmain(int argc, WCHAR **argv) {
     write_u32(log, time.wHour); write_ascii(log, ":"); write_u32(log, time.wMinute);
     write_ascii(log, ":"); write_u32(log, time.wSecond); write_ascii(log, "\r\n");
 
-    file = CreateFileW(target, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
-                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    if (file == INVALID_HANDLE_VALUE || !GetFileSizeEx(file, &file_size) ||
-        file_size.QuadPart <= 0 || (ULONGLONG)file_size.QuadPart > (ULONGLONG)(SIZE_T)-1) {
-        write_ascii(log, "FATAL: cannot open or size the target executable.\r\n\r\n");
-        goto cleanup;
-    }
-    mapping = CreateFileMappingW(file, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (mapping == NULL) {
-        write_ascii(log, "FATAL: cannot map the target executable.\r\n\r\n");
-        goto cleanup;
-    }
-    mapped = (const BYTE *)MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
-    if (mapped == NULL || !parse_pe(mapped, (SIZE_T)file_size.QuadPart, &view)) {
-        write_ascii(log, "FATAL: the target is not a valid, supported PE32/PE32+ image.\r\n\r\n");
-        goto cleanup;
-    }
     SetDllDirectoryW(L"");
     state.log = log;
+    state.images = 0;
     state.libraries = 0;
     state.procedures = 0;
     state.missing = 0;
-    if (!audit_imports(&view, &state) || !audit_delay_imports(&view, &state)) {
-        write_ascii(log, "FATAL: malformed or out-of-range import data was rejected.\r\n\r\n");
+    state.dynamic_procedures = 0;
+    state.dynamic_feature_missing = 0;
+    state.dynamic_optional_missing = 0;
+    if (!audit_pe_file(target, &state, TRUE)) {
         goto cleanup;
     }
-    write_ascii(log, "Imported libraries: "); write_u32(log, state.libraries);
+    {
+        SIZE_T index;
+        for (index = 0; index < sizeof(owned_modules) / sizeof(owned_modules[0]); ++index) {
+            WCHAR module_path[MAX_PATH];
+            if (!copy_wide(module_path, MAX_PATH, directory) ||
+                !append_component(module_path, MAX_PATH, owned_modules[index]) ||
+                !audit_pe_file(module_path, &state, TRUE)) goto cleanup;
+        }
+    }
+    audit_dynamic_apis(directory, &state);
+    write_ascii(log, "Audited PE images: "); write_u32(log, state.images);
+    write_ascii(log, "\r\nImported libraries: "); write_u32(log, state.libraries);
     write_ascii(log, "\r\nImported procedures: "); write_u32(log, state.procedures);
-    write_ascii(log, "\r\nMissing procedures: "); write_u32(log, state.missing);
-    write_ascii(log, state.missing == 0
-        ? "\r\nResult: compatible on this Windows installation.\r\n\r\n"
-        : "\r\nResult: incompatible imports were found.\r\n\r\n");
-    result = state.missing == 0 ? 0 : 2;
+    write_ascii(log, "\r\nMissing static/delay procedures or modules: "); write_u32(log, state.missing);
+    write_ascii(log, "\r\nDeclared runtime-resolved procedures: "); write_u32(log, state.dynamic_procedures);
+    write_ascii(log, "\r\nMissing feature runtime procedures: "); write_u32(log, state.dynamic_feature_missing);
+    write_ascii(log, "\r\nMissing optional runtime procedures: "); write_u32(log, state.dynamic_optional_missing);
+    if (state.missing != 0) {
+        write_ascii(log, "\r\nResult: the process loader has incompatible or missing imports.\r\n\r\n");
+        result = 2;
+    } else if (state.dynamic_feature_missing != 0 || state.dynamic_optional_missing != 0) {
+        write_ascii(log, "\r\nResult: the program can load, but runtime-resolved feature gaps were found.\r\n\r\n");
+        result = 3;
+    } else {
+        write_ascii(log, "\r\nResult: no missing declared static, delay, or runtime-resolved APIs were found.\r\n\r\n");
+        result = 0;
+    }
 
 cleanup:
-    if (mapped != NULL) UnmapViewOfFile(mapped);
-    if (mapping != NULL) CloseHandle(mapping);
-    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
     return result;
 }

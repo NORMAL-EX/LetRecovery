@@ -4,7 +4,41 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'LetRecoveryWinApiAudit.c'
+$inventory = Join-Path $PSScriptRoot 'LetRecoveryWinApiDynamicApis.inc'
+$repository = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $output = Join-Path ([System.IO.Path]::GetFullPath($OutputDirectory)) 'LetRecoveryWinApiAudit.exe'
+if (-not (Test-Path -LiteralPath $inventory -PathType Leaf)) {
+    throw 'The runtime-resolved API inventory is missing.'
+}
+
+# Prevent new literal libloading/GetProcAddress bindings from silently escaping the auditor.
+$sourceRoots = Get-ChildItem -LiteralPath $repository -Directory | ForEach-Object {
+    $candidate = Join-Path $_.FullName 'src'
+    if (Test-Path -LiteralPath $candidate -PathType Container) { $candidate }
+}
+$runtimeSources = Get-ChildItem -LiteralPath $sourceRoots -Recurse -Filter *.rs -File
+$patterns = @(
+    '\.get(?:\s*::<[^>]+>)?\s*\(\s*b"([^"\\]+)(?:\\0)?"',
+    '(?:req!|opt!|load_sym!|load_optional_sym(?:\s*::<[^>]+>)?)\s*\([\s\S]{0,300}?b"([^"\\]+)(?:\\0)?"',
+    'procedure\s*\(\s*b"([^"\\]+)(?:\\0)?"',
+    'load_catalog_proc\s*\([^,]+,\s*b"([^"\\]+)(?:\\0)?"'
+)
+$declared = [System.IO.File]::ReadAllText($inventory)
+$unregistered = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($runtimeSource in $runtimeSources) {
+    $text = [System.IO.File]::ReadAllText($runtimeSource.FullName)
+    foreach ($pattern in $patterns) {
+        foreach ($match in [regex]::Matches($text, $pattern)) {
+            $symbol = $match.Groups[1].Value
+            if ($declared.IndexOf(('"{0}"' -f $symbol), [System.StringComparison]::Ordinal) -lt 0) {
+                [void]$unregistered.Add($symbol)
+            }
+        }
+    }
+}
+if ($unregistered.Count -ne 0) {
+    throw "Runtime-resolved APIs are missing from LetRecoveryWinApiDynamicApis.inc: $($unregistered -join ', ')"
+}
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
     throw 'vswhere.exe was not found; Visual Studio Build Tools with C++ are required.'
