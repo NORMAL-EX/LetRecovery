@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::native_ui::{GetDpiForSystem, GetDpiForWindow, SetBestProcessDpiAwareness};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WPARAM,
@@ -23,23 +24,19 @@ use windows::Win32::UI::Controls::{
     InitCommonControlsEx, DRAWITEMSTRUCT, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
     INITCOMMONCONTROLSEX,
 };
-use windows::Win32::UI::HiDpi::{
-    GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawMenuBar, EnableMenuItem,
     GetClientRect, GetMessageW, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
-    LoadCursorW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, BN_CLICKED, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    GWLP_USERDATA, HMENU, IDC_ARROW, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED, MF_GRAYED, MINMAXINFO,
-    MSG, PM_REMOVE, SC_CLOSE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_DLGMODALFRAME, WS_MAXIMIZEBOX,
+    LoadCursorW, MessageBoxW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, BN_CLICKED, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    GWLP_USERDATA, HMENU, IDC_ARROW, MB_ICONWARNING, MB_OK, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED,
+    MF_GRAYED, MINMAXINFO, MSG, PM_REMOVE, SC_CLOSE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SIZE, WM_TIMER,
+    WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_DLGMODALFRAME, WS_MAXIMIZEBOX,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
@@ -237,6 +234,7 @@ struct ProgressPresentation {
     step_progress: u8,
     overall_progress: u8,
     status: String,
+    completion_warning: Option<String>,
     terminal: ProgressTerminal,
     rows: Vec<ProgressStepRow>,
 }
@@ -283,6 +281,7 @@ impl ProgressPresentation {
             step_progress: state.step_progress,
             overall_progress: state.overall_progress,
             status,
+            completion_warning: state.completion_warning.clone(),
             terminal,
             rows,
         }
@@ -349,6 +348,7 @@ struct NativeProgressWindow {
     state: NativeWindowState<Option<WorkflowSession>>,
     presentation: ProgressPresentation,
     worker_finished: bool,
+    completion_warning_shown: bool,
     theme: ThemeContext,
     brushes: ThemeBrushes,
     body_font: HFONT,
@@ -396,6 +396,7 @@ impl NativeProgressWindow {
             state,
             presentation,
             worker_finished: false,
+            completion_warning_shown: false,
             theme,
             brushes: ThemeBrushes::new(theme.palette),
             body_font: create_ui_font(dpi, 10),
@@ -583,6 +584,11 @@ impl NativeProgressWindow {
     }
 
     unsafe fn apply_presentation(&mut self, hwnd: HWND, next: ProgressPresentation) {
+        let completion_warning_to_show = (self.presentation.terminal != next.terminal
+            && next.terminal == ProgressTerminal::Completed
+            && !self.completion_warning_shown)
+            .then(|| next.completion_warning.clone())
+            .flatten();
         let rows_changed = self.presentation.rows != next.rows;
         if self.presentation.step_progress != next.step_progress {
             let _ = InvalidateRect(hwnd, Some(&self.step_bar), false);
@@ -615,6 +621,17 @@ impl NativeProgressWindow {
             let _ = InvalidateRect(hwnd, None, false);
         }
         self.presentation = next;
+        if let Some(warning) = completion_warning_to_show {
+            self.completion_warning_shown = true;
+            let warning = wide(&warning);
+            let title = wide(crate::tr!("安装已完成，需要修改固件设置"));
+            let _ = MessageBoxW(
+                hwnd,
+                PCWSTR(warning.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
         if rows_changed {
             if self.refresh_spinner_rect() {
                 self.spinner_started = Instant::now();
@@ -966,7 +983,7 @@ fn run_internal(
     preview_state: PreviewState,
 ) -> Result<(), ProgressRunError> {
     unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = SetBestProcessDpiAwareness();
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
             dwICC: ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES,

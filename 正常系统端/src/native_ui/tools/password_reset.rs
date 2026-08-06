@@ -3,12 +3,12 @@
 //! It selects a typed current/offline target and one inventory-provided account. The operation is
 //! fixed to clearing that password and enabling the account; no batch or enable-only option exists.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, DeleteObject, RedrawWindow, HFONT, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, CBS_DROPDOWNLIST,

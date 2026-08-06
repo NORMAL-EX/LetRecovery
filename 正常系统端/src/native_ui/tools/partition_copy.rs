@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
@@ -15,7 +16,6 @@ use windows::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_REPORT, LVS_SHOWSELALWAYS,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MoveWindow, SendMessageW, SetWindowTextW, CBS_DROPDOWNLIST, CB_ADDSTRING,

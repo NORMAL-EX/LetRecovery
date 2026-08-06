@@ -1221,23 +1221,21 @@ impl ProductionInstallBackend {
     fn stage_uefiseven(&self) -> Result<(), InstallBackendError> {
         let source = crate::utils::path::get_uefiseven_dir();
         let destination = Path::new(&self.data_dir()?).join("uefiseven");
-        if !source.is_dir() {
-            log::warn!(
-                "[NATIVE INSTALL] UefiSeven source is missing: {}",
-                source.display()
-            );
-            return Ok(());
+        lr_core::boot_pca::verify_uefiseven_package(&source)
+            .map_err(|error| Self::error("verify_uefiseven_source", error))?;
+        if destination.exists() {
+            std::fs::remove_dir_all(&destination)
+                .map_err(|error| Self::error("clear_uefiseven_stage", error))?;
         }
         std::fs::create_dir_all(&destination)
             .map_err(|error| Self::error("create_uefiseven_stage", error))?;
         for name in ["bootx64.efi", "UefiSeven.ini"] {
             let from = source.join(name);
-            if from.is_file() {
-                if let Err(error) = std::fs::copy(&from, destination.join(name)) {
-                    log::warn!("[NATIVE INSTALL] failed to stage {name}: {error}");
-                }
-            }
+            std::fs::copy(&from, destination.join(name))
+                .map_err(|error| Self::error("copy_uefiseven_stage", error))?;
         }
+        lr_core::boot_pca::verify_uefiseven_package(&destination)
+            .map_err(|error| Self::error("verify_staged_uefiseven", error))?;
         Ok(())
     }
 
@@ -1886,14 +1884,9 @@ impl ProductionInstallBackend {
         }
         if is_xp {
             if use_uefi {
-                if let Err(primary) = manager.write_xp_uefi_gpt_boot(&self.target) {
-                    log::warn!(
-                        "[NATIVE INSTALL] XP UEFI boot failed ({primary}); falling back to NTLDR"
-                    );
-                    manager
-                        .write_xp_boot(&self.target)
-                        .map_err(|error| Self::error("repair_xp_boot", error))?;
-                }
+                manager
+                    .write_xp_uefi_gpt_boot(&self.target)
+                    .map_err(|error| Self::error("repair_xp_uefi_boot", error))?;
             } else {
                 manager
                     .write_xp_boot(&self.target)

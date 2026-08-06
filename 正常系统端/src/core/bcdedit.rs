@@ -504,25 +504,50 @@ impl BootManager {
                 .as_ref()
                 .map(lr_core::boot_pca::TemporaryEspMountGuard::letter)
                 .expect("UEFI repair always mounts the target-disk ESP first");
-
-            let firmware = lr_core::boot_pca::inspect_firmware_pca();
-            log::info!("[BOOT PCA] 固件检测: {:?}", firmware);
-
-            let repair_result = lr_core::boot_pca::repair_uefi_boot(
-                Path::new(&self.bcdboot_path),
-                windows_partition,
-                esp_letter,
-                pca_mode,
-                firmware,
-                existing_esp_hint,
-            );
-            let decision = repair_result
-                .map_err(|error| anyhow::anyhow!("{}", tr!("UEFI 引导修复失败: {}", error)))?;
+            let (version, family) =
+                lr_core::boot_pca::inspect_installed_windows_boot_family(windows_partition)
+                    .map_err(|error| {
+                        anyhow::anyhow!("{}", tr!("无法确认目标系统引导版本: {}", error))
+                    })?;
             log::info!(
-                "[BOOT] UEFI 引导修复成功: {} ({})",
-                decision.generation,
-                decision.reason
+                "[BOOT] 目标 Windows 版本: {}，引导族: {:?}",
+                version,
+                family
             );
+            match family {
+                lr_core::boot_pca::InstalledWindowsBootFamily::LegacyUefi => {
+                    lr_core::boot_pca::repair_legacy_windows_uefi_boot(
+                        Path::new(&self.bcdboot_path),
+                        windows_partition,
+                        esp_letter,
+                    )
+                    .map_err(|error| {
+                        anyhow::anyhow!("{}", tr!("旧版 Windows UEFI 引导修复失败: {}", error))
+                    })?;
+                    log::info!("[BOOT] 旧版 Windows 标准 UEFI 引导修复成功");
+                }
+                lr_core::boot_pca::InstalledWindowsBootFamily::ModernPca => {
+                    let firmware = lr_core::boot_pca::inspect_firmware_pca();
+                    log::info!("[BOOT PCA] 固件检测: {:?}", firmware);
+                    let decision = lr_core::boot_pca::repair_uefi_boot(
+                        Path::new(&self.bcdboot_path),
+                        windows_partition,
+                        esp_letter,
+                        pca_mode,
+                        firmware,
+                        existing_esp_hint,
+                    )
+                    .map_err(|error| anyhow::anyhow!("{}", tr!("UEFI 引导修复失败: {}", error)))?;
+                    log::info!(
+                        "[BOOT] UEFI 引导修复成功: {} ({})",
+                        decision.generation,
+                        decision.reason
+                    );
+                }
+                lr_core::boot_pca::InstalledWindowsBootFamily::Nt5 => {
+                    anyhow::bail!("{}", tr!("NT5 系统必须使用 XP/2003 专用引导写入路径"));
+                }
+            }
         } else {
             // Legacy/BIOS 模式——照搬 DSI：bootmgr/BCD 写到【活动的 System 分区】，而不是 Windows 分区。
             // System+Windows 拆分布局时引导分区≠Windows 分区（之前直接拿 Windows 分区写引导，导致开机 0x7B）；

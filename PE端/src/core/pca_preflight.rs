@@ -18,6 +18,13 @@ pub struct StagedPcaCompatConfig {
     target: lr_core::pca_compat::TargetImageIdentity,
 }
 
+#[derive(Debug)]
+pub struct BootPreflight {
+    pub pca_compat_package: Option<PreparedPcaCompatPackage>,
+    pub uefiseven_source: Option<std::path::PathBuf>,
+    pub secure_boot_disable_required: bool,
+}
+
 pub fn staged_config(
     config: &InstallConfig,
     data_directory: &Path,
@@ -56,6 +63,7 @@ pub fn staged_config(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_before_disk_write(
     image_path: &str,
     volume_index: u32,
@@ -64,11 +72,29 @@ pub fn verify_before_disk_write(
     may_use_uefi: bool,
     requested: BootPcaMode,
     staged: Option<&StagedPcaCompatConfig>,
-) -> Result<Option<PreparedPcaCompatPackage>, String> {
+    data_directory: &Path,
+) -> Result<BootPreflight, String> {
     let firmware = lr_core::boot_pca::inspect_firmware_pca();
     if let Some(error) = firmware.error.as_deref() {
         log::warn!("[BOOT PCA] 固件预检信息不完整: {error}");
     }
+    let uefiseven_source = if !is_gho && !is_nt5 && may_use_uefi {
+        let platform = lr_core::pca_preflight::inspect_selected_image_platform(
+            Path::new(image_path),
+            volume_index,
+        )
+        .map_err(|error| user_error(&error))?;
+        if lr_core::pca_preflight::requires_uefiseven(platform.0, platform.1, platform.2) {
+            Some(resolve_uefiseven_source(data_directory)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let secure_boot_disable_required =
+        uefiseven_source.is_some() && firmware.secure_boot_enabled == Some(true);
 
     let image_kind = if is_gho {
         InstallImageKind::Opaque
@@ -86,16 +112,24 @@ pub fn verify_before_disk_write(
     ) {
         Ok(PcaPreflightStatus::NotRequired) => {
             log::info!("[BOOT PCA] 写盘前预检无需强制签名代际");
-            Ok(None)
+            Ok(BootPreflight {
+                pca_compat_package: None,
+                uefiseven_source,
+                secure_boot_disable_required,
+            })
         }
         Ok(PcaPreflightStatus::Verified(generation)) => {
             log::info!("[BOOT PCA] 写盘前预检通过: {generation}");
-            Ok(None)
+            Ok(BootPreflight {
+                pca_compat_package: None,
+                uefiseven_source,
+                secure_boot_disable_required,
+            })
         }
         Ok(PcaPreflightStatus::CompatibilityPackageRequired(generation)) => {
             log::info!("[BOOT PCA] 镜像缺少 {generation}，准备离线资源包");
             if let Some(staged) = staged {
-                return lr_core::pca_compat::open_staged_package(
+                let package = lr_core::pca_compat::open_staged_package(
                     Path::new(image_path),
                     volume_index,
                     &staged.path,
@@ -103,27 +137,35 @@ pub fn verify_before_disk_write(
                     staged.image_index,
                     staged.target,
                 )
-                .map(Some)
                 .map_err(|error| {
                     log::error!("[BOOT PCA] 暂存兼容包验证失败: {error}");
                     tr!(
                         "暂存的 PCA2023 兼容包校验失败：{}。安装已在格式化前停止。",
                         error
                     )
+                })?;
+                return Ok(BootPreflight {
+                    pca_compat_package: Some(package),
+                    uefiseven_source,
+                    secure_boot_disable_required,
                 });
             }
-            lr_core::pca_compat::prepare_from_local_assets(
+            let package = lr_core::pca_compat::prepare_from_local_assets(
                 Path::new(image_path),
                 volume_index,
                 &crate::utils::path::get_bin_dir().join("pca2023"),
             )
-            .map(Some)
             .map_err(|error| {
                 log::error!("[BOOT PCA] 自动准备兼容包失败: {error}");
                 tr!(
                     "准备适用于所选系统镜像的 PCA2023 离线资源失败：{}。安装已在格式化前停止。",
                     error
                 )
+            })?;
+            Ok(BootPreflight {
+                pca_compat_package: Some(package),
+                uefiseven_source,
+                secure_boot_disable_required,
             })
         }
         Err(error) => {
@@ -131,6 +173,23 @@ pub fn verify_before_disk_write(
             Err(user_error(&error))
         }
     }
+}
+
+fn resolve_uefiseven_source(data_directory: &Path) -> Result<std::path::PathBuf, String> {
+    let staged = data_directory.join("uefiseven");
+    let bundled = crate::utils::path::get_bin_dir().join("uefiseven");
+    let source = if staged.is_dir() { staged } else { bundled };
+    lr_core::boot_pca::verify_uefiseven_package(&source).map_err(|error| {
+        tr!(
+            "Windows 7 x64 UEFI 兼容加载器校验失败：{}。安装已在格式化前停止。",
+            error
+        )
+    })?;
+    log::info!(
+        "[BOOT PCA] Windows 7 x64 UEFI 将使用已校验的 UefiSeven 资源: {}",
+        source.display()
+    );
+    Ok(source)
 }
 
 fn user_error(error: &PcaPreflightError) -> String {

@@ -17,8 +17,8 @@ static const DYNAMIC_API dynamic_apis[] = {
     {"setupapi.dll", "SetupGetInfDriverStoreLocationW", DYNAMIC_OPTIONAL, "OEM driver export"},
     {"newdev.dll", "DiInstallDriverW", DYNAMIC_FEATURE, "online driver installation"},
 
-    {"wintrust.dll", "CryptCATAdminAcquireContext2", DYNAMIC_FEATURE, "driver catalog verification"},
-    {"wintrust.dll", "CryptCATAdminCalcHashFromFileHandle2", DYNAMIC_FEATURE, "driver catalog verification"},
+    {"wintrust.dll", "CryptCATAdminAcquireContext2", DYNAMIC_FEATURE, "driver catalog verification", "wintrust.dll", "CryptCATAdminAcquireContext"},
+    {"wintrust.dll", "CryptCATAdminCalcHashFromFileHandle2", DYNAMIC_FEATURE, "driver catalog verification", "wintrust.dll", "CryptCATAdminCalcHashFromFileHandle"},
     {"wintrust.dll", "CryptCATAdminReleaseContext", DYNAMIC_FEATURE, "driver catalog verification"},
 
     {"fveapi.dll", "FveOpenVolumeW", DYNAMIC_FEATURE, "BitLocker recovery"},

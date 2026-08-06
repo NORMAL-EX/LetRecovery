@@ -604,21 +604,32 @@ impl Dism {
         result
     }
 
-    /// 添加 CAB 更新包到离线系统
-    /// 使用 dism.exe 命令行实现
-    pub fn add_package_offline(&self, image_path: &str, cab_path: &str) -> Result<()> {
+    /// 在一个 DISM servicing 会话中按依赖顺序添加多个 CAB 更新包。
+    pub fn add_packages_offline_ordered(
+        &self,
+        image_path: &str,
+        cab_paths: &[std::path::PathBuf],
+    ) -> Result<()> {
+        if cab_paths.is_empty() {
+            anyhow::bail!("no ordered CAB packages were supplied");
+        }
         log::info!(
-            "[Dism] 使用 dism.exe 安装 CAB 更新包: {} -> {}",
-            cab_path,
+            "[Dism] 在单个 servicing 会话中按顺序安装 {} 个 CAB 更新包 -> {}",
+            cab_paths.len(),
             image_path
         );
-
+        for (index, cab) in cab_paths.iter().enumerate() {
+            log::info!(
+                "[Dism] 有序 CAB {}/{}: {}",
+                index + 1,
+                cab_paths.len(),
+                cab.display()
+            );
+        }
         let dism_exe =
-            DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
-
-        dism_exe.add_package_offline(image_path, cab_path, false, None)?;
-
-        log::info!("[Dism] CAB 更新包安装完成");
+            DismExe::new().map_err(|error| anyhow::anyhow!("dism.exe 初始化失败: {error}"))?;
+        dism_exe.add_packages_offline_ordered(image_path, cab_paths, false, None)?;
+        log::info!("[Dism] 有序 CAB servicing 会话完成");
         Ok(())
     }
 

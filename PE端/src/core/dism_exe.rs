@@ -914,38 +914,76 @@ impl DismExe {
             image_path
         );
 
-        // 验证文件存在
-        if !Path::new(package_path).exists() {
-            bail!("{}", tr!("CAB 包文件不存在: {}", package_path));
+        self.add_packages_offline_ordered(
+            image_path,
+            &[PathBuf::from(package_path)],
+            ignore_check,
+            progress_tx,
+        )
+    }
+
+    /// 在同一个 DISM servicing 会话中按给定顺序添加多个离线包。
+    ///
+    /// 依赖包必须由调用方按依赖顺序传入。DISM 官方支持重复的
+    /// `/PackagePath` 参数，并按命令行顺序处理；这对 Windows 7 NVMe
+    /// 热修补包这种有关联关系的组合尤为重要。
+    pub fn add_packages_offline_ordered(
+        &self,
+        image_path: &str,
+        package_paths: &[PathBuf],
+        ignore_check: bool,
+        progress_tx: Option<Sender<DismExeProgress>>,
+    ) -> Result<()> {
+        for package_path in package_paths {
+            if !package_path.is_file() {
+                bail!("{}", tr!("CAB 包文件不存在: {}", package_path.display()));
+            }
+        }
+        let scratch_dir = Self::ensure_scratch_directory();
+        let args = Self::build_add_packages_offline_arguments(
+            image_path,
+            package_paths,
+            ignore_check,
+            &scratch_dir,
+        )?;
+        let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.execute_with_progress(&args_ref, progress_tx)?;
+        Ok(())
+    }
+
+    fn build_add_packages_offline_arguments(
+        image_path: &str,
+        package_paths: &[PathBuf],
+        ignore_check: bool,
+        scratch_dir: &str,
+    ) -> Result<Vec<String>> {
+        if image_path.trim().is_empty() {
+            bail!("offline image path is empty");
+        }
+        if package_paths.is_empty() {
+            bail!("no offline packages were supplied");
+        }
+        if scratch_dir.trim().is_empty() {
+            bail!("DISM scratch directory is empty");
         }
 
-        // 规范化镜像路径
         let normalized_image = if image_path.ends_with('\\') {
             image_path.to_string()
         } else {
             format!("{}\\", image_path)
         };
-
-        // 确保 scratchdir 存在
-        let scratch_dir = Self::ensure_scratch_directory();
-
-        // 构建命令参数
         let mut args = vec![
-            "/Image:".to_string() + &normalized_image,
+            format!("/Image:{normalized_image}"),
             "/Add-Package".to_string(),
-            "/PackagePath:".to_string() + package_path,
-            format!("/scratchdir:{}", scratch_dir),
         ];
-
+        for package_path in package_paths {
+            args.push(format!("/PackagePath:{}", package_path.display()));
+        }
+        args.push(format!("/scratchdir:{scratch_dir}"));
         if ignore_check {
             args.push("/IgnoreCheck".to_string());
         }
-
-        // 转换为 &str 切片
-        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-        self.execute_with_progress(&args_ref, progress_tx)?;
-        Ok(())
+        Ok(args)
     }
 
     /// 批量添加 Windows Update CAB 包到离线系统镜像
@@ -1104,6 +1142,51 @@ mod tests {
         let output = "Line 1\nError: Something went wrong\nDetails here\nMore info\nLast line";
         let error = DismExe::extract_error_from_output(output);
         assert!(error.contains("Error:"));
+    }
+
+    #[test]
+    fn ordered_package_arguments_preserve_dependency_order_in_one_transaction() {
+        let packages = vec![
+            PathBuf::from(r"R:\nvme\Windows6.1-KB2990941-v3-x64.cab"),
+            PathBuf::from(r"R:\nvme\Windows6.1-KB3087873-v2-x64.cab"),
+        ];
+        let args = DismExe::build_add_packages_offline_arguments(
+            r"C:",
+            &packages,
+            false,
+            r"X:\Windows\Temp",
+        )
+        .unwrap();
+        assert_eq!(args[0], r"/Image:C:\");
+        assert_eq!(args[1], "/Add-Package");
+        assert_eq!(
+            args[2],
+            r"/PackagePath:R:\nvme\Windows6.1-KB2990941-v3-x64.cab"
+        );
+        assert_eq!(
+            args[3],
+            r"/PackagePath:R:\nvme\Windows6.1-KB3087873-v2-x64.cab"
+        );
+        assert_eq!(args[4], r"/scratchdir:X:\Windows\Temp");
+        assert_eq!(args.len(), 5);
+    }
+
+    #[test]
+    fn ordered_package_arguments_reject_empty_inputs() {
+        assert!(DismExe::build_add_packages_offline_arguments(
+            r"C:\",
+            &[],
+            false,
+            r"X:\Windows\Temp"
+        )
+        .is_err());
+        assert!(DismExe::build_add_packages_offline_arguments(
+            "",
+            &[PathBuf::from(r"R:\nvme\one.cab")],
+            false,
+            r"X:\Windows\Temp"
+        )
+        .is_err());
     }
 
     #[test]

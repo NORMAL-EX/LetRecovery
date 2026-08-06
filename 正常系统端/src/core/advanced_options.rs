@@ -250,17 +250,8 @@ impl AdvancedOptions {
             }
         };
 
-        // 检查 UefiSeven 文件
-        let uefiseven_efi = uefiseven_dir.join("bootx64.efi");
-        let uefiseven_ini = uefiseven_dir.join("UefiSeven.ini");
-
-        if !uefiseven_efi.exists() {
-            log::error!(
-                "[UEFISEVEN] UefiSeven bootx64.efi 不存在: {}",
-                uefiseven_efi.display()
-            );
-            return Err(anyhow::anyhow!("UefiSeven bootx64.efi 不存在"));
-        }
+        lr_core::boot_pca::verify_uefiseven_package(&uefiseven_dir)
+            .map_err(|error| anyhow::anyhow!("UefiSeven 固定资源校验失败: {error}"))?;
 
         // UefiSeven 必须跟随目标 Windows 所在磁盘，不能改写其它硬盘的 ESP。
         let boot_manager = crate::core::bcdedit::BootManager::new();
@@ -271,47 +262,23 @@ impl AdvancedOptions {
         log::info!("[UEFISEVEN] EFI 分区挂载点: {}", efi_mount_point);
 
         // Microsoft Boot 目录
-        let ms_boot_dir = format!("{}\\EFI\\Microsoft\\Boot", efi_mount_point);
-        let bootmgfw_path = format!("{}\\bootmgfw.efi", ms_boot_dir);
-        let bootmgfw_original = format!("{}\\bootmgfw.original.efi", ms_boot_dir);
-        let uefiseven_target = format!("{}\\bootmgfw.efi", ms_boot_dir);
-        let uefiseven_ini_target = format!("{}\\UefiSeven.ini", ms_boot_dir);
-
-        // 检查原始 bootmgfw.efi 是否存在
-        if !std::path::Path::new(&bootmgfw_path).exists() {
-            log::error!("[UEFISEVEN] bootmgfw.efi 不存在: {}", bootmgfw_path);
-            return Err(anyhow::anyhow!("bootmgfw.efi 不存在，请确保引导修复已完成"));
+        let ms_boot_dir =
+            std::path::PathBuf::from(format!("{}\\EFI\\Microsoft\\Boot", efi_mount_point));
+        let machine = lr_core::windows_hardware::collect_machine_identity();
+        log::info!("[UEFISEVEN] machine environment: {:?}", machine.environment);
+        for diagnostic in &machine.diagnostics {
+            log::debug!("[UEFISEVEN] hardware probe: {diagnostic}");
+        }
+        if !lr_core::windows_hardware::should_install_uefiseven(machine.environment) {
+            lr_core::boot_pca::restore_native_windows7_uefi_entries(&ms_boot_dir).map_err(
+                |error| anyhow::anyhow!("恢复 VMware 原生 Windows EFI 引导失败: {error}"),
+            )?;
+            log::info!("[UEFISEVEN] confirmed VMware guest; native Microsoft EFI entries restored");
+            return Ok(());
         }
 
-        // 备份原始 bootmgfw.efi（如果尚未备份）
-        if !std::path::Path::new(&bootmgfw_original).exists() {
-            log::info!("[UEFISEVEN] 备份原始 bootmgfw.efi 到 bootmgfw.original.efi");
-            std::fs::copy(&bootmgfw_path, &bootmgfw_original)?;
-        } else {
-            log::info!("[UEFISEVEN] bootmgfw.original.efi 已存在，跳过备份");
-        }
-
-        // 复制 UefiSeven 到 bootmgfw.efi（替换原来的）
-        log::info!("[UEFISEVEN] 部署 UefiSeven bootx64.efi -> bootmgfw.efi");
-        std::fs::copy(&uefiseven_efi, &uefiseven_target)?;
-
-        // 复制配置文件（如果存在）
-        if uefiseven_ini.exists() {
-            log::info!("[UEFISEVEN] 部署 UefiSeven.ini 配置文件");
-            std::fs::copy(&uefiseven_ini, &uefiseven_ini_target)?;
-        } else {
-            // 创建默认配置文件
-            log::info!("[UEFISEVEN] 创建默认 UefiSeven.ini 配置");
-            let default_config = r#"[uefiseven]
-; Skip any warnings and errors during boot
-skiperrors=0
-; Enable verbose logging (set to 1 for debugging)
-verbose=0
-; Log output to file (requires verbose=1)
-log=0
-"#;
-            std::fs::write(&uefiseven_ini_target, default_config)?;
-        }
+        lr_core::boot_pca::install_uefiseven_package(&uefiseven_dir, &ms_boot_dir)
+            .map_err(|error| anyhow::anyhow!("部署 UefiSeven 失败: {error}"))?;
 
         log::info!("[UEFISEVEN] UefiSeven 补丁应用成功");
         log::info!("[UEFISEVEN] 启动流程: UEFI -> UefiSeven -> bootmgfw.original.efi -> Windows 7");
@@ -375,6 +342,15 @@ log=0
         let default_loaded = OfflineRegistry::load_hive("pc-default", &default_hive).is_ok();
         if default_loaded {
             hive_cleanup.0.push("pc-default");
+        }
+
+        if Self::target_is_windows_7(target_partition) {
+            let control_sets =
+                OfflineRegistry::disable_crash_auto_reboot_for_loaded_system("pc-sys")?;
+            log::info!(
+                "[WIN7 DIAGNOSTIC] 已关闭首次启动崩溃自动重启并回读验证，control_sets={:?}",
+                control_sets
+            );
         }
 
         // 创建脚本目录（用于存放自定义脚本）

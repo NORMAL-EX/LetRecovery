@@ -91,7 +91,7 @@ windows = { version = "0.58", features = [
     # 进程管理 - ToolHelp
     "Win32_System_Diagnostics_ToolHelp",
 ] }
-winreg = "0.52"
+winreg = "0.55"
 
 # 两端共享核心库
 lr-core = { path = "../lr-core" }
@@ -116,7 +116,7 @@ thiserror = "1"
 
 # 其他工具
 chrono = "0.4"
-dirs = "5"
+dirs = "6"
 walkdir = "2"
 rfd = "0.15"
 single-instance = "0.3"

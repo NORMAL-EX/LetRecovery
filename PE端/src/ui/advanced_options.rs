@@ -3,7 +3,7 @@ use crate::core::dism::Dism;
 use crate::core::registry::OfflineRegistry;
 use crate::utils::path;
 use anyhow::Context;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 脚本目录名称（统一路径，与正常系统端保持一致）
 const SCRIPTS_DIR: &str = "LetRecovery_Scripts";
@@ -135,6 +135,14 @@ pub fn apply_advanced_options(
         log::info!("[ADVANCED] DEFAULT hive 加载成功");
     } else {
         log::warn!("[ADVANCED] DEFAULT hive 加载失败，部分用户级设置可能无法应用");
+    }
+
+    if detect_user_driver_version(target_partition) == Some("win7") {
+        let control_sets = OfflineRegistry::disable_crash_auto_reboot_for_loaded_system("pc-sys")?;
+        log::info!(
+            "[WIN7 DIAGNOSTIC] 已关闭首次启动崩溃自动重启并回读验证，control_sets={:?}",
+            control_sets
+        );
     }
 
     // 创建脚本目录（用于存放自定义脚本）
@@ -720,11 +728,49 @@ fn install_win7_nvme_drivers(drivers_root: &Path, target_partition: &str) -> any
     let cabs = payload.nvme_cabs(architecture)?;
     let dism = Dism::new();
     let image_path = format!("{}\\", target_partition);
-    for cab in cabs {
-        log::info!("[NVME] 按依赖顺序安装锁定的微软更新: {}", cab.display());
-        dism.add_package_offline(&image_path, &cab.to_string_lossy())?;
+    log::info!(
+        "[NVME] 在同一 servicing 会话中按依赖顺序安装 {} 个锁定的微软更新",
+        cabs.len()
+    );
+    dism.add_packages_offline_ordered(&image_path, cabs)?;
+    verify_win7_nvme_offline_versions(target_partition)
+}
+
+fn verify_win7_nvme_offline_versions(target_partition: &str) -> anyhow::Result<()> {
+    use lr_core::windows_file_version::query_file_version;
+
+    let target_root = PathBuf::from(format!(
+        "{}\\",
+        target_partition.trim_end_matches(['\\', '/'])
+    ));
+    let drivers = target_root.join("Windows").join("System32").join("drivers");
+    let expected = [("stornvme.sys", 18_615_u16), ("storport.sys", 18_969_u16)];
+    for (file_name, minimum_revision) in expected {
+        let path = drivers.join(file_name);
+        let version = query_file_version(&path).with_context(|| {
+            format!("回读 Windows 7 NVMe 热修补文件版本失败: {}", path.display())
+        })?;
+        if !is_supported_win7_nvme_file_version(version, minimum_revision) {
+            anyhow::bail!(
+                "Windows 7 NVMe 热修补文件版本不满足要求: {} = {}, 要求 6.1.7601.{} 或更高",
+                path.display(),
+                version,
+                minimum_revision
+            );
+        }
+        log::info!("[NVME] 已回读验证 {} = {}", path.display(), version);
     }
     Ok(())
+}
+
+fn is_supported_win7_nvme_file_version(
+    version: lr_core::windows_file_version::FileVersion,
+    minimum_revision: u16,
+) -> bool {
+    version.major == 6
+        && version.minor == 1
+        && version.build == 7601
+        && version.revision >= minimum_revision
 }
 
 /// 生成删除预装UWP应用的PowerShell脚本
@@ -798,30 +844,12 @@ pub fn get_scripts_dir_name() -> &'static str {
 /// UefiSeven 是一个 EFI 加载器，用于模拟 Int10h 中断，使 Windows 7 能够在 UEFI Class 3 系统上启动。
 ///
 /// 参考: https://github.com/manatails/uefiseven
-pub fn apply_uefiseven_patch(data_partition: &str, target_partition: &str) -> anyhow::Result<()> {
+pub fn apply_uefiseven_patch(uefiseven_dir: &Path, target_partition: &str) -> anyhow::Result<()> {
     use crate::core::bcdedit::BootManager;
-    use std::path::Path;
-
     log::info!("[UEFISEVEN] 开始应用 UefiSeven 补丁");
 
-    // 从数据分区查找 UefiSeven 文件
-    let data_dir = crate::core::config::ConfigFileManager::get_data_dir(data_partition);
-    let uefiseven_dir = format!("{}\\uefiseven", data_dir);
-    let uefiseven_efi = format!("{}\\bootx64.efi", uefiseven_dir);
-    let uefiseven_ini = format!("{}\\UefiSeven.ini", uefiseven_dir);
-
-    if !Path::new(&uefiseven_efi).exists() {
-        log::warn!(
-            "[UEFISEVEN] UefiSeven bootx64.efi 不存在: {}",
-            uefiseven_efi
-        );
-        return Err(anyhow::anyhow!(
-            "UefiSeven bootx64.efi 不存在: {}",
-            uefiseven_efi
-        ));
-    }
-
-    log::info!("[UEFISEVEN] 找到 UefiSeven 文件: {}", uefiseven_efi);
+    lr_core::boot_pca::verify_uefiseven_package(uefiseven_dir)
+        .map_err(|error| anyhow::anyhow!("UefiSeven 固定资源校验失败: {error}"))?;
 
     // 只挂载目标 Windows 所在磁盘的 ESP，不能改写其它硬盘的引导。
     let boot_manager = BootManager::new();
@@ -833,50 +861,67 @@ pub fn apply_uefiseven_patch(data_partition: &str, target_partition: &str) -> an
     log::info!("[UEFISEVEN] EFI 分区: {}", esp_letter);
 
     // Microsoft Boot 目录
-    let ms_boot_dir = format!("{}\\EFI\\Microsoft\\Boot", esp_letter);
-    let bootmgfw_path = format!("{}\\bootmgfw.efi", ms_boot_dir);
-    let bootmgfw_original = format!("{}\\bootmgfw.original.efi", ms_boot_dir);
-    let uefiseven_target = format!("{}\\bootmgfw.efi", ms_boot_dir);
-    let uefiseven_ini_target = format!("{}\\UefiSeven.ini", ms_boot_dir);
-
-    // 检查原始 bootmgfw.efi 是否存在
-    if !Path::new(&bootmgfw_path).exists() {
-        log::warn!("[UEFISEVEN] bootmgfw.efi 不存在: {}", bootmgfw_path);
-        return Err(anyhow::anyhow!("bootmgfw.efi 不存在，请确保引导修复已完成"));
+    let ms_boot_dir = PathBuf::from(format!("{}\\EFI\\Microsoft\\Boot", esp_letter));
+    let machine = lr_core::windows_hardware::collect_machine_identity();
+    log::info!("[UEFISEVEN] machine environment: {:?}", machine.environment);
+    for diagnostic in &machine.diagnostics {
+        log::debug!("[UEFISEVEN] hardware probe: {diagnostic}");
+    }
+    if !lr_core::windows_hardware::should_install_uefiseven(machine.environment) {
+        lr_core::boot_pca::restore_native_windows7_uefi_entries(&ms_boot_dir)
+            .map_err(|error| anyhow::anyhow!("恢复 VMware 原生 Windows EFI 引导失败: {error}"))?;
+        log::info!("[UEFISEVEN] confirmed VMware guest; native Microsoft EFI entries restored");
+        return Ok(());
     }
 
-    // 备份原始 bootmgfw.efi（如果尚未备份）
-    if !Path::new(&bootmgfw_original).exists() {
-        log::info!("[UEFISEVEN] 备份原始 bootmgfw.efi 到 bootmgfw.original.efi");
-        std::fs::copy(&bootmgfw_path, &bootmgfw_original)?;
-    } else {
-        log::info!("[UEFISEVEN] bootmgfw.original.efi 已存在，跳过备份");
-    }
-
-    // 复制 UefiSeven 到 bootmgfw.efi（替换原来的）
-    log::info!("[UEFISEVEN] 部署 UefiSeven bootx64.efi -> bootmgfw.efi");
-    std::fs::copy(&uefiseven_efi, &uefiseven_target)?;
-
-    // 复制配置文件（如果存在）
-    if Path::new(&uefiseven_ini).exists() {
-        log::info!("[UEFISEVEN] 部署 UefiSeven.ini 配置文件");
-        std::fs::copy(&uefiseven_ini, &uefiseven_ini_target)?;
-    } else {
-        // 创建默认配置文件
-        log::info!("[UEFISEVEN] 创建默认 UefiSeven.ini 配置");
-        let default_config = r#"[uefiseven]
-; Skip any warnings and errors during boot
-skiperrors=0
-; Enable verbose logging (set to 1 for debugging)
-verbose=0
-; Log output to file (requires verbose=1)
-log=0
-"#;
-        std::fs::write(&uefiseven_ini_target, default_config)?;
-    }
+    lr_core::boot_pca::install_uefiseven_package(uefiseven_dir, &ms_boot_dir)
+        .map_err(|error| anyhow::anyhow!("部署 UefiSeven 失败: {error}"))?;
 
     log::info!("[UEFISEVEN] UefiSeven 补丁应用成功");
     log::info!("[UEFISEVEN] 启动流程: UEFI -> UefiSeven -> bootmgfw.original.efi -> Windows 7");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_supported_win7_nvme_file_version;
+    use lr_core::windows_file_version::FileVersion;
+
+    #[test]
+    fn nvme_hotfix_version_gate_accepts_gdr_ldr_and_newer_revisions() {
+        for revision in [18_615, 22_823, 24_001] {
+            assert!(is_supported_win7_nvme_file_version(
+                FileVersion {
+                    major: 6,
+                    minor: 1,
+                    build: 7601,
+                    revision,
+                },
+                18_615,
+            ));
+        }
+    }
+
+    #[test]
+    fn nvme_hotfix_version_gate_rejects_wrong_os_and_old_payloads() {
+        assert!(!is_supported_win7_nvme_file_version(
+            FileVersion {
+                major: 6,
+                minor: 1,
+                build: 7601,
+                revision: 18_614,
+            },
+            18_615,
+        ));
+        assert!(!is_supported_win7_nvme_file_version(
+            FileVersion {
+                major: 10,
+                minor: 0,
+                build: 7601,
+                revision: 24_001,
+            },
+            18_615,
+        ));
+    }
 }

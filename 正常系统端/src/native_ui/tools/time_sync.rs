@@ -3,10 +3,10 @@
 //! The legacy operation has no user-selectable server or other input. This module only displays
 //! the fixed fallback order used by the existing backend and returns a confirmation intent.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MoveWindow, SendMessageW, WM_SETFONT,
 };

@@ -29,6 +29,9 @@ pub(crate) enum WorkerMessage {
     SetProgressStatus { progress: u8, status: String },
     /// 标记完成
     Completed,
+    /// The operation succeeded but automatic reboot is suppressed until the user performs the
+    /// described firmware action.
+    CompletedWithWarning(String),
     /// 标记失败
     Failed(String),
 }
@@ -192,7 +195,9 @@ impl WorkflowSession {
                         );
                         if matches!(
                             transition,
-                            WorkerMessage::Completed | WorkerMessage::Failed(_)
+                            WorkerMessage::Completed
+                                | WorkerMessage::CompletedWithWarning(_)
+                                | WorkerMessage::Failed(_)
                         ) {
                             self.terminal_message_seen = true;
                         }
@@ -205,6 +210,7 @@ impl WorkflowSession {
                                     journal.observe_backup_step(*step)
                                 }
                                 WorkerMessage::Completed => journal.complete(),
+                                WorkerMessage::CompletedWithWarning(_) => journal.complete(),
                                 WorkerMessage::Failed(error) => journal.fail(error),
                                 WorkerMessage::SetProgress(_)
                                 | WorkerMessage::SetStatus(_)
@@ -227,6 +233,9 @@ impl WorkflowSession {
                                 }
                                 WorkerMessage::Completed => {
                                     state.mark_completed();
+                                }
+                                WorkerMessage::CompletedWithWarning(warning) => {
+                                    state.mark_completed_with_warning(Some(warning));
                                 }
                                 WorkerMessage::Failed(error) => {
                                     state.mark_failed(&error);
@@ -492,8 +501,12 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     // PCA/EFI validation only protects a later boot write. When the user
     // explicitly disabled boot repair, neither validate nor stage boot assets.
-    let pca_compat_package = if !config.repair_boot || config.is_xp_i386 {
-        None
+    let boot_preflight = if !config.repair_boot || config.is_xp_i386 {
+        crate::core::pca_preflight::BootPreflight {
+            pca_compat_package: None,
+            uefiseven_source: None,
+            secure_boot_disable_required: false,
+        }
     } else {
         // Auto mode can become UEFI after target preparation, so preflight all
         // modes except explicit Legacy before the first target-disk mutation.
@@ -515,6 +528,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             config.boot_mode != 2,
             config.boot_pca_mode,
             staged_pca_compat.as_ref(),
+            std::path::Path::new(&data_dir),
         ) {
             Ok(package) => package,
             Err(error) => {
@@ -523,6 +537,9 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             }
         }
     };
+    let pca_compat_package = boot_preflight.pca_compat_package;
+    let uefiseven_source = boot_preflight.uefiseven_source;
+    let secure_boot_disable_required = boot_preflight.secure_boot_disable_required;
 
     // Audit the driver tree before formatting. Unsafe traversal is fatal, but a rejected optional
     // package is recorded and later isolated by the exact-INF importer.
@@ -712,6 +729,7 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
     let driver_path = format!("{}\\drivers", data_dir);
     let driver_path_exists = std::path::Path::new(&driver_path).exists();
     let mut vmd_recovery_warning: Option<String> = None;
+    let mut secure_boot_disable_warning: Option<String> = None;
 
     if config.should_import_drivers() && driver_path_exists {
         let _ = tx.send(WorkerMessage::SetStatus(tr!("正在导入驱动...")));
@@ -934,10 +952,9 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
                 }
             };
 
-        // XP/2003 写 ntldr 引导；其余走 bcdboot。
-        // XP 判定：配置已标记 或 释放后的系统缺少 \Windows\Boot（该目录仅 Vista+ 才有）。
-        let win_boot_dir = format!("{}\\Windows\\Boot", target_partition);
-        let is_xp = config.is_xp || !std::path::Path::new(&win_boot_dir).exists();
+        // NT5 只能来自已经验证并写入交接配置的安装意图。不能再通过目录缺失
+        // 猜测 XP，否则损坏或精简的现代镜像会被错误写入 NTLDR 引导。
+        let is_xp = config.is_xp || config.is_xp_i386;
         let boot_result = if is_xp {
             if use_uefi {
                 log::info!("[PE安装] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
@@ -950,8 +967,27 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
             boot_manager.repair_boot_advanced(&target_partition, use_uefi, config.boot_pca_mode)
         };
         if let Err(e) = boot_result {
+            log::error!("[PE安装] 修复引导失败: {e}");
             let _ = tx.send(WorkerMessage::Failed(tr!("修复引导失败: {}", e)));
             return;
+        }
+
+        if use_uefi && uefiseven_source.is_some() {
+            log::info!("[PE安装] 部署 Win7 x64 UEFI 兼容加载器 UefiSeven");
+            if let Err(error) = crate::ui::advanced_options::apply_uefiseven_patch(
+                uefiseven_source.as_deref().expect("checked above"),
+                &target_partition,
+            ) {
+                log::error!("[PE安装] UefiSeven 部署失败: {error}");
+                let _ = tx.send(WorkerMessage::Failed(tr!(
+                    "部署 Windows 7 UEFI 兼容加载器失败: {}",
+                    error
+                )));
+                return;
+            }
+            if secure_boot_disable_required {
+                secure_boot_disable_warning = Some(tr!("Windows 7 UEFI 已安装完成，但当前 Secure Boot（安全启动）仍处于开启状态。请先进入 BIOS/UEFI 关闭 Secure Boot，再启动新系统。程序不会自动重启。"));
+            }
         }
     } else {
         log::info!("[PE安装] 用户已关闭添加引导，跳过引导模式探测和引导写入");
@@ -1062,12 +1098,18 @@ fn execute_install_workflow(tx: Sender<WorkerMessage>) {
 
     // 完成
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Complete));
-    let _ = tx.send(WorkerMessage::Completed);
-    if let Some(warning) = vmd_recovery_warning {
-        let _ = tx.send(WorkerMessage::SetStatus(warning));
-        log::warn!("VMD recovery is required; automatic restart is suppressed");
+    let completion_warning = [vmd_recovery_warning, secure_boot_disable_warning]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !completion_warning.is_empty() {
+        let _ = tx.send(WorkerMessage::CompletedWithWarning(completion_warning));
+        log::warn!("post-install firmware action is required; automatic restart is suppressed");
         return;
     }
+
+    let _ = tx.send(WorkerMessage::Completed);
 
     log::info!("========== PE安装流程完成 ==========");
 

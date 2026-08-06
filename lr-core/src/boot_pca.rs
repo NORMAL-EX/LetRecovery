@@ -12,6 +12,470 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::{CommandExecutor, CommandRequest, SystemCommandExecutor};
 use crate::encoding::gbk_to_utf8;
+use crate::scoped_temp_file::ScopedTempFile;
+use crate::windows_file_version::FileVersion;
+
+pub const UEFISEVEN_BOOTX64_SIZE: u64 = 96_896;
+pub const UEFISEVEN_BOOTX64_SHA256: &str =
+    "0a44a256cda725c22f1daadcf093fc4660b7214e6437968a4c8e119aed02a947";
+pub const UEFISEVEN_INI_SIZE: u64 = 294;
+pub const UEFISEVEN_INI_SHA256: &str =
+    "7a4293182f93ae9537251b80de03308b2e9cb33e194711894ddf84377edf58bb";
+
+/// Boot-file policy selected from the installed target's own `ntdll.dll` version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstalledWindowsBootFamily {
+    /// Vista through Windows 8.1 use the ordinary BCDBoot UEFI path. PCA2011/PCA2023
+    /// selection belongs only to Windows 10/11 and Server 2016+.
+    LegacyUefi,
+    /// Windows 10/11 and their server counterparts use the PCA-aware path.
+    ModernPca,
+    /// NT5 must stay on its dedicated XP/2003 boot writer.
+    Nt5,
+}
+
+pub fn classify_installed_windows_boot_family(
+    version: FileVersion,
+) -> Result<InstalledWindowsBootFamily, String> {
+    match version.major {
+        5 => Ok(InstalledWindowsBootFamily::Nt5),
+        6 if version.minor <= 3 => Ok(InstalledWindowsBootFamily::LegacyUefi),
+        10 => Ok(InstalledWindowsBootFamily::ModernPca),
+        _ => Err(format!("不支持或无法确认的目标 Windows 版本: {version}")),
+    }
+}
+
+pub fn inspect_installed_windows_boot_family(
+    windows_partition: &str,
+) -> Result<(FileVersion, InstalledWindowsBootFamily), String> {
+    let win = windows_partition.trim_end_matches(['\\', ':']);
+    let ntdll = PathBuf::from(format!("{}:\\Windows\\System32\\ntdll.dll", win));
+    let version = crate::windows_file_version::query_file_version(&ntdll)
+        .map_err(|error| format!("读取目标系统版本失败 {}: {error}", ntdll.display()))?;
+    Ok((version, classify_installed_windows_boot_family(version)?))
+}
+
+fn verify_locked_file(
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("读取固定资源元数据失败 {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("固定资源不是普通文件: {}", path.display()));
+    }
+    if metadata.len() != expected_size {
+        return Err(format!(
+            "固定资源大小不匹配 {}: expected={expected_size}, actual={}",
+            path.display(),
+            metadata.len()
+        ));
+    }
+    let actual = crate::hash::sha256_file(path, |_| {})
+        .map_err(|error| format!("计算固定资源 SHA-256 失败 {}: {error}", path.display()))?;
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        return Err(format!(
+            "固定资源 SHA-256 不匹配 {}: expected={expected_sha256}, actual={actual}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Verify the exact UefiSeven payload shipped with LetRecovery.
+pub fn verify_uefiseven_package(directory: &Path) -> Result<(), String> {
+    verify_locked_file(
+        &directory.join("bootx64.efi"),
+        UEFISEVEN_BOOTX64_SIZE,
+        UEFISEVEN_BOOTX64_SHA256,
+    )?;
+    verify_locked_file(
+        &directory.join("UefiSeven.ini"),
+        UEFISEVEN_INI_SIZE,
+        UEFISEVEN_INI_SHA256,
+    )
+}
+
+#[derive(Clone)]
+struct UefiSevenChainTarget {
+    active: PathBuf,
+    original: PathBuf,
+    ini: PathBuf,
+}
+
+fn path_name_eq(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+}
+
+fn uefiseven_installed_chain_targets(
+    microsoft_boot: &Path,
+) -> Result<[UefiSevenChainTarget; 2], String> {
+    if !path_name_eq(microsoft_boot, "Boot") {
+        return Err(format!(
+            "Microsoft EFI 引导目录结构无效: {}",
+            microsoft_boot.display()
+        ));
+    }
+    let microsoft = microsoft_boot.parent().ok_or_else(|| {
+        format!(
+            "Microsoft EFI 引导目录缺少父目录: {}",
+            microsoft_boot.display()
+        )
+    })?;
+    if !path_name_eq(microsoft, "Microsoft") {
+        return Err(format!(
+            "Microsoft EFI 引导目录结构无效: {}",
+            microsoft_boot.display()
+        ));
+    }
+    let efi = microsoft.parent().ok_or_else(|| {
+        format!(
+            "Microsoft EFI 引导目录缺少 EFI 根目录: {}",
+            microsoft_boot.display()
+        )
+    })?;
+    if !path_name_eq(efi, "EFI") {
+        return Err(format!(
+            "Microsoft EFI 引导目录结构无效: {}",
+            microsoft_boot.display()
+        ));
+    }
+
+    let firmware_fallback = efi.join("Boot");
+    Ok([
+        UefiSevenChainTarget {
+            active: microsoft_boot.join("bootmgfw.efi"),
+            original: microsoft_boot.join("bootmgfw.original.efi"),
+            ini: microsoft_boot.join("UefiSeven.ini"),
+        },
+        UefiSevenChainTarget {
+            active: firmware_fallback.join("bootx64.efi"),
+            original: firmware_fallback.join("bootx64.original.efi"),
+            ini: firmware_fallback.join("UefiSeven.ini"),
+        },
+    ])
+}
+
+fn replace_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "atomic EFI target has no parent directory",
+        )
+    })?;
+    ScopedTempFile::create_in(parent, "uefiseven", "tmp", bytes)?.persist_replace(path)
+}
+
+fn restore_optional_file(path: &Path, bytes: &Option<Vec<u8>>) -> std::io::Result<()> {
+    match bytes {
+        Some(bytes) => replace_file_atomically(path, bytes),
+        None if path.exists() => std::fs::remove_file(path),
+        None => Ok(()),
+    }
+}
+
+/// Replace both installed Windows 7 x64 boot-manager entry points with the locked
+/// UefiSeven loader.
+///
+/// Firmware normally follows the registered `EFI/Microsoft/Boot/bootmgfw.efi`
+/// entry, but some firmware and hypervisors boot an installed disk through the
+/// removable-media fallback `EFI/Boot/bootx64.efi`. Both paths must therefore
+/// enter UefiSeven, while each original Windows loader is preserved alongside the
+/// shim under the name UefiSeven expects. The operation is transactional across
+/// both entry points so a partial deployment is rolled back.
+pub fn install_uefiseven_package(directory: &Path, microsoft_boot: &Path) -> Result<(), String> {
+    verify_uefiseven_package(directory)?;
+    if !microsoft_boot.is_dir() {
+        return Err(format!(
+            "Microsoft EFI 引导目录不存在: {}",
+            microsoft_boot.display()
+        ));
+    }
+
+    let source_efi = directory.join("bootx64.efi");
+    let source_ini = directory.join("UefiSeven.ini");
+    let loader = std::fs::read(&source_efi)
+        .map_err(|error| format!("读取锁定 UefiSeven 加载器失败: {error}"))?;
+    let targets = uefiseven_installed_chain_targets(microsoft_boot)?;
+
+    for target in &targets {
+        if !target.active.is_file() {
+            return Err(format!(
+                "标准 UEFI 引导文件不存在，不能部署 UefiSeven: {}",
+                target.active.display()
+            ));
+        }
+    }
+
+    let snapshots = targets
+        .iter()
+        .map(|target| {
+            Ok::<_, String>((
+                std::fs::read(&target.active).map_err(|error| {
+                    format!("回读 EFI 引导文件失败 {}: {error}", target.active.display())
+                })?,
+                std::fs::read(&target.original).ok(),
+                std::fs::read(&target.ini).ok(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let deploy_result = (|| {
+        for target in &targets {
+            let current = std::fs::read(&target.active).map_err(|error| {
+                format!("回读 EFI 引导文件失败 {}: {error}", target.active.display())
+            })?;
+            if current != loader {
+                replace_file_atomically(&target.original, &current).map_err(|error| {
+                    format!(
+                        "备份 EFI 引导文件失败 {} -> {}: {error}",
+                        target.active.display(),
+                        target.original.display()
+                    )
+                })?;
+                let backup = std::fs::read(&target.original).map_err(|error| {
+                    format!(
+                        "回读 EFI 原始链文件失败 {}: {error}",
+                        target.original.display()
+                    )
+                })?;
+                if current != backup {
+                    return Err(format!(
+                        "EFI 原始链文件备份回读不一致: {}",
+                        target.original.display()
+                    ));
+                }
+            } else if !target.original.is_file() {
+                return Err(format!(
+                    "EFI 入口已是 UefiSeven，但原始链文件缺失: {}",
+                    target.original.display()
+                ));
+            }
+
+            let original = std::fs::read(&target.original).map_err(|error| {
+                format!(
+                    "回读 EFI 原始链文件失败 {}: {error}",
+                    target.original.display()
+                )
+            })?;
+            if original == loader {
+                return Err(format!(
+                    "EFI 原始链文件不能是 UefiSeven 自身: {}",
+                    target.original.display()
+                ));
+            }
+            if efi_fallback_name(&target.original)? != "bootx64.efi" {
+                return Err(format!(
+                    "EFI 原始链文件不是 x64 EFI 程序: {}",
+                    target.original.display()
+                ));
+            }
+
+            let ini = std::fs::read(&source_ini)
+                .map_err(|error| format!("读取 UefiSeven.ini 失败: {error}"))?;
+            replace_file_atomically(&target.ini, &ini).map_err(|error| {
+                format!("部署 UefiSeven.ini 失败 {}: {error}", target.ini.display())
+            })?;
+            verify_locked_file(&target.ini, UEFISEVEN_INI_SIZE, UEFISEVEN_INI_SHA256)?;
+            replace_file_atomically(&target.active, &loader).map_err(|error| {
+                format!(
+                    "部署 UefiSeven 加载器失败 {}: {error}",
+                    target.active.display()
+                )
+            })?;
+            verify_locked_file(
+                &target.active,
+                UEFISEVEN_BOOTX64_SIZE,
+                UEFISEVEN_BOOTX64_SHA256,
+            )?;
+        }
+        Ok::<(), String>(())
+    })();
+
+    if let Err(error) = deploy_result {
+        let mut rollback_errors = Vec::new();
+        for (target, (active, original, ini)) in targets.iter().zip(snapshots.iter()) {
+            if let Err(restore_error) = replace_file_atomically(&target.active, active) {
+                rollback_errors.push(format!("{}: {restore_error}", target.active.display()));
+            }
+            if let Err(restore_error) = restore_optional_file(&target.original, original) {
+                rollback_errors.push(format!("{}: {restore_error}", target.original.display()));
+            }
+            if let Err(restore_error) = restore_optional_file(&target.ini, ini) {
+                rollback_errors.push(format!("{}: {restore_error}", target.ini.display()));
+            }
+        }
+        return Err(format!(
+            "{error}; UefiSeven 入口回滚{}",
+            if rollback_errors.is_empty() {
+                "成功".to_string()
+            } else {
+                format!("不完整: {}", rollback_errors.join("; "))
+            }
+        ));
+    }
+    log::info!(
+        "[UEFISEVEN] locked package deployed and verified for Microsoft and firmware fallback entries: {}",
+        microsoft_boot.display()
+    );
+    Ok(())
+}
+
+fn is_locked_uefiseven_loader(path: &Path) -> Result<bool, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "读取 EFI 入口元数据失败 {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if !metadata.is_file() || metadata.len() != UEFISEVEN_BOOTX64_SIZE {
+        return Ok(false);
+    }
+    let actual = crate::hash::sha256_file(path, |_| {})
+        .map_err(|error| format!("计算 EFI 入口 SHA-256 失败 {}: {error}", path.display()))?;
+    Ok(actual.eq_ignore_ascii_case(UEFISEVEN_BOOTX64_SHA256))
+}
+
+fn is_locked_uefiseven_ini(path: &Path) -> Result<bool, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "读取 UefiSeven 配置元数据失败 {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if !metadata.is_file() || metadata.len() != UEFISEVEN_INI_SIZE {
+        return Ok(false);
+    }
+    let actual = crate::hash::sha256_file(path, |_| {}).map_err(|error| {
+        format!(
+            "计算 UefiSeven 配置 SHA-256 失败 {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(actual.eq_ignore_ascii_case(UEFISEVEN_INI_SHA256))
+}
+
+/// Restore both native Windows EFI entry points when a confirmed VMware guest does
+/// not need UefiSeven. Existing non-UefiSeven loaders are preserved, while a shim
+/// installed by LetRecovery is replaced with its verified adjacent original.
+///
+/// The operation snapshots and rolls back both entry points as one transaction. A
+/// missing or invalid original fails closed instead of leaving a partially native
+/// boot chain.
+pub fn restore_native_windows7_uefi_entries(microsoft_boot: &Path) -> Result<(), String> {
+    let targets = uefiseven_installed_chain_targets(microsoft_boot)?;
+    let snapshots = targets
+        .iter()
+        .map(|target| {
+            Ok((
+                std::fs::read(&target.active).ok(),
+                std::fs::read(&target.original).ok(),
+                std::fs::read(&target.ini).ok(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let restore_result = (|| {
+        for target in &targets {
+            if is_locked_uefiseven_loader(&target.active)? {
+                if !target.original.is_file() {
+                    return Err(format!(
+                        "EFI 入口是 UefiSeven，但缺少原始 Windows 加载器: {}",
+                        target.original.display()
+                    ));
+                }
+                if is_locked_uefiseven_loader(&target.original)? {
+                    return Err(format!(
+                        "EFI 原始链文件不能是 UefiSeven 自身: {}",
+                        target.original.display()
+                    ));
+                }
+                if efi_fallback_name(&target.original)? != "bootx64.efi" {
+                    return Err(format!(
+                        "EFI 原始链文件不是 x64 EFI 程序: {}",
+                        target.original.display()
+                    ));
+                }
+                let original = std::fs::read(&target.original).map_err(|error| {
+                    format!(
+                        "读取 EFI 原始链文件失败 {}: {error}",
+                        target.original.display()
+                    )
+                })?;
+                replace_file_atomically(&target.active, &original).map_err(|error| {
+                    format!(
+                        "恢复原生 Windows EFI 入口失败 {}: {error}",
+                        target.active.display()
+                    )
+                })?;
+            } else if !target.active.is_file() {
+                return Err(format!(
+                    "原生 Windows EFI 入口不存在: {}",
+                    target.active.display()
+                ));
+            }
+
+            if is_locked_uefiseven_loader(&target.active)? {
+                return Err(format!(
+                    "恢复后 EFI 入口仍是 UefiSeven: {}",
+                    target.active.display()
+                ));
+            }
+            if efi_fallback_name(&target.active)? != "bootx64.efi" {
+                return Err(format!(
+                    "恢复后的 EFI 入口不是 x64 EFI 程序: {}",
+                    target.active.display()
+                ));
+            }
+            if is_locked_uefiseven_ini(&target.ini)? {
+                std::fs::remove_file(&target.ini).map_err(|error| {
+                    format!("清理 UefiSeven 配置失败 {}: {error}", target.ini.display())
+                })?;
+            }
+        }
+        Ok::<(), String>(())
+    })();
+
+    if let Err(error) = restore_result {
+        let mut rollback_errors = Vec::new();
+        for (target, (active, original, ini)) in targets.iter().zip(snapshots.iter()) {
+            if let Err(restore_error) = restore_optional_file(&target.active, active) {
+                rollback_errors.push(format!("{}: {restore_error}", target.active.display()));
+            }
+            if let Err(restore_error) = restore_optional_file(&target.original, original) {
+                rollback_errors.push(format!("{}: {restore_error}", target.original.display()));
+            }
+            if let Err(restore_error) = restore_optional_file(&target.ini, ini) {
+                rollback_errors.push(format!("{}: {restore_error}", target.ini.display()));
+            }
+        }
+        return Err(format!(
+            "{error}; 原生 EFI 双入口回滚{}",
+            if rollback_errors.is_empty() {
+                "成功".to_string()
+            } else {
+                format!("不完整: {}", rollback_errors.join("; "))
+            }
+        ));
+    }
+
+    log::info!(
+        "[UEFISEVEN] native Windows EFI entries verified for confirmed VMware guest: {}",
+        microsoft_boot.display()
+    );
+    Ok(())
+}
 
 /// Pick an unused drive letter for a temporary ESP mount.
 ///
@@ -403,6 +867,69 @@ pub fn inspect_esp_generation(esp_root: &Path) -> EfiSignatureInfo {
         return primary_info;
     }
     inspect_efi_signature(&fallback)
+}
+
+/// Write the ordinary UEFI boot files used by Vista, Windows 7, Windows 8 and
+/// Windows 8.1. These releases predate the PCA2023 BootEx contract, so routing
+/// them through `repair_uefi_boot` can reject a perfectly valid legacy
+/// `bootmgfw.efi` merely because its signer is not classified as PCA2011/2023.
+pub fn repair_legacy_windows_uefi_boot(
+    bcdboot_path: &Path,
+    windows_partition: &str,
+    esp_letter: &str,
+) -> Result<(), String> {
+    let win = windows_partition.trim_end_matches(['\\', ':']);
+    let windows_dir = PathBuf::from(format!("{}:\\Windows", win));
+    let esp = esp_letter.trim_end_matches(['\\', ':']);
+    let esp_root = PathBuf::from(format!("{}:\\", esp));
+
+    if !windows_dir.is_dir() {
+        return Err(format!("Windows 目录不存在: {}", windows_dir.display()));
+    }
+    if !esp_root.is_dir() {
+        return Err(format!("ESP 未挂载: {}", esp_root.display()));
+    }
+
+    let windows_arg = windows_dir.to_string_lossy().to_string();
+    let esp_arg = format!("{}:", esp);
+    log::info!(
+        "[BOOT LEGACY UEFI] 执行标准 bcdboot，Windows={}，ESP={}",
+        windows_arg,
+        esp_arg
+    );
+    run_bcdboot(bcdboot_path, &windows_arg, &esp_arg, PcaGeneration::Pca2011)?;
+
+    let microsoft_boot = esp_root.join("EFI").join("Microsoft").join("Boot");
+    let bcd = microsoft_boot.join("BCD");
+    if !bcd.is_file() {
+        return Err(format!("bcdboot 返回成功，但未生成 BCD: {}", bcd.display()));
+    }
+    let primary = microsoft_boot.join("bootmgfw.efi");
+    if !primary.is_file() {
+        return Err(format!(
+            "bcdboot 返回成功，但未生成 bootmgfw.efi: {}",
+            primary.display()
+        ));
+    }
+
+    // Parsing the PE machine both rejects malformed output and picks the correct
+    // firmware fallback name without relying on the host/PE architecture.
+    let fallback_name = efi_fallback_name(&primary)?;
+    let fallback_dir = esp_root.join("EFI").join("Boot");
+    std::fs::create_dir_all(&fallback_dir)
+        .map_err(|error| format!("创建 EFI fallback 目录失败: {error}"))?;
+    let fallback = fallback_dir.join(fallback_name);
+    std::fs::copy(&primary, &fallback)
+        .map_err(|error| format!("复制 bootmgfw.efi 到 {fallback_name} 失败: {error}"))?;
+    let primary_bytes =
+        std::fs::read(&primary).map_err(|error| format!("回读 bootmgfw.efi 失败: {error}"))?;
+    let fallback_bytes =
+        std::fs::read(&fallback).map_err(|error| format!("回读 {fallback_name} 失败: {error}"))?;
+    if primary_bytes != fallback_bytes {
+        return Err(format!("EFI fallback 回读不一致: {}", fallback.display()));
+    }
+    log::info!("[BOOT LEGACY UEFI] 标准 UEFI 引导写入并回读验证完成");
+    Ok(())
 }
 
 /// Write and verify the selected EFI boot-manager generation.
@@ -865,6 +1392,8 @@ mod windows_impl {
     use std::path::Path;
     use std::ptr::null_mut;
 
+    use super::{generation_from_name, FirmwarePcaInfo, PcaGeneration};
+    use crate::windows_compat::get_firmware_environment_variable;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS, HANDLE,
@@ -887,9 +1416,6 @@ mod windows_impl {
         SE_SYSTEM_ENVIRONMENT_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::Win32::System::WindowsProgramming::GetFirmwareEnvironmentVariableExW;
-
-    use super::{generation_from_name, FirmwarePcaInfo, PcaGeneration};
 
     const EFI_GLOBAL_VARIABLE_GUID: &str = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}";
     const EFI_IMAGE_SECURITY_DATABASE_GUID: &str = "{D719B2CB-3D3A-4596-A3BC-DAD00E67656F}";
@@ -1131,10 +1657,10 @@ mod windows_impl {
         let mut buffer = vec![0u8; 1024 * 1024];
         let mut attributes = 0u32;
         let size = unsafe {
-            GetFirmwareEnvironmentVariableExW(
+            get_firmware_environment_variable(
                 PCWSTR(name_wide.as_ptr()),
                 PCWSTR(guid_wide.as_ptr()),
-                Some(buffer.as_mut_ptr() as *mut c_void),
+                buffer.as_mut_ptr() as *mut c_void,
                 buffer.len() as u32,
                 Some(&mut attributes),
             )
@@ -1318,6 +1844,31 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    #[test]
+    fn installed_windows_version_selects_the_correct_boot_family() {
+        let version = |major, minor| crate::windows_file_version::FileVersion {
+            major,
+            minor,
+            build: 0,
+            revision: 0,
+        };
+
+        for legacy in [version(6, 0), version(6, 1), version(6, 2), version(6, 3)] {
+            assert_eq!(
+                classify_installed_windows_boot_family(legacy).unwrap(),
+                InstalledWindowsBootFamily::LegacyUefi
+            );
+        }
+        assert_eq!(
+            classify_installed_windows_boot_family(version(10, 0)).unwrap(),
+            InstalledWindowsBootFamily::ModernPca
+        );
+        assert_eq!(
+            classify_installed_windows_boot_family(version(5, 1)).unwrap(),
+            InstalledWindowsBootFamily::Nt5
+        );
+    }
 
     struct SequenceExecutor {
         outcomes: Mutex<VecDeque<crate::command::CommandOutcome>>,
@@ -1529,6 +2080,108 @@ mod tests {
         assert_eq!(efi_architecture_from_pe(&image(0x8664)), Some(9));
         assert_eq!(efi_architecture_from_pe(&image(0xaa64)), Some(12));
         assert_eq!(efi_architecture_from_pe(&image(0xffff)), None);
+    }
+
+    #[test]
+    fn uefiseven_wraps_registered_and_firmware_fallback_entries() {
+        let [registered, fallback] =
+            uefiseven_installed_chain_targets(Path::new(r"S:\EFI\Microsoft\Boot")).unwrap();
+        assert_eq!(
+            registered.active,
+            PathBuf::from(r"S:\EFI\Microsoft\Boot\bootmgfw.efi")
+        );
+        assert_eq!(
+            registered.original,
+            PathBuf::from(r"S:\EFI\Microsoft\Boot\bootmgfw.original.efi")
+        );
+        assert_eq!(
+            registered.ini,
+            PathBuf::from(r"S:\EFI\Microsoft\Boot\UefiSeven.ini")
+        );
+        assert_eq!(fallback.active, PathBuf::from(r"S:\EFI\Boot\bootx64.efi"));
+        assert_eq!(
+            fallback.original,
+            PathBuf::from(r"S:\EFI\Boot\bootx64.original.efi")
+        );
+        assert_eq!(fallback.ini, PathBuf::from(r"S:\EFI\Boot\UefiSeven.ini"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uefiseven_deployment_wraps_and_preserves_both_boot_entries() {
+        let root = crate::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "uefiseven-deploy",
+        )
+        .unwrap();
+        let microsoft_boot = root.path().join("EFI").join("Microsoft").join("Boot");
+        let fallback = root.path().join("EFI").join("Boot").join("bootx64.efi");
+        std::fs::create_dir_all(&microsoft_boot).unwrap();
+        std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+
+        let original_loader = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        std::fs::write(microsoft_boot.join("bootmgfw.efi"), &original_loader).unwrap();
+        std::fs::write(&fallback, &original_loader).unwrap();
+
+        let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("assets")
+            .join("release")
+            .join("bin")
+            .join("uefiseven");
+        install_uefiseven_package(&package, &microsoft_boot).unwrap();
+
+        assert_eq!(
+            std::fs::read(microsoft_boot.join("bootmgfw.efi")).unwrap(),
+            std::fs::read(package.join("bootx64.efi")).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(microsoft_boot.join("bootmgfw.original.efi")).unwrap(),
+            original_loader
+        );
+        assert_eq!(
+            std::fs::read(&fallback).unwrap(),
+            std::fs::read(package.join("bootx64.efi")).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(fallback.parent().unwrap().join("bootx64.original.efi")).unwrap(),
+            original_loader
+        );
+        assert_eq!(
+            std::fs::read(fallback.parent().unwrap().join("UefiSeven.ini")).unwrap(),
+            std::fs::read(package.join("UefiSeven.ini")).unwrap()
+        );
+
+        // Repeating the deployment must not replace either saved Windows loader
+        // with the UefiSeven shim.
+        install_uefiseven_package(&package, &microsoft_boot).unwrap();
+        assert_eq!(
+            std::fs::read(microsoft_boot.join("bootmgfw.original.efi")).unwrap(),
+            original_loader
+        );
+        assert_eq!(
+            std::fs::read(fallback.parent().unwrap().join("bootx64.original.efi")).unwrap(),
+            original_loader
+        );
+
+        restore_native_windows7_uefi_entries(&microsoft_boot).unwrap();
+        assert_eq!(
+            std::fs::read(microsoft_boot.join("bootmgfw.efi")).unwrap(),
+            original_loader
+        );
+        assert_eq!(std::fs::read(&fallback).unwrap(), original_loader);
+        assert!(!microsoft_boot.join("UefiSeven.ini").exists());
+        assert!(!fallback.parent().unwrap().join("UefiSeven.ini").exists());
+
+        // Native reconciliation is idempotent and must not remove the recovery copies.
+        restore_native_windows7_uefi_entries(&microsoft_boot).unwrap();
+        assert!(microsoft_boot.join("bootmgfw.original.efi").is_file());
+        assert!(fallback
+            .parent()
+            .unwrap()
+            .join("bootx64.original.efi")
+            .is_file());
     }
 
     #[test]

@@ -564,8 +564,12 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
 
         // PCA/EFI validation only protects a later boot write. When the user
         // explicitly disabled boot repair, neither validate nor stage boot assets.
-        let pca_compat_package = if !config.repair_boot || config.is_xp_i386 {
-            None
+        let boot_preflight = if !config.repair_boot || config.is_xp_i386 {
+            core::pca_preflight::BootPreflight {
+                pca_compat_package: None,
+                uefiseven_source: None,
+                secure_boot_disable_required: false,
+            }
         } else {
             // Keep CLI installs on the same fail-closed path as the PE GUI.
             let staged_pca_compat = match core::pca_preflight::staged_config(
@@ -586,6 +590,7 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
                 config.boot_mode != 2,
                 config.boot_pca_mode,
                 staged_pca_compat.as_ref(),
+                std::path::Path::new(&data_dir),
             ) {
                 Ok(package) => package,
                 Err(error) => {
@@ -594,6 +599,9 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
                 }
             }
         };
+        let pca_compat_package = boot_preflight.pca_compat_package;
+        let uefiseven_source = boot_preflight.uefiseven_source;
+        let secure_boot_disable_required = boot_preflight.secure_boot_disable_required;
 
         // Keep CLI installs on the same pre-destructive structural audit as the native UI.
         if config.should_import_drivers() {
@@ -723,6 +731,7 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
         let driver_path_exists = std::path::Path::new(&driver_path).exists();
 
         let mut vmd_recovery_warning: Option<String> = None;
+        let mut secure_boot_disable_warning: Option<String> = None;
         if config.should_import_drivers() && driver_path_exists {
             if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
                 log::error!("[PE INSTALL] 初始化 PE 驱动签名信任链失败: {error}");
@@ -843,9 +852,8 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
             let use_uefi =
                 DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition)?;
 
-            // XP/2003：写 XP 引导（UEFI 化映像走 UEFI/GPT，否则 ntldr）；其余走 bcdboot。
-            let win_boot_dir = format!("{}\\Windows\\Boot", target_partition);
-            let is_xp = config.is_xp || !std::path::Path::new(&win_boot_dir).exists();
+            // NT5 只能来自经过验证的安装意图，不能根据目标目录缺失猜测。
+            let is_xp = config.is_xp || config.is_xp_i386;
             let boot_result = if is_xp {
                 if use_uefi {
                     log::info!("[PE INSTALL] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
@@ -863,21 +871,23 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            // Step 5.5: 如果启用了 Win7 UEFI 补丁，应用 UefiSeven
-            if use_uefi && config.win7_uefi_patch {
+            // Step 5.5: 所选卷确认为 Win7 x64 且最终使用 UEFI 时自动应用 UefiSeven。
+            if use_uefi && uefiseven_source.is_some() {
                 log::info!("[PE INSTALL] Step 5.5: 应用 Win7 UEFI 补丁 (UefiSeven)");
                 match ui::advanced_options::apply_uefiseven_patch(
-                    &data_partition,
+                    uefiseven_source.as_deref().expect("checked above"),
                     &target_partition,
                 ) {
-                    Ok(_) => log::info!("[PE INSTALL] UefiSeven 补丁应用成功"),
+                    Ok(_) => {
+                        log::info!("[PE INSTALL] UefiSeven 补丁应用成功");
+                        if secure_boot_disable_required {
+                            secure_boot_disable_warning = Some(tr!("Windows 7 UEFI 已安装完成，但当前 Secure Boot（安全启动）仍处于开启状态。请先进入 BIOS/UEFI 关闭 Secure Boot，再启动新系统。程序不会自动重启。"));
+                        }
+                    }
                     Err(e) => {
-                        // UefiSeven 补丁失败不中断安装，只记录警告
-                        log::warn!(
-                            "[PE INSTALL] 警告: UefiSeven 补丁应用失败: {} (继续安装)",
-                            e
-                        );
-                        log::warn!("UefiSeven 补丁应用失败: {}", e);
+                        log::error!("[PE INSTALL] UefiSeven 补丁应用失败: {e}");
+                        show_error_message(&tr!("部署 Windows 7 UEFI 兼容加载器失败: {}", e));
+                        return Ok(());
                     }
                 }
             }
@@ -957,9 +967,14 @@ fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
 
         log::info!("[PE INSTALL] 安装完成!");
 
-        if let Some(warning) = vmd_recovery_warning {
-            log::warn!("[PE INSTALL] VMD recovery is required; automatic restart is suppressed");
-            show_error_message(&warning);
+        let completion_warning = [vmd_recovery_warning, secure_boot_disable_warning]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !completion_warning.is_empty() {
+            log::warn!("[PE INSTALL] post-install firmware action is required; automatic restart is suppressed");
+            show_success_message(&completion_warning);
         } else if config.auto_reboot {
             log::info!("[PE INSTALL] 即将重启...");
             if let Err(error) = lr_core::windows_shutdown::schedule_restart(

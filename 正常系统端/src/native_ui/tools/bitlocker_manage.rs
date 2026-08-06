@@ -3,6 +3,7 @@
 //! The dialog consumes caller-supplied read-only inventory and returns typed intents. It never
 //! creates a BitLocker manager, reads a recovery protector, writes a file, or changes protection.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
@@ -13,7 +14,6 @@ use windows::Win32::UI::Controls::{
     LVM_SETTEXTCOLOR, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_REPORT,
     LVS_SHOWSELALWAYS,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW, SetWindowTextW,

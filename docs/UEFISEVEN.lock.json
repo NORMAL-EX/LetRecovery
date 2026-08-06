@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "upstream": "https://github.com/manatails/uefiseven",
+  "source": "User-provided existing LetRecovery resource set",
+  "architecture": "x86_64",
+  "authenticode": "NotSigned",
+  "files": [
+    {
+      "path": "bootx64.efi",
+      "size": 96896,
+      "sha256": "0A44A256CDA725C22F1DAADCF093FC4660B7214E6437968A4C8E119AED02A947"
+    },
+    {
+      "path": "UefiSeven.ini",
+      "size": 294,
+      "sha256": "7A4293182F93AE9537251B80DE03308B2E9CB33E194711894DDF84377EDF58BB"
+    }
+  ]
+}

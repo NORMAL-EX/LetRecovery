@@ -565,6 +565,40 @@ mod native {
 }
 
 impl OfflineRegistry {
+    /// Keep an offline Windows installation on its real bugcheck instead of turning an
+    /// early boot failure into an opaque reboot loop. The loaded SYSTEM hive can contain
+    /// more than one usable control set, so every existing CrashControl key is updated and
+    /// read back through the Win32 registry boundary.
+    pub fn disable_crash_auto_reboot_for_loaded_system(hive_name: &str) -> Result<Vec<u32>> {
+        if hive_name.is_empty()
+            || !hive_name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            anyhow::bail!("invalid loaded SYSTEM hive name")
+        }
+
+        let mut updated = Vec::new();
+        for control_set in 1..=4 {
+            let key = format!(
+                "HKLM\\{}\\ControlSet{:03}\\Control\\CrashControl",
+                hive_name, control_set
+            );
+            if !Self::key_exists(&key)? {
+                continue;
+            }
+            Self::set_dword(&key, "AutoReboot", 0)?;
+            if Self::query_dword(&key, "AutoReboot")? != 0 {
+                anyhow::bail!("CrashControl AutoReboot readback mismatch for {key}")
+            }
+            updated.push(control_set);
+        }
+        if updated.is_empty() {
+            anyhow::bail!("no existing CrashControl key was found in the loaded SYSTEM hive")
+        }
+        Ok(updated)
+    }
+
     pub fn query_string(key_path: &str, value_name: &str) -> Result<String> {
         #[cfg(windows)]
         {

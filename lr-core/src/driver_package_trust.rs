@@ -139,8 +139,10 @@ pub fn verify_driver_package(inf_path: &Path) -> Result<VerifiedDriverPackage> {
     let mut accepted_signer = None;
     let mut last_error = 0;
     for platform in &attempts {
-        let mut signer = SP_INF_SIGNER_INFO_V2_W::default();
-        signer.cbSize = size_of::<SP_INF_SIGNER_INFO_V2_W>() as u32;
+        let mut signer = SP_INF_SIGNER_INFO_V2_W {
+            cbSize: size_of::<SP_INF_SIGNER_INFO_V2_W>() as u32,
+            ..Default::default()
+        };
         let verified = unsafe {
             SetupVerifyInfFileW(
                 PCWSTR(wide.as_ptr()),
@@ -268,11 +270,25 @@ type CryptCatAdminAcquireContext2 =
     unsafe extern "system" fn(*mut isize, *const GUID, *const u16, *const c_void, u32) -> BOOL;
 type CryptCatAdminCalcHashFromFileHandle2 =
     unsafe extern "system" fn(isize, HANDLE, *mut u32, *mut u8, u32) -> BOOL;
+type CryptCatAdminAcquireContext = unsafe extern "system" fn(*mut isize, *const GUID, u32) -> BOOL;
+type CryptCatAdminCalcHashFromFileHandle =
+    unsafe extern "system" fn(HANDLE, *mut u32, *mut u8, u32) -> BOOL;
 type CryptCatAdminReleaseContext = unsafe extern "system" fn(isize, u32) -> BOOL;
 
+#[derive(Clone, Copy)]
+enum CatalogHashApi {
+    Modern {
+        acquire_context: CryptCatAdminAcquireContext2,
+        calc_hash: CryptCatAdminCalcHashFromFileHandle2,
+    },
+    Windows7 {
+        acquire_context: CryptCatAdminAcquireContext,
+        calc_hash: CryptCatAdminCalcHashFromFileHandle,
+    },
+}
+
 struct CatalogApi {
-    acquire_context2: CryptCatAdminAcquireContext2,
-    calc_hash2: CryptCatAdminCalcHashFromFileHandle2,
+    hash: CatalogHashApi,
     release_context: CryptCatAdminReleaseContext,
 }
 
@@ -283,9 +299,23 @@ impl CatalogApi {
         let module_name = wide_null(OsStr::new("wintrust.dll"));
         let module = unsafe { GetModuleHandleW(PCWSTR(module_name.as_ptr())) }
             .context("Wintrust.dll is not loaded")?;
+        let acquire_context2 = load_catalog_proc(module, b"CryptCATAdminAcquireContext2\0");
+        let calc_hash2 = load_catalog_proc(module, b"CryptCATAdminCalcHashFromFileHandle2\0");
+        let hash = match (acquire_context2, calc_hash2) {
+            (Ok(acquire_context), Ok(calc_hash)) => CatalogHashApi::Modern {
+                acquire_context,
+                calc_hash,
+            },
+            // Microsoft documents the *2 pair as Windows 8+. Keep it on every modern system,
+            // while Windows 7 falls back to the original XP-era pair. Mixing one generation's
+            // context with the other generation's hash function is deliberately forbidden.
+            _ => CatalogHashApi::Windows7 {
+                acquire_context: load_catalog_proc(module, b"CryptCATAdminAcquireContext\0")?,
+                calc_hash: load_catalog_proc(module, b"CryptCATAdminCalcHashFromFileHandle\0")?,
+            },
+        };
         Ok(Self {
-            acquire_context2: load_catalog_proc(module, b"CryptCATAdminAcquireContext2\0")?,
-            calc_hash2: load_catalog_proc(module, b"CryptCATAdminCalcHashFromFileHandle2\0")?,
+            hash,
             release_context: load_catalog_proc(module, b"CryptCATAdminReleaseContext\0")?,
         })
     }
@@ -348,20 +378,40 @@ fn verify_catalog_member_with_algorithm(
     member_handle: HANDLE,
     algorithm: &str,
 ) -> Result<()> {
-    let algorithm_wide = wide_null(OsStr::new(algorithm));
+    let api_generation = match api.hash {
+        CatalogHashApi::Modern { .. } => "modern",
+        CatalogHashApi::Windows7 { .. } => "Windows 7 compatible",
+    };
     let mut context_handle = 0isize;
-    let acquired = unsafe {
-        (api.acquire_context2)(
-            &mut context_handle,
-            &DRIVER_ACTION_VERIFY,
-            algorithm_wide.as_ptr(),
-            std::ptr::null(),
-            0,
-        )
+    let acquired = match api.hash {
+        CatalogHashApi::Modern {
+            acquire_context, ..
+        } => {
+            let algorithm_wide = wide_null(OsStr::new(algorithm));
+            unsafe {
+                acquire_context(
+                    &mut context_handle,
+                    &DRIVER_ACTION_VERIFY,
+                    algorithm_wide.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                )
+            }
+        }
+        CatalogHashApi::Windows7 {
+            acquire_context, ..
+        } => {
+            if algorithm != "SHA1" {
+                bail!(
+                    "the Windows 7 catalog API cannot select the requested {algorithm} hash policy"
+                );
+            }
+            unsafe { acquire_context(&mut context_handle, &DRIVER_ACTION_VERIFY, 0) }
+        }
     };
     if !acquired.as_bool() || context_handle == 0 {
         bail!(
-            "CryptCATAdminAcquireContext2 failed with Win32 error {}",
+            "{api_generation} catalog context acquisition failed with Win32 error {}",
             unsafe { GetLastError() }.0
         );
     }
@@ -372,34 +422,44 @@ fn verify_catalog_member_with_algorithm(
 
     let mut hash_size = 0u32;
     let measured = unsafe {
-        (api.calc_hash2)(
-            context.handle,
-            member_handle,
-            &mut hash_size,
-            std::ptr::null_mut(),
-            0,
-        )
+        match api.hash {
+            CatalogHashApi::Modern { calc_hash, .. } => calc_hash(
+                context.handle,
+                member_handle,
+                &mut hash_size,
+                std::ptr::null_mut(),
+                0,
+            ),
+            CatalogHashApi::Windows7 { calc_hash, .. } => {
+                calc_hash(member_handle, &mut hash_size, std::ptr::null_mut(), 0)
+            }
+        }
     };
     if !measured.as_bool() || hash_size == 0 || hash_size > 128 {
         bail!(
-            "CryptCATAdminCalcHashFromFileHandle2 size query failed (size {}, Win32 error {})",
+            "{api_generation} catalog hash size query failed (size {}, Win32 error {})",
             hash_size,
             unsafe { GetLastError() }.0
         );
     }
     let mut hash = vec![0u8; hash_size as usize];
     let calculated = unsafe {
-        (api.calc_hash2)(
-            context.handle,
-            member_handle,
-            &mut hash_size,
-            hash.as_mut_ptr(),
-            0,
-        )
+        match api.hash {
+            CatalogHashApi::Modern { calc_hash, .. } => calc_hash(
+                context.handle,
+                member_handle,
+                &mut hash_size,
+                hash.as_mut_ptr(),
+                0,
+            ),
+            CatalogHashApi::Windows7 { calc_hash, .. } => {
+                calc_hash(member_handle, &mut hash_size, hash.as_mut_ptr(), 0)
+            }
+        }
     };
     if !calculated.as_bool() || hash_size as usize != hash.len() {
         bail!(
-            "CryptCATAdminCalcHashFromFileHandle2 failed (size {}, Win32 error {})",
+            "{api_generation} catalog hash calculation failed (size {}, Win32 error {})",
             hash_size,
             unsafe { GetLastError() }.0
         );

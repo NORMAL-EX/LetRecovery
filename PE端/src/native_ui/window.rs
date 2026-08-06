@@ -1,5 +1,6 @@
 use std::mem::size_of;
 
+use crate::native_ui::{GetDpiForSystem, GetDpiForWindow, SetBestProcessDpiAwareness};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
@@ -11,10 +12,6 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, DRAWITEMSTRUCT, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
-};
-use windows::Win32::UI::HiDpi::{
-    GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
@@ -235,7 +232,7 @@ impl Drop for NativeShell {
 
 pub fn run_shell_preview(workflow: WorkflowKind) -> windows::core::Result<ShellExit> {
     unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = SetBestProcessDpiAwareness();
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
             dwICC: ICC_STANDARD_CLASSES,

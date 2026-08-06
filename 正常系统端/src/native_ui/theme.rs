@@ -1,3 +1,4 @@
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -18,7 +19,6 @@ use windows::Win32::UI::Controls::{
     CDRF_NOTIFYITEMDRAW, CDRF_SKIPDEFAULT, CDRF_SKIPPOSTPAINT, COMBOBOXINFO, HDITEMW, HDI_TEXT,
     LVIF_TEXT, LVITEMW, NMLVCUSTOMDRAW, NM_CUSTOMDRAW,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, IsWindowEnabled, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
 };

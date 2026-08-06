@@ -361,8 +361,8 @@ impl NativeInstallState {
         // Windows 7 compatibility payloads are bundled, locked and selected by hardware policy.
         // They are not user-supplied advanced options: USB3 is considered for every identified
         // Windows 7 image, while the NVMe hotfix pair is allowed only for x64 plus a positively
-        // identified native NVMe target. The historical processor-power workaround remains an
-        // explicit Windows 7 choice; the broad storage registry hack and UefiSeven stay retired.
+        // identified native NVMe target. UefiSeven is automatic only for x64 Windows 7 when the
+        // final boot policy may use UEFI and boot repair is enabled.
         let (win7_usb3, win7_nvme) =
             windows7_driver_defaults(self.selected_image, target.disk_bus_type);
         advanced_options.win7_inject_usb3_driver = win7_usb3;
@@ -370,7 +370,13 @@ impl NativeInstallState {
         advanced_options.win7_inject_nvme_driver = win7_nvme;
         advanced_options.win7_nvme_driver_path.clear();
         advanced_options.win7_fix_storage_bsod = false;
-        advanced_options.win7_uefi_patch = false;
+        advanced_options.win7_uefi_patch = self.prefs.repair_boot
+            && self.target_may_use_uefi(target)
+            && self.selected_image.is_some_and(|image| {
+                image.major_version == Some(6)
+                    && image.minor_version == Some(1)
+                    && image.architecture == Some(9)
+            });
         let boot_pca_mode = if self.image_supports_pca(is_gho, is_xp_i386) {
             self.prefs.boot_pca_mode
         } else {
@@ -680,7 +686,55 @@ mod tests {
         assert!(options.win7_nvme_driver_path.is_empty());
         assert!(options.win7_fix_acpi_bsod);
         assert!(!options.win7_fix_storage_bsod);
-        assert!(!options.win7_uefi_patch);
+        assert!(options.win7_uefi_patch);
+    }
+
+    #[test]
+    fn uefiseven_is_automatic_only_for_windows_7_x64_uefi_with_boot_repair() {
+        let mut state = base_state();
+        state.selected_image.as_mut().unwrap().major_version = Some(6);
+        state.selected_image.as_mut().unwrap().minor_version = Some(1);
+        state.selected_image.as_mut().unwrap().architecture = Some(9);
+        assert!(
+            state
+                .start_intent()
+                .unwrap()
+                .options
+                .advanced_options
+                .win7_uefi_patch
+        );
+
+        state.selected_image.as_mut().unwrap().architecture = Some(0);
+        assert!(
+            !state
+                .start_intent()
+                .unwrap()
+                .options
+                .advanced_options
+                .win7_uefi_patch
+        );
+
+        state.selected_image.as_mut().unwrap().architecture = Some(9);
+        state.prefs.boot_mode = BootModeSelection::Legacy;
+        assert!(
+            !state
+                .start_intent()
+                .unwrap()
+                .options
+                .advanced_options
+                .win7_uefi_patch
+        );
+
+        state.prefs.boot_mode = BootModeSelection::UEFI;
+        state.prefs.repair_boot = false;
+        assert!(
+            !state
+                .start_intent()
+                .unwrap()
+                .options
+                .advanced_options
+                .win7_uefi_patch
+        );
     }
 
     #[test]

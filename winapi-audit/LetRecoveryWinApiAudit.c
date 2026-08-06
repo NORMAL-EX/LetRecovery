@@ -35,6 +35,8 @@ typedef struct DYNAMIC_API {
     const char *procedure;
     BOOL feature_required;
     const char *feature;
+    const char *fallback_library;
+    const char *fallback_procedure;
 } DYNAMIC_API;
 
 #include "LetRecoveryWinApiDynamicApis.inc"
@@ -495,27 +497,63 @@ static void audit_dynamic_apis(const WCHAR *app_directory, AUDIT_STATE *state) {
         DWORD error = 0;
         HMODULE module = load_dynamic_library(app_directory, api->library, &error);
         FARPROC procedure = NULL;
+        HMODULE fallback_module = NULL;
+        FARPROC fallback_procedure = NULL;
         ++state->dynamic_procedures;
         if (module != NULL) procedure = GetProcAddress(module, api->procedure);
-        if (procedure == NULL) {
-            write_ascii(state->log, "MISSING [dynamic ");
-            write_ascii(state->log, api->feature_required ? "feature" : "optional");
-            write_ascii(state->log, "] ");
-            write_ascii(state->log, api->library);
-            write_ascii(state->log, "!");
-            write_ascii(state->log, api->procedure);
-            write_ascii(state->log, " (feature: ");
-            write_ascii(state->log, api->feature);
-            if (module == NULL) {
-                write_ascii(state->log, ", DLL unavailable, GetLastError=");
-                write_u32(state->log, error);
-            } else {
-                write_ascii(state->log, ", procedure unavailable");
+        if (procedure == NULL && api->fallback_procedure != NULL) {
+            DWORD fallback_error = 0;
+            const char *fallback_library = api->fallback_library != NULL
+                ? api->fallback_library : api->library;
+            fallback_module = load_dynamic_library(app_directory, fallback_library, &fallback_error);
+            ++state->dynamic_procedures;
+            if (fallback_module != NULL) {
+                fallback_procedure = GetProcAddress(fallback_module, api->fallback_procedure);
             }
-            write_ascii(state->log, ")\r\n");
-            if (api->feature_required) ++state->dynamic_feature_missing;
-            else ++state->dynamic_optional_missing;
+            if (fallback_procedure != NULL) {
+                write_ascii(state->log, "MISSING [dynamic modern, compatible fallback available] ");
+                write_ascii(state->log, api->library);
+                write_ascii(state->log, "!");
+                write_ascii(state->log, api->procedure);
+                write_ascii(state->log, " (feature: ");
+                write_ascii(state->log, api->feature);
+                write_ascii(state->log, ", fallback: ");
+                write_ascii(state->log, fallback_library);
+                write_ascii(state->log, "!");
+                write_ascii(state->log, api->fallback_procedure);
+                write_ascii(state->log, ")\r\n");
+                ++state->dynamic_optional_missing;
+            }
         }
+        if (procedure == NULL) {
+            if (fallback_procedure == NULL) {
+                write_ascii(state->log, "MISSING [dynamic ");
+                write_ascii(state->log, api->feature_required ? "feature" : "optional");
+                write_ascii(state->log, "] ");
+                write_ascii(state->log, api->library);
+                write_ascii(state->log, "!");
+                write_ascii(state->log, api->procedure);
+                write_ascii(state->log, " (feature: ");
+                write_ascii(state->log, api->feature);
+                if (module == NULL) {
+                    write_ascii(state->log, ", DLL unavailable, GetLastError=");
+                    write_u32(state->log, error);
+                } else {
+                    write_ascii(state->log, ", procedure unavailable");
+                }
+                if (api->fallback_procedure != NULL) {
+                    write_ascii(state->log, ", compatible fallback also unavailable: ");
+                    write_ascii(state->log, api->fallback_library != NULL
+                        ? api->fallback_library : api->library);
+                    write_ascii(state->log, "!");
+                    write_ascii(state->log, api->fallback_procedure);
+                }
+                write_ascii(state->log, ")\r\n");
+                if (api->feature_required) ++state->dynamic_feature_missing;
+                else ++state->dynamic_optional_missing;
+            }
+        }
+        if (fallback_module != NULL) FreeLibrary(fallback_module);
         if (module != NULL) FreeLibrary(module);
     }
 }

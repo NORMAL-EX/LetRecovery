@@ -3,10 +3,10 @@
 //! It only selects one detected Windows partition, shows its version/architecture, and produces
 //! refresh/confirmation/close intents. No UEFI/Legacy selector or boot-writing operation exists.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, CBS_DROPDOWNLIST,

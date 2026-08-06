@@ -2,6 +2,7 @@ use std::ffi::c_void;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -20,7 +21,6 @@ use windows::Win32::UI::Controls::{
     SetWindowTheme, DRAWITEMSTRUCT, ODA_FOCUS, ODS_DISABLED, ODS_FOCUS, ODS_HOTLIGHT, ODS_SELECTED,
     WM_MOUSELEAVE,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{

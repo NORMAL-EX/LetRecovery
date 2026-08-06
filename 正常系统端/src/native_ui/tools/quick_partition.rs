@@ -4,6 +4,7 @@
 //! host and every destructive action is returned as a fingerprinted intent. No DiskPart command,
 //! resize operation, refresh enumeration, or other host I/O is performed here.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -25,7 +26,6 @@ use windows::Win32::UI::Controls::{
     LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_REPORT, LVS_SHOWSELALWAYS, MEASUREITEMSTRUCT,
     ODS_DISABLED, ODS_GRAYED, ODS_SELECTED, ODT_MENU,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetCapture, ReleaseCapture, SetCapture,
 };

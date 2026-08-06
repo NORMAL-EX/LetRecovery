@@ -42,6 +42,7 @@ pub mod wimlib_dll;
 pub mod win7_driver_package;
 pub mod windows_accounts;
 pub mod windows_cabinet;
+pub mod windows_compat;
 pub mod windows_file_copy;
 pub mod windows_file_version;
 pub mod windows_firmware;

@@ -563,7 +563,7 @@ fn is_uuid(value: &str) -> bool {
 }
 
 fn hex_to_bytes(value: &str) -> Result<Vec<u8>> {
-    if value.len() % 2 != 0 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("invalid hexadecimal digest");
     }
     value

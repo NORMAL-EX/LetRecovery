@@ -38,7 +38,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -63,10 +63,21 @@ jobs:
 
       - name: Build system-side exe (LetRecovery.exe)
         shell: bash
-        working-directory: 正常系统端
+        env:
+          # The Win7 target changes the minimum loader ABI; the resulting single executable still
+          # runs on Windows 8/8.1/10/11 and dynamically prefers their newer APIs.
+          RUSTC_BOOTSTRAP: "1"
         run: |
           set -euo pipefail
-          cargo build --release --locked
+          cargo build -p LetRecovery --release --locked \
+            --target x86_64-win7-windows-msvc \
+            -Z build-std=std,panic_abort
+
+      - name: Build WinAPI compatibility auditor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\winapi-audit\build.ps1
 
       - name: Build PE-side exe (LetRecoveryPE.exe)
         shell: bash
@@ -275,14 +286,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 产物可能在各 crate 的 target/（独立 crate）或工作区根 target/（workspace）
-          src=""
-          for p in "正常系统端/target/release/LetRecovery.exe" "target/release/LetRecovery.exe"; do
-            if [ -f "$p" ]; then src="$p"; break; fi
-          done
-          test -n "$src" || { echo "找不到编译产物 LetRecovery.exe"; exit 1; }
+          # 正常端只发布一份 Win7-11 通用 EXE。PE 端仍由默认现代 Windows target 单独构建。
+          src="target/x86_64-win7-windows-msvc/release/LetRecovery.exe"
+          test -f "$src" || { echo "找不到 Win7-11 通用编译产物 LetRecovery.exe"; exit 1; }
           echo "Using system-side exe: $src"
           cp -f "$src" "pkg/LetRecovery.exe"
+          test -f "target/release/LetRecoveryWinApiAudit.exe" || { echo "找不到兼容性审计器 LetRecoveryWinApiAudit.exe"; exit 1; }
+          cp -f "target/release/LetRecoveryWinApiAudit.exe" "pkg/LetRecoveryWinApiAudit.exe"
 
       - name: Inject PE-side exe into WIM
         shell: pwsh
@@ -313,6 +323,25 @@ jobs:
           New-Item -ItemType Directory -Force -Path $pcaDestination | Out-Null
           Copy-Item -Path (Join-Path $pcaSource "*") -Destination $pcaDestination -Recurse -Force
           Write-Host "Injected PCA2023 offline assets: $pcaDestination"
+          $uefiSevenSource = "pkg\bin\uefiseven"
+          $uefiSevenDestination = Join-Path $mount "Program Files\LetRecoveryPE\bin\uefiseven"
+          if (Test-Path -LiteralPath $uefiSevenDestination) {
+            Remove-Item -LiteralPath $uefiSevenDestination -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $uefiSevenDestination | Out-Null
+          Copy-Item -Path (Join-Path $uefiSevenSource "*") -Destination $uefiSevenDestination -Recurse -Force
+          foreach ($lockedFile in @(
+            @{ Name = "bootx64.efi"; Size = 96896; Sha256 = "0A44A256CDA725C22F1DAADCF093FC4660B7214E6437968A4C8E119AED02A947" },
+            @{ Name = "UefiSeven.ini"; Size = 294; Sha256 = "7A4293182F93AE9537251B80DE03308B2E9CB33E194711894DDF84377EDF58BB" }
+          )) {
+            $lockedPath = Join-Path $uefiSevenDestination $lockedFile.Name
+            $lockedInfo = Get-Item -LiteralPath $lockedPath
+            $lockedHash = (Get-FileHash -LiteralPath $lockedPath -Algorithm SHA256).Hash
+            if ($lockedInfo.Length -ne $lockedFile.Size -or $lockedHash -ne $lockedFile.Sha256) {
+              throw "Injected UefiSeven resource does not match its lock: $lockedPath"
+            }
+          }
+          Write-Host "Injected locked UefiSeven assets: $uefiSevenDestination"
           $languageSource = "assets\release\lang"
           $languageDestination = Join-Path $mount "Program Files\LetRecoveryPE\lang"
           New-Item -ItemType Directory -Force -Path $languageDestination | Out-Null
@@ -421,6 +450,18 @@ jobs:
               -Root $windows7Audit `
               -LockFile "docs\WINDOWS7_DRIVERS.lock.json" `
               -VerifySignatures
+            $uefiSevenRoot = Join-Path $mount "Program Files\LetRecoveryPE\bin\uefiseven"
+            foreach ($lockedFile in @(
+              @{ Name = "bootx64.efi"; Size = 96896; Sha256 = "0A44A256CDA725C22F1DAADCF093FC4660B7214E6437968A4C8E119AED02A947" },
+              @{ Name = "UefiSeven.ini"; Size = 294; Sha256 = "7A4293182F93AE9537251B80DE03308B2E9CB33E194711894DDF84377EDF58BB" }
+            )) {
+              $lockedPath = Join-Path $uefiSevenRoot $lockedFile.Name
+              $lockedInfo = Get-Item -LiteralPath $lockedPath
+              $lockedHash = (Get-FileHash -LiteralPath $lockedPath -Algorithm SHA256).Hash
+              if ($lockedInfo.Length -ne $lockedFile.Size -or $lockedHash -ne $lockedFile.Sha256) {
+                throw "Final WIM UefiSeven resource does not match its lock: $lockedPath"
+              }
+            }
           } finally {
             if ($mounted) {
               dism /Unmount-Image /MountDir:"$mount" /Discard

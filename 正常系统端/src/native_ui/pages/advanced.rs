@@ -2126,7 +2126,7 @@ unsafe fn paint_advanced_scrollbar_to_dc(
         advanced_scrollbar_interaction(viewport)
     };
     let dark = colorref_is_dark(background_color.0);
-    let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(viewport).max(96);
+    let dpi = crate::native_ui::GetDpiForWindow(viewport).max(96);
 
     // The msstyles resources describe how each part looks once the Windows 11 overlay scrollbar
     // expands, but USER32 separately controls whether the track and arrow parts are present.
@@ -2301,7 +2301,7 @@ unsafe fn compose_advanced_scrollbar_frame(
         pixel.copy_from_slice(&[blue, green, red, 255]);
     }
 
-    let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(viewport).max(96);
+    let dpi = crate::native_ui::GetDpiForWindow(viewport).max(96);
     let Some((screen_geometry, disabled)) = advanced_scrollbar_geometry(viewport) else {
         return Some((width, height, dpi, pixels));
     };

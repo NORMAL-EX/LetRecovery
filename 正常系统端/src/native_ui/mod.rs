@@ -16,5 +16,10 @@ pub mod tool_dialogs_mutating;
 pub mod tools;
 mod window;
 
+pub(crate) use lr_core::windows_compat::{
+    dpi_for_system as GetDpiForSystem, dpi_for_window as GetDpiForWindow,
+    enable_best_process_dpi_awareness as SetBestProcessDpiAwareness,
+};
+
 pub(crate) use window::enable_process_dpi_awareness;
 pub use window::run;

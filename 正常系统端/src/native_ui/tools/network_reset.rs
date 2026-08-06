@@ -3,10 +3,10 @@
 //! It has no input controls and never executes a command. The text deliberately mirrors the four
 //! commands in the current backend so the user can assess the real firewall and connectivity risk.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MoveWindow, SendMessageW, WM_SETFONT,
 };

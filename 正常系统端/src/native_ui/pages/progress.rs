@@ -3,11 +3,11 @@
 //! Workers, cancellation, reboot and follow-up actions stay in controllers.
 //! This page displays snapshots and emits command intents only.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     MoveWindow, SendMessageW, ShowWindow, BS_OWNERDRAW, SW_HIDE, SW_SHOW, WM_GETFONT, WM_SETFONT,

@@ -421,7 +421,7 @@ impl NativeInstallExecutor {
             InstallExecutionPhase::VerifySourceImage,
             InstallExecutionPhase::CopySourceImage,
         ]);
-        if intent.options.advanced_options.win7_uefi_patch {
+        if intent.options.repair_boot && intent.options.advanced_options.win7_uefi_patch {
             phases.push(InstallExecutionPhase::StageUefiSeven);
         }
         phases.extend([

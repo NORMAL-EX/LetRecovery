@@ -251,7 +251,7 @@ impl NativeHardwareInspectorDialog {
         let parent = self.shell.content();
         let mut rect = RECT::default();
         let _ = GetClientRect(parent, &mut rect);
-        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(parent).max(96);
+        let dpi = crate::native_ui::GetDpiForWindow(parent).max(96);
         let scale = |value: i32| value * dpi as i32 / 96;
         let width = (rect.right - rect.left).max(0);
         let height = (rect.bottom - rect.top).max(0);

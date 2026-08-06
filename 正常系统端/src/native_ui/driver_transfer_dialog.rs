@@ -3,10 +3,10 @@
 //! The dialog only edits state and emits typed intents. Directory browsing and driver operations
 //! remain owned by the main window and the existing confirmed tool execution boundary.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW, ShowWindow,
     BM_GETCHECK, BM_SETCHECK, BS_AUTORADIOBUTTON, BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING,

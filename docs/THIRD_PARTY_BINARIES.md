@@ -102,7 +102,31 @@ synchronizes the locked tree into the PE WIM and then mounts the final cleaned
 WIM read-only to repeat the same hash and signature checks.
 
 The retired blanket storage-controller package directories (`18`, `19`, `20`,
-`AMD`, `Applessd`, `iastorE` and `viostor`) and UefiSeven must not be restored.
+`AMD`, `Applessd`, `iastorE` and `viostor`) must not be restored.
+
+## UefiSeven
+
+The release package contains the upstream UefiSeven x64 compatibility loader
+under `bin/uefiseven/`. It is used only for a confirmed Windows 7 x64 UEFI
+installation after standard BCDBoot output has been verified. LetRecovery keeps
+the Microsoft loader as `bootmgfw.original.efi`, installs the locked
+`bootx64.efi` as the chain loader, and copies the locked configuration file. A
+reinstall refreshes `bootmgfw.original.efi` from the Microsoft loader just
+written by BCDBoot, so the new system never chains through a stale boot manager
+left by an earlier installation. An idempotent retry that already sees the
+UefiSeven loader preserves and revalidates the existing original instead.
+
+Source project: <https://github.com/manatails/uefiseven>. The packaged binary
+was supplied from the user's existing LetRecovery resource set. It has no
+Authenticode signature, so it is not compatible with Secure Boot. When Secure
+Boot is still enabled, installation may finish but LetRecovery suppresses
+automatic restart and tells the user to disable Secure Boot before starting the
+new Windows 7 system. It is never selected for x86, Legacy BIOS, Vista,
+Windows 8/8.1, Windows 10/11, GHO/GHS or XP/2003.
+
+`docs/UEFISEVEN.lock.json` records every packaged file, exact size and SHA-256.
+Runtime staging and ESP deployment both re-verify this lock; a missing or
+modified file stops deployment instead of silently continuing.
 
 ## Microsoft WHCP driver signing chain
 

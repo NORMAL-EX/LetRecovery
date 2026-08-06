@@ -424,18 +424,22 @@ mod tests {
 
     #[test]
     fn stale_ui_snapshot_cannot_erase_a_newer_pe_catalogue() {
-        let mut stale_ui = AppConfig::default();
-        stale_ui.language = "en-US".to_owned();
+        let stale_ui = AppConfig {
+            language: "en-US".to_owned(),
+            ..Default::default()
+        };
 
-        let mut latest = AppConfig::default();
-        latest.pe_cache = crate::download::config::PeCache {
-            pe_list: vec![crate::download::config::CachedPE {
-                display_name: "LetRecovery PE".to_owned(),
-                filename: "LetRecovery_PE.wim".to_owned(),
-                md5: Some("900150983CD24FB0D6963F7D28E17F72".to_owned()),
-                sha256: None,
-            }],
-            version: 1,
+        let latest = AppConfig {
+            pe_cache: crate::download::config::PeCache {
+                pe_list: vec![crate::download::config::CachedPE {
+                    display_name: "LetRecovery PE".to_owned(),
+                    filename: "LetRecovery_PE.wim".to_owned(),
+                    md5: Some("900150983CD24FB0D6963F7D28E17F72".to_owned()),
+                    sha256: None,
+                }],
+                version: 1,
+            },
+            ..Default::default()
         };
 
         let merged = stale_ui.merge_latest_pe_cache(latest);

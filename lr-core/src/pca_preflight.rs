@@ -158,19 +158,32 @@ pub fn verify_install_image(
         return Ok(PcaPreflightStatus::NotRequired);
     }
 
-    let mut selected_major = None;
+    let mut selected_platform = None;
     if image_kind == InstallImageKind::WimFamily {
-        let (major, architecture) = selected_image_platform(image_file, index)?;
+        let (major, minor, architecture) = inspect_selected_image_platform(image_file, index)?;
         if !matches!(architecture, 0 | 9) {
             return Err(PcaPreflightError::UnsupportedArchitecture(architecture));
         }
-        selected_major = Some(major);
+        selected_platform = Some((major, minor, architecture));
     }
 
     if !may_use_uefi {
         return Ok(PcaPreflightStatus::NotRequired);
     }
-    if selected_major.is_some_and(|major| major != 10) {
+    if selected_platform
+        .is_some_and(|(major, minor, architecture)| requires_uefiseven(major, minor, architecture))
+    {
+        // Win7 x64 UEFI is handed to the locked UefiSeven deployment after the
+        // standard BCDBoot write. UefiSeven is unsigned, so a currently enabled
+        // Secure Boot cannot be made compatible by choosing PCA2011/PCA2023;
+        // installation is allowed to finish and both PE entry points suppress
+        // automatic restart while instructing the user to disable Secure Boot.
+        if firmware.secure_boot_enabled.is_none() {
+            return Err(PcaPreflightError::SecureBootStateUnknown);
+        }
+        return Ok(PcaPreflightStatus::NotRequired);
+    }
+    if selected_platform.is_some_and(|(major, _, _)| major != 10) {
         verify_legacy_windows_firmware(requested, firmware)?;
         return Ok(PcaPreflightStatus::NotRequired);
     }
@@ -223,7 +236,12 @@ pub const fn supports_pca_selection(major: Option<u16>, architecture: Option<u16
     matches!(major, Some(10)) && matches!(architecture, Some(0 | 9))
 }
 
-fn selected_image_platform(image_file: &Path, index: u32) -> Result<(u16, u16), PcaPreflightError> {
+/// Read the selected WIM/ESD volume's Windows version and architecture without
+/// mounting or modifying the image.
+pub fn inspect_selected_image_platform(
+    image_file: &Path,
+    index: u32,
+) -> Result<(u16, u16, u16), PcaPreflightError> {
     let image = image_file
         .to_str()
         .ok_or_else(|| PcaPreflightError::InspectImage("镜像路径不是有效 Unicode".to_string()))?;
@@ -238,10 +256,17 @@ fn selected_image_platform(image_file: &Path, index: u32) -> Result<(u16, u16), 
     let major = selected
         .major_version
         .ok_or_else(|| PcaPreflightError::InspectImage("WIM XML 缺少 VERSION/MAJOR".to_string()))?;
+    let minor = selected
+        .minor_version
+        .ok_or_else(|| PcaPreflightError::InspectImage("WIM XML 缺少 VERSION/MINOR".to_string()))?;
     let architecture = selected
         .architecture
         .ok_or_else(|| PcaPreflightError::InspectImage("WIM XML 缺少 WINDOWS/ARCH".to_string()))?;
-    Ok((major, architecture))
+    Ok((major, minor, architecture))
+}
+
+pub const fn requires_uefiseven(major: u16, minor: u16, architecture: u16) -> bool {
+    major == 6 && minor == 1 && architecture == 9
 }
 
 /// Extract only the two possible Windows boot managers and validate their
@@ -362,6 +387,14 @@ mod tests {
             revokes_pca2011: Some(false),
             error: None,
         }
+    }
+
+    #[test]
+    fn only_windows7_x64_requires_uefiseven() {
+        assert!(requires_uefiseven(6, 1, 9));
+        assert!(!requires_uefiseven(6, 1, 0));
+        assert!(!requires_uefiseven(6, 2, 9));
+        assert!(!requires_uefiseven(10, 0, 9));
     }
 
     fn sources(generation: PcaGeneration) -> WindowsBootSources {

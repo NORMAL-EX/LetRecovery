@@ -5,12 +5,12 @@
 //! host must obtain [`ExpandCAnalysis`] through a read-only controller, show a separate explicit
 //! confirmation for [`ExpandCRequest`], then enter the existing typed PE handoff boundary.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, DeleteObject, RedrawWindow, HFONT, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, MoveWindow, SendMessageW,

@@ -3,10 +3,10 @@
 //! Targets come only from the host's Windows inventory. Hardware and the effective complete
 //! removal scope are read-only; the dialog never performs removal itself.
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MoveWindow, SendMessageW, SetWindowTextW, CBS_DROPDOWNLIST, CB_ADDSTRING,

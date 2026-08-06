@@ -186,6 +186,10 @@ pub struct ProgressState {
     pub is_failed: bool,
     /// 错误信息
     pub error_message: Option<String>,
+    /// Installation completed successfully, but the user must perform a firmware action before
+    /// the new system can boot. This is terminal success metadata, not an ordinary transient
+    /// status line, so it must survive the completed transition.
+    pub completion_warning: Option<String>,
 }
 
 impl Default for ProgressState {
@@ -202,6 +206,7 @@ impl Default for ProgressState {
             is_completed: false,
             is_failed: false,
             error_message: None,
+            completion_warning: None,
         }
     }
 }
@@ -274,7 +279,15 @@ impl ProgressState {
 
     /// 标记完成
     pub fn mark_completed(&mut self) {
+        self.mark_completed_with_warning(None);
+    }
+
+    /// Mark the workflow complete while retaining an optional post-install action for the native
+    /// UI. The worker must not publish this warning as a later status message because terminal
+    /// transitions may already have been rendered by then.
+    pub fn mark_completed_with_warning(&mut self, warning: Option<String>) {
         self.is_completed = true;
+        self.completion_warning = warning;
         self.overall_progress = 100;
         self.step_progress = 100;
         self.has_current_step = !self.is_expand_mode;

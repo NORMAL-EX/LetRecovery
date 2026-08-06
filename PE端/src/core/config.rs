@@ -802,7 +802,7 @@ impl ConfigFileManager {
                     }
                     "VolumeLabel" => config.volume_label = value.to_string(),
                     "CustomUnattendFile" => config.custom_unattend_file = value.to_string(),
-                    "Win7UefiPatch" => config.win7_uefi_patch = false,
+                    "Win7UefiPatch" => config.win7_uefi_patch = value.parse().unwrap_or(false),
                     "Win7InjectUsb3Driver" => {
                         config.win7_inject_usb3_driver = value.parse().unwrap_or(false)
                     }
@@ -925,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_win7_processor_workaround_is_preserved_but_retired_flags_are_ignored() {
+    fn win7_uefi_and_processor_workarounds_are_preserved_but_storage_hack_is_ignored() {
         let config = ConfigFileManager::deserialize_install_config(concat!(
             "[Install]\r\n",
             "Win7UefiPatch=true\r\n",
@@ -934,7 +934,7 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(!config.win7_uefi_patch);
+        assert!(config.win7_uefi_patch);
         assert!(config.win7_fix_acpi_bsod);
         assert!(!config.win7_fix_storage_bsod);
     }

@@ -6,10 +6,10 @@
 
 use std::fmt;
 
+use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW, SetWindowTextW,
     BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL,

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
+use crate::native_ui::{GetDpiForSystem, GetDpiForWindow, SetBestProcessDpiAwareness};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
@@ -21,10 +22,6 @@ use windows::Win32::UI::Controls::{
     LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE,
     LVN_ITEMCHANGED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SHOWSELALWAYS,
     NMHDR, NMLISTVIEW, ODT_HEADER,
-};
-use windows::Win32::UI::HiDpi::{
-    GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -1952,6 +1949,7 @@ struct NativeWindow {
     install_messages: Option<Receiver<InstallWorkerMessage>>,
     install_cancel: Option<Arc<AtomicBool>>,
     install_auto_reboot: bool,
+    install_requires_secure_boot_disable: bool,
     catalogue_messages: Option<Receiver<crate::download::server_config::RemoteConfig>>,
     tool_dialogs: Vec<NativeToolDialog>,
     tool_background_jobs: usize,
@@ -2149,6 +2147,7 @@ impl NativeWindow {
             install_messages: None,
             install_cancel: None,
             install_auto_reboot: false,
+            install_requires_secure_boot_disable: false,
             catalogue_messages: None,
             tool_dialogs: Vec::new(),
             tool_background_jobs: 0,
@@ -9534,6 +9533,10 @@ impl NativeWindow {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         self.install_auto_reboot = intent.options.auto_reboot;
+        self.install_requires_secure_boot_disable = intent.mode == InstallMode::Direct
+            && intent.options.repair_boot
+            && intent.options.advanced_options.win7_uefi_patch
+            && lr_core::boot_pca::inspect_firmware_pca().secure_boot_enabled == Some(true);
         std::thread::spawn(move || {
             let mut backend = ProductionInstallBackend::new(&intent);
             let event_sender = sender.clone();
@@ -9724,14 +9727,19 @@ impl NativeWindow {
                         state.status_text = match outcome {
                             crate::core::native_install_executor::InstallExecutionOutcome::DirectInstallCompleted => {
                                 page.set_completion(ProgressCompletion::DirectInstall);
-                                crate::tr!("系统安装已完成。")
+                                if self.install_requires_secure_boot_disable {
+                                    crate::tr!("Windows 7 UEFI 已安装完成，但当前 Secure Boot（安全启动）仍处于开启状态。请先进入 BIOS/UEFI 关闭 Secure Boot，再启动新系统。程序不会自动重启。")
+                                } else {
+                                    crate::tr!("系统安装已完成。")
+                                }
                             }
                             crate::core::native_install_executor::InstallExecutionOutcome::ReadyToRebootIntoPe => {
                                 page.set_completion(ProgressCompletion::ViaPePrepared);
                                 crate::tr!("PE 环境准备完成，请选择立即重启或稍后重启。")
                             }
                         };
-                        reboot_after_completion = self.install_auto_reboot;
+                        reboot_after_completion =
+                            self.install_auto_reboot && !self.install_requires_secure_boot_disable;
                         terminal = true;
                     }
                     InstallWorkerMessage::Failed(error) => {
@@ -11325,9 +11333,7 @@ pub(super) unsafe fn load_application_icons(
 }
 
 pub(crate) fn enable_process_dpi_awareness() {
-    unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
+    let _ = SetBestProcessDpiAwareness();
 }
 
 pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {

@@ -47,6 +47,16 @@ pub enum MachineEnvironment {
     Unknown,
 }
 
+/// Whether Windows 7 x64 UEFI should be wrapped with UefiSeven on this machine.
+///
+/// VMware's UEFI implementation can boot the native Windows 7 x64 EFI loader, while
+/// UefiSeven cannot reliably unlock the legacy VGA-ROM range at `0xC0000` there.  Only
+/// a positively identified VMware guest bypasses the shim; every physical, unknown or
+/// other virtual environment keeps the conservative compatibility loader.
+pub const fn should_install_uefiseven(environment: MachineEnvironment) -> bool {
+    !matches!(environment, MachineEnvironment::Vmware)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineIdentity {
     pub processor: Option<ProcessorIdentity>,
@@ -411,6 +421,17 @@ mod tests {
             classify_machine_environment(Some(&cpu), Some(&firmware), Some(&ids)),
             MachineEnvironment::Vmware
         );
+    }
+
+    #[test]
+    fn only_confirmed_vmware_bypasses_uefiseven() {
+        assert!(!should_install_uefiseven(MachineEnvironment::Vmware));
+        assert!(should_install_uefiseven(MachineEnvironment::Physical));
+        assert!(should_install_uefiseven(MachineEnvironment::VirtualBox));
+        assert!(should_install_uefiseven(
+            MachineEnvironment::OtherHypervisor
+        ));
+        assert!(should_install_uefiseven(MachineEnvironment::Unknown));
     }
 
     #[test]
