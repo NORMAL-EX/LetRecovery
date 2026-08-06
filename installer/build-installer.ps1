@@ -32,6 +32,7 @@ if (-not (Test-Path -LiteralPath $source -PathType Container)) {
 
 $requiredFiles = @(
     "LetRecovery.exe",
+    "LetRecoveryWinApiAudit.exe",
     "config.json",
     "README.txt",
     "bin\pe\LetRecovery_PE.wim"
