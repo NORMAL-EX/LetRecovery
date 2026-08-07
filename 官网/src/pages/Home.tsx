@@ -37,7 +37,7 @@ const featureIcons = [Zap, Shield, Sparkles, Rocket, Gauge, BadgeCheck]
 
 const downloadLinks = [
   { name: '123云盘', url: 'https://www.123865.com/s/5ZD9-OZ2fd', icon: HardDrive },
-  { name: 'Cloud-PE 云盘', url: 'https://pan.sysre.cn/s/N3iW', icon: Cloud },
+  { name: 'Cloud-PE 云盘', url: 'https://pan.sysre.cn/s/r0CO', icon: Cloud },
   { name: 'GitHub', url: 'https://github.com/NORMAL-EX/LetRecovery/releases', icon: Github },
 ]
 
