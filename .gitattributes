@@ -2,3 +2,7 @@ docs/third-party/wimlib-1.14.5/*.patch -whitespace
 # Signed driver payloads are immutable binary members even when their extension
 # is textual; line-ending normalization would invalidate the lock and catalogs.
 assets/release/bin/drivers/** -text -whitespace
+
+# UefiSeven payloads are byte-locked release resources. Windows checkout must
+# not rewrite the INI line endings because that invalidates the size and hash.
+assets/release/bin/uefiseven/** -text -whitespace
