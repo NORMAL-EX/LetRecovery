@@ -51,7 +51,7 @@ LetRecovery 会自动识别 UEFI / Legacy（GPT→UEFI、MBR→Legacy）并写�
 
 ## 驱动与选项
 
-开始前可在[高级选项](/guide/advanced-options)里启用驱动导出/导入、磁盘控制器驱动注入、无人值守、注册表优化、WiFi 配置迁移等。Win7 / XP 镜像还会自动显示各自的兼容性开关。
+开始前可在[高级选项](/guide/advanced-options)里启用驱动导出/导入、磁盘控制器驱动注入、无人值守、注册表优化、WiFi 配置迁移等。Windows 7 的 USB3/NVMe/UEFI 资源由最终安装意图按镜像、架构和硬件自动选择，只保留受限的 0xA5 手工兼容尝试；XP/2003 仍显示自己的专用选项。
 
 ::: danger
 安装会**格式化目标分区**，请先备份。

@@ -59,6 +59,7 @@ LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]
 | `pe_path` | string | **必填** | PE 启动文件**绝对路径**（`.wim` 或 `.iso`）。 |
 | `volume_index` | number | `1` | 镜像内分卷索引（WIM/ESD 多版本时选择）。 |
 | `is_gho` | bool | 按扩展名自动判断 | 是否 GHO 镜像。 |
+| `is_xp` | bool | `false` | 是否为 XP/2003 镜像；用于进入对应的兼容预检与安装路径。 |
 | `driver_action_mode` | number | `0` | 驱动处理：`0`=不处理，`1`=仅备份，`2`=自动导入（从数据目录 `drivers\` 导入）。 |
 | `unattended` | bool | `false` | 是否生成无人值守配置。 |
 | `auto_reboot` | bool | `true` | 准备完成后是否自动重启进 PE。 |
@@ -94,7 +95,7 @@ LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]
 | `remove_uwp_apps` | bool | 删除预装 UWP 应用。 |
 | `import_storage_controller_drivers` | bool | 导入磁盘控制器驱动（Win10/11 x64）。 |
 | `disable_windows_update` | bool | 禁用 Windows 更新。 |
-| `disable_windows_defender` | bool | 禁用 Windows 安全中心。 |
+| `disable_windows_defender` | bool | 深度移除 Microsoft Defender Antivirus 杀毒引擎；保留 Windows 安全中心、UAC、防火墙、SmartScreen、VBS 与 Defender for Endpoint。 |
 | `disable_reserved_storage` | bool | 禁用系统保留空间。 |
 | `disable_uac` | bool | 禁用用户账户控制。 |
 | `disable_device_encryption` | bool | 禁用自动设备加密。 |
@@ -102,11 +103,6 @@ LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]
 | `restore_classic_context_menu` | bool | Win11 恢复经典右键菜单。 |
 | `custom_username` + `username` | bool + string | 自定义用户名（`custom_username=true` 时取 `username`）。 |
 | `custom_volume_label` + `volume_label` | bool + string | 自定义系统盘卷标。 |
-| `win7_uefi_patch` | bool | Win7 UEFI 补丁（UefiSeven）。 |
-| `win7_inject_usb3_driver` | bool | Win7 注入 USB3 驱动。 |
-| `win7_inject_nvme_driver` | bool | Win7 注入 NVMe 驱动。 |
-| `win7_fix_acpi_bsod` | bool | Windows 7 手工兼容尝试；仅禁用离线系统的 `intelppm`、`amdppm` 和 `Processor` 服务，不修改 ACPI 表或 `acpi.sys`，默认关闭。 |
-| `win7_fix_storage_bsod` | bool | Win7 修复存储控制器蓝屏。 |
 
 示例：
 
@@ -124,6 +120,7 @@ LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]
 ```
 
 ::: warning 注意
+- `win7_*` 是旧配置兼容字段，不是稳定的用户命令行接口，不应在新的 `advanced.json` 中手工设置。旧 0x7B 字段和本命令行路径中的 ACPI 尝试会固定关闭；Windows 7 的锁定 USB3/NVMe/UEFI 自动策略请使用图形界面创建最终安装意图。
 - `AdvancedOptions` 中其余更丰富的项（自定义脚本、自定义驱动目录、注册表导入、自定义文件、迁移 WiFi 等）**不属于"重启进 PE 安装"流程**（图形界面同样如此），即便写进 advanced.json 也不会在本命令行安装流程中生效。
 - 路径建议使用绝对路径；JSON 中的反斜杠需转义（`"D:\\Images\\x.wim"`）。
 :::

@@ -63,6 +63,7 @@ The JSON pointed to by `--config`. **The first three fields are required**; the 
 | `pe_path` | string | **Required** | **Absolute path** of the PE boot file (`.wim` or `.iso`). |
 | `volume_index` | number | `1` | Volume index within the image (selects the edition for multi-edition WIM/ESD). |
 | `is_gho` | bool | Auto-detected by extension | Whether it is a GHO image. |
+| `is_xp` | bool | `false` | Whether the image is XP/2003; selects its compatibility preflight and install path. |
 | `driver_action_mode` | number | `0` | Driver handling: `0` = do nothing, `1` = back up only, `2` = import automatically (imported from the `drivers\` folder in the data directory). |
 | `unattended` | bool | `false` | Whether to generate an unattended configuration. |
 | `auto_reboot` | bool | `true` | Whether to automatically reboot into PE after preparation completes. |
@@ -99,7 +100,7 @@ The following fields **take effect** during the PE installation process (identic
 | `remove_uwp_apps` | bool | Remove preinstalled UWP apps. |
 | `import_storage_controller_drivers` | bool | Import disk controller drivers (Win10/11 x64). |
 | `disable_windows_update` | bool | Disable Windows Update. |
-| `disable_windows_defender` | bool | Disable Windows Security. |
+| `disable_windows_defender` | bool | Deep-remove the Microsoft Defender Antivirus engine while preserving Windows Security, UAC, Firewall, SmartScreen, VBS, and Defender for Endpoint. |
 | `disable_reserved_storage` | bool | Disable reserved storage. |
 | `disable_uac` | bool | Disable User Account Control. |
 | `disable_device_encryption` | bool | Disable automatic device encryption. |
@@ -107,11 +108,6 @@ The following fields **take effect** during the PE installation process (identic
 | `restore_classic_context_menu` | bool | Restore the classic context menu on Win11. |
 | `custom_username` + `username` | bool + string | Custom username (when `custom_username=true`, `username` is used). |
 | `custom_volume_label` + `volume_label` | bool + string | Custom system-disk volume label. |
-| `win7_uefi_patch` | bool | Win7 UEFI patch (UefiSeven). |
-| `win7_inject_usb3_driver` | bool | Inject USB3 drivers for Win7. |
-| `win7_inject_nvme_driver` | bool | Inject NVMe drivers for Win7. |
-| `win7_fix_acpi_bsod` | bool | Manual Windows 7 compatibility attempt; disables only the offline `intelppm`, `amdppm`, and `Processor` services, does not modify ACPI tables or `acpi.sys`, and is off by default. |
-| `win7_fix_storage_bsod` | bool | Fix the storage-controller BSOD on Win7. |
 
 Example:
 
@@ -129,6 +125,7 @@ Example:
 ```
 
 ::: warning Note
+- `win7_*` keys are legacy configuration-compatibility fields, not a stable user-authored CLI interface, and should not be set in new `advanced.json` files. The legacy 0x7B field and the ACPI attempt on this CLI path are forced off. Use the GUI to produce the final install intent for the locked automatic Windows 7 USB3/NVMe/UEFI policy.
 - The remaining, richer items in `AdvancedOptions` (custom scripts, custom driver directories, registry imports, custom files,
   Wi-Fi migration, etc.) **are not part of the "reboot into PE to install" process** (the same is true in the GUI), so even if you write them into advanced.json,
   they will not take effect in this command-line installation process.

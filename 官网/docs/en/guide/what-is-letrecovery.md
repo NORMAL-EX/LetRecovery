@@ -43,8 +43,8 @@ automatically enables or disables the relevant features (for example, "One-click
 
 ## Which systems can I install?
 
-- **Running the LetRecovery desktop client** requires **Windows 10 / 11 (64-bit)**, or simply run it inside WinPE.
-- **The installable target systems** cover a very wide range: Windows **XP / 2003 / 7 / 8 / 8.1 / 10 / 11**. Systems from different eras automatically enable the matching compatibility handling (such as USB3/NVMe injection and blue-screen fixes for Win7, and text-mode setup with storage-driver integration for XP).
+- **The LetRecovery desktop client** supports **Windows 7 / 8 / 8.1 / 10 / 11 (64-bit, one universal build)**, and it can also run directly inside WinPE.
+- **The installable target systems** cover a very wide range: Windows **XP / 2003 / 7 / 8 / 8.1 / 10 / 11**. Each generation uses its matching compatibility policy: Windows 7 uses verified offline USB3/NVMe resources and an automatic UEFI policy, while XP/2003 uses its separate text-mode setup and storage-driver integration. LetRecovery does not present broadly enabling unrelated storage services as a universal BSOD fix.
 
 ## Where to get it
 

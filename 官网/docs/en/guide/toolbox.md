@@ -5,7 +5,7 @@ description: Maintenance tools built into LetRecovery.
 
 # Toolbox
 
-The **Toolbox** page brings together commonly used maintenance tools. Some are available only on the desktop, others only in WinPE — the interface automatically enables/disables (greys out) each tool based on the current environment.
+The **Toolbox** page brings together commonly used maintenance tools. Some are desktop-only and others are WinPE-only. The interface hides unsupported entries for the current environment and Windows version, then compacts the layout. For example, Windows 7/8/8.1 never show Windows 10/11-only APPX tools.
 
 ## Disks and partitions
 
@@ -23,14 +23,14 @@ The **Toolbox** page brings together commonly used maintenance tools. Some are a
 
 - **BitLocker management** — unlock / decrypt / suspend·resume protection, view the recovery key (see [Reinstalling on a BitLocker-encrypted drive](/guide/bitlocker)).
 - **Password reset** — clears a local account's password:
-  - **Online** (the current system): uses `net user` to clear the password and enable the account;
-  - **Offline** (another system): edits its SAM directly. Before making changes, it force-backs up the SAM as `SAM.lrbak`, then deletes that backup on success (to avoid leaving a copy containing hashes on the target drive), keeping the backup only on error so recovery is possible.
+  - **Online** (the current system): uses a parameterized Windows account API to clear the password and enable the account by identity, without parsing localized `net user` output;
+  - **Offline** (another system): uses a controlled registry/SAM boundary. Before making changes, it force-backs up the SAM as `SAM.lrbak`, then deletes that backup on success (to avoid leaving a copy containing hashes on the target drive), keeping the backup only on error so recovery is possible.
 - **One-click boot repair** *(PE only)* — rebuilds the BCD / repairs UEFI·Legacy boot.
 
 ## Drivers and apps
 
 - **Driver backup and restore**, **Import storage drivers**
-- **Remove APPX apps** (ships with a whitelist of critical system components so nothing essential is deleted by mistake), **NVIDIA driver uninstall**
+- **Remove APPX apps** (shown only on supported Windows 10/11 environments and protected by a critical-component allowlist), **NVIDIA driver uninstall**
 
 ## System expansion and maintenance
 

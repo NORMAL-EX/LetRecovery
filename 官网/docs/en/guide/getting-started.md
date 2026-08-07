@@ -9,7 +9,7 @@ description: Download and run LetRecovery, and complete your first reinstall.
 
 To run the LetRecovery **desktop client**:
 
-- Windows 10 / 11 (64-bit) — the desktop client enforces a 64-bit check, so it cannot run on 32-bit systems
+- Windows 7 / 8 / 8.1 / 10 / 11 (64-bit, one universal build) — 32-bit systems cannot run it
 - Administrator privileges (launching as a non-administrator automatically triggers a UAC elevation prompt)
 - UEFI or Legacy BIOS, either works
 
@@ -17,14 +17,14 @@ To run the LetRecovery **desktop client**:
 The official recommendation is at least **4 GB of free memory**, but this is just a rule of thumb — the program does **not** enforce a memory check. With limited memory, applying a large image may simply be slower or fail.
 :::
 
-The range of **target systems** you can install goes well beyond 10/11. See [Which systems can it install](/guide/what-is-letrecovery) for details.
+The **target systems** you can install also include much older releases such as XP / 2003. The desktop host requirement and the target-system range are separate; see [Which systems can it install](/guide/what-is-letrecovery) for details.
 
 ## 1. Download
 
 Get the latest **full package** from [GitHub Releases](https://github.com/NORMAL-EX/LetRecovery/releases) — it's a single `LetRecovery.7z` with WinPE built in.
 
 ::: warning Use the full package
-Extract the **entire** `LetRecovery.7z`; don't copy out `LetRecovery.exe` on its own — it needs the accompanying runtime DLLs such as `bin\`, `opengl32.dll`, and `libwim-15.dll` to work (especially inside WinPE).
+Extract the **entire** `LetRecovery.7z`; don't copy out `LetRecovery.exe` on its own — it also needs the packaged `bin\` directory, `libwim-15.dll`, VC++ runtimes, and WinPE resources. Both current clients use native Win32 interfaces and **no longer depend on `opengl32.dll`**. Do not copy that DLL from an old package or mix files from different releases.
 :::
 
 ## 2. Run as administrator
@@ -65,7 +65,7 @@ When reporting an issue, please attach:
 
 ## How to check the version number
 
-The software version number is generated from the **build date**, in the form `v2026.06.07`. You can find it on the **About** page or in the "version" line at the start of the log. Including it when reporting a problem helps with diagnosis.
+The software version number is generated from the **build date**, in the form `v2026.8.7`. You can find it on the **About** page or in the “version” line at the start of the log. Including it when reporting a problem helps with diagnosis.
 
 ## Next steps
 

@@ -23,12 +23,13 @@ The main place to chat, ask for help, and share tips.
 
 ## How to Report a Bug
 
-To make issues easier to reproduce, please provide as much of the following as possible:
+The GitHub bug form asks only for information the application does not already record automatically:
 
-1. Software version (the build-date version number, e.g. `v2026.06.07`, plus the "version" line in the log, plus where you downloaded it from).
-2. The stage where the problem occurred (desktop / WinPE / after first booting into the system).
-3. Runtime environment (source and target systems, UEFI/Legacy, Secure Boot, BitLocker, disk layout, the PE used, physical machine / virtual machine).
-4. Logs (desktop `log\LetRecovery.<date>.log` and/or the PE's `LetRecoveryPE.log`) and screenshots.
+1. What happened and the stage involved (normal-system client / PE client / after first boot).
+2. Steps that reproduce the problem.
+3. Complete logs for the affected stage and a full screenshot of the error. For a PE-stage issue, upload both the normal-system log and `LetRecoveryPE.log`.
+
+Current logs automatically record the software version, source and target systems, UEFI/Legacy, Secure Boot, BitLocker, disk layout, the PE used, and physical/virtual-machine clues, so **you do not need to transcribe them manually**. If logs genuinely cannot be obtained, explain why and where you already looked.
 
 ::: tip Privacy
 Logs and screenshots may contain sensitive information such as BitLocker recovery keys and serial numbers. Please redact them before sharing.

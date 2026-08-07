@@ -29,7 +29,7 @@ Easy Mode automatically applies a set of settings that suit most people, saving 
 
 - **Bypass the OOBE online requirement** (BypassNRO)
 - **Remove preinstalled UWP apps**
-- **Import disk controller drivers** (NVMe / AHCI / RAID) and **auto-import** this machine's drivers
+- Import the uniquely matched locked **disk-controller driver** when the target supports it; when reinstalling an existing Windows system, automatically back up and import its current drivers
 - Set the system drive's **volume label to `OS`**
 - Take the **username** from the currently logged-in account
 - Enable **unattended** setup, format the target drive, **repair boot**, and **reboot automatically** when finished

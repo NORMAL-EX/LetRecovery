@@ -18,12 +18,12 @@ Be wary of any other so-called "official sites" or "download sites."
 
 ## Can it run inside WinPE?
 
-Yes. The desktop `LetRecovery.exe` automatically detects WinPE and **installs in place** (no reboot needed). Inside PE, run the **full package**—don't copy out just the single exe; it needs the accompanying DLLs and `bin\`.
+Yes. The normal-system `LetRecovery.exe` automatically detects WinPE and **installs in place** (without rebooting into PE again). Use the full package rather than copying out one exe: `bin\`, the libwim/VC++ runtimes, and other resources must stay together. The current interface does not use OpenGL, so an old package's `opengl32.dll` is neither needed nor safe to mix into a new package.
 
 ## Which image formats are supported? Which systems can it install?
 
 Image formats: WIM, ESD, SWM, GHO, ISO, and the i386 text-mode setup media of original XP/2003.
-Installable target systems cover Windows **XP / 2003 / 7 / 8 / 10 / 11**.
+Installable target systems cover Windows **XP / 2003 / 7 / 8 / 8.1 / 10 / 11**.
 
 ## Should I choose PCA2011 or PCA2023?
 

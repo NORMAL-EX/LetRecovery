@@ -50,7 +50,7 @@ For supported Windows 10/11 and Server 2016+ UEFI images, LetRecovery also check
 
 ## Drivers and options
 
-Before starting, you can enable driver export/import, disk controller driver injection, unattended, registry tweaks, WiFi configuration migration, and more in [Advanced Options](/guide/advanced-options). Win7 / XP images also automatically show their respective compatibility switches.
+Before starting, you can enable driver export/import, disk-controller driver injection, unattended setup, registry tweaks, Wi-Fi migration, and more in [Advanced Options](/guide/advanced-options). The final install intent selects Windows 7 USB3/NVMe/UEFI resources automatically from the image, architecture, and hardware, leaving only the limited 0xA5 manual compatibility attempt; XP/2003 still expose their own dedicated options.
 
 ::: danger
 Installation will **format the target partition**, so back up first.

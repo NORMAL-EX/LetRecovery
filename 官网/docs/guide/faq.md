@@ -19,11 +19,11 @@ description: 关于 LetRecovery 的常见问题。
 
 ## 能在 WinPE 里运行吗？
 
-能。桌面版 `LetRecovery.exe` 会自动识别 WinPE 并**就地安装**（无需重启）。在 PE 里请运行**完整包**——别只拷出单个 exe，它需要随附的 DLL 和 `bin\`。
+能。正常系统端 `LetRecovery.exe` 会自动识别 WinPE 并**就地安装**（无需再次重启进 PE）。请使用完整包，不要只拷出单个 exe：`bin\`、libwim/VC++ 运行库和其它资源仍需保持配套。当前界面不依赖 OpenGL，旧包中的 `opengl32.dll` 不需要也不应混入新包。
 
 ## 支持哪些镜像格式？能装哪些系统？
 
-镜像格式：WIM、ESD、SWM、GHO、ISO，以及原版 XP/2003 的 i386 文本安装介质。可安装的目标系统涵盖 Windows **XP / 2003 / 7 / 8 / 10 / 11**。
+镜像格式：WIM、ESD、SWM、GHO、ISO，以及原版 XP/2003 的 i386 文本安装介质。可安装的目标系统涵盖 Windows **XP / 2003 / 7 / 8 / 8.1 / 10 / 11**。
 
 ## PCA2011 和 PCA2023 应该选哪个？
 
