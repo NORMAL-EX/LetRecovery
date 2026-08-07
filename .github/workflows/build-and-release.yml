@@ -67,17 +67,20 @@ jobs:
           # The Win7 target changes the minimum loader ABI; the resulting single executable still
           # runs on Windows 8/8.1/10/11 and dynamically prefers their newer APIs.
           RUSTC_BOOTSTRAP: "1"
+          # Keep the universal CRT inside the executable. An ordinary dynamic MSVC build imports
+          # api-ms-win-crt-* loader modules that are absent on an unserviced Windows 7 SP1 host.
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: |
           set -euo pipefail
           cargo build -p LetRecovery --release --locked \
             --target x86_64-win7-windows-msvc \
             -Z build-std=std,panic_abort
 
-      - name: Build WinAPI compatibility auditor
+      - name: Verify Windows 7 import boundary
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          & .\winapi-audit\build.ps1
+          & .\.github\scripts\verify-win7-imports.ps1
 
       - name: Build PE-side exe (LetRecoveryPE.exe)
         shell: bash
@@ -300,8 +303,7 @@ jobs:
           test -f "$src" || { echo "找不到 Win7-11 通用编译产物 LetRecovery.exe"; exit 1; }
           echo "Using system-side exe: $src"
           cp -f "$src" "pkg/LetRecovery.exe"
-          test -f "target/release/LetRecoveryWinApiAudit.exe" || { echo "找不到兼容性审计器 LetRecoveryWinApiAudit.exe"; exit 1; }
-          cp -f "target/release/LetRecoveryWinApiAudit.exe" "pkg/LetRecoveryWinApiAudit.exe"
+          find "pkg" -maxdepth 1 -type f -iname '*.exe' ! -iname 'LetRecovery.exe' -delete
 
       - name: Inject PE-side exe into WIM
         shell: pwsh

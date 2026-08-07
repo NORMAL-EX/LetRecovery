@@ -1268,6 +1268,70 @@ pub fn export_drivers(destination: &str) -> Result<usize> {
     manager.export_drivers(Path::new(destination), true)
 }
 
+/// Counts exported INF packages without following or accepting reparse points.
+///
+/// A zero result is meaningful: an online Windows installation can legitimately contain only
+/// inbox drivers. Callers decide whether that verified empty set is a no-op (automatic preserve)
+/// or a user-visible failure (an explicit "save drivers" request).
+pub fn count_exported_driver_inf_files(driver_tree: &Path) -> Result<usize> {
+    let root_metadata = driver_tree.symlink_metadata().with_context(|| {
+        format!(
+            "failed to inspect exported driver directory: {}",
+            driver_tree.display()
+        )
+    })?;
+    if !root_metadata.file_type().is_dir() || metadata_is_reparse_point(&root_metadata) {
+        bail!(
+            "exported driver root is not a plain directory: {}",
+            driver_tree.display()
+        );
+    }
+
+    let mut count = 0usize;
+    for entry in WalkDir::new(driver_tree).follow_links(false) {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to enumerate exported driver directory: {}",
+                driver_tree.display()
+            )
+        })?;
+        let metadata = entry.path().symlink_metadata().with_context(|| {
+            format!(
+                "failed to inspect exported driver entry: {}",
+                entry.path().display()
+            )
+        })?;
+        if metadata_is_reparse_point(&metadata) {
+            bail!(
+                "exported driver tree contains a reparse point: {}",
+                entry.path().display()
+            );
+        }
+        if metadata.file_type().is_file()
+            && entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("inf"))
+        {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
 /// 从指定系统分区导出驱动（PE环境下使用）
 ///
 /// # 参数

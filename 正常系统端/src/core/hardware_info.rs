@@ -1004,7 +1004,9 @@ impl HardwareInfo {
         info.bios = Self::get_bios_info();
         info.disks = Self::get_disk_info();
         info.gpus = Self::get_gpu_info();
-        info.network_adapters = Self::get_network_adapters();
+        // Reuse the toolbox collector so the hardware summary gets the same
+        // 64-bit speeds and Windows 7 IP Helper fallbacks.
+        info.network_adapters = crate::core::tool_network::get_detailed_network_info();
         info.system_bitlocker_status = Self::get_system_bitlocker_status();
         info.system_serial_number = Self::get_system_serial_number();
         info.device_type = Self::get_device_type();
@@ -1498,109 +1500,6 @@ impl HardwareInfo {
             }
         }
         gpus
-    }
-
-    fn get_network_adapters() -> Vec<NetworkAdapterInfo> {
-        let mut adapters = Vec::new();
-        #[repr(C)]
-        #[allow(non_snake_case)]
-        struct IP_ADDR_STRING {
-            Next: *mut IP_ADDR_STRING,
-            IpAddress: [i8; 16],
-            IpMask: [i8; 16],
-            Context: u32,
-        }
-        #[repr(C)]
-        #[allow(non_snake_case)]
-        struct IP_ADAPTER_INFO {
-            Next: *mut IP_ADAPTER_INFO,
-            ComboIndex: u32,
-            AdapterName: [i8; 260],
-            Description: [i8; 132],
-            AddressLength: u32,
-            Address: [u8; 8],
-            Index: u32,
-            Type: u32,
-            DhcpEnabled: u32,
-            CurrentIpAddress: *mut IP_ADDR_STRING,
-            IpAddressList: IP_ADDR_STRING,
-            GatewayList: IP_ADDR_STRING,
-            DhcpServer: IP_ADDR_STRING,
-            HaveWins: i32,
-            PrimaryWinsServer: IP_ADDR_STRING,
-            SecondaryWinsServer: IP_ADDR_STRING,
-            LeaseObtained: i64,
-            LeaseExpires: i64,
-        }
-        #[link(name = "iphlpapi")]
-        extern "system" {
-            fn GetAdaptersInfo(AdapterInfo: *mut IP_ADAPTER_INFO, SizePointer: *mut u32) -> u32;
-        }
-        unsafe {
-            let mut buf_len: u32 = 0;
-            let result = GetAdaptersInfo(std::ptr::null_mut(), &mut buf_len);
-            if result != 111 && result != 0 {
-                return adapters;
-            }
-            if buf_len == 0 {
-                return adapters;
-            }
-            let mut buffer: Vec<u8> = vec![0u8; buf_len as usize];
-            let adapter_info = buffer.as_mut_ptr() as *mut IP_ADAPTER_INFO;
-            if GetAdaptersInfo(adapter_info, &mut buf_len) != 0 {
-                return adapters;
-            }
-            let mut current = adapter_info;
-            while !current.is_null() {
-                let adapter = &*current;
-                let description_bytes: Vec<u8> = adapter
-                    .Description
-                    .iter()
-                    .take_while(|&&b| b != 0)
-                    .map(|&b| b as u8)
-                    .collect();
-                let description = String::from_utf8_lossy(&description_bytes).to_string();
-                let mac = if adapter.AddressLength > 0 {
-                    adapter.Address[..adapter.AddressLength as usize]
-                        .iter()
-                        .map(|b| format!("{:02X}", b))
-                        .collect::<Vec<_>>()
-                        .join(":")
-                } else {
-                    String::new()
-                };
-                let mut ip_addresses = Vec::new();
-                let ip_bytes: Vec<u8> = adapter
-                    .IpAddressList
-                    .IpAddress
-                    .iter()
-                    .take_while(|&&b| b != 0)
-                    .map(|&b| b as u8)
-                    .collect();
-                let ip = String::from_utf8_lossy(&ip_bytes).to_string();
-                if !ip.is_empty() && ip != "0.0.0.0" {
-                    ip_addresses.push(ip);
-                }
-                let adapter_type = match adapter.Type {
-                    6 => tr!("以太网"),
-                    71 => tr!("无线网络"),
-                    _ => tr!("类型 {}", adapter.Type),
-                };
-                if !description.is_empty() {
-                    adapters.push(NetworkAdapterInfo {
-                        name: description.clone(),
-                        description,
-                        mac_address: mac,
-                        ip_addresses,
-                        adapter_type,
-                        status: tr!("已连接"),
-                        speed: 0,
-                    });
-                }
-                current = adapter.Next;
-            }
-        }
-        adapters
     }
 
     fn get_system_bitlocker_status() -> BitLockerStatus {

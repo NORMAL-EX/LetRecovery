@@ -1,0 +1,4 @@
+[target.x86_64-win7-windows-msvc]
+# The normal endpoint must load on Windows 7 SP1 without the separately serviced
+# Universal CRT API-set modules. PE uses x86_64-pc-windows-msvc and is unaffected.
+rustflags = ["-C", "target-feature=+crt-static"]

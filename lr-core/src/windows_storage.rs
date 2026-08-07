@@ -673,10 +673,10 @@ mod platform {
     /// Resolve an exact physical partition to its existing volume GUID root without assigning a
     /// drive letter. Microsoft documents volume GUID paths as directly usable absolute roots; the
     /// trailing slash is removed only while opening the volume for the extent identity IOCTL.
-    pub unsafe fn volume_guid_path_for_partition(
+    pub unsafe fn try_volume_guid_path_for_partition(
         disk_number: u32,
         offset_bytes: u64,
-    ) -> Result<String, StorageError> {
+    ) -> Result<Option<String>, StorageError> {
         let expected = VolumeIdentity {
             disk_number,
             offset_bytes,
@@ -692,7 +692,7 @@ mod platform {
             let device_path = volume_name.trim_end_matches('\\');
             if let Ok(actual) = volume_identity_from_device_path(device_path) {
                 if same_physical_partition(actual, expected) {
-                    return Ok(volume_name);
+                    return Ok(Some(volume_name));
                 }
             }
 
@@ -706,10 +706,19 @@ mod platform {
             }
         }
 
-        Err(StorageError::new(
-            "resolve partition volume GUID path",
-            format!("no volume maps to disk {disk_number} offset {offset_bytes}"),
-        ))
+        Ok(None)
+    }
+
+    pub unsafe fn volume_guid_path_for_partition(
+        disk_number: u32,
+        offset_bytes: u64,
+    ) -> Result<String, StorageError> {
+        try_volume_guid_path_for_partition(disk_number, offset_bytes)?.ok_or_else(|| {
+            StorageError::new(
+                "resolve partition volume GUID path",
+                format!("no volume maps to disk {disk_number} offset {offset_bytes}"),
+            )
+        })
     }
 
     pub unsafe fn mbr_signature(disk_number: u32) -> Result<Option<u32>, StorageError> {
@@ -1734,6 +1743,37 @@ mod platform {
         vds.refresh()
     }
 
+    unsafe fn remove_partition_drive_letter_via_vds(
+        disk_number: u32,
+        offset_bytes: u64,
+        drive_letter: char,
+    ) -> Result<(), StorageError> {
+        let letter = normalize_letter(drive_letter)?;
+        let vds = Vds::connect()?;
+        let disk = vds.find_disk(disk_number)?;
+        let advanced = disk
+            .disk
+            .cast::<IVdsAdvancedDisk>()
+            .map_err(|error| api_error("open VDS advanced disk", error))?;
+        let mut assigned = 0_u16;
+        advanced
+            .GetDriveLetter(offset_bytes, PWSTR(&mut assigned))
+            .map_err(|error| api_error("query partition drive letter", error))?;
+        if assigned != letter as u16 {
+            return Err(StorageError::new(
+                "verify partition drive letter",
+                format!(
+                    "disk {disk_number} offset {offset_bytes} owns {}:, not {letter}:",
+                    char::from_u32(u32::from(assigned)).unwrap_or('?')
+                ),
+            ));
+        }
+        advanced
+            .DeleteDriveLetter(offset_bytes, letter as u16)
+            .map_err(|error| api_error("remove partition drive letter", error))?;
+        vds.refresh()
+    }
+
     pub unsafe fn remove_drive_letter(drive_letter: char) -> Result<(), StorageError> {
         let letter = normalize_letter(drive_letter)?;
         remove_drive_letter_via_vds(letter, false)?;
@@ -1767,21 +1807,41 @@ mod platform {
         }
         let letter = normalize_letter(drive_letter)?;
         let dos_target = query_dos_device_target(letter)?;
-        let vds_error = remove_drive_letter_via_vds(letter, true).err();
+        let partition_error = remove_partition_drive_letter_via_vds(
+            expected.disk_number,
+            expected.offset_bytes,
+            letter,
+        )
+        .err();
+        if wait_for_drive_letter_removal(letter)? {
+            return Ok(());
+        }
+
+        // Ordinary data volumes use IVdsVolumeMF. Hidden OEM/ESP partitions are not volume
+        // objects and are handled by IVdsAdvancedDisk above, as required by the VDS contract.
+        let volume_error = remove_drive_letter_via_vds(letter, true).err();
         if wait_for_drive_letter_removal(letter)? {
             return Ok(());
         }
 
         remove_exact_dos_device_mapping(letter, &dos_target).map_err(|dos_error| {
-            let vds_context = vds_error
+            let partition_context = partition_error
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| {
-                    "VDS reported success but the drive letter remained".to_string()
+                    "IVdsAdvancedDisk reported success but the drive letter remained".to_string()
+                });
+            let volume_context = volume_error
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    "IVdsVolumeMF reported success but the drive letter remained".to_string()
                 });
             StorageError::new(
                 "remove temporary drive letter",
-                format!("{vds_context}; exact DOS mapping cleanup also failed: {dos_error}"),
+                format!(
+                    "{partition_context}; {volume_context}; exact DOS mapping cleanup also failed: {dos_error}"
+                ),
             )
         })?;
         if wait_for_drive_letter_removal(letter)? {
@@ -1790,6 +1850,25 @@ mod platform {
             Err(StorageError::new(
                 "verify removed temporary drive letter",
                 format!("{letter}: remains assigned after exact DOS mapping cleanup"),
+            ))
+        }
+    }
+
+    pub unsafe fn remove_partition_drive_letter(
+        disk_number: u32,
+        offset_bytes: u64,
+        drive_letter: char,
+    ) -> Result<(), StorageError> {
+        let letter = normalize_letter(drive_letter)?;
+        remove_partition_drive_letter_via_vds(disk_number, offset_bytes, letter)?;
+        if wait_for_drive_letter_removal(letter)? {
+            Ok(())
+        } else {
+            Err(StorageError::new(
+                "verify removed partition drive letter",
+                format!(
+                    "{letter}: remains assigned after removing it from disk {disk_number} offset {offset_bytes}"
+                ),
             ))
         }
     }
@@ -2021,6 +2100,19 @@ pub fn remove_drive_letter_if_matches(
     unsafe { platform::remove_drive_letter_if_matches(drive_letter, expected) }
 }
 
+/// Remove a drive letter from an OEM/ESP/unknown partition by exact disk and offset.
+///
+/// This is the symmetric cleanup for `IVdsAdvancedDisk::AssignDriveLetter` and remains usable
+/// when Windows does not expose the hidden partition as an `IVdsVolume` object.
+#[cfg(windows)]
+pub fn remove_partition_drive_letter(
+    disk_number: u32,
+    offset_bytes: u64,
+    drive_letter: char,
+) -> Result<(), StorageError> {
+    unsafe { platform::remove_partition_drive_letter(disk_number, offset_bytes, drive_letter) }
+}
+
 #[cfg(windows)]
 pub fn assign_partition_drive_letter(
     disk_number: u32,
@@ -2085,6 +2177,17 @@ pub fn volume_guid_path_for_partition(
     offset_bytes: u64,
 ) -> Result<String, StorageError> {
     unsafe { platform::volume_guid_path_for_partition(disk_number, offset_bytes) }
+}
+
+/// Try to resolve a partition through the ordinary volume GUID namespace without changing its
+/// access paths. Hidden OEM/ESP partitions are allowed to return `Ok(None)` because Microsoft
+/// documents that they need not be enumerable as ordinary volume objects.
+#[cfg(windows)]
+pub fn try_volume_guid_path_for_partition(
+    disk_number: u32,
+    offset_bytes: u64,
+) -> Result<Option<String>, StorageError> {
+    unsafe { platform::try_volume_guid_path_for_partition(disk_number, offset_bytes) }
 }
 
 #[cfg(windows)]

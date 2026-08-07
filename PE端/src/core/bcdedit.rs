@@ -69,8 +69,15 @@ impl BootManager {
             esp.offset_bytes,
             mount_letter,
         )?;
-        let mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&mount_letter.to_string())
-            .map_err(anyhow::Error::msg)?;
+        let mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(
+            &mount_letter.to_string(),
+            lr_core::windows_storage::VolumeIdentity {
+                disk_number: disk_num,
+                offset_bytes: esp.offset_bytes,
+                extent_length_bytes: esp.size_bytes,
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
 
         let mount_root = format!("{}:\\", mount_letter);
         for _ in 0..20 {
@@ -79,12 +86,18 @@ impl BootManager {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        if Path::new(&mount_root).exists() {
+        if Path::new(&mount_root).is_dir() {
             let mounted = format!("{}:", mount_letter);
             log::info!("ESP 已挂载到 {}", mounted);
             Ok(mount_guard)
         } else {
-            anyhow::bail!("{}", tr!("ESP 盘符分配失败"))
+            let cleanup = mount_guard.close();
+            match cleanup {
+                Ok(()) => anyhow::bail!("{}", tr!("ESP 盘符分配失败")),
+                Err(error) => {
+                    anyhow::bail!("{}", tr!("ESP 盘符分配失败，且临时盘符卸载失败: {}", error))
+                }
+            }
         }
     }
 
@@ -164,30 +177,6 @@ impl BootManager {
                 lr_core::boot_pca::PcaGeneration::Unknown
             }
         });
-
-        // Legacy 自定义脚本成功后可直接完成；UEFI 命令作为前置步骤，随后仍由
-        // 内置逻辑按所选 PCA 重新写入并校验，不能绕过 Secure Boot 兼容性检查。
-        let repair_script = get_bin_dir().join("repair_boot.txt");
-        if repair_script.exists() {
-            log::info!("检测到自定义修复引导脚本: {}", repair_script.display());
-            match lr_core::boot::run_repair_script(
-                &repair_script,
-                &get_bin_dir(),
-                windows_partition,
-                use_uefi,
-                mounted_esp.as_ref().map(|mount| mount.letter()),
-            ) {
-                Ok(out) => {
-                    log::info!("自定义修复引导脚本执行完成:\n{}", out);
-                    if !use_uefi {
-                        log::info!("========== 引导修复完成（自定义脚本）==========");
-                        return Ok(());
-                    }
-                    log::info!("[BOOT PCA] 将继续执行内置 UEFI 写入与签名验证");
-                }
-                Err(e) => log::warn!("自定义修复引导脚本失败，回退默认逻辑: {}", e),
-            }
-        }
 
         if use_uefi {
             let esp_letter = mounted_esp

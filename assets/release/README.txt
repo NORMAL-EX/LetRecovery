@@ -30,8 +30,6 @@ LetRecovery 面向常见的 Windows 修复和装机场景：
 ------------------------------------------------------------------
 
   LetRecovery.exe          Windows 端主程序
-  LetRecoveryWinApiAudit.exe
-                           WinAPI 兼容性审计工具
   config.json              运行配置和 PE 缓存配置
   bin\                     运行组件、语言文件和 PE 文件
   bin\pe\LetRecovery_PE.wim
@@ -84,17 +82,6 @@ LetRecovery 面向常见的 Windows 修复和装机场景：
 
 常见安装失败原因包括：镜像损坏、硬盘异常、磁盘写保护、
 BitLocker 卷未解锁、WinPE 下盘符变化、驱动缺失等。
-
-如果旧版 Windows 提示缺少程序入口点、主程序完全无法启动：
-
-  1. 运行同目录的 LetRecoveryWinApiAudit.exe。
-  2. 打开 log\LetRecovery.WinAPI.log。
-  3. 日志会一次列出主程序和随包自有运行库的普通导入、延迟导入，
-     以及源码中通过 LoadLibrary/GetProcAddress/libloading 动态解析的 API。
-  4. 动态 API 会区分“功能必需”和“可选回退”；前者缺失表示对应功能
-     不可用，不一定表示主程序加载器无法启动。
-
-审计工具只读取程序导入信息、随包运行库和当前系统 DLL，不会修改系统。
 
 ------------------------------------------------------------------
 许可

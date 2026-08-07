@@ -232,6 +232,11 @@ pub fn get_detailed_network_info() -> Vec<crate::core::hardware_info::NetworkAda
 
                 // 过滤掉回环适配器和空描述的适配器
                 if adapter.IfType != 24 && !description.is_empty() {
+                    let speed = query_interface_link_speed(
+                        adapter.IfIndex,
+                        adapter.TransmitLinkSpeed,
+                        adapter.ReceiveLinkSpeed,
+                    );
                     adapters.push(crate::core::hardware_info::NetworkAdapterInfo {
                         name: friendly_name,
                         description,
@@ -239,7 +244,7 @@ pub fn get_detailed_network_info() -> Vec<crate::core::hardware_info::NetworkAda
                         ip_addresses,
                         adapter_type,
                         status,
-                        speed: adapter.TransmitLinkSpeed,
+                        speed,
                     });
                 }
 
@@ -249,6 +254,67 @@ pub fn get_detailed_network_info() -> Vec<crate::core::hardware_info::NetworkAda
     }
 
     adapters
+}
+
+fn preferred_link_speed(
+    address_tx: u64,
+    address_rx: u64,
+    interface_tx: u64,
+    interface_rx: u64,
+    legacy_speed: u32,
+) -> u64 {
+    address_tx
+        .max(address_rx)
+        .max(interface_tx.max(interface_rx))
+        .max(u64::from(legacy_speed))
+}
+
+#[cfg(windows)]
+unsafe fn query_interface_link_speed(if_index: u32, address_tx: u64, address_rx: u64) -> u64 {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetIfEntry, GetIfEntry2, MIB_IFROW, MIB_IF_ROW2,
+    };
+
+    // Keep GetAdaptersAddresses as the zero-extra-call path on modern Windows. Windows 7 network
+    // drivers can leave those two fields at zero even though the interface table reports the
+    // negotiated link rate.
+    let address_speed = address_tx.max(address_rx);
+    if address_speed != 0 {
+        return address_speed;
+    }
+
+    let mut row2 = MIB_IF_ROW2 {
+        InterfaceIndex: if_index,
+        ..Default::default()
+    };
+    let (interface_tx, interface_rx) = if GetIfEntry2(&mut row2).0 == 0 {
+        (row2.TransmitLinkSpeed, row2.ReceiveLinkSpeed)
+    } else {
+        (0, 0)
+    };
+    if interface_tx != 0 || interface_rx != 0 {
+        return interface_tx.max(interface_rx);
+    }
+
+    // The legacy table is available before Windows 7 and remains a final compatibility fallback.
+    // Its 32-bit bits-per-second field can saturate above 4 Gbps, so it is never preferred over the
+    // 64-bit modern values.
+    let mut legacy = MIB_IFROW {
+        dwIndex: if_index,
+        ..Default::default()
+    };
+    let legacy_speed = if GetIfEntry(&mut legacy) == 0 {
+        legacy.dwSpeed
+    } else {
+        0
+    };
+    preferred_link_speed(
+        address_tx,
+        address_rx,
+        interface_tx,
+        interface_rx,
+        legacy_speed,
+    )
 }
 
 /// 执行网络重置
@@ -279,4 +345,26 @@ pub fn reset_network() -> (usize, usize) {
     }
 
     (success_count, fail_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preferred_link_speed;
+
+    #[test]
+    fn adapter_address_speed_remains_the_fast_preferred_value() {
+        assert_eq!(
+            preferred_link_speed(2_500_000_000, 1_000_000_000, 0, 0, 100_000_000),
+            2_500_000_000
+        );
+    }
+
+    #[test]
+    fn windows7_interface_and_legacy_fallbacks_replace_zero_mbps() {
+        assert_eq!(
+            preferred_link_speed(0, 0, 1_000_000_000, 1_000_000_000, 100_000_000),
+            1_000_000_000
+        );
+        assert_eq!(preferred_link_speed(0, 0, 0, 0, 100_000_000), 100_000_000);
+    }
 }

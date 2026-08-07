@@ -1,5 +1,7 @@
 //! Native toolbox page controls and side-effect-free command intents.
 
+use std::cell::Cell;
+
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
@@ -86,7 +88,7 @@ pub struct ToolLabels<'a> {
     pub introduction: &'a str,
 }
 
-fn tool_grid_layout(rect: PageRect, dpi: u32) -> ToolGridLayout {
+fn tool_grid_layout(rect: PageRect, dpi: u32, tool_count: usize) -> ToolGridLayout {
     let s = |value: i32| value * dpi.max(1) as i32 / 96;
     let width = rect.width.max(0);
     let height = rect.height.max(0);
@@ -97,14 +99,14 @@ fn tool_grid_layout(rect: PageRect, dpi: u32) -> ToolGridLayout {
     let minimum_height = s(26);
     let mut columns = preferred;
     while columns < 4 {
-        let rows = (ToolIntent::ALL.len() as i32 + columns - 1) / columns;
+        let rows = (tool_count.max(1) as i32 + columns - 1) / columns;
         let candidate = (available_height - gap * (rows - 1)) / rows.max(1);
         if candidate >= minimum_height {
             break;
         }
         columns += 1;
     }
-    let rows = (ToolIntent::ALL.len() as i32 + columns - 1) / columns;
+    let rows = (tool_count.max(1) as i32 + columns - 1) / columns;
     let button_width = ((width - gap * (columns - 1)) / columns).max(0);
     let button_height = s(38).min(((available_height - gap * (rows - 1)) / rows.max(1)).max(0));
     ToolGridLayout {
@@ -116,9 +118,16 @@ fn tool_grid_layout(rect: PageRect, dpi: u32) -> ToolGridLayout {
     }
 }
 
+fn tool_availability(supports_appx: bool) -> [bool; 21] {
+    let mut available = [true; 21];
+    available[ToolIntent::RemoveAppx as usize] = supports_appx;
+    available
+}
+
 pub struct ToolsPage {
     pub introduction: HWND,
     pub buttons: [HWND; 21],
+    available: Cell<[bool; 21]>,
 }
 
 impl ToolsPage {
@@ -150,6 +159,7 @@ impl ToolsPage {
         let page = Self {
             introduction,
             buttons,
+            available: Cell::new([true; 21]),
         };
         page.apply_font(font);
         page.show(false);
@@ -163,7 +173,10 @@ impl ToolsPage {
     }
 
     /// Some tools are deliberately unavailable outside their supported environment.
-    pub unsafe fn apply_environment(&self, is_pe: bool) {
+    pub unsafe fn apply_environment(&self, is_pe: bool, supports_appx: bool) {
+        let available = tool_availability(supports_appx);
+        self.available.set(available);
+
         for intent in [
             ToolIntent::RepairBoot,
             ToolIntent::SoftwareList,
@@ -197,7 +210,9 @@ impl ToolsPage {
 
     pub unsafe fn layout(&self, rect: PageRect, dpi: u32) {
         let s = |value: i32| value * dpi as i32 / 96;
-        let layout = tool_grid_layout(rect, dpi);
+        let available = self.available.get();
+        let tool_count = available.iter().filter(|supported| **supported).count();
+        let layout = tool_grid_layout(rect, dpi, tool_count);
         let _ = MoveWindow(
             self.introduction,
             rect.x,
@@ -206,9 +221,13 @@ impl ToolsPage {
             s(24).min(rect.height.max(0)),
             true,
         );
+        let mut visible_index = 0i32;
         for (index, button) in self.buttons.iter().copied().enumerate() {
-            let column = index as i32 % layout.columns;
-            let row = index as i32 / layout.columns;
+            if !available[index] {
+                continue;
+            }
+            let column = visible_index % layout.columns;
+            let row = visible_index / layout.columns;
             let _ = MoveWindow(
                 button,
                 rect.x + column * (layout.button_width + layout.gap),
@@ -217,14 +236,23 @@ impl ToolsPage {
                 layout.button_height,
                 true,
             );
+            visible_index += 1;
         }
     }
 
     pub unsafe fn show(&self, visible: bool) {
         let command = if visible { SW_SHOW } else { SW_HIDE };
         let _ = ShowWindow(self.introduction, command);
-        for button in self.buttons {
-            let _ = ShowWindow(button, command);
+        let available = self.available.get();
+        for (index, button) in self.buttons.iter().copied().enumerate() {
+            let _ = ShowWindow(
+                button,
+                if visible && available[index] {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
         }
     }
 
@@ -249,6 +277,16 @@ unsafe fn set_text(hwnd: HWND, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_windows_hides_only_the_appx_entry() {
+        let legacy = tool_availability(false);
+        assert!(!legacy[ToolIntent::RemoveAppx as usize]);
+        assert_eq!(legacy.iter().filter(|available| **available).count(), 20);
+
+        let modern = tool_availability(true);
+        assert!(modern.into_iter().all(|available| available));
+    }
 
     #[test]
     fn every_tool_has_a_stable_unique_command() {
@@ -290,7 +328,7 @@ mod tests {
                 192,
             ),
         ] {
-            let layout = tool_grid_layout(rect, dpi);
+            let layout = tool_grid_layout(rect, dpi, ToolIntent::ALL.len());
             let last_index = ToolIntent::ALL.len() as i32 - 1;
             let last_row = last_index / layout.columns;
             let bottom = layout.grid_y
@@ -312,6 +350,7 @@ mod tests {
                 height: 800,
             },
             96,
+            ToolIntent::ALL.len(),
         );
         assert_eq!(layout.columns, 1);
         assert_eq!(layout.button_width, 140);

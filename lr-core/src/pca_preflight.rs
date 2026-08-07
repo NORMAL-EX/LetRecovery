@@ -4,20 +4,17 @@
 //! selected WIM image before partitioning or formatting can alter the target disk.
 
 use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 
 use crate::boot_pca::{
     inspect_efi_architecture, inspect_windows_boot_sources, BootPcaMode, FirmwarePcaInfo,
     PcaGeneration, WindowsBootSources,
 };
+use crate::scoped_temp_file::ScopedTempDir;
 use crate::wimlib::WimlibManager;
 
 const NORMAL_BOOT_MANAGER: &str = "\\Windows\\Boot\\EFI\\bootmgfw.efi";
 const BOOTEX_BOOT_MANAGER: &str = "\\Windows\\Boot\\EFI_EX\\bootmgfw_EX.efi";
-const MAX_TEMP_DIR_ATTEMPTS: u64 = 128;
-static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallImageKind {
@@ -304,9 +301,11 @@ pub fn inspect_wim_boot_source_details(
         return Ok(WimBootSourceDetails::default());
     }
 
-    let temp_dir = ScopedTempDir::create()?;
+    let temp_dir = ScopedTempDir::create_in(&std::env::temp_dir(), "LetRecovery-PcaPreflight")
+        .map_err(|error| format!("create PCA preflight temporary directory failed: {error}"))?;
     let target = temp_dir.path().to_string_lossy();
     manager.extract_paths(image, index, &target, &paths)?;
+    drop(manager);
 
     let windows = temp_dir.path().join("Windows");
     Ok(WimBootSourceDetails {
@@ -315,63 +314,6 @@ pub fn inspect_wim_boot_source_details(
             &windows.join("Boot").join("EFI_EX").join("bootmgfw_EX.efi"),
         ),
     })
-}
-
-#[derive(Debug)]
-struct ScopedTempDir {
-    path: PathBuf,
-}
-
-impl ScopedTempDir {
-    fn create() -> Result<Self, String> {
-        let base = std::env::temp_dir();
-        Self::create_in(&base)
-    }
-
-    fn create_in(base: &Path) -> Result<Self, String> {
-        fs::create_dir_all(base).map_err(|error| {
-            format!("创建 PCA 预检临时根目录失败 ({}): {error}", base.display())
-        })?;
-        let metadata = fs::symlink_metadata(base).map_err(|error| {
-            format!("检查 PCA 预检临时根目录失败 ({}): {error}", base.display())
-        })?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            return Err(format!(
-                "PCA 预检临时根路径不是安全的普通目录: {}",
-                base.display()
-            ));
-        }
-
-        for _ in 0..MAX_TEMP_DIR_ATTEMPTS {
-            let id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
-            let path = base.join(format!(
-                "LetRecovery-PcaPreflight-{}-{id}",
-                std::process::id()
-            ));
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(format!("创建 PCA 预检临时目录失败: {error}")),
-            }
-        }
-        Err("无法分配唯一的 PCA 预检临时目录".to_string())
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ScopedTempDir {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.path) {
-            log::warn!(
-                "[BOOT PCA] 清理预检临时目录 {} 失败: {}",
-                self.path.display(),
-                error
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -607,19 +549,18 @@ mod tests {
     #[test]
     fn preflight_temp_directory_creates_a_missing_parent_tree() {
         let root = std::env::temp_dir().join(format!(
-            "letrecovery-pca-temp-parent-{}-{}",
-            std::process::id(),
-            NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed)
+            "letrecovery-pca-temp-parent-{}",
+            std::process::id()
         ));
         let base = root.join("missing").join("temp");
         assert!(!base.exists());
 
-        let directory = ScopedTempDir::create_in(&base).unwrap();
+        let directory = ScopedTempDir::create_in(&base, "LetRecovery-PcaPreflight").unwrap();
         assert!(base.is_dir());
         assert!(directory.path().is_dir());
         assert_eq!(directory.path().parent(), Some(base.as_path()));
 
         drop(directory);
-        fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

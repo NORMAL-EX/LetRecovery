@@ -28,6 +28,14 @@ pub struct ScopedTempDir {
 impl ScopedTempDir {
     pub fn create_in(parent: &Path, prefix: &str) -> io::Result<Self> {
         validate_name_component(prefix, "prefix")?;
+        std::fs::create_dir_all(parent)?;
+        let parent_metadata = std::fs::symlink_metadata(parent)?;
+        if !parent_metadata.file_type().is_dir() || parent_metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "temporary directory parent is not a regular directory",
+            ));
+        }
         for _ in 0..MAX_CREATE_ATTEMPTS {
             let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
             let path = parent.join(format!("{prefix}-{}-{id}", std::process::id()));
@@ -59,8 +67,99 @@ impl ScopedTempDir {
 
 impl Drop for ScopedTempDir {
     fn drop(&mut self) {
-        let _ = remove_dir_all(&self.path);
+        if let Err(error) = remove_temporary_tree(&self.path) {
+            log::warn!(
+                "temporary directory cleanup failed for {}: {}",
+                self.path.display(),
+                error
+            );
+        }
     }
+}
+
+/// Remove a private temporary directory, retrying after clearing Windows
+/// read-only/system/hidden attributes commonly restored from WIM metadata.
+/// Reparse points are never traversed while attributes are cleared.
+pub fn remove_temporary_tree(path: &Path) -> io::Result<()> {
+    match remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(first_error) => {
+            if path.exists() {
+                clear_tree_removal_attributes(path)?;
+            }
+            match remove_dir_all(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(retry_error) => Err(io::Error::new(
+                    retry_error.kind(),
+                    format!(
+                        "initial removal failed: {first_error}; retry after clearing attributes failed: {retry_error}"
+                    ),
+                )),
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn clear_tree_removal_attributes(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+        FILE_FLAGS_AND_ATTRIBUTES, INVALID_FILE_ATTRIBUTES,
+    };
+
+    fn attributes(path: &Path) -> io::Result<u32> {
+        let wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let value = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+        if value == INVALID_FILE_ATTRIBUTES {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn clear_one(path: &Path, current: u32) -> io::Result<()> {
+        let mut cleared = current
+            & !(FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_SYSTEM.0 | FILE_ATTRIBUTE_HIDDEN.0);
+        if cleared == 0 {
+            cleared = FILE_ATTRIBUTE_NORMAL.0;
+        }
+        if cleared == current {
+            return Ok(());
+        }
+        let wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        unsafe {
+            SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(cleared))
+                .map_err(|_| io::Error::last_os_error())
+        }
+    }
+
+    let current = attributes(path)?;
+    if current & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0
+        && std::fs::symlink_metadata(path)?.file_type().is_dir()
+    {
+        for entry in std::fs::read_dir(path)? {
+            clear_tree_removal_attributes(&entry?.path())?;
+        }
+    }
+    clear_one(path, current)
+}
+
+#[cfg(not(windows))]
+fn clear_tree_removal_attributes(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 impl ScopedTempFile {
@@ -369,6 +468,26 @@ mod tests {
         assert!(path.is_dir());
 
         std::fs::remove_dir(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn removes_wim_style_read_only_temporary_tree() {
+        let directory = test_directory();
+        std::fs::create_dir(&directory).unwrap();
+        let temp = ScopedTempDir::create_in(&directory, "wim-extract").unwrap();
+        let path = temp.path().to_path_buf();
+        let nested = path.join("Windows").join("Boot").join("bootmgfw.efi");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, b"test").unwrap();
+        let mut permissions = std::fs::metadata(&nested).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&nested, permissions).unwrap();
+
+        drop(temp);
+
+        assert!(!path.exists());
         std::fs::remove_dir(directory).unwrap();
     }
 }

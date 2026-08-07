@@ -707,11 +707,7 @@ pub fn hardware_info_rows(
         push(
             &network,
             &crate::tr!("{} 状态", prefix),
-            format!(
-                "{} | {} Mbps",
-                localized_network_status(&adapter.status),
-                adapter.speed / 1_000_000
-            ),
+            network_link_status_text(&localized_network_status(&adapter.status), adapter.speed),
         );
     }
 
@@ -747,6 +743,14 @@ pub fn hardware_info_rows(
     }
 
     rows
+}
+
+fn network_link_status_text(status: &str, speed_bps: u64) -> String {
+    if speed_bps == 0 {
+        format!("{} | {}", status, crate::tr!("未知"))
+    } else {
+        format!("{} | {} Mbps", status, speed_bps / 1_000_000)
+    }
 }
 
 fn display_value(value: String) -> String {
@@ -1529,6 +1533,17 @@ mod tests {
         let ordinary = hardware_column_widths(926, 96);
         assert!(ordinary[0] <= 120);
         assert!(ordinary[0] < ordinary[1]);
+    }
+
+    #[test]
+    fn unknown_link_speed_is_never_rendered_as_zero_mbps() {
+        let unknown = network_link_status_text("已连接", 0);
+        assert!(unknown.contains(&crate::tr!("未知")));
+        assert!(!unknown.contains("0 Mbps"));
+        assert_eq!(
+            network_link_status_text("已连接", 1_000_000_000),
+            "已连接 | 1000 Mbps"
+        );
     }
 
     #[test]

@@ -79,8 +79,14 @@ pub struct PeManager {
 impl PeManager {
     pub fn new() -> Self {
         let bin_dir = get_bin_dir();
+        let bcdedit_path = lr_core::windows_compat::system_directory()
+            .map(|directory| directory.join("bcdedit.exe"))
+            .unwrap_or_else(|error| {
+                log::error!("[PE BOOT] 无法解析宿主 System32，bcdedit 将失败关闭: {error}");
+                PathBuf::from("__LetRecovery_missing_System32__").join("bcdedit.exe")
+            });
         Self {
-            bcdedit_path: bin_dir.join("bcdedit.exe").to_string_lossy().to_string(),
+            bcdedit_path: bcdedit_path.to_string_lossy().to_string(),
             bcdboot_path: bin_dir.join("bcdboot.exe").to_string_lossy().to_string(),
         }
     }

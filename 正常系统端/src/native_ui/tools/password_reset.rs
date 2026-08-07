@@ -93,7 +93,7 @@ impl NativePasswordResetDialog {
         )?;
         let controls = create_controls(shell.content())?;
         let dpi = GetDpiForWindow(shell.hwnd()).max(96);
-        let face = wide("Microsoft YaHei UI");
+        let face = wide("Microsoft YaHei");
         let font = CreateFontW(
             -scale(14, dpi),
             0,

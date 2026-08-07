@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::tr;
@@ -38,6 +38,10 @@ fn require_legacy_active_partition(result: Result<()>) -> Result<()> {
     result.map_err(|error| anyhow::anyhow!("{}", tr!("设置 Legacy 活动分区失败：{}", error)))
 }
 
+fn require_pca_esp(esp: Option<(u32, u32, u64)>) -> Result<(u32, u32, u64)> {
+    esp.ok_or_else(|| anyhow::anyhow!("{}", tr!("目标磁盘上没有 EFI 系统分区。")))
+}
+
 pub struct BootManager {
     bcdedit_path: String,
     bcdboot_path: String,
@@ -46,8 +50,14 @@ pub struct BootManager {
 impl BootManager {
     pub fn new() -> Self {
         let bin_dir = get_bin_dir();
+        let bcdedit_path = lr_core::windows_compat::system_directory()
+            .map(|directory| directory.join("bcdedit.exe"))
+            .unwrap_or_else(|error| {
+                log::error!("[BOOT] 无法解析宿主 System32，bcdedit 将失败关闭: {error}");
+                PathBuf::from("__LetRecovery_missing_System32__").join("bcdedit.exe")
+            });
         Self {
-            bcdedit_path: bin_dir.join("bcdedit.exe").to_string_lossy().to_string(),
+            bcdedit_path: bcdedit_path.to_string_lossy().to_string(),
             bcdboot_path: bin_dir.join("bcdboot.exe").to_string_lossy().to_string(),
         }
     }
@@ -79,7 +89,10 @@ impl BootManager {
         anyhow::bail!("Could not find current boot GUID")
     }
 
-    fn esp_on_same_disk(&self, windows_partition: &str) -> Result<(u32, u32, u64)> {
+    fn optional_esp_on_same_disk(
+        &self,
+        windows_partition: &str,
+    ) -> Result<Option<(u32, u32, u64)>> {
         log::info!("[BOOT] 查找 {} 所在磁盘的 ESP 分区...", windows_partition);
 
         let drive_letter = windows_partition
@@ -103,30 +116,33 @@ impl BootManager {
         let disk_num = disk.disk_number;
         log::info!("[BOOT] 目标分区在磁盘 {}", disk_num);
 
-        let esp = disk
-            .partitions
-            .iter()
-            .find(|partition| partition.is_esp)
-            .ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))?;
+        let Some(esp) = disk.partitions.iter().find(|partition| partition.is_esp) else {
+            return Ok(None);
+        };
         log::info!(
             "[BOOT] 找到 ESP: 分区 {}，偏移 {}",
             esp.partition_number,
             esp.offset_bytes
         );
 
-        Ok((disk_num, esp.partition_number, esp.offset_bytes))
+        Ok(Some((disk_num, esp.partition_number, esp.offset_bytes)))
     }
 
-    /// 查找目标 Windows 分区所在磁盘的 ESP 分区
-    pub fn find_esp_on_same_disk(
-        &self,
-        windows_partition: &str,
-    ) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
-        let _mount_lock = ESP_MOUNT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (disk_num, _partition_number, esp_offset) = self.esp_on_same_disk(windows_partition)?;
+    fn esp_on_same_disk(&self, windows_partition: &str) -> Result<(u32, u32, u64)> {
+        self.optional_esp_on_same_disk(windows_partition)?
+            .ok_or_else(|| anyhow::anyhow!("{}", tr!("未找到 ESP 分区")))
+    }
 
+    fn mount_known_esp(
+        &self,
+        disk_num: u32,
+        esp_offset: u64,
+    ) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
+        let expected = lr_core::windows_storage::VolumeIdentity {
+            disk_number: disk_num,
+            offset_bytes: esp_offset,
+            extent_length_bytes: 0,
+        };
         let existing_letters =
             lr_core::windows_storage::assigned_drive_letters_for_partition(disk_num, esp_offset)?;
         if let Some(letter) = existing_letters.first().copied() {
@@ -138,50 +154,107 @@ impl BootManager {
                 .map_err(anyhow::Error::msg);
         }
 
-        // Step 3: 使用真正空闲的盘符挂载 ESP，不能覆盖用户已有的 S: 等盘符。
         let mount_letter = lr_core::boot_pca::find_available_drive_letter()
             .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
-
         lr_core::windows_storage::assign_partition_drive_letter(
             disk_num,
             esp_offset,
             mount_letter,
         )?;
-        let mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(&mount_letter.to_string())
-            .map_err(anyhow::Error::msg)?;
+        let mount_guard =
+            lr_core::boot_pca::TemporaryEspMountGuard::new(&mount_letter.to_string(), expected)
+                .map_err(anyhow::Error::msg)?;
 
         let mount_root = format!("{}:\\", mount_letter);
         for _ in 0..20 {
-            if Path::new(&mount_root).exists() {
-                break;
+            if Path::new(&mount_root).is_dir() {
+                log::info!("[BOOT] ESP 已挂载到 {}:", mount_letter);
+                return Ok(mount_guard);
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        if Path::new(&mount_root).exists() {
-            let mounted = format!("{}:", mount_letter);
-            log::info!("[BOOT] ESP 已挂载到 {}", mounted);
-            Ok(mount_guard)
-        } else {
-            anyhow::bail!("{}", tr!("ESP 盘符分配失败"))
+
+        let cleanup = mount_guard.close();
+        match cleanup {
+            Ok(()) => anyhow::bail!("{}", tr!("ESP 盘符分配失败")),
+            Err(error) => {
+                anyhow::bail!("{}", tr!("ESP 盘符分配失败，且临时盘符卸载失败: {}", error))
+            }
         }
     }
 
+    /// 查找目标 Windows 分区所在磁盘的 ESP 分区
+    pub fn find_esp_on_same_disk(
+        &self,
+        windows_partition: &str,
+    ) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
+        let _mount_lock = ESP_MOUNT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (disk_num, _partition_number, esp_offset) = self.esp_on_same_disk(windows_partition)?;
+        self.mount_known_esp(disk_num, esp_offset)
+    }
+
     /// Inspect the existing Windows boot manager on the ESP that belongs to
-    /// `windows_partition`. This read-only automatic-selection signal resolves the ESP through its
-    /// volume GUID root and never assigns a user-visible drive letter. The installer performs a
-    /// fresh source and firmware check before writing.
+    /// `windows_partition`. The Windows 10/11 fast path uses the volume GUID root without changing
+    /// access paths. Windows 7 can omit a hidden ESP from that namespace, so the documented VDS
+    /// partition interface supplies a scoped, identity-checked drive letter that is removed before
+    /// this method returns. The installer performs a fresh source and firmware check before writing.
     pub fn inspect_existing_esp_pca(
         &self,
         windows_partition: &str,
     ) -> Result<lr_core::boot_pca::EfiSignatureInfo> {
+        let _mount_lock = ESP_MOUNT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (disk_number, _partition_number, offset_bytes) =
-            self.esp_on_same_disk(windows_partition)?;
-        let esp_root =
-            lr_core::windows_storage::volume_guid_path_for_partition(disk_number, offset_bytes)
-                .map_err(anyhow::Error::msg)?;
-        log::info!("[BOOT PCA] 通过卷 GUID 路径只读检测目标 ESP，不分配盘符");
-        let result = lr_core::boot_pca::inspect_esp_generation(Path::new(&esp_root));
-        Ok(result)
+            require_pca_esp(self.optional_esp_on_same_disk(windows_partition)?)?;
+
+        let result = lr_core::boot_pca::inspect_existing_esp_with_fallback(
+            || {
+                lr_core::windows_storage::try_volume_guid_path_for_partition(
+                    disk_number,
+                    offset_bytes,
+                )
+                .map(|path| path.map(Into::into))
+                .map_err(|error| error.to_string())
+            },
+            || {
+                log::warn!(
+                    "[BOOT PCA] 目标 ESP 未通过卷 GUID 路径开放，使用受物理身份约束的临时盘符只读检测"
+                );
+                let guard = self
+                    .mount_known_esp(disk_number, offset_bytes)
+                    .map_err(|error| error.to_string())?;
+                let root = std::path::PathBuf::from(format!("{}\\", guard.letter()));
+                Ok((root, guard))
+            },
+            |root| {
+                if !root.is_dir() {
+                    return Err(format!("ESP root is not accessible: {}", root.display()));
+                }
+                Ok(lr_core::boot_pca::inspect_esp_generation(root))
+            },
+            lr_core::boot_pca::TemporaryEspMountGuard::close,
+        );
+
+        match result {
+            Ok(info) => Ok(info),
+            Err(error @ lr_core::boot_pca::EspProbeAccessError::Cleanup { .. }) => {
+                log::error!("[BOOT PCA] 临时 ESP 卸载失败: {}", error);
+                anyhow::bail!(
+                    "{}",
+                    tr!("目标磁盘上的临时 ESP 盘符卸载失败。为安全起见，已阻止继续安装；请查看日志。")
+                )
+            }
+            Err(error) => {
+                log::error!("[BOOT PCA] ESP 已找到但无法解析或挂载: {}", error);
+                anyhow::bail!(
+                    "{}",
+                    tr!("目标磁盘上的 ESP 已存在，但无法解析或临时挂载；请查看日志。")
+                )
+            }
+        }
     }
 
     /// 查找并挂载 EFI 系统分区（旧方法，作为备选）
@@ -199,38 +272,8 @@ impl BootManager {
         log::info!("[BOOT] 使用 WinAPI 查找 ESP");
         for disk in crate::core::quick_partition::get_physical_disks() {
             for partition in disk.partitions.iter().filter(|partition| partition.is_esp) {
-                let existing_letters =
-                    lr_core::windows_storage::assigned_drive_letters_for_partition(
-                        disk.disk_number,
-                        partition.offset_bytes,
-                    )?;
-                if let Some(letter) = existing_letters.first().copied() {
-                    return lr_core::boot_pca::TemporaryEspMountGuard::existing(
-                        &letter.to_string(),
-                    )
-                    .map_err(anyhow::Error::msg);
-                }
-                let mount_letter = lr_core::boot_pca::find_available_drive_letter()
-                    .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
-                if let Err(error) = lr_core::windows_storage::assign_partition_drive_letter(
-                    disk.disk_number,
-                    partition.offset_bytes,
-                    mount_letter,
-                ) {
-                    log::warn!(
-                        "[BOOT] 无法挂载磁盘 {} 分区 {}: {}",
-                        disk.disk_number,
-                        partition.partition_number,
-                        error
-                    );
-                    continue;
-                }
-                let mount_guard =
-                    lr_core::boot_pca::TemporaryEspMountGuard::new(&mount_letter.to_string())
-                        .map_err(anyhow::Error::msg)?;
-                let mount_root = format!("{}:\\", mount_letter);
-                for _ in 0..20 {
-                    if Path::new(&mount_root).exists() {
+                match self.mount_known_esp(disk.disk_number, partition.offset_bytes) {
+                    Ok(mount_guard) => {
                         log::info!(
                             "[BOOT] 找到 ESP: 磁盘 {} 分区 {}",
                             disk.disk_number,
@@ -238,7 +281,14 @@ impl BootManager {
                         );
                         return Ok(mount_guard);
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    Err(error) => {
+                        log::warn!(
+                            "[BOOT] 无法挂载磁盘 {} 分区 {}: {}",
+                            disk.disk_number,
+                            partition.partition_number,
+                            error
+                        );
+                    }
                 }
             }
         }
@@ -731,5 +781,13 @@ mod tests {
             .to_string();
 
         assert!(error.contains("modeled failure"));
+    }
+
+    #[test]
+    fn missing_esp_is_distinct_from_an_access_failure() {
+        let error = require_pca_esp(None).unwrap_err().to_string();
+        assert!(error.contains("没有 EFI 系统分区"));
+        assert!(!error.contains("无法解析"));
+        assert!(!error.contains("无法挂载"));
     }
 }

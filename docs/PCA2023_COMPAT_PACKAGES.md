@@ -33,7 +33,9 @@ pca2023-modern-amd64.wim
 \Windows\Boot\EFI\boot.stl           # 可选
 ```
 
-客户端在格式化前检查包是普通文件、大小不超过 256 MiB、核心路径完整、`bootmgfw_EX.efi` 具有有效 PCA2023 签名且 PE 架构与目标 WIM 一致。正常系统端传给 PE 的副本另以 SHA-256 绑定；缺失、计算失败或不匹配均失败关闭。微软官方媒体脚本将 `bootmgr_EX.efi` 和 `boot.stl` 视为可选资源，LetRecovery 同样只在存在时复制。
+客户端在格式化前检查包是普通文件、精确匹配内嵌锁定清单中的大小和 SHA-256、索引固定为 1、核心路径完整、内部 `bootmgfw_EX.efi` 精确匹配锁定 SHA-256、具有 PCA2023 签发者且 PE 架构与目标 WIM 一致。正常系统端传给 PE 的副本另以 SHA-256 绑定；缺失、计算失败或不匹配均失败关闭。微软官方媒体脚本将 `bootmgr_EX.efi` 和 `boot.stl` 视为可选资源，LetRecovery 同样只在存在时复制。
+
+Windows 7 的系统信任库可能尚不认识 `Windows UEFI CA 2023`，此时有效文件会因无法建立到受信任根的链而被 `WinVerifyTrust` 报为不受信任。LetRecovery 仍优先接受宿主完整验证；只有 WinTrust 明确返回纯链信任错误时，才检查 provider 中主签名与时间戳没有摘要、吊销、过期、用途等其它错误，并要求证书链精确包含微软发布 SHA-256 为 `076F1FEA90AC29155EBF77C17682F75F1FDD1BE196DA302DC8461E350A9AE330` 的 `Windows UEFI CA 2023` 证书。该兼容路径不会向宿主证书库安装证书，也不会把普通未受信任文件泛化为有效签名。
 
 程序不会从资源包释放 BCD、脚本、注册表、日志、机器 ESP 或其他文件。注入后会再次检查离线系统中的 PCA2023 BootEx 签名。
 
@@ -92,4 +94,7 @@ cargo run -p lr-core --example build_pca2023_resource_pack --locked -- `
 
 - [Microsoft: BCDBoot command-line options](https://learn.microsoft.com/windows-hardware/manufacture/desktop/bcdboot-command-line-options-techref-di)
 - [Microsoft: Updating Windows bootable media to use the PCA2023 signed boot manager](https://support.microsoft.com/topic/d4064779-0e4e-43ac-b2ce-24f434fcfa0f)
+- [Microsoft: WinVerifyTrust](https://learn.microsoft.com/windows/win32/api/wintrust/nf-wintrust-winverifytrust)
+- [Microsoft: WTHelperProvDataFromStateData](https://learn.microsoft.com/windows/win32/api/wintrust/nf-wintrust-wthelperprovdatafromstatedata)
+- [Microsoft: SHA-2 code signing support for Windows 7](https://support.microsoft.com/topic/84a8aad5-d8d9-2d5c-6d78-34f9aa5f8339)
 - [Microsoft secureboot_objects: Make2023BootableMedia.ps1](https://github.com/microsoft/secureboot_objects/blob/main/scripts/windows/Make2023BootableMedia.ps1)

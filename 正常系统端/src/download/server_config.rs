@@ -186,9 +186,9 @@ impl RemoteConfig {
                 log::info!("远程配置加载成功");
             }
             Err(e) => {
-                config.error = Some(e.to_string());
+                config.error = Some(format!("{e:#}"));
                 config.loaded = false;
-                log::warn!("远程配置加载失败: {}", e);
+                log::warn!("远程配置加载失败: {e:#}");
             }
         }
 
@@ -197,12 +197,36 @@ impl RemoteConfig {
 
     /// 获取 v3 单文件目录。v3 是唯一受支持的远程目录协议。
     fn fetch_config() -> Result<RemoteConfigContents> {
-        let client = reqwest::blocking::Client::builder()
+        let native_client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .context(tr!("创建 HTTP 客户端失败"))?;
 
-        let mut contents = Self::fetch_v3_config(&client).context(tr!("v3 远程资源目录不可用"))?;
+        let mut contents = match Self::fetch_v3_config(&native_client) {
+            Ok(contents) => contents,
+            Err(native_error) => {
+                // Windows 7 frequently has a stale WinHTTP/IE proxy or a Schannel installation
+                // without a currently usable TLS credential chain. This retry is deliberately
+                // limited to LetRecovery's fixed HTTPS catalogue: it bypasses the machine proxy
+                // and uses the bundled WebPKI root set, without weakening certificate checks or
+                // changing the transport policy for user-provided URLs.
+                log::warn!(
+                    "系统 TLS/代理路径无法读取固定 v3 目录，改用直连 Rustls 重试: {native_error:#}"
+                );
+                let direct_client = reqwest::blocking::Client::builder()
+                    .use_rustls_tls()
+                    .no_proxy()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .context(tr!("创建兼容 HTTP 客户端失败"))?;
+                Self::fetch_v3_config(&direct_client).map_err(|direct_error| {
+                    anyhow::anyhow!(
+                        "{}; system TLS/proxy error: {native_error:#}; direct rustls error: {direct_error:#}",
+                        tr!("v3 远程资源目录不可用")
+                    )
+                })?
+            }
+        };
         let api_systems = contents
             .1
             .as_deref()

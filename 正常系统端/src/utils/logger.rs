@@ -6,6 +6,7 @@
 //! - 可在运行时动态开关日志
 //! - 日志状态持久化到配置文件
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -27,6 +28,42 @@ static LOG_GUARD: OnceLock<RwLock<Option<WorkerGuard>>> = OnceLock::new();
 
 /// 日志管理器
 pub struct LogManager;
+
+/// Converts tracing's platform-independent LF records to CRLF so the legacy Windows 7 Notepad
+/// renders one record per line. Existing CRLF pairs are preserved, including pairs split across
+/// separate writes.
+struct CrLfWriter<W> {
+    inner: W,
+    previous_was_cr: bool,
+}
+
+impl<W> CrLfWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            previous_was_cr: false,
+        }
+    }
+}
+
+impl<W: Write> Write for CrLfWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut converted = Vec::with_capacity(buf.len().saturating_add(16));
+        for &byte in buf {
+            if byte == b'\n' && !self.previous_was_cr {
+                converted.push(b'\r');
+            }
+            converted.push(byte);
+            self.previous_was_cr = byte == b'\r';
+        }
+        self.inner.write_all(&converted)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 impl LogManager {
     /// 获取日志目录路径
@@ -64,7 +101,8 @@ impl LogManager {
                 .rotation(tracing_appender::rolling::Rotation::DAILY)
                 .build(&log_dir)
                 .map_err(|e| anyhow::anyhow!("创建日志文件写入器失败: {}", e))?;
-            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            let (non_blocking, guard) =
+                tracing_appender::non_blocking(CrLfWriter::new(file_appender));
 
             // 文件日志格式层
             let file_layer = fmt::layer()
@@ -330,6 +368,28 @@ macro_rules! log_trace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crlf_writer_converts_lone_newlines_and_preserves_crlf() {
+        let mut output = Vec::new();
+        {
+            let mut writer = CrLfWriter::new(&mut output);
+            writer.write_all(b"first\nsecond\r\nthird").unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(output, b"first\r\nsecond\r\nthird");
+    }
+
+    #[test]
+    fn crlf_writer_preserves_a_crlf_split_across_writes() {
+        let mut output = Vec::new();
+        {
+            let mut writer = CrLfWriter::new(&mut output);
+            writer.write_all(b"first\r").unwrap();
+            writer.write_all(b"\nsecond\n").unwrap();
+        }
+        assert_eq!(output, b"first\r\nsecond\r\n");
+    }
 
     #[test]
     fn test_format_size() {

@@ -9,9 +9,12 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::boot_pca::{inspect_windows_boot_sources, PcaGeneration};
+use serde::Deserialize;
+
+use crate::boot_pca::{inspect_efi_architecture, inspect_efi_embedded_signer, PcaGeneration};
 use crate::hash::{hash_matches, normalize_hash, sha256_file};
 use crate::pca_preflight::inspect_wim_boot_source_details;
+use crate::scoped_temp_file::ScopedTempDir;
 use crate::wimlib::WimlibManager;
 
 pub const STAGED_PACKAGE_RELATIVE_PATH: &str = "pca_compat\\package.wim";
@@ -29,6 +32,22 @@ const BOOTEX_BOOT_MANAGER: &str = "\\Windows\\Boot\\EFI_EX\\bootmgfw_EX.efi";
 const BOOTEX_FONTS: &str = "\\Windows\\Boot\\FONTS_EX";
 const BOOT_STL: &str = "\\Windows\\Boot\\EFI\\boot.stl";
 const REQUIRED_INJECTION_PATHS: [&str; 2] = ["\\Windows\\Boot\\EFI_EX", BOOTEX_FONTS];
+const PCA2023_RESOURCE_LOCK: &str = include_str!("../../docs/PCA2023_RESOURCES.lock.json");
+
+#[derive(Debug, Deserialize)]
+struct PcaResourceLock {
+    schema_version: u32,
+    packages: Vec<LockedPcaPackage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LockedPcaPackage {
+    file: String,
+    target_wim_architecture: u16,
+    size: u64,
+    sha256: String,
+    bootmgfw_sha256: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetImageIdentity {
@@ -101,6 +120,7 @@ pub struct PreparedPcaCompatPackage {
     image_index: u32,
     target: TargetImageIdentity,
     family: PcaCompatFamily,
+    locked_file_name: &'static str,
 }
 
 impl PreparedPcaCompatPackage {
@@ -156,8 +176,24 @@ impl PreparedPcaCompatPackage {
     /// applied Windows image. No scripts, BCD store, registry data, or ESP
     /// content can be supplied by the resource pack.
     pub fn inject_into_offline_windows(&self, target_root: &Path) -> Result<(), PcaCompatError> {
-        verify_sha256_file(&self.path, &self.sha256)?;
-        validate_package_wim(&self.path, self.image_index, self.target.architecture)?;
+        let selection = select_offline_asset(self.target)?;
+        if selection.file_name != self.locked_file_name {
+            return Err(PcaCompatError::InvalidPackage(
+                "prepared package identity no longer matches its target image".to_string(),
+            ));
+        }
+        let locked = locked_package(selection.file_name)?;
+        if !hash_matches(&self.sha256, &locked.sha256) {
+            return Err(PcaCompatError::PackageIntegrity(
+                "prepared package SHA-256 does not match the embedded release lock".to_string(),
+            ));
+        }
+        validate_locked_package(
+            &self.path,
+            self.image_index,
+            self.target.architecture,
+            &locked,
+        )?;
 
         let target = target_root.to_string_lossy();
         let package = self.path.to_string_lossy();
@@ -174,12 +210,11 @@ impl PreparedPcaCompatPackage {
             .map_err(PcaCompatError::InvalidPackage)?;
 
         let windows = target_root.join("Windows");
-        let sources = inspect_windows_boot_sources(&windows);
-        if !sources.supports(PcaGeneration::Pca2023) {
-            return Err(PcaCompatError::InvalidPackage(
-                "注入后未检测到有效的 PCA2023 BootEx 引导文件".to_string(),
-            ));
-        }
+        validate_locked_bootex(
+            &windows.join("Boot").join("EFI_EX").join("bootmgfw_EX.efi"),
+            self.target.architecture,
+            &locked,
+        )?;
         for relative in ["Boot\\FONTS_EX"] {
             if !windows.join(relative).exists() {
                 return Err(PcaCompatError::InvalidPackage(format!(
@@ -265,16 +300,21 @@ pub fn prepare_from_local_assets(
     }
     let selection = select_offline_asset(target)?;
     let package_path = asset_directory.join(selection.file_name);
-    validate_offline_asset_package(&package_path, target.architecture)?;
-    let sha256 = sha256_file(&package_path, |_| {})
-        .map_err(|error| PcaCompatError::Io(error.to_string()))?;
+    let locked = locked_package(selection.file_name)?;
+    validate_locked_package(
+        &package_path,
+        PACKAGE_IMAGE_INDEX,
+        target.architecture,
+        &locked,
+    )?;
 
     Ok(PreparedPcaCompatPackage {
         path: package_path,
-        sha256,
+        sha256: normalize_hash(&locked.sha256),
         image_index: PACKAGE_IMAGE_INDEX,
         target,
         family: selection.family,
+        locked_file_name: selection.file_name,
     })
 }
 
@@ -307,18 +347,25 @@ pub fn open_staged_package(
         )));
     }
     let selection = select_offline_asset(actual_target)?;
-    verify_sha256_file(package_path, expected_sha256)?;
-    validate_package_wim(
+    let locked = locked_package(selection.file_name)?;
+    if !hash_matches(expected_sha256, &locked.sha256) {
+        return Err(PcaCompatError::PackageIntegrity(
+            "staged package SHA-256 does not match the embedded release lock".to_string(),
+        ));
+    }
+    validate_locked_package(
         package_path,
         package_image_index,
         actual_target.architecture,
+        &locked,
     )?;
     Ok(PreparedPcaCompatPackage {
         path: package_path.to_path_buf(),
-        sha256: normalize_hash(expected_sha256),
+        sha256: normalize_hash(&locked.sha256),
         image_index: package_image_index,
         target: actual_target,
         family: selection.family,
+        locked_file_name: selection.file_name,
     })
 }
 
@@ -352,6 +399,173 @@ pub fn resolve_staged_package_path(
         ));
     }
     Ok(data_directory.join(relative))
+}
+
+fn locked_package(file_name: &str) -> Result<LockedPcaPackage, PcaCompatError> {
+    let resource_lock: PcaResourceLock =
+        serde_json::from_str(PCA2023_RESOURCE_LOCK).map_err(|error| {
+            PcaCompatError::InvalidPackage(format!(
+                "embedded PCA2023 release lock is invalid: {error}"
+            ))
+        })?;
+    if resource_lock.schema_version != 1 {
+        return Err(PcaCompatError::InvalidPackage(format!(
+            "unsupported PCA2023 release lock schema {}",
+            resource_lock.schema_version
+        )));
+    }
+    if resource_lock.packages.len() != 3 {
+        return Err(PcaCompatError::InvalidPackage(format!(
+            "PCA2023 release lock must contain exactly three packages, found {}",
+            resource_lock.packages.len()
+        )));
+    }
+
+    let expected = [
+        (LEGACY_AMD64_PACKAGE, 9u16),
+        (LEGACY_X86_PACKAGE, 0u16),
+        (MODERN_AMD64_PACKAGE, 9u16),
+    ];
+    for (expected_name, expected_architecture) in expected {
+        let matches = resource_lock
+            .packages
+            .iter()
+            .filter(|package| package.file == expected_name)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(PcaCompatError::InvalidPackage(format!(
+                "PCA2023 release lock must contain exactly one {expected_name} entry"
+            )));
+        }
+        let package = matches[0];
+        if package.target_wim_architecture != expected_architecture {
+            return Err(PcaCompatError::InvalidPackage(format!(
+                "PCA2023 release lock architecture mismatch for {expected_name}"
+            )));
+        }
+        if package.size == 0 || package.size > MAX_PACKAGE_BYTES {
+            return Err(PcaCompatError::InvalidPackage(format!(
+                "PCA2023 release lock size is invalid for {expected_name}"
+            )));
+        }
+        for (label, digest) in [
+            ("package", package.sha256.as_str()),
+            ("bootmgfw_EX.efi", package.bootmgfw_sha256.as_str()),
+        ] {
+            let digest = normalize_hash(digest);
+            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(PcaCompatError::InvalidPackage(format!(
+                    "PCA2023 release lock {label} SHA-256 is invalid for {expected_name}"
+                )));
+            }
+        }
+    }
+
+    resource_lock
+        .packages
+        .into_iter()
+        .find(|package| package.file == file_name)
+        .ok_or_else(|| {
+            PcaCompatError::InvalidPackage(format!(
+                "PCA2023 release lock has no entry for {file_name}"
+            ))
+        })
+}
+
+fn validate_locked_package(
+    path: &Path,
+    image_index: u32,
+    expected_architecture: u16,
+    locked: &LockedPcaPackage,
+) -> Result<(), PcaCompatError> {
+    validate_local_package_file(path)?;
+    if image_index != PACKAGE_IMAGE_INDEX {
+        return Err(PcaCompatError::InvalidPackage(format!(
+            "locked PCA2023 resource package must use image index {PACKAGE_IMAGE_INDEX}, got {image_index}"
+        )));
+    }
+    if expected_architecture != locked.target_wim_architecture {
+        return Err(PcaCompatError::InvalidPackage(format!(
+            "locked PCA2023 resource architecture mismatch: expected {expected_architecture}, lock has {}",
+            locked.target_wim_architecture
+        )));
+    }
+    let size = fs::symlink_metadata(path)
+        .map_err(|error| PcaCompatError::Io(error.to_string()))?
+        .len();
+    if size != locked.size {
+        return Err(PcaCompatError::PackageIntegrity(format!(
+            "locked package size mismatch: expected {}, actual {size}",
+            locked.size
+        )));
+    }
+    verify_sha256_file(path, &locked.sha256)?;
+
+    let temp = ScopedTempDir::create_in(&std::env::temp_dir(), "LetRecovery-PcaCompat")
+        .map_err(|error| PcaCompatError::Io(error.to_string()))?;
+    {
+        let manager = WimlibManager::new().map_err(PcaCompatError::InvalidPackage)?;
+        let package = path.to_string_lossy();
+        for required in [BOOTEX_BOOT_MANAGER, BOOTEX_FONTS] {
+            if !manager
+                .image_contains_path(&package, image_index, required)
+                .map_err(PcaCompatError::InvalidPackage)?
+            {
+                return Err(PcaCompatError::InvalidPackage(format!(
+                    "resource package is missing allowlisted path: {required}"
+                )));
+            }
+        }
+        let target = temp.path().to_string_lossy();
+        manager
+            .extract_paths(&package, image_index, &target, &[BOOTEX_BOOT_MANAGER])
+            .map_err(PcaCompatError::InvalidPackage)?;
+    }
+
+    validate_locked_bootex(
+        &temp
+            .path()
+            .join("Windows")
+            .join("Boot")
+            .join("EFI_EX")
+            .join("bootmgfw_EX.efi"),
+        expected_architecture,
+        locked,
+    )
+}
+
+fn validate_locked_bootex(
+    path: &Path,
+    expected_architecture: u16,
+    locked: &LockedPcaPackage,
+) -> Result<(), PcaCompatError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        PcaCompatError::InvalidPackage(format!(
+            "locked bootmgfw_EX.efi is unavailable at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(PcaCompatError::InvalidPackage(format!(
+            "locked bootmgfw_EX.efi is not a regular file: {}",
+            path.display()
+        )));
+    }
+    verify_sha256_file(path, &locked.bootmgfw_sha256)?;
+    let architecture = inspect_efi_architecture(path);
+    if architecture != Some(expected_architecture) {
+        return Err(PcaCompatError::InvalidPackage(format!(
+            "locked BootEx architecture mismatch: expected {expected_architecture}, actual {architecture:?}"
+        )));
+    }
+    let (generation, issuer) =
+        inspect_efi_embedded_signer(path).map_err(PcaCompatError::InvalidPackage)?;
+    if generation != PcaGeneration::Pca2023 {
+        return Err(PcaCompatError::InvalidPackage(format!(
+            "locked bootmgfw_EX.efi signer is not Windows UEFI CA 2023: {issuer}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_local_package_file(path: &Path) -> Result<(), PcaCompatError> {
@@ -508,5 +722,47 @@ mod tests {
         let mismatch = verify_sha256_file(&path, &"0".repeat(64)).unwrap_err();
         assert!(mismatch.to_string().contains("期望"));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn embedded_release_lock_is_complete_and_matches_selection() {
+        for (file_name, architecture) in [
+            (LEGACY_AMD64_PACKAGE, 9),
+            (LEGACY_X86_PACKAGE, 0),
+            (MODERN_AMD64_PACKAGE, 9),
+        ] {
+            let package = locked_package(file_name).unwrap();
+            assert_eq!(package.file, file_name);
+            assert_eq!(package.target_wim_architecture, architecture);
+            assert!(package.size > 0);
+            assert_eq!(normalize_hash(&package.sha256).len(), 64);
+            assert_eq!(normalize_hash(&package.bootmgfw_sha256).len(), 64);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "validates the three release WIMs from pkg/bin/pca2023"]
+    fn validates_all_locked_release_packages_without_host_root_trust() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("pkg")
+            .join("bin")
+            .join("pca2023");
+        for (file_name, architecture) in [
+            (LEGACY_AMD64_PACKAGE, 9),
+            (LEGACY_X86_PACKAGE, 0),
+            (MODERN_AMD64_PACKAGE, 9),
+        ] {
+            let locked = locked_package(file_name).unwrap();
+            validate_locked_package(
+                &directory.join(file_name),
+                PACKAGE_IMAGE_INDEX,
+                architecture,
+                &locked,
+            )
+            .unwrap();
+        }
     }
 }

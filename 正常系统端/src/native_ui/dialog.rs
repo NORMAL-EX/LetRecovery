@@ -341,7 +341,7 @@ impl DialogState {
                 let _ = DeleteObject(font);
             }
         }
-        let face = wide("Microsoft YaHei UI");
+        let face = wide("Microsoft YaHei");
         self.font = create_font(scale(12, self.dpi), 400, &face);
         self.heading_font = create_font(scale(15, self.dpi), 600, &face);
     }

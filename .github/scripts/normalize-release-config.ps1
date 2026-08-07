@@ -57,6 +57,11 @@ function Assert-ReleaseTemplate {
             throw "Release template must explicitly set $name to false"
         }
     }
+
+    $logEnabled = $Template.PSObject.Properties["log_enabled"]
+    if ($null -eq $logEnabled -or $logEnabled.Value -ne $true) {
+        throw "Release template must explicitly set log_enabled to true"
+    }
     if ($null -eq $Template.PSObject.Properties["install_prefs"] -or $null -eq $Template.install_prefs) {
         throw "Release template is missing install_prefs"
     }

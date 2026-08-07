@@ -526,6 +526,9 @@ impl DiskManager {
     fn get_volume_space_bytes(letter: char) -> Option<(u64, u64)> {
         let path = format!("{}:\\", letter.to_ascii_uppercase());
         let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        if unsafe { GetDriveTypeW(PCWSTR(wide_path.as_ptr())) } == DRIVE_CDROM {
+            return None;
+        }
         let mut free_bytes_available = 0;
         let mut total_bytes = 0;
         unsafe {
@@ -904,6 +907,10 @@ impl DiskManager {
     pub fn get_free_space_bytes(partition: &str) -> Option<u64> {
         let path = format!("{}\\", partition);
         let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+
+        if unsafe { GetDriveTypeW(PCWSTR(wide_path.as_ptr())) } == DRIVE_CDROM {
+            return None;
+        }
 
         let mut free_bytes_available: u64 = 0;
         let mut total_bytes: u64 = 0;

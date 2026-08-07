@@ -7,12 +7,14 @@
 #[cfg(windows)]
 mod imp {
     use std::ffi::c_void;
+    use std::path::PathBuf;
     use std::sync::OnceLock;
 
     use libloading::Library;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, LOGPIXELSX};
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
     use windows::Win32::System::WindowsProgramming::GetFirmwareEnvironmentVariableW;
     use windows::Win32::UI::WindowsAndMessaging::SetProcessDPIAware;
 
@@ -186,10 +188,40 @@ mod imp {
         }
         GetFirmwareEnvironmentVariableW(name, guid, Some(buffer), size)
     }
+
+    /// Resolve the real Windows system directory without trusting PATH or a
+    /// mutable environment variable. This keeps host BCD tools matched to the
+    /// running Windows version, including Windows 7.
+    pub fn system_directory() -> std::io::Result<PathBuf> {
+        let required = unsafe { GetSystemDirectoryW(None) };
+        if required == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut buffer = vec![0u16; required as usize + 1];
+        let written = unsafe { GetSystemDirectoryW(Some(&mut buffer)) };
+        if written == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if written as usize >= buffer.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "GetSystemDirectoryW returned a truncated path",
+            ));
+        }
+        buffer.truncate(written as usize);
+        Ok(PathBuf::from(String::from_utf16(&buffer).map_err(
+            |_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "system directory is not valid UTF-16",
+                )
+            },
+        )?))
+    }
 }
 
 #[cfg(windows)]
 pub use imp::{
     dpi_for_system, dpi_for_window, enable_best_process_dpi_awareness,
-    get_firmware_environment_variable,
+    get_firmware_environment_variable, system_directory,
 };

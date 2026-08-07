@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -47,7 +48,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::controls::{center_single_line_edit_in_row, child, draw_inno_button, wide, ButtonRole};
 use super::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
 use super::driver_transfer_dialog::NativeDriverTransferDialog;
-use super::layout::{centered_control_y_ceil, measure_text, measured_button_width, LayoutMetrics};
+use super::layout::{centered_control_y_ceil, measure_text, LayoutMetrics};
 use super::pages::advanced::{
     AdvancedBrowseTarget, AdvancedPage, AdvancedPageContext, AdvancedPageIntent,
 };
@@ -536,6 +537,18 @@ fn pca_target_probe_required(context: PcaTargetContext) -> bool {
 
 fn pca_target_error_blocks(target_error: bool) -> bool {
     target_error
+}
+
+fn install_primary_enabled(validation_ok: bool, pca_pending: bool) -> bool {
+    validation_ok && !pca_pending
+}
+
+fn network_speed_text(speed_bps: u64) -> String {
+    if speed_bps == 0 {
+        crate::tr!("未知")
+    } else {
+        format!("{} Mbps", speed_bps / 1_000_000)
+    }
 }
 
 #[cfg(feature = "non-elevated-tests")]
@@ -1072,11 +1085,12 @@ mod layout_tests {
         command_status_right_edge, confirmed_tool_backend_request,
         device_change_requests_partition_refresh, download_failure_message,
         effective_easy_mode_enabled, initial_mutating_tool_state, install_partition_heading_y,
-        list_view_selection_state_changed, main_window_ex_style_owns_input,
-        may_publish_install_chrome, minimum_window_size, navigation_visibility,
-        page_switch_requires_full_layout, pca_pending_status, pca_target_error_blocks,
-        pca_target_probe_required, pca_target_result_is_current, pca_target_uses_uefi,
-        preferred_window_size, primary_state_refresh_for_page, reusable_pca_target_result,
+        install_primary_enabled, list_view_selection_state_changed,
+        main_window_ex_style_owns_input, may_publish_install_chrome, minimum_window_size,
+        navigation_visibility, network_speed_text, page_switch_requires_full_layout,
+        pca_pending_status, pca_target_error_blocks, pca_target_probe_required,
+        pca_target_result_is_current, pca_target_uses_uefi, preferred_window_size,
+        primary_state_refresh_for_page, reusable_pca_target_result,
         shared_install_mode_label_width, tool_backend_result_succeeded,
         unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
         Page, PcaPendingStatus, PcaTargetCacheEntry, PcaTargetContext, PcaTargetKey,
@@ -1272,6 +1286,20 @@ mod layout_tests {
             Some(PcaPendingStatus::TargetEfiSignature)
         );
         assert_eq!(pca_pending_status(true, false, false), None);
+    }
+
+    #[test]
+    fn install_primary_never_enables_while_a_relevant_pca_probe_is_pending() {
+        assert!(install_primary_enabled(true, false));
+        assert!(!install_primary_enabled(true, true));
+        assert!(!install_primary_enabled(false, false));
+        assert!(!install_primary_enabled(false, true));
+    }
+
+    #[test]
+    fn unavailable_network_rate_is_not_misreported_as_zero_mbps() {
+        assert_eq!(network_speed_text(0), crate::tr!("未知"));
+        assert_eq!(network_speed_text(1_000_000_000), "1000 Mbps");
     }
 
     #[test]
@@ -1772,7 +1800,7 @@ mod layout_tests {
             "当前计算机的系统和硬件摘要。",
             "界面语言:",
             "下载线程:",
-            "名称：{}\r\n描述：{}\r\n类型：{}\r\n状态：{}\r\n速度：{} Mbps\r\nMAC：{}\r\nIP：{}",
+            "名称：{}\r\n描述：{}\r\n类型：{}\r\n状态：{}\r\n速度：{}\r\nMAC：{}\r\nIP：{}",
             "{}不能为空",
             "请至少选择一项",
             "请从列表中选择{}",
@@ -1822,9 +1850,6 @@ const ID_IMAGE_VOLUME: u16 = 213;
 const ID_UNATTEND_BROWSE: u16 = 215;
 const ID_UNATTEND_CLEAR: u16 = 216;
 const ID_PCA_MODE: u16 = 217;
-const ID_RUN_DISKPART: u16 = 218;
-const ID_OPEN_DISKPART_DIR: u16 = 219;
-const ID_EDIT_BOOT_COMMANDS: u16 = 220;
 
 const fn command_button_role(id: u16) -> ButtonRole {
     if id == ID_PRIMARY {
@@ -1889,9 +1914,6 @@ struct Handles {
     boot_mode: HWND,
     pca_label: HWND,
     pca_mode: HWND,
-    run_diskpart: HWND,
-    open_diskpart_dir: HWND,
-    edit_boot_commands: HWND,
     advanced: HWND,
     refresh: HWND,
     status: HWND,
@@ -2323,9 +2345,9 @@ impl NativeWindow {
             let _ = DeleteObject(self.font_brand);
         }
         // Keep every native surface on the same CJK-capable UI family.  Mixing Segoe UI on the
-        // main window with Microsoft YaHei UI in tool dialogs changes glyph metrics and makes the
+        // main window with Microsoft YaHei in tool dialogs changes glyph metrics and makes the
         // migrated interface visibly jump between pages.
-        let face = wide("Microsoft YaHei UI");
+        let face = wide("Microsoft YaHei");
         self.font = CreateFontW(
             -self.scale(12),
             0,
@@ -2616,31 +2638,6 @@ impl NativeWindow {
         let _ = SendMessageW(pca_mode, 0x014E, WPARAM(pca_index), LPARAM(0));
         let _ = ShowWindow(pca_label, SW_HIDE);
         let _ = ShowWindow(pca_mode, SW_HIDE);
-        let run_diskpart = child(
-            hwnd,
-            w!("BUTTON"),
-            &crate::tr!("运行Diskpart脚本"),
-            BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
-            ID_RUN_DISKPART,
-        )?;
-        let _ = SendMessageW(run_diskpart, 0x00F1, WPARAM(0), LPARAM(0));
-        let open_diskpart_dir = child(
-            hwnd,
-            w!("BUTTON"),
-            &crate::tr!("打开目录"),
-            BS_OWNERDRAW | WS_TABSTOP.0 as i32,
-            ID_OPEN_DISKPART_DIR,
-        )?;
-        let edit_boot_commands = child(
-            hwnd,
-            w!("BUTTON"),
-            &crate::tr!("修改引导命令"),
-            BS_OWNERDRAW | WS_TABSTOP.0 as i32,
-            ID_EDIT_BOOT_COMMANDS,
-        )?;
-        for control in [run_diskpart, open_diskpart_dir, edit_boot_commands] {
-            let _ = ShowWindow(control, SW_HIDE);
-        }
         let advanced = child(
             hwnd,
             w!("BUTTON"),
@@ -2696,9 +2693,6 @@ impl NativeWindow {
             boot_mode,
             pca_label,
             pca_mode,
-            run_diskpart,
-            open_diskpart_dir,
-            edit_boot_commands,
             advanced,
             refresh,
             status,
@@ -2908,12 +2902,6 @@ impl NativeWindow {
         #[cfg(not(feature = "non-elevated-tests"))]
         {
             self.pca_target_detection_pending = true;
-            if let Some(handles) = self.handles {
-                set_text(
-                    handles.status,
-                    &crate::tr!("正在检测目标磁盘的 EFI 引导签名..."),
-                );
-            }
             let generation = self.pca_target_generation;
             let partition = target.partition.clone();
             let window = hwnd.0 as usize;
@@ -2967,10 +2955,7 @@ impl NativeWindow {
             };
             set_text(handles.status, &text);
         } else if let Some(error) = self.pca_target_detection_error.as_ref() {
-            set_text(
-                handles.status,
-                &crate::tr!("目标系统所在磁盘没有可用的 ESP: {}", error),
-            );
+            set_text(handles.status, error);
         } else if let Some(error) = self.pca_selection_error() {
             set_text(handles.status, &error);
         } else {
@@ -3110,7 +3095,18 @@ impl NativeWindow {
             .system_info
             .as_ref()
             .is_some_and(|info| info.is_pe_environment);
-        tools.apply_environment(is_pe_environment);
+        let supports_appx = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .and_then(|root| {
+                crate::core::system_utils::get_file_version(
+                    &root.join("System32").join("ntdll.dll"),
+                )
+            })
+            .is_some_and(|version| version.0 >= 10);
+        if !supports_appx {
+            log::info!("当前 Windows 不支持 AppX 工具，已从工具箱隐藏相关入口");
+        }
+        tools.apply_environment(is_pe_environment, supports_appx);
         self.tools_page = Some(tools);
 
         let hardware = HardwareInfoPage::create(
@@ -3208,9 +3204,6 @@ impl NativeWindow {
             h.unattend_browse,
             h.unattend_clear,
             h.reboot,
-            h.run_diskpart,
-            h.open_diskpart_dir,
-            h.edit_boot_commands,
             h.advanced,
             h.refresh,
             h.primary,
@@ -3223,7 +3216,7 @@ impl NativeWindow {
         // controls through the shared deterministic checkbox renderer just like the backup and
         // easy-mode pages do.  Reapplying this on a system-theme change also refreshes the
         // subclass palette reference without changing USER32's checkbox behaviour.
-        for checkbox in [h.format, h.boot, h.unattend, h.reboot, h.run_diskpart] {
+        for checkbox in [h.format, h.boot, h.unattend, h.reboot] {
             theme::apply_control_theme(
                 checkbox,
                 control_palette,
@@ -3424,9 +3417,6 @@ impl NativeWindow {
                 h.boot_mode,
                 h.pca_label,
                 h.pca_mode,
-                h.run_diskpart,
-                h.open_diskpart_dir,
-                h.edit_boot_commands,
                 h.advanced,
                 h.refresh,
                 h.status,
@@ -3742,7 +3732,6 @@ impl NativeWindow {
             self.scale(180),
             true,
         );
-        let unattended_enabled = SendMessageW(h.unattend, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
         let unattend_browse_width = self.scale(if compact_chinese { 132 } else { 180 });
         let unattend_clear_width = self.scale(if compact_chinese { 58 } else { 76 });
         let unattend_x = boot_mode_x + boot_mode_width + self.scale(12);
@@ -3806,55 +3795,10 @@ impl NativeWindow {
         } else {
             second_y + self.scale(34)
         };
-        let pca_y = third_y;
-        let edit_width = measured_button_width(
-            hwnd,
-            self.font,
-            &crate::tr!("修改引导命令"),
-            self.dpi,
-            self.scale(96),
-        );
-        let advanced_inline_x = unattend_x;
-        let advanced_inline_width = edit_width;
-        // Arbitrary DiskPart scripts are permanently disabled. Lay out only the supported boot
-        // command editor, otherwise the widths of the two hidden legacy controls push the visible
-        // button into the middle of an otherwise empty row.
-        let advanced_follows_boot = !unattended_enabled
-            && self.app_config.enable_advanced_options
-            && advanced_inline_x + advanced_inline_width <= content_right;
-        let advanced_row_x = if advanced_follows_boot {
-            advanced_inline_x
-        } else {
-            content_left
-        };
-        let advanced_row_y = if advanced_follows_boot {
-            second_y
-        } else {
-            pca_y
-        };
-        let _ = MoveWindow(h.run_diskpart, 0, 0, 0, 0, false);
-        let _ = MoveWindow(h.open_diskpart_dir, 0, 0, 0, 0, false);
-        let edit_x = advanced_row_x;
-        let _ = MoveWindow(
-            h.edit_boot_commands,
-            edit_x,
-            advanced_row_y,
-            edit_width.min((content_right - edit_x).max(0)),
-            self.scale(24),
-            true,
-        );
-        // When the action needs its own row, the image-dependent PCA selector may use the remaining
-        // space on that row. Otherwise PCA starts at the left edge on the following row.
-        let pca_row_y = if advanced_follows_boot {
-            third_y
-        } else {
-            advanced_row_y
-        };
-        let pca_x = if self.app_config.enable_advanced_options && !advanced_follows_boot {
-            edit_x + edit_width + self.scale(16)
-        } else {
-            content_left
-        };
+        // The removed legacy script controls reserve no hidden layout row. PCA starts at the
+        // normal left edge regardless of whether advanced options are enabled.
+        let pca_row_y = third_y;
+        let pca_x = content_left;
         let pca_closed_height = theme::combo_closed_height(h.pca_mode, metrics.field_height);
         let pca_row_height = pca_closed_height.max(metrics.label_height);
         let _ = MoveWindow(
@@ -4271,10 +4215,6 @@ impl NativeWindow {
                 windows::Win32::UI::WindowsAndMessaging::SW_HIDE
             },
         );
-        let _ = ShowWindow(h.edit_boot_commands, SW_HIDE);
-        for control in [h.run_diskpart, h.open_diskpart_dir] {
-            let _ = ShowWindow(control, SW_HIDE);
-        }
         self.update_unattend_controls_visibility();
         // PCA controls have stricter, image-dependent visibility than the rest of the install
         // page. Reapply that policy after every page switch instead of showing them wholesale.
@@ -4314,6 +4254,13 @@ impl NativeWindow {
             PrimaryStateRefresh::Install => self.update_install_primary_state(),
             PrimaryStateRefresh::Backup => self.update_backup_primary_state(),
             PrimaryStateRefresh::None => {}
+        }
+        // The footer belongs to the currently visible page. Never carry an asynchronous install
+        // probe caption onto Tools/Hardware/About, and rebuild the Install caption from live state
+        // when the user returns.
+        set_text(h.status, "");
+        if page == Page::Install {
+            self.update_pca_detection_status();
         }
         if page_switch_requires_full_layout(page) {
             // The install geometry is inventory-dependent: loading an ISO adds the image-volume
@@ -4517,9 +4464,6 @@ impl NativeWindow {
             h.boot_mode,
             h.pca_label,
             h.pca_mode,
-            h.run_diskpart,
-            h.open_diskpart_dir,
-            h.edit_boot_commands,
             h.refresh,
             h.primary,
         ] {
@@ -4559,13 +4503,13 @@ impl NativeWindow {
         // path both use the same current preferences even before the user touches a ComboBox.
         self.sync_install_preferences_from_controls();
         let validation = self.install_intent();
-        let enabled = validation.is_ok();
         let pca_pending = pca_pending_status(
             self.pca_selection_is_relevant(),
             self.pca_detection_pending,
             self.pca_target_detection_pending,
         )
         .is_some();
+        let enabled = install_primary_enabled(validation.is_ok(), pca_pending);
         if !may_publish_install_chrome(self.page, self.advanced_visible, self.progress_visible) {
             return;
         }
@@ -4703,7 +4647,7 @@ impl NativeWindow {
         if let Some(error) = self.pca_target_detection_error.as_ref() {
             let target_error_blocks = pca_target_error_blocks(true);
             if target_error_blocks {
-                return Some(crate::tr!("目标系统所在磁盘没有可用的 ESP: {}", error));
+                return Some(error.clone());
             }
         }
         let firmware = self.pca_firmware.as_ref()?;
@@ -6073,9 +6017,6 @@ impl NativeWindow {
                 Err(error) => {
                     let message = crate::tr!("无法识别当前运行的 Windows 分区：{}", error);
                     log::error!("{message}");
-                    if let Some(page) = &self.tools_page {
-                        set_text(page.introduction, &message);
-                    }
                     return;
                 }
             };
@@ -6872,14 +6813,9 @@ impl NativeWindow {
             confirmed: true,
         });
         let ToolExecutionPlan::External(external) = plan else {
-            if let Some(page) = &self.tools_page {
-                set_text(page.introduction, &crate::tr!("无法生成外部工具启动计划。"));
-            }
+            log::error!("无法生成外部工具启动计划");
             return;
         };
-        if let Some(page) = &self.tools_page {
-            set_text(page.introduction, &crate::tr!("正在启动工具..."));
-        }
         self.tool_background_jobs = self.tool_background_jobs.saturating_add(1);
         let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
         let sender = self.tool_worker_sender.clone();
@@ -7033,24 +6969,23 @@ impl NativeWindow {
                             result.unwrap_or_else(|error| crate::tr!("操作失败：{}", error));
                         dialog.set_state(state);
                         dialog.show_modeless();
-                    } else if let Some(page) = &self.tools_page {
-                        set_text(
-                            page.introduction,
-                            &result.unwrap_or_else(|error| crate::tr!("操作失败：{}", error)),
-                        );
+                    } else {
+                        match result {
+                            Ok(message) => log::info!("工具操作完成: {message}"),
+                            Err(error) => log::error!("工具操作失败: {error}"),
+                        }
                     }
                 }
                 ToolWorkerMessage::ExternalCompleted(action, result) => {
                     self.tool_background_jobs = self.tool_background_jobs.saturating_sub(1);
-                    if let Some(page) = &self.tools_page {
-                        let message = match result {
-                            Ok(message) if !message.trim().is_empty() => message,
-                            Ok(_) => crate::tr!("工具已启动。"),
-                            Err(error) => crate::tr!("工具启动失败：{}", error),
-                        };
-                        set_text(page.introduction, &message);
+                    match result {
+                        Ok(message) => {
+                            log::info!("外部工具启动成功: action={action:?}, result={message}")
+                        }
+                        Err(error) => {
+                            log::error!("外部工具启动失败: action={action:?}, error={error}")
+                        }
                     }
-                    log::info!("外部工具启动结果: action={action:?}");
                 }
                 ToolWorkerMessage::BitLockerGateCompleted { drive, result } => {
                     self.handle_bitlocker_gate_completed(hwnd, drive, result);
@@ -7353,11 +7288,13 @@ impl NativeWindow {
                     }
                 }
                 ToolWorkerMessage::QuickPartitionPendingCompleted(result) => {
-                    if let Some(page) = &self.tools_page {
-                        set_text(
-                            page.introduction,
-                            &result.unwrap_or_else(|error| crate::tr!("分区操作失败：{}", error)),
-                        );
+                    if let Some(dialog) = &mut self.quick_partition_dialog {
+                        match result {
+                            Ok(message) => dialog.set_operation_status(message),
+                            Err(error) => {
+                                dialog.set_operation_error(crate::tr!("分区操作失败：{}", error))
+                            }
+                        }
                     }
                     self.start_quick_partition_inventory();
                 }
@@ -9375,9 +9312,6 @@ impl NativeWindow {
             handles.boot_mode,
             handles.pca_label,
             handles.pca_mode,
-            handles.run_diskpart,
-            handles.open_diskpart_dir,
-            handles.edit_boot_commands,
             handles.advanced,
             handles.refresh,
             handles.status,
@@ -10718,64 +10652,6 @@ impl NativeWindow {
         }
     }
 
-    unsafe fn open_diskpart_script_directory(&self, hwnd: HWND) {
-        let directory = crate::utils::path::get_bin_dir().join("diskpart");
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            self.show_information(
-                hwnd,
-                crate::tr!("无法打开脚本目录"),
-                crate::tr!("创建目录失败：{}", error),
-            );
-            return;
-        }
-        let target = wide(&directory);
-        let result = ShellExecuteW(
-            hwnd,
-            w!("open"),
-            PCWSTR(target.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-        if result.0 as isize <= 32 {
-            self.show_information(
-                hwnd,
-                crate::tr!("无法打开脚本目录"),
-                crate::tr!("Windows 无法打开目录：{}", directory.display()),
-            );
-        }
-    }
-
-    unsafe fn edit_repair_boot_script(&self, hwnd: HWND) {
-        let file = crate::utils::path::get_bin_dir().join("repair_boot.txt");
-        if let Some(parent) = file.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                self.show_information(
-                    hwnd,
-                    crate::tr!("无法编辑引导命令"),
-                    crate::tr!("创建目录失败：{}", error),
-                );
-                return;
-            }
-        }
-        let target = wide(&file);
-        let result = ShellExecuteW(
-            hwnd,
-            w!("open"),
-            w!("notepad.exe"),
-            PCWSTR(target.as_ptr()),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-        if result.0 as isize <= 32 {
-            self.show_information(
-                hwnd,
-                crate::tr!("无法编辑引导命令"),
-                crate::tr!("Windows 无法启动记事本打开：{}", file.display()),
-            );
-        }
-    }
-
     unsafe fn relocalize_after_language_change(&mut self, hwnd: HWND) {
         // SetWindowText, ComboBox resets and ListView repopulation each invalidate their own
         // native HWND. Keep those intermediate mixed-language frames hidden and publish one
@@ -10826,9 +10702,6 @@ impl NativeWindow {
             );
             set_text(handles.pca_label, &crate::tr!("启动签名:"));
             self.update_pca_combo_labels();
-            set_text(handles.run_diskpart, &crate::tr!("运行Diskpart脚本"));
-            set_text(handles.open_diskpart_dir, &crate::tr!("打开目录"));
-            set_text(handles.edit_boot_commands, &crate::tr!("修改引导命令"));
             set_text(handles.advanced, &crate::tr!("高级选项..."));
             set_text(handles.refresh, &crate::tr!("刷新分区"));
             update_list_column_titles(
@@ -12152,13 +12025,6 @@ unsafe extern "system" fn window_proc(
                         state.update_install_primary_state();
                     }
                     ID_REBOOT | ID_DRIVER_COMBO => state.persist_install_preferences(),
-                    ID_RUN_DISKPART => {
-                        state.persist_install_preferences();
-                        state.update_pca_detection_status();
-                        state.update_install_primary_state();
-                    }
-                    ID_OPEN_DISKPART_DIR => state.open_diskpart_script_directory(hwnd),
-                    ID_EDIT_BOOT_COMMANDS => state.edit_repair_boot_script(hwnd),
                     ID_BOOT_COMBO if notification == CBN_SELCHANGE as u16 => {
                         state.persist_install_preferences();
                         state.update_advanced_install_context();
@@ -13303,12 +13169,12 @@ unsafe fn apply_tool_result(
                 .into_iter()
                 .map(|record| {
                     crate::tr!(
-                        "名称：{}\r\n描述：{}\r\n类型：{}\r\n状态：{}\r\n速度：{} Mbps\r\nMAC：{}\r\nIP：{}",
+                        "名称：{}\r\n描述：{}\r\n类型：{}\r\n状态：{}\r\n速度：{}\r\nMAC：{}\r\nIP：{}",
                         record.name,
                         record.description,
                         crate::tr!(record.adapter_type.as_str()),
                         crate::tr!(record.status.as_str()),
-                        record.speed / 1_000_000,
+                        network_speed_text(record.speed),
                         record.mac_address,
                         record.ip_addresses.join(", ")
                     )

@@ -31,7 +31,7 @@ Keep **Auto** selected in normal use. Before formatting, LetRecovery checks firm
 
 ## What configuration is required to run? Do I really need 4 GB of RAM?
 
-Running the desktop client requires Windows 10/11 (64-bit) plus administrator privileges. At least 4 GB of free memory is recommended, but this is only a **recommendation**—the program does **not** enforce a memory check.
+Running the desktop client requires Windows 7–11 (64-bit, one universal build) plus administrator privileges. At least 4 GB of free memory is recommended, but this is only a **recommendation**—the program does **not** enforce a memory check.
 
 ## Is BitLocker supported?
 

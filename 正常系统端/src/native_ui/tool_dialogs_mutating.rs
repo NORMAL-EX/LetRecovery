@@ -417,7 +417,7 @@ impl NativeMutatingToolDialog {
     pub unsafe fn create(owner: HWND, kind: MutatingToolKind) -> windows::core::Result<Self> {
         let shell = DialogShell::create(owner, dialog_spec(kind))?;
         let dpi = GetDpiForWindow(shell.hwnd()).max(96);
-        let face = wide("Microsoft YaHei UI");
+        let face = wide("Microsoft YaHei");
         let font = CreateFontW(
             -scale(14, dpi),
             0,

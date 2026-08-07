@@ -25,6 +25,18 @@ pub struct PreloadedConfig {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Suppress the system's modal "No disk" critical-error dialog before any background
+    // preload probes drive letters. Empty/ejected optical drives are valid and must be skipped,
+    // not allowed to block the whole process behind a system-owned retry dialog.
+    unsafe {
+        use windows::Win32::System::Diagnostics::Debug::{
+            SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX,
+        };
+        let required = SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX;
+        let previous = SetErrorMode(required);
+        let _ = SetErrorMode(previous | required);
+    }
+
     // Startup validation and elevation failures can display MessageBoxW before the main window
     // exists. Establish PMv2 awareness first so those dialogs are rendered at the monitor's native
     // DPI instead of being bitmap-scaled and blurred by USER32.

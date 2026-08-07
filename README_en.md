@@ -58,7 +58,7 @@ English | [简体中文](README.md)
 
 ### System Requirements
 
-- Normal system application: Windows 10/11 (64-bit)
+- Normal system application: Windows 7–11 (64-bit, one universal build)
 - WinPE application: the 64-bit WinPE shipped with the release package
 - Administrator privileges
 - At least 4GB available memory

@@ -505,15 +505,6 @@ fn normalize_drive_letter(value: &str) -> Option<char> {
     Some(letter.to_ascii_uppercase())
 }
 
-/// Remove a temporary drive-letter mount created for an ESP.
-pub fn unmount_esp(esp_letter: &str) -> Result<(), String> {
-    let letter = normalize_drive_letter(esp_letter)
-        .ok_or_else(|| format!("无效的 ESP 盘符: {esp_letter}"))?;
-    let mounted = format!("{letter}:");
-    crate::windows_storage::remove_drive_letter(letter)
-        .map_err(|error| format!("卸载 ESP {mounted} 失败: {error}"))
-}
-
 /// Owns a temporary ESP drive-letter mount and removes it on every exit path.
 #[derive(Debug)]
 pub struct TemporaryEspMountGuard {
@@ -522,14 +513,21 @@ pub struct TemporaryEspMountGuard {
 }
 
 impl TemporaryEspMountGuard {
-    /// Adopt a drive letter created by the caller and remove it when the guard closes.
-    pub fn new(esp_letter: &str) -> Result<Self, String> {
+    /// Adopt a drive letter created for an exact partition and remove it when the guard closes.
+    pub fn new(
+        esp_letter: &str,
+        expected: crate::windows_storage::VolumeIdentity,
+    ) -> Result<Self, String> {
         let letter = normalize_drive_letter(esp_letter)
             .ok_or_else(|| format!("无效的 ESP 盘符: {esp_letter}"))?;
         let identity = match crate::windows_storage::volume_identity(letter) {
             Ok(identity) => identity,
             Err(error) => {
-                let cleanup = unmount_esp(&letter.to_string());
+                let cleanup = crate::windows_storage::remove_partition_drive_letter(
+                    expected.disk_number,
+                    expected.offset_bytes,
+                    letter,
+                );
                 return Err(match cleanup {
                     Ok(()) => format!("无法确认临时 ESP {letter}: 的卷身份，已撤销盘符: {error}"),
                     Err(cleanup_error) => format!(
@@ -538,9 +536,35 @@ impl TemporaryEspMountGuard {
                 });
             }
         };
+        if identity.disk_number != expected.disk_number
+            || identity.offset_bytes != expected.offset_bytes
+        {
+            let cleanup = crate::windows_storage::remove_partition_drive_letter(
+                expected.disk_number,
+                expected.offset_bytes,
+                letter,
+            );
+            return Err(match cleanup {
+                Ok(()) => format!(
+                    "临时 ESP {letter}: 身份不一致，已撤销目标分区盘符: 实际磁盘 {} 偏移 {}，预期磁盘 {} 偏移 {}",
+                    identity.disk_number,
+                    identity.offset_bytes,
+                    expected.disk_number,
+                    expected.offset_bytes
+                ),
+                Err(cleanup_error) => format!(
+                    "临时 ESP {letter}: 身份不一致，且无法安全撤销目标分区盘符: 实际磁盘 {} 偏移 {}，预期磁盘 {} 偏移 {}; {}",
+                    identity.disk_number,
+                    identity.offset_bytes,
+                    expected.disk_number,
+                    expected.offset_bytes,
+                    cleanup_error
+                ),
+            });
+        }
         Ok(Self {
             letter: Some(format!("{letter}:")),
-            identity: Some(identity),
+            identity: Some(expected),
         })
     }
 
@@ -570,6 +594,107 @@ impl TemporaryEspMountGuard {
             Some(identity) => unmount_owned_esp(&letter, identity),
             None => Ok(()),
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EspProbeAccessError {
+    Mount {
+        volume_guid_detail: String,
+        mount_detail: String,
+    },
+    Inspect {
+        volume_guid_detail: String,
+        inspect_detail: String,
+    },
+    Cleanup {
+        inspect_detail: Option<String>,
+        cleanup_detail: String,
+    },
+}
+
+impl fmt::Display for EspProbeAccessError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mount {
+                volume_guid_detail,
+                mount_detail,
+            } => write!(
+                formatter,
+                "volume GUID access unavailable ({volume_guid_detail}); temporary ESP mount failed: {mount_detail}"
+            ),
+            Self::Inspect {
+                volume_guid_detail,
+                inspect_detail,
+            } => write!(
+                formatter,
+                "volume GUID access unavailable ({volume_guid_detail}); temporary ESP inspection failed: {inspect_detail}"
+            ),
+            Self::Cleanup {
+                inspect_detail,
+                cleanup_detail,
+            } => {
+                if let Some(inspect_detail) = inspect_detail {
+                    write!(
+                        formatter,
+                        "temporary ESP inspection failed ({inspect_detail}) and cleanup failed: {cleanup_detail}"
+                    )
+                } else {
+                    write!(formatter, "temporary ESP cleanup failed: {cleanup_detail}")
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for EspProbeAccessError {}
+
+/// Inspect an already identified ESP without changing access paths when its volume GUID root is
+/// usable. Hidden ESPs that are not exposed through the ordinary volume namespace fall back to a
+/// scoped drive-letter mount. The mount is always closed before this function returns, including
+/// inspection failures, and cleanup failures override a successful inspection.
+pub fn inspect_existing_esp_with_fallback<M, Resolve, Mount, Inspect, Close>(
+    resolve_volume_guid: Resolve,
+    mut mount_temporary: Mount,
+    mut inspect: Inspect,
+    close: Close,
+) -> Result<EfiSignatureInfo, EspProbeAccessError>
+where
+    Resolve: FnOnce() -> Result<Option<PathBuf>, String>,
+    Mount: FnMut() -> Result<(PathBuf, M), String>,
+    Inspect: FnMut(&Path) -> Result<EfiSignatureInfo, String>,
+    Close: FnOnce(M) -> Result<(), String>,
+{
+    let volume_guid_detail = match resolve_volume_guid() {
+        Ok(Some(root)) => match inspect(&root) {
+            Ok(info) => return Ok(info),
+            Err(error) => format!("GUID root inspection failed: {error}"),
+        },
+        Ok(None) => "partition is not exposed in the ordinary volume GUID namespace".to_string(),
+        Err(error) => error,
+    };
+
+    let (root, mount) = mount_temporary().map_err(|mount_detail| EspProbeAccessError::Mount {
+        volume_guid_detail: volume_guid_detail.clone(),
+        mount_detail,
+    })?;
+    let inspection = inspect(&root);
+    let cleanup = close(mount);
+
+    match (inspection, cleanup) {
+        (Ok(info), Ok(())) => Ok(info),
+        (Err(inspect_detail), Ok(())) => Err(EspProbeAccessError::Inspect {
+            volume_guid_detail,
+            inspect_detail,
+        }),
+        (Ok(_), Err(cleanup_detail)) => Err(EspProbeAccessError::Cleanup {
+            inspect_detail: None,
+            cleanup_detail,
+        }),
+        (Err(inspect_detail), Err(cleanup_detail)) => Err(EspProbeAccessError::Cleanup {
+            inspect_detail: Some(inspect_detail),
+            cleanup_detail,
+        }),
     }
 }
 
@@ -1371,6 +1496,23 @@ pub fn inspect_efi_signature(path: &Path) -> EfiSignatureInfo {
     }
 }
 
+/// Read the signer embedded in an EFI PE file without asking the host trust
+/// store to build its certificate chain.
+///
+/// Callers may use this only after an independent exact-content identity
+/// check. Windows 7 can parse a Windows UEFI CA 2023 signer even when its host
+/// trust store cannot build that newer certificate chain.
+#[cfg(windows)]
+pub fn inspect_efi_embedded_signer(path: &Path) -> Result<(PcaGeneration, String), String> {
+    let issuer = windows_impl::embedded_signer_issuer(path)?;
+    Ok((generation_from_name(&issuer), issuer))
+}
+
+#[cfg(not(windows))]
+pub fn inspect_efi_embedded_signer(_path: &Path) -> Result<(PcaGeneration, String), String> {
+    Err("EFI embedded signer inspection is only supported on Windows".to_string())
+}
+
 #[cfg(windows)]
 pub fn inspect_firmware_pca() -> FirmwarePcaInfo {
     windows_impl::inspect_firmware_pca()
@@ -1396,7 +1538,8 @@ mod windows_impl {
     use crate::windows_compat::get_firmware_environment_variable;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, SetLastError, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS, HANDLE,
+        CloseHandle, GetLastError, SetLastError, BOOL, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS,
+        HANDLE,
     };
     use windows::Win32::Security::Cryptography::{
         CertCloseStore, CertCreateCertificateContext, CertFindCertificateInStore,
@@ -1407,9 +1550,10 @@ mod windows_impl {
         CMSG_SIGNER_INFO_PARAM, HCERTSTORE, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
     };
     use windows::Win32::Security::WinTrust::{
-        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
-        WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE,
-        WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+        WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
+        WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
+        WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
+        WTD_UI_NONE,
     };
     use windows::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
@@ -1423,6 +1567,14 @@ mod windows_impl {
         0xa1, 0x59, 0xc0, 0xa5, 0xe4, 0x94, 0xa7, 0x4a, 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0,
         0x72,
     ];
+    // Microsoft publishes this SHA-256 for the Windows UEFI CA 2023
+    // certificate in its PKI audit repository. It is used only when
+    // WinVerifyTrust reports a pure chain-trust failure on an older host.
+    const WINDOWS_UEFI_CA_2023_CERT_SHA256: &str =
+        "076f1fea90ac29155ebf77c17682f75f1fdd1be196da302dc8461e350a9ae330";
+    const CERT_E_UNTRUSTEDROOT_STATUS: u32 = 0x800B_0109;
+    const CERT_E_CHAINING_STATUS: u32 = 0x800B_010A;
+    const CERT_E_UNTRUSTEDCA_STATUS: u32 = 0x800B_0112;
 
     struct HandleGuard(HANDLE);
     impl Drop for HandleGuard {
@@ -1460,16 +1612,136 @@ mod windows_impl {
         let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
         let status =
             unsafe { WinVerifyTrust(None, &mut action, &mut trust_data as *mut _ as *mut c_void) };
+        let compatibility_result = if status == 0 {
+            Ok(false)
+        } else {
+            verify_pinned_uefi_ca_2023_chain(status as u32, &trust_data).map(|()| true)
+        };
         trust_data.dwStateAction = WTD_STATEACTION_CLOSE;
         unsafe {
             let _ = WinVerifyTrust(None, &mut action, &mut trust_data as *mut _ as *mut c_void);
         }
-        if status != 0 {
-            return Err(format!("WinVerifyTrust 返回 0x{:08X}", status as u32));
+        let issuer = signer_issuer(&wide)?;
+        match compatibility_result {
+            Ok(false) => {}
+            Ok(true) if generation_from_name(&issuer) == PcaGeneration::Pca2023 => {
+                log::warn!(
+                    "[BOOT PCA] WinVerifyTrust host chain unavailable; accepted exact Microsoft Windows UEFI CA 2023 chain for {} (status 0x{:08X})",
+                    path.display(),
+                    status as u32
+                );
+            }
+            Ok(true) => {
+                return Err(format!(
+                    "WinVerifyTrust returned 0x{:08X}; pinned chain was present but signer generation was not PCA2023 ({issuer})",
+                    status as u32
+                ));
+            }
+            Err(detail) => {
+                return Err(format!(
+                    "WinVerifyTrust returned 0x{:08X}: {detail}",
+                    status as u32
+                ));
+            }
+        }
+        Ok((true, issuer))
+    }
+
+    pub(super) fn is_chain_trust_only_error(status: u32) -> bool {
+        matches!(
+            status,
+            CERT_E_UNTRUSTEDROOT_STATUS | CERT_E_CHAINING_STATUS | CERT_E_UNTRUSTEDCA_STATUS
+        )
+    }
+
+    fn verify_pinned_uefi_ca_2023_chain(
+        status: u32,
+        trust_data: &WINTRUST_DATA,
+    ) -> Result<(), String> {
+        if !is_chain_trust_only_error(status) {
+            return Err("failure is not a permitted host chain-trust error".to_string());
+        }
+        if trust_data.hWVTStateData.is_invalid() {
+            return Err("WinVerifyTrust did not return provider state".to_string());
         }
 
-        let issuer = signer_issuer(&wide)?;
-        Ok((true, issuer))
+        let provider = unsafe { WTHelperProvDataFromStateData(trust_data.hWVTStateData) };
+        if provider.is_null() {
+            return Err("WinTrust provider data is unavailable".to_string());
+        }
+        let signer = unsafe { WTHelperGetProvSignerFromChain(provider, 0, BOOL(0), 0) };
+        if signer.is_null() {
+            return Err("WinTrust primary signer is unavailable".to_string());
+        }
+        let signer = unsafe { &*signer };
+        if signer.dwError != 0 && !is_chain_trust_only_error(signer.dwError) {
+            return Err(format!(
+                "primary signer has non-chain error 0x{:08X}",
+                signer.dwError
+            ));
+        }
+        if signer.csCounterSigners > 0 {
+            if signer.pasCounterSigners.is_null() {
+                return Err("WinTrust countersigner array is invalid".to_string());
+            }
+            for index in 0..signer.csCounterSigners as usize {
+                let countersigner = unsafe { &*signer.pasCounterSigners.add(index) };
+                if countersigner.dwError != 0 {
+                    return Err(format!(
+                        "timestamp countersigner has error 0x{:08X}",
+                        countersigner.dwError
+                    ));
+                }
+            }
+        }
+        if signer.csCertChain == 0 || signer.pasCertChain.is_null() {
+            return Err("WinTrust primary signer chain is empty".to_string());
+        }
+
+        let mut pinned_ca_found = false;
+        for index in 0..signer.csCertChain as usize {
+            let provider_cert = unsafe { &*signer.pasCertChain.add(index) };
+            if provider_cert.dwError != 0 && !is_chain_trust_only_error(provider_cert.dwError) {
+                return Err(format!(
+                    "signer certificate {index} has non-chain error 0x{:08X}",
+                    provider_cert.dwError
+                ));
+            }
+            if provider_cert.pCert.is_null() {
+                return Err(format!("signer certificate {index} is unavailable"));
+            }
+            let certificate = unsafe { &*provider_cert.pCert };
+            let encoded_len = certificate.cbCertEncoded as usize;
+            if encoded_len == 0 || encoded_len > 1024 * 1024 || certificate.pbCertEncoded.is_null()
+            {
+                return Err(format!(
+                    "signer certificate {index} has invalid encoded data"
+                ));
+            }
+            let encoded = unsafe {
+                std::slice::from_raw_parts(certificate.pbCertEncoded.cast_const(), encoded_len)
+            };
+            if crate::hash::sha256_bytes(encoded)
+                .eq_ignore_ascii_case(WINDOWS_UEFI_CA_2023_CERT_SHA256)
+            {
+                pinned_ca_found = true;
+            }
+        }
+        if !pinned_ca_found {
+            return Err(
+                "signer chain does not contain the pinned Windows UEFI CA 2023 certificate"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn embedded_signer_issuer(path: &Path) -> Result<String, String> {
+        if !path.is_file() {
+            return Err(format!("file does not exist: {}", path.display()));
+        }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        signer_issuer(&wide)
     }
 
     fn signer_issuer(wide_path: &[u16]) -> Result<String, String> {
@@ -1839,8 +2111,10 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::VecDeque;
     use std::io;
+    use std::rc::Rc;
     use std::sync::Mutex;
 
     use super::*;
@@ -1992,6 +2266,125 @@ mod tests {
         assert_eq!(guard.letter(), "X:");
         assert!(guard.identity.is_none());
         drop(guard);
+    }
+
+    fn test_signature(path: &Path) -> EfiSignatureInfo {
+        EfiSignatureInfo {
+            generation: PcaGeneration::Pca2011,
+            signature_valid: true,
+            issuer: "test".to_string(),
+            path: path.to_path_buf(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn esp_probe_prefers_an_existing_volume_guid_without_mounting() {
+        let mounted = Rc::new(Cell::new(false));
+        let mounted_for_closure = Rc::clone(&mounted);
+        let result = inspect_existing_esp_with_fallback(
+            || Ok(Some(PathBuf::from(r"\\?\Volume{test}\"))),
+            move || {
+                mounted_for_closure.set(true);
+                Ok((PathBuf::from(r"Z:\"), false))
+            },
+            |root| Ok(test_signature(root)),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert!(!mounted.get());
+        assert_eq!(result.path, PathBuf::from(r"\\?\Volume{test}\"));
+    }
+
+    #[test]
+    fn hidden_esp_falls_back_to_a_scoped_temporary_mount() {
+        let cleanup_count = Rc::new(Cell::new(0));
+        let cleanup_for_closure = Rc::clone(&cleanup_count);
+        let result = inspect_existing_esp_with_fallback(
+            || Ok(None),
+            || Ok((PathBuf::from(r"Z:\"), true)),
+            |root| Ok(test_signature(root)),
+            move |owned| {
+                if owned {
+                    cleanup_for_closure.set(cleanup_for_closure.get() + 1);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.path, PathBuf::from(r"Z:\"));
+        assert_eq!(cleanup_count.get(), 1);
+    }
+
+    #[test]
+    fn borrowed_existing_esp_letter_is_never_unmounted() {
+        let cleanup_count = Rc::new(Cell::new(0));
+        let cleanup_for_closure = Rc::clone(&cleanup_count);
+        inspect_existing_esp_with_fallback(
+            || Ok(None),
+            || Ok((PathBuf::from(r"S:\"), false)),
+            |root| Ok(test_signature(root)),
+            move |owned| {
+                if owned {
+                    cleanup_for_closure.set(cleanup_for_closure.get() + 1);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(cleanup_count.get(), 0);
+    }
+
+    #[test]
+    fn temporary_mount_identity_mismatch_stops_before_inspection() {
+        let inspected = Rc::new(Cell::new(false));
+        let inspected_for_closure = Rc::clone(&inspected);
+        let result = inspect_existing_esp_with_fallback::<bool, _, _, _, _>(
+            || Ok(None),
+            || Err("assigned letter maps to a different partition".to_string()),
+            move |_| {
+                inspected_for_closure.set(true);
+                Ok(test_signature(Path::new(r"Z:\")))
+            },
+            |_| Ok(()),
+        );
+
+        assert!(matches!(result, Err(EspProbeAccessError::Mount { .. })));
+        assert!(!inspected.get());
+    }
+
+    #[test]
+    fn inspection_failure_still_closes_the_temporary_mount() {
+        let cleanup_count = Rc::new(Cell::new(0));
+        let cleanup_for_closure = Rc::clone(&cleanup_count);
+        let result = inspect_existing_esp_with_fallback(
+            || Ok(None),
+            || Ok((PathBuf::from(r"Z:\"), true)),
+            |_| Err("modeled read failure".to_string()),
+            move |_| {
+                cleanup_for_closure.set(cleanup_for_closure.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Err(EspProbeAccessError::Inspect { .. })));
+        assert_eq!(cleanup_count.get(), 1);
+    }
+
+    #[test]
+    fn cleanup_failure_overrides_a_successful_inspection() {
+        let result = inspect_existing_esp_with_fallback(
+            || Ok(None),
+            || Ok((PathBuf::from(r"Z:\"), true)),
+            |root| Ok(test_signature(root)),
+            |_| Err("modeled cleanup failure".to_string()),
+        );
+
+        assert!(matches!(&result, Err(EspProbeAccessError::Cleanup { .. })));
+        assert!(result.unwrap_err().to_string().contains("cleanup failure"));
     }
 
     #[test]
@@ -2239,6 +2632,24 @@ mod tests {
         let info = inspect_efi_signature(path);
         assert!(info.signature_valid, "{:?}", info.error);
         assert_ne!(info.generation, PcaGeneration::Unknown, "{}", info.issuer);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn win7_uefi_compatibility_accepts_only_chain_trust_errors() {
+        for status in [0x800B_0109, 0x800B_010A, 0x800B_0112] {
+            assert!(windows_impl::is_chain_trust_only_error(status));
+        }
+        for status in [
+            0,
+            0x8009_6002, // TRUST_E_NOSIGNATURE
+            0x8009_6010, // TRUST_E_BAD_DIGEST
+            0x800B_0101, // CERT_E_EXPIRED
+            0x800B_010C, // CERT_E_REVOKED
+            0x800B_0110, // CERT_E_WRONG_USAGE
+        ] {
+            assert!(!windows_impl::is_chain_trust_only_error(status));
+        }
     }
 
     #[cfg(windows)]

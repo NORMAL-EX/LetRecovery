@@ -147,6 +147,24 @@ where
     Ok(())
 }
 
+/// Distinguishes a verified manifest-only backup from a damaged or incomplete export. Automatic
+/// preservation may safely no-op only when there are no INF packages and no captured boot-storage
+/// requirements. Missing, malformed or contradictory manifests remain fail-closed.
+fn automatic_driver_export_has_payload(driver_root: &Path) -> anyhow::Result<bool> {
+    let inf_count = lr_core::driver::count_exported_driver_inf_files(driver_root)?;
+    let requirements = lr_core::driver::load_storage_driver_requirements(driver_root)?;
+    if inf_count != 0 {
+        return Ok(true);
+    }
+    if !requirements.is_empty() {
+        anyhow::bail!(
+            "driver export contains no INF packages but declares {} boot-storage requirements",
+            requirements.len()
+        );
+    }
+    Ok(false)
+}
+
 /// Stateful backend used for one executor run.
 ///
 /// Target identity is resolved again from `disk:partition` before every write
@@ -1294,6 +1312,20 @@ impl ProductionInstallBackend {
         });
         let mut config =
             intent.to_install_config(staged_name, lr_core::active_engine().as_u8(), pca.as_ref());
+        if intent.options.export_drivers && intent.options.driver_action == DriverAction::AutoImport
+        {
+            let driver_root = Path::new(&self.data_dir()?).join("drivers");
+            if !automatic_driver_export_has_payload(&driver_root)
+                .map_err(|error| Self::error("verify_empty_pe_driver_backup", error))?
+            {
+                // Older PE packages treat any existing driver directory as importable. Encode the
+                // verified empty result explicitly so they never invoke DISM on a manifest-only
+                // directory.
+                config.restore_drivers = false;
+                config.driver_action_mode = 0;
+                log::info!("[Driver] 当前系统没有第三方 OEM 驱动；PE 配置已明确跳过驱动导入");
+            }
+        }
         if intent.options.is_xp_i386 {
             config.xp_source_arch = self.staged_xp_source_arch.clone().ok_or_else(|| {
                 InstallBackendError::new(
@@ -1615,6 +1647,16 @@ impl ProductionInstallBackend {
         let backup = self.driver_backup.to_string_lossy();
         match intent.options.driver_action {
             DriverAction::AutoImport => {
+                if !automatic_driver_export_has_payload(&self.driver_backup)
+                    .map_err(|error| Self::error("verify_empty_driver_backup", error))?
+                {
+                    std::fs::remove_dir_all(&self.driver_backup)
+                        .map_err(|error| Self::error("clear_empty_driver_backup", error))?;
+                    log::info!(
+                        "[Driver] 当前系统没有第三方 OEM 驱动；直接安装路径安全跳过驱动导入"
+                    );
+                    return Ok(());
+                }
                 super::dism::Dism::new()
                     .add_drivers_offline(&format!("{}\\", self.target), &backup)
                     .map_err(|error| Self::error("import_preserved_drivers", error))?;
@@ -1992,6 +2034,10 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                             &format!("{}\\", self.target),
                             &self.driver_backup.to_string_lossy(),
                         )
+                    } else if intent.options.driver_action == DriverAction::AutoImport {
+                        dism.export_drivers_for_automatic_restore(
+                            &self.driver_backup.to_string_lossy(),
+                        )
                     } else {
                         dism.export_drivers(&self.driver_backup.to_string_lossy())
                     }
@@ -2045,8 +2091,13 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                         std::fs::remove_dir_all(&destination)
                             .map_err(|error| Self::error("clear_pe_driver_backup", error))?;
                     }
-                    super::dism::Dism::new()
-                        .export_drivers(&destination.to_string_lossy())
+                    let dism = super::dism::Dism::new();
+                    let result = if intent.options.driver_action == DriverAction::AutoImport {
+                        dism.export_drivers_for_automatic_restore(&destination.to_string_lossy())
+                    } else {
+                        dism.export_drivers(&destination.to_string_lossy())
+                    };
+                    result
                         .map(|_| ())
                         .map_err(|error| Self::error("export_drivers_to_pe_data", error))
                 }
@@ -2233,6 +2284,23 @@ mod tests {
         assert!(converted.migrate_wifi);
         assert_eq!(converted.wifi_ssid, "Test Wi-Fi");
         assert_eq!(converted.wifi_profile_xml, "<WLANProfile />");
+    }
+
+    #[test]
+    fn automatic_driver_restore_accepts_only_a_verified_empty_manifest() {
+        let temporary = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-empty-driver-export",
+        )
+        .expect("temporary driver export");
+
+        assert!(automatic_driver_export_has_payload(temporary.path()).is_err());
+        lr_core::driver::write_storage_driver_requirements(temporary.path(), &[])
+            .expect("empty manifest");
+        assert!(!automatic_driver_export_has_payload(temporary.path()).unwrap());
+
+        std::fs::write(temporary.path().join("oem1.inf"), b"[Version]\r\n").expect("driver INF");
+        assert!(automatic_driver_export_has_payload(temporary.path()).unwrap());
     }
 
     #[test]

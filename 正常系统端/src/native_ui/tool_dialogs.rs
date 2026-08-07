@@ -133,7 +133,7 @@ impl NativeToolDialog {
         let shell = DialogShell::create(owner, dialog_spec(kind))?;
         let content = shell.content();
         let dpi = GetDpiForWindow(shell.hwnd()).max(96);
-        let face = wide("Microsoft YaHei UI");
+        let face = wide("Microsoft YaHei");
         let font = CreateFontW(
             -scale(14, dpi),
             0,
@@ -680,7 +680,7 @@ impl NativeToolDialog {
     }
 
     /// `DialogShell` already measures command captions. Keep an additional conservative minimum
-    /// for the longest tool caption so Microsoft YaHei UI fallback metrics cannot ellipsize
+    /// for the longest tool caption so Microsoft YaHei fallback metrics cannot ellipsize
     /// “保存列表为TXT” / “Save list as TXT” at 200% DPI. The existing command height and right edge
     /// remain unchanged, and an optional cancel button retains the standard ten-pixel gap.
     unsafe fn ensure_software_export_button_width(&self, dpi: u32) {

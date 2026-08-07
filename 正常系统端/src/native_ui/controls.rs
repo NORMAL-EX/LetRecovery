@@ -1560,7 +1560,7 @@ fn single_line_edit_inner_bounds(
     let spare = available_height.saturating_sub(height);
     SingleLineEditInnerBounds {
         x: inset,
-        // Bias an odd spare pixel downward. Microsoft YaHei UI has more visible descent than
+        // Bias an odd spare pixel downward. Microsoft YaHei has more visible descent than
         // ascent whitespace; ordinary floor division recreates the reported top-heavy result.
         y: inset + (spare + 1) / 2,
         width: available_width,
