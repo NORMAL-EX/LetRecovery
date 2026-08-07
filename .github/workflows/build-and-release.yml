@@ -109,12 +109,11 @@ jobs:
           test -f "pkg/LetRecovery.exe"            || { echo "底包缺少 LetRecovery.exe"; exit 1; }
           test -f "pkg/bin/pe/LetRecovery_PE.wim"  || { echo "底包缺少 bin/pe/LetRecovery_PE.wim"; exit 1; }
 
-      - name: Rebuild package config from tracked release defaults
+      - name: Rebuild package config from generated release defaults
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           & .\.github\scripts\normalize-release-config.ps1 `
-            -TemplatePath .\config.json `
             -PackageConfigPath .\pkg\config.json `
             -RequirePeEntries
 
@@ -772,7 +771,6 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           & .\.github\scripts\normalize-release-config.ps1 `
-            -TemplatePath .\config.json `
             -PackageConfigPath .\pkg\config.json `
             -RequirePeEntries `
             -RequirePeHashes
@@ -814,7 +812,6 @@ jobs:
             }
             $archivedConfig = Join-Path $audit "config.json"
             & .\.github\scripts\normalize-release-config.ps1 `
-              -TemplatePath .\config.json `
               -PackageConfigPath $archivedConfig `
               -RequirePeEntries `
               -RequirePeHashes `

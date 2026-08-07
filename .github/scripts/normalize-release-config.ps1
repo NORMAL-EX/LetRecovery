@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [string]$TemplatePath = "config.json",
     [string]$PackageConfigPath = "pkg\config.json",
     [switch]$RequirePeEntries,
     [switch]$RequirePeHashes,
@@ -46,6 +45,81 @@ function Read-JsonObject {
 function ConvertTo-CompactJson {
     param([Parameter(Mandatory = $true)]$Value)
     return ($Value | ConvertTo-Json -Depth 100 -Compress)
+}
+
+function New-ReleaseTemplate {
+    # Keep this deterministic object synchronized with AppConfig::default, InstallPrefs::default,
+    # and the serializable fields of AdvancedOptionsData::default. Runtime-only values such as the
+    # current username and passwords must never appear in a release package.
+    return [pscustomobject][ordered]@{
+        easy_mode_enabled = $false
+        easy_mode_tip_dismissed = $false
+        easy_mode_settings_tip_dismissed = $false
+        log_enabled = $true
+        log_retention_days = 7
+        language = "zh-CN"
+        pe_cache = [pscustomobject][ordered]@{
+            pe_list = @()
+            version = 0
+        }
+        wim_engine = 0
+        # AppConfig no longer serializes this legacy field, but release packages keep an explicit
+        # false value so old program versions can never interpret the package as Advanced Mode.
+        enable_advanced_options = $false
+        allow_insecure_http_downloads = $false
+        download_threads = 16
+        install_prefs = [pscustomobject][ordered]@{
+            format_partition = $true
+            repair_boot = $true
+            unattended_install = $true
+            export_drivers = $true
+            auto_reboot = $true
+            run_diskpart_scripts = $false
+            boot_mode = "Auto"
+            boot_pca_mode = "Auto"
+            driver_action = "AutoImport"
+            advanced_options = [pscustomobject][ordered]@{
+                remove_shortcut_arrow = $true
+                restore_classic_context_menu = $false
+                bypass_nro = $true
+                disable_windows_update = $false
+                disable_windows_defender = $false
+                disable_reserved_storage = $true
+                disable_uac = $false
+                disable_device_encryption = $true
+                remove_uwp_apps = $false
+                migrate_wifi = $false
+                run_script_during_deploy = $false
+                deploy_script_path = ""
+                run_script_first_login = $false
+                first_login_script_path = ""
+                import_custom_drivers = $false
+                custom_drivers_path = ""
+                import_storage_controller_drivers = $false
+                import_registry_file = $false
+                registry_file_path = ""
+                import_custom_files = $false
+                custom_files_path = ""
+                custom_username = $true
+                builtin_administrator = [pscustomobject][ordered]@{
+                    enabled = $false
+                    account_name = "Administrator"
+                    auto_logon = $true
+                }
+                custom_volume_label = $false
+                volume_label = "OS"
+                win7_inject_usb3_driver = $false
+                win7_usb3_driver_path = ""
+                win7_inject_nvme_driver = $false
+                win7_nvme_driver_path = ""
+                win7_fix_acpi_bsod = $false
+                win7_fix_storage_bsod = $false
+                win7_uefi_patch = $false
+                xp_inject_usb3_driver = $false
+                xp_inject_nvme_driver = $false
+            }
+        }
+    }
 }
 
 function Assert-ReleaseTemplate {
@@ -113,24 +187,24 @@ function Assert-PeCache {
     }
 }
 
-$resolvedTemplate = Resolve-JsonFile -Path $TemplatePath -Description "Tracked release config template"
 $resolvedPackage = Resolve-JsonFile -Path $PackageConfigPath -Description "Package config"
-$template = Read-JsonObject -Path $resolvedTemplate -Description "Tracked release config template"
+$template = New-ReleaseTemplate
 $package = Read-JsonObject -Path $resolvedPackage -Description "Package config"
 
 Assert-ReleaseTemplate -Template $template
 Assert-PeCache -Config $package -EntriesRequired:$RequirePeEntries -HashesRequired:$RequirePeHashes
 
-# Reconstruct the complete release configuration from the tracked template. The only state retained
-# from the external package is PE metadata, because the workflow recalculates those hashes for the
-# WIM it has just built. No UI preference, local path, account choice, or dismissed-tip flag survives.
+# Reconstruct the complete release configuration from deterministic CI defaults. The only state
+# retained from the external package is PE metadata, because the workflow recalculates those hashes
+# for the WIM it has just built. No UI preference, local path, account choice, or dismissed-tip flag
+# survives.
 $expected = ConvertTo-CompactJson -Value $template | ConvertFrom-Json
 $expected.pe_cache = $package.pe_cache
 $expectedJson = ($expected | ConvertTo-Json -Depth 100) + "`n"
 
 if ($VerifyOnly) {
     if ((ConvertTo-CompactJson -Value $package) -ne (ConvertTo-CompactJson -Value $expected)) {
-        throw "Package config contains values outside the tracked release defaults and PE metadata: $resolvedPackage"
+        throw "Package config contains values outside the generated release defaults and PE metadata: $resolvedPackage"
     }
     Write-Host "Verified release config defaults: $resolvedPackage"
     return
@@ -153,7 +227,7 @@ try {
         throw "Normalized package config failed its final read-back check"
     }
     Assert-PeCache -Config $final -EntriesRequired:$RequirePeEntries -HashesRequired:$RequirePeHashes
-    Write-Host "Rebuilt release config from tracked defaults: $resolvedPackage"
+    Write-Host "Rebuilt release config from generated defaults: $resolvedPackage"
 } finally {
     if ($null -ne $temporary -and (Test-Path -LiteralPath $temporary)) {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
