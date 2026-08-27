@@ -633,50 +633,27 @@ pub fn require_plain_regular_file(path: &Path) -> Result<std::fs::Metadata> {
         .with_context(|| format!("inspect regular file {}", path.display()))
 }
 
-fn sensitive_acl_has_exact_trustees(aces: &[&str], current_sid: &str) -> bool {
-    use std::collections::BTreeSet;
-
-    let expected = [current_sid, "S-1-5-18", "S-1-5-32-544"]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let mut observed = BTreeSet::new();
-    for ace in aces {
-        let Some(trustee) = ace
-            .strip_prefix("(A;;FA;;;")
-            .and_then(|value| value.strip_suffix(')'))
-        else {
-            return false;
-        };
-        let trustee = match trustee {
-            "SY" | "S-1-5-18" => "S-1-5-18",
-            "BA" | "S-1-5-32-544" => "S-1-5-32-544",
-            value => value,
-        };
-        if !expected.contains(trustee) {
-            return false;
-        }
-        observed.insert(trustee);
-    }
-    observed == expected
-}
-
 /// Sensitive configurations may be consumed only when their persistent DACL has the exact
 /// protected current-user + SYSTEM + Administrators access semantics installed by `write_atomic`.
-/// `SET_ACCESS` may consolidate entries when the current token user is itself SYSTEM, so the
-/// verifier compares the unique SID set instead of requiring three textual ACEs.
+/// SDDL is deliberately not used as an authority here: Windows may serialize the same binary SID
+/// as either a numeric value or a well-known alias such as `LA`, `SY`, or `BA`. The verifier reads
+/// the binary ACL and compares SIDs directly so account naming cannot change the result.
 #[cfg(windows)]
 pub(crate) fn verify_sensitive_config_acl(path: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::{PCWSTR, PWSTR};
+    use std::ptr::null_mut;
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL};
-    use windows::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-        GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
-    };
+    use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows::Win32::Security::{
-        GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+        AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetLengthSid,
+        GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetTokenInformation, IsValidSid,
+        IsWellKnownSid, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        TOKEN_QUERY, TOKEN_USER,
     };
+    use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     struct HandleGuard(HANDLE);
     impl Drop for HandleGuard {
@@ -718,11 +695,10 @@ pub(crate) fn verify_sensitive_config_acl(path: &Path) -> Result<()> {
     }
     .context("read current TokenUser")?;
     let record = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<TOKEN_USER>()) };
-    let mut sid_text = PWSTR::null();
-    unsafe { ConvertSidToStringSidW(record.User.Sid, &mut sid_text) }
-        .context("format current user SID")?;
-    let sid_guard = LocalGuard(sid_text.0.cast());
-    let current_sid = unsafe { sid_text.to_string() }.context("read current user SID")?;
+    let current_sid = record.User.Sid;
+    if current_sid.is_invalid() || !unsafe { IsValidSid(current_sid).as_bool() } {
+        return Err(anyhow!("TokenUser returned an invalid SID"));
+    }
 
     let wide = path
         .as_os_str()
@@ -745,36 +721,123 @@ pub(crate) fn verify_sensitive_config_acl(path: &Path) -> Result<()> {
     if result != ERROR_SUCCESS {
         return Err(anyhow!("read CLI config DACL failed: {}", result.0));
     }
-    let descriptor_guard = LocalGuard(descriptor.0);
-    let mut sddl = PWSTR::null();
+    if descriptor.0.is_null() {
+        return Err(anyhow!("GetNamedSecurityInfoW returned a null descriptor"));
+    }
+    let _descriptor_guard = LocalGuard(descriptor.0);
+
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }
+        .context("read CLI config security descriptor control")?;
+    if control & SE_DACL_PROTECTED.0 == 0 {
+        return Err(anyhow!("sensitive CLI config DACL is not protected"));
+    }
+
+    let mut dacl_present = false.into();
+    let mut dacl_defaulted = false.into();
+    let mut dacl = null_mut();
     unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        GetSecurityDescriptorDacl(
             descriptor,
-            SDDL_REVISION_1,
-            DACL_SECURITY_INFORMATION,
-            &mut sddl,
-            None,
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
         )
     }
-    .context("format CLI config DACL")?;
-    let sddl_guard = LocalGuard(sddl.0.cast());
-    let value = unsafe { sddl.to_string() }.context("read CLI config DACL SDDL")?;
-    drop((sddl_guard, descriptor_guard, sid_guard));
-    let Some(mut rest) = value.strip_prefix("D:P") else {
-        return Err(anyhow!("sensitive CLI config DACL is not protected"));
-    };
-    let mut aces = Vec::new();
-    while !rest.is_empty() {
-        if !rest.starts_with('(') {
-            return Err(anyhow!("sensitive CLI config has unexpected DACL text"));
-        }
-        let end = rest
-            .find(')')
-            .ok_or_else(|| anyhow!("sensitive CLI config DACL is malformed"))?;
-        aces.push(&rest[..=end]);
-        rest = &rest[end + 1..];
+    .context("read CLI config DACL pointer")?;
+    if !dacl_present.as_bool() || dacl.is_null() {
+        return Err(anyhow!("sensitive CLI config has no non-null DACL"));
     }
-    if !sensitive_acl_has_exact_trustees(&aces, &current_sid) {
+
+    let mut information = ACL_SIZE_INFORMATION::default();
+    unsafe {
+        GetAclInformation(
+            dacl,
+            (&mut information as *mut ACL_SIZE_INFORMATION).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    }
+    .context("read CLI config ACL size information")?;
+
+    let current_is_system = unsafe { IsWellKnownSid(current_sid, WinLocalSystemSid).as_bool() };
+    let current_is_administrators =
+        unsafe { IsWellKnownSid(current_sid, WinBuiltinAdministratorsSid).as_bool() };
+    let expected_ace_count = if current_is_system || current_is_administrators {
+        2
+    } else {
+        3
+    };
+    if information.AceCount != expected_ace_count {
+        return Err(anyhow!(
+            "sensitive CLI config DACL has {} ACEs instead of the required unique trustee count {}",
+            information.AceCount,
+            expected_ace_count
+        ));
+    }
+
+    let mut saw_current = false;
+    let mut saw_system = false;
+    let mut saw_administrators = false;
+    for index in 0..information.AceCount {
+        let mut raw_ace = null_mut();
+        unsafe { GetAce(dacl, index, &mut raw_ace) }
+            .with_context(|| format!("read CLI config DACL ACE {index}"))?;
+        if raw_ace.is_null() {
+            return Err(anyhow!("CLI config DACL returned a null ACE"));
+        }
+        let header = unsafe { &*raw_ace.cast::<ACE_HEADER>() };
+        if header.AceType != 0
+            || header.AceFlags != 0
+            || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+        {
+            return Err(anyhow!(
+                "sensitive CLI config DACL contains a non-exact allow ACE"
+            ));
+        }
+        let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
+        if ace.Mask != FILE_ALL_ACCESS.0 {
+            return Err(anyhow!(
+                "sensitive CLI config DACL contains a non-full-control ACE"
+            ));
+        }
+        let sid = PSID((&ace.SidStart as *const u32).cast_mut().cast());
+        if !unsafe { IsValidSid(sid).as_bool() } {
+            return Err(anyhow!("sensitive CLI config DACL contains an invalid SID"));
+        }
+        let sid_offset = (&ace.SidStart as *const u32 as usize)
+            .checked_sub(raw_ace as usize)
+            .ok_or_else(|| anyhow!("sensitive CLI config ACE SID precedes its header"))?;
+        let sid_end = sid_offset
+            .checked_add(unsafe { GetLengthSid(sid) } as usize)
+            .ok_or_else(|| anyhow!("sensitive CLI config ACE SID length overflow"))?;
+        if sid_end > usize::from(header.AceSize) {
+            return Err(anyhow!("sensitive CLI config ACE contains a truncated SID"));
+        }
+
+        let is_current = unsafe { EqualSid(sid, current_sid).is_ok() };
+        let is_system = unsafe { IsWellKnownSid(sid, WinLocalSystemSid).as_bool() };
+        let is_administrators =
+            unsafe { IsWellKnownSid(sid, WinBuiltinAdministratorsSid).as_bool() };
+        if !is_current && !is_system && !is_administrators {
+            return Err(anyhow!(
+                "sensitive CLI config DACL grants an unexpected principal"
+            ));
+        }
+        if (is_current && saw_current)
+            || (is_system && saw_system)
+            || (is_administrators && saw_administrators)
+        {
+            return Err(anyhow!(
+                "sensitive CLI config DACL contains a duplicate trustee ACE"
+            ));
+        }
+        saw_current |= is_current;
+        saw_system |= is_system;
+        saw_administrators |= is_administrators;
+    }
+    if !saw_current || !saw_system || !saw_administrators {
         return Err(anyhow!(
             "sensitive CLI config DACL does not exactly grant current user, SYSTEM and Administrators"
         ));
@@ -1075,60 +1138,6 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sensitive_acl_accepts_unique_trusted_sid_semantics() {
-        assert!(sensitive_acl_has_exact_trustees(
-            &[
-                "(A;;FA;;;S-1-5-21-1-2-3-1001)",
-                "(A;;FA;;;SY)",
-                "(A;;FA;;;BA)",
-            ],
-            "S-1-5-21-1-2-3-1001",
-        ));
-        assert!(sensitive_acl_has_exact_trustees(
-            &["(A;;FA;;;SY)", "(A;;FA;;;BA)"],
-            "S-1-5-18",
-        ));
-        assert!(sensitive_acl_has_exact_trustees(
-            &["(A;;FA;;;SY)", "(A;;FA;;;S-1-5-18)", "(A;;FA;;;BA)"],
-            "S-1-5-18",
-        ));
-    }
-
-    #[test]
-    fn sensitive_acl_rejects_missing_extra_or_non_exact_aces() {
-        let user = "S-1-5-21-1-2-3-1001";
-        assert!(!sensitive_acl_has_exact_trustees(
-            &["(A;;FA;;;SY)", "(A;;FA;;;BA)"],
-            user,
-        ));
-        assert!(!sensitive_acl_has_exact_trustees(
-            &[
-                "(A;;FA;;;S-1-5-21-1-2-3-1001)",
-                "(A;;FA;;;SY)",
-                "(A;;FA;;;BA)",
-                "(A;;FA;;;WD)",
-            ],
-            user,
-        ));
-        assert!(!sensitive_acl_has_exact_trustees(
-            &[
-                "(A;;FR;;;S-1-5-21-1-2-3-1001)",
-                "(A;;FA;;;SY)",
-                "(A;;FA;;;BA)",
-            ],
-            user,
-        ));
-        assert!(!sensitive_acl_has_exact_trustees(
-            &[
-                "(A;;FA;OI;S-1-5-21-1-2-3-1001)",
-                "(A;;FA;;;SY)",
-                "(A;;FA;;;BA)",
-            ],
-            user,
-        ));
-    }
 
     #[cfg(windows)]
     fn dacl_sddl(path: &Path) -> String {
