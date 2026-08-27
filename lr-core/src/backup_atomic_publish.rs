@@ -417,10 +417,18 @@ impl SecurePublishSession {
             bail!("empty backup publish session pathname rebound before deletion");
         }
         verify_system_administrators_directory_custody(&directory)?;
-        let mut entries = std::fs::read_dir(&self.path)?;
-        if entries.next().transpose()?.is_some() {
-            bail!("backup publish session is not empty; preserving it for diagnosis or recovery");
+        {
+            let mut entries = std::fs::read_dir(&self.path)?;
+            if entries.next().transpose()?.is_some() {
+                bail!(
+                    "backup publish session is not empty; preserving it for diagnosis or recovery"
+                );
+            }
         }
+        // `FileDispositionInfo` removes the directory only after its last handle closes. Keep the
+        // emptiness check in a separate scope so the `ReadDir` enumeration handle is closed before
+        // marking and closing the exact DELETE-capable directory handle. Otherwise deletion can
+        // remain pending and the authoritative pathname readback below must correctly reject it.
         let Self { path, _pins, .. } = self;
         delete_on_close(&directory)?;
         drop(directory);
