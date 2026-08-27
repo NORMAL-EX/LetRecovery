@@ -53,6 +53,14 @@ pub struct AppConfig {
     #[serde(default, skip_serializing)]
     pub enable_advanced_options: bool,
 
+    /// 在安装/备份页显示 CLI 自动化配置导出按钮。该高级入口默认关闭。
+    #[serde(default)]
+    pub automation_export_enabled: bool,
+
+    /// 在正常系统端工具箱显示“进入 PE 维护环境”。缺省和 false 均不暴露该高级入口。
+    #[serde(default)]
+    pub pe_maintenance_entry_enabled: bool,
+
     /// Compatibility switch for trusted deployments that still publish HTTP
     /// download URLs. HTTPS remains the secure default.
     #[serde(default)]
@@ -111,6 +119,8 @@ impl Default for AppConfig {
             pe_cache: crate::download::config::PeCache::default(),
             wim_engine: 0, // 默认 libwim
             enable_advanced_options: false,
+            automation_export_enabled: false,
+            pe_maintenance_entry_enabled: false,
             allow_insecure_http_downloads: false,
             download_threads: default_download_threads(),
             install_prefs: crate::core::ui_state::InstallPrefs::default(),
@@ -133,6 +143,34 @@ impl AppConfig {
         Self::load_silent()
     }
 
+    /// Strict loader for automation safety boundaries. Unlike GUI preference loading, a present
+    /// but unreadable or malformed file is an error and must not become an empty/default catalog.
+    pub(crate) fn load_strict() -> anyhow::Result<Self> {
+        let config_path = Self::get_config_path();
+        if !config_path.exists() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|error| anyhow::anyhow!("read {}: {error}", config_path.display()))?;
+        let config = serde_json::from_str::<Self>(&content)
+            .map_err(|error| anyhow::anyhow!("parse {}: {error}", config_path.display()))?;
+        Ok(config.normalized())
+    }
+
+    /// Automation may explicitly ask to inherit the adjacent GUI preferences.  In that mode a
+    /// missing file is not equivalent to the application's defaults: it would make the automated
+    /// run differ silently from the configuration the operator asked us to reproduce.
+    pub(crate) fn load_required_strict() -> anyhow::Result<Self> {
+        let config_path = Self::get_config_path();
+        if !config_path.exists() {
+            anyhow::bail!(
+                "required adjacent application configuration is missing: {}",
+                config_path.display()
+            );
+        }
+        Self::load_strict()
+    }
+
     /// 静默加载配置（不输出日志）
     /// 用于在日志系统初始化之前加载配置
     fn load_silent() -> Self {
@@ -147,34 +185,6 @@ impl AppConfig {
                 .map(Self::normalized)
                 .unwrap_or_default(),
             Err(_) => Self::default(),
-        }
-    }
-
-    /// 重新加载配置并记录日志
-    /// 用于在日志系统初始化之后需要重新加载时使用
-    pub fn reload_with_logging() -> Self {
-        let config_path = Self::get_config_path();
-
-        if !config_path.exists() {
-            log::info!("配置文件不存在，使用默认配置");
-            return Self::default();
-        }
-
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => match serde_json::from_str::<AppConfig>(&content) {
-                Ok(config) => {
-                    log::info!("加载配置文件成功");
-                    config.normalized()
-                }
-                Err(e) => {
-                    log::warn!("解析配置文件失败: {}，使用默认配置", e);
-                    Self::default()
-                }
-            },
-            Err(e) => {
-                log::warn!("读取配置文件失败: {}，使用默认配置", e);
-                Self::default()
-            }
         }
     }
 
@@ -247,14 +257,6 @@ impl AppConfig {
         }
     }
 
-    /// 关闭小白模式提示
-    pub fn dismiss_easy_mode_tip(&mut self) {
-        self.easy_mode_tip_dismissed = true;
-        if let Err(e) = self.save() {
-            log::warn!("保存配置失败: {}", e);
-        }
-    }
-
     /// 关闭小白模式下的设置提示
     pub fn dismiss_easy_mode_settings_tip(&mut self) {
         self.easy_mode_settings_tip_dismissed = true;
@@ -271,19 +273,6 @@ impl AppConfig {
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
         }
-    }
-
-    /// 设置日志保留天数并保存
-    pub fn set_log_retention_days(&mut self, days: u32) {
-        self.log_retention_days = days.clamp(1, 365); // 限制范围：1-365天
-        if let Err(e) = self.save() {
-            log::warn!("保存配置失败: {}", e);
-        }
-    }
-
-    /// 获取日志记录状态
-    pub fn is_log_enabled(&self) -> bool {
-        self.log_enabled
     }
 
     /// 设置 WIM 镜像引擎并保存（同时更新进程级引擎选择，立即生效）
@@ -308,6 +297,14 @@ impl AppConfig {
         }
     }
 
+    /// 设置安装/备份页的自动化配置导出入口并立即保存。
+    pub fn set_automation_export_enabled(&mut self, enabled: bool) {
+        self.automation_export_enabled = enabled;
+        if let Err(e) = self.save() {
+            log::warn!("保存配置失败: {}", e);
+        }
+    }
+
     /// 设置界面语言并保存
     ///
     /// # Arguments
@@ -325,47 +322,6 @@ impl AppConfig {
     }
 }
 
-/// 获取当前Windows用户名
-#[cfg(windows)]
-pub fn get_current_username() -> Option<String> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
-
-    // 尝试从环境变量获取
-    if let Ok(username) = std::env::var("USERNAME") {
-        if lr_core::unattend_account::validate_unattended_local_account_name(&username).is_ok() {
-            return Some(username);
-        }
-    }
-
-    // 使用Windows API获取
-    unsafe {
-        #[link(name = "advapi32")]
-        extern "system" {
-            fn GetUserNameW(lpBuffer: *mut u16, pcbBuffer: *mut u32) -> i32;
-        }
-
-        let mut buffer = [0u16; 256];
-        let mut size = buffer.len() as u32;
-
-        if GetUserNameW(buffer.as_mut_ptr(), &mut size) != 0 {
-            let username = OsString::from_wide(&buffer[..size as usize - 1]);
-            if let Some(name) = username.to_str() {
-                if lr_core::unattend_account::validate_unattended_local_account_name(name).is_ok() {
-                    return Some(name.to_string());
-                }
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(not(windows))]
-pub fn get_current_username() -> Option<String> {
-    std::env::var("USER").ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +330,7 @@ mod tests {
     fn old_json_without_download_threads_keeps_legacy_connection_count() {
         let config: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.download_threads, 16);
+        assert!(!config.automation_export_enabled);
     }
 
     #[test]
@@ -420,6 +377,36 @@ mod tests {
                 .advanced_options
                 .disable_windows_defender
         );
+    }
+
+    #[test]
+    fn pe_maintenance_entry_is_opt_in_and_absent_means_false() {
+        let absent: AppConfig = serde_json::from_str("{}").unwrap();
+        let disabled: AppConfig =
+            serde_json::from_str(r#"{"pe_maintenance_entry_enabled":false}"#).unwrap();
+        let enabled: AppConfig =
+            serde_json::from_str(r#"{"pe_maintenance_entry_enabled":true}"#).unwrap();
+
+        assert!(!absent.pe_maintenance_entry_enabled);
+        assert!(!disabled.pe_maintenance_entry_enabled);
+        assert!(enabled.pe_maintenance_entry_enabled);
+    }
+
+    #[test]
+    fn persisted_wifi_migration_without_session_profile_is_reset_on_load() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"install_prefs":{"advanced_options":{"migrate_wifi":true}}}"#)
+                .unwrap();
+        assert!(config.install_prefs.advanced_options.migrate_wifi);
+
+        let normalized = config.normalized();
+
+        assert!(!normalized.install_prefs.advanced_options.migrate_wifi);
+        assert!(normalized
+            .install_prefs
+            .advanced_options
+            .wifi_profile_xml
+            .is_empty());
     }
 
     #[test]

@@ -85,8 +85,8 @@ impl DismCmd {
     /// 查找 DISM 可执行文件
     fn find_dism_executable() -> Result<PathBuf> {
         let is_pe = crate::core::system_info::SystemInfo::check_pe_environment();
-        if let Ok(windir) = std::env::var("WINDIR") {
-            let system32_dism = PathBuf::from(&windir).join("System32").join("Dism.exe");
+        if let Ok(system_directory) = lr_core::windows_compat::system_directory() {
+            let system32_dism = system_directory.join("Dism.exe");
             if system32_dism.exists() {
                 log::info!(
                     "[DismCmd] 使用{}系统 DISM: {}",
@@ -128,8 +128,8 @@ impl DismCmd {
                 "未找到可用的 dism.exe。请确保系统已安装 DISM 或将 dism.exe 放置于程序目录的 bin\\Dism\\ 下\n\
                  已搜索路径:\n\
                  - {程序目录}\\bin\\Dism\\dism.exe\n\
-                 - X:\\Windows\\System32\\dism.exe (PE 环境)\n\
-                 - C:\\Windows\\System32\\dism.exe (Windows 系统)"
+                 - Windows API 返回的实际 System32\\Dism.exe\n\
+                 - X:\\Windows\\System32\\dism.exe (常见 PE 环境)"
             )
         )
     }
@@ -143,11 +143,6 @@ impl DismCmd {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
-    }
-
-    /// 获取 DISM 路径
-    pub fn dism_path(&self) -> &Path {
-        &self.dism_path
     }
 
     /// 确保临时目录存在并返回路径
@@ -216,7 +211,6 @@ impl DismCmd {
     /// - `image_path`: 离线映像路径（挂载点或 Windows 根目录，如 `D:\`）
     /// - `driver_path`: 驱动路径（INF 文件或包含驱动的目录）
     /// - `recurse`: 是否递归搜索子目录
-    /// - `force_unsigned`: 是否强制安装未签名驱动
     /// - `progress_tx`: 可选的进度发送器
     ///
     /// # 返回
@@ -227,21 +221,8 @@ impl DismCmd {
         image_path: &str,
         driver_path: &str,
         recurse: bool,
-        force_unsigned: bool,
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
-        let verified_package = if force_unsigned {
-            if recurse {
-                bail!("controlled signed-driver fallback cannot use /Recurse");
-            }
-            let package =
-                lr_core::driver_package_trust::verify_driver_package(Path::new(driver_path.trim()))
-                    .context("driver package did not pass independent SetupAPI verification")?;
-            package.revalidate()?;
-            Some(package)
-        } else {
-            None
-        };
         // 规范化路径（确保以反斜杠结尾，与 PE 端保持一致）
         let image_path = Self::normalize_image_path(image_path);
         let driver_path_normalized = driver_path.trim().to_string();
@@ -277,15 +258,6 @@ impl DismCmd {
         if recurse {
             args.push("/Recurse".to_string());
         }
-        if let Some(package) = verified_package {
-            log::warn!(
-                "[DismCmd] DISM signature false-negative fallback for {} (signer: {})",
-                package.inf_path().display(),
-                package.signer()
-            );
-            args.push("/ForceUnsigned".to_string());
-        }
-
         // 执行命令
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         self.execute_with_progress_args(&args_ref, progress_tx, &tr!("驱动添加"))
@@ -306,7 +278,7 @@ impl DismCmd {
         progress_tx: Option<Sender<DismCmdProgress>>,
     ) -> Result<()> {
         // 直接使用 /Recurse 参数一次性添加整个目录
-        match self.add_driver_offline(image_path, driver_dir, true, false, progress_tx.clone()) {
+        match self.add_driver_offline(image_path, driver_dir, true, progress_tx.clone()) {
             Ok(()) => return Ok(()),
             Err(batch_error) => log::warn!(
                 "[DismCmd] recursive driver import failed; retrying exact INF packages: {}",
@@ -337,22 +309,10 @@ impl DismCmd {
         for inf in inf_files {
             let inf_text = inf.to_string_lossy();
             if let Err(normal_error) =
-                self.add_driver_offline(image_path, &inf_text, false, false, progress_tx.clone())
+                self.add_driver_offline(image_path, &inf_text, false, progress_tx.clone())
             {
-                if !lr_core::driver_package_trust::is_known_dism_signature_false_negative(
-                    &normal_error.to_string(),
-                ) {
-                    return Err(normal_error).with_context(|| {
-                        format!("DISM rejected driver package: {}", inf.display())
-                    });
-                }
-                self.add_driver_offline(image_path, &inf_text, false, true, progress_tx.clone())
-                    .with_context(|| {
-                        format!(
-                            "verified signed-driver fallback failed for {}",
-                            inf.display()
-                        )
-                    })?;
+                return Err(normal_error)
+                    .with_context(|| format!("DISM rejected driver package: {}", inf.display()));
             }
         }
         Ok(())
@@ -652,34 +612,6 @@ impl DismCmd {
     // ========================================================================
     // 信息查询
     // ========================================================================
-
-    /// 获取离线系统中已安装的驱动列表
-    pub fn get_drivers(&self, image_path: &str) -> Result<String> {
-        let image_path = Self::normalize_image_path(image_path);
-        let scratch_dir = Self::ensure_scratch_directory();
-
-        let args = [
-            &format!("/Image:{}", image_path),
-            "/Get-Drivers",
-            &format!("/scratchdir:{}", scratch_dir),
-        ];
-
-        self.execute_and_get_output(&args)
-    }
-
-    /// 获取离线系统中已安装的更新包列表
-    pub fn get_packages(&self, image_path: &str) -> Result<String> {
-        let image_path = Self::normalize_image_path(image_path);
-        let scratch_dir = Self::ensure_scratch_directory();
-
-        let args = [
-            &format!("/Image:{}", image_path),
-            "/Get-Packages",
-            &format!("/scratchdir:{}", scratch_dir),
-        ];
-
-        self.execute_and_get_output(&args)
-    }
 
     // ========================================================================
     // 内部辅助方法
@@ -1089,15 +1021,6 @@ mod tests {
             "D:\\Windows\\"
         );
         assert_eq!(DismCmd::normalize_image_path("  C:\\Test  "), "C:\\Test\\");
-    }
-
-    #[test]
-    fn unsigned_driver_override_rejects_recursive_directories() {
-        let dism = DismCmd::new().expect("DISM command boundary should initialize");
-        let error = dism
-            .add_driver_offline(r"Z:\missing-image", r"Z:\missing-driver", true, true, None)
-            .expect_err("verified fallback must reject /Recurse");
-        assert!(error.to_string().contains("cannot use /Recurse"));
     }
 
     #[test]

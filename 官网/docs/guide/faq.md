@@ -35,7 +35,7 @@ description: 关于 LetRecovery 的常见问题。
 
 ## 支持 BitLocker 吗？
 
-支持——重装前会自动解锁（密钥透传）或解密被加密的系统盘。详见[BitLocker 加密盘重装](/guide/bitlocker)。
+支持受检处理，但不是旧式密钥透传：当前经 PE 重装要求目标在交接前彻底解密为 NotEncrypted；锁定、转换中、未知或仍加密的状态会失败关闭。详见[BitLocker 加密盘重装](/guide/bitlocker)。
 
 ## 有没有更简单的"一键重装"？
 
@@ -43,10 +43,12 @@ description: 关于 LetRecovery 的常见问题。
 
 ## 安装失败——日志在哪？
 
-- 桌面：`<程序目录>\log\LetRecovery.<日期>.log`
-- PE：`X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`
+- **ViaPE 安装成功后（优先上传）**：正常系统端与 PE 端日志会合并为一个文件，位于 `<新系统盘>\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`。
+- **格式化或首次写入后安装失败**：程序会尽量把同一个合并日志写到 `<数据分区>\LetRecovery_Data\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`。
+- **交接前失败、合并日志未生成或排查其它正常端问题**：点击 **关于 → 打开日志目录**，文件位于 `<LetRecovery.exe 所在目录>\log\LetRecovery.<日期>.log`；便携版对应解压目录，安装版对应安装目录。
+- **需要原始 PE 运行日志时**：文件位于 `<LetRecoveryPE.exe 所在目录>\LetRecoveryPE.log`；正式发布包默认是 `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`。
 
-如果重装 C:，请从**另一块盘**运行 LetRecovery，日志才不会被格式化掉。
+反馈 ViaPE 安装问题时优先上传合并日志，不需要再分别上传正常端与 PE 原始日志；只有合并日志不存在时才上传能够取得的原始日志并说明失败阶段。
 [反馈问题](https://github.com/NORMAL-EX/LetRecovery/issues)时请附上日志。
 
 ## 部署时报 "invalid compressed data" / 错误码 2

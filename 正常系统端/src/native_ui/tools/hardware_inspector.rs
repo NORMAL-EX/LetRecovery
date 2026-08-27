@@ -3,7 +3,7 @@
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+    RedrawWindow, HFONT, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
 };
 use windows::Win32::UI::Controls::{
     LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW,
@@ -12,13 +12,15 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, MoveWindow, SendMessageW, SetWindowTextW, BS_OWNERDRAW, WS_BORDER, WS_TABSTOP,
+    GetClientRect, MoveWindow, SendMessageW, SetWindowTextW, BS_OWNERDRAW, WM_GETFONT, WS_BORDER,
+    WS_TABSTOP,
 };
 
 use crate::core::hardware_info::format_bytes;
 use crate::core::hardware_inspector::HardwareInspectorSnapshot;
 use crate::native_ui::controls::{child, wide};
 use crate::native_ui::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
+use crate::native_ui::layout::measure_text;
 use crate::native_ui::theme::apply_list_view_theme;
 
 const FIRST_NAV_ID: u16 = 65_000;
@@ -91,6 +93,7 @@ pub struct NativeHardwareInspectorDialog {
     status: HWND,
     section: InspectorSection,
     snapshot: Option<HardwareInspectorSnapshot>,
+    status_text: String,
     last_layout: (i32, i32, u32),
 }
 
@@ -151,6 +154,7 @@ impl NativeHardwareInspectorDialog {
             status,
             section: InspectorSection::Overview,
             snapshot: None,
+            status_text: crate::tr!("正在读取硬件信息..."),
             last_layout: (-1, -1, 0),
         };
         dialog.layout();
@@ -189,7 +193,7 @@ impl NativeHardwareInspectorDialog {
 
     pub unsafe fn set_loading(&mut self) {
         self.shell.set_primary_enabled(false);
-        set_text(self.status, &crate::tr!("正在读取硬件信息..."));
+        self.set_status_text(crate::tr!("正在读取硬件信息..."));
         replace_rows(
             self.list,
             &[DetailRow::new(
@@ -205,12 +209,12 @@ impl NativeHardwareInspectorDialog {
         match result {
             Ok(snapshot) => {
                 self.snapshot = Some(snapshot);
-                set_text(self.status, &crate::tr!("硬件信息读取完成。"));
+                self.set_status_text(crate::tr!("硬件信息读取完成。"));
                 self.render();
             }
             Err(error) => {
                 self.snapshot = None;
-                set_text(self.status, &crate::tr!("读取硬件信息失败：{}", error));
+                self.set_status_text(crate::tr!("读取硬件信息失败：{}", error));
                 replace_rows(
                     self.list,
                     &[DetailRow::new(
@@ -240,11 +244,18 @@ impl NativeHardwareInspectorDialog {
         self.update_nav();
         update_columns(self.list);
         if self.snapshot.is_some() {
-            set_text(self.status, &crate::tr!("硬件信息读取完成。"));
+            self.set_status_text(crate::tr!("硬件信息读取完成。"));
             self.render();
         } else {
-            set_text(self.status, &crate::tr!("正在读取硬件信息..."));
+            self.set_status_text(crate::tr!("正在读取硬件信息..."));
         }
+    }
+
+    unsafe fn set_status_text(&mut self, value: String) {
+        set_text(self.status, &value);
+        self.status_text = value;
+        self.last_layout = (-1, -1, 0);
+        self.layout();
     }
 
     unsafe fn layout(&mut self) {
@@ -273,20 +284,26 @@ impl NativeHardwareInspectorDialog {
             );
         }
         let list_x = nav_width + gap;
-        let status_height = scale(24);
-        let _ = MoveWindow(
-            self.list,
-            list_x,
-            0,
-            (width - list_x).max(0),
-            (height - status_height - gap).max(scale(120)),
-            true,
-        );
+        let status_width = (width - list_x).max(0);
+        let status_font =
+            HFONT(SendMessageW(self.status, WM_GETFONT, WPARAM(0), LPARAM(0)).0 as *mut _);
+        let requested_status_height = measure_text(
+            self.shell.hwnd(),
+            status_font,
+            &self.status_text,
+            Some(status_width),
+        )
+        .height
+        .max(scale(24));
+        let status_height = requested_status_height.min(height.max(0));
+        let status_y = (height - status_height).max(0);
+        let list_height = (status_y - gap).max(0);
+        let _ = MoveWindow(self.list, list_x, 0, status_width, list_height, true);
         let _ = MoveWindow(
             self.status,
             list_x,
-            (height - status_height).max(0),
-            (width - list_x).max(0),
+            status_y,
+            status_width,
             status_height,
             true,
         );

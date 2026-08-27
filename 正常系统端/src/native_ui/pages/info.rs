@@ -21,13 +21,13 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    IsWindowVisible, MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, BS_AUTOCHECKBOX,
-    BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
-    SW_HIDE, SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP,
+    IsWindowVisible, SendMessageW, SetWindowTextW, ShowWindow, BS_AUTOCHECKBOX, BS_OWNERDRAW,
+    CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, SW_HIDE, SW_SHOW,
+    WM_SETFONT, WS_BORDER, WS_TABSTOP,
 };
 
 use super::download::PageRect;
-use crate::native_ui::controls::{child, wide};
+use crate::native_ui::controls::{child, move_layout_window as MoveWindow, wide};
 use crate::native_ui::layout::{centered_control_y_ceil, measure_text, LayoutMetrics};
 use crate::native_ui::theme::{
     apply_control_theme, apply_list_view_theme, combo_closed_height, NativeControlKind, Palette,
@@ -44,6 +44,7 @@ const ID_ABOUT_LANGUAGE: u16 = 5_250;
 const ID_ABOUT_REFRESH_LANGUAGES: u16 = 5_251;
 const ID_ABOUT_LOGGING: u16 = 5_252;
 const ID_ABOUT_WIM_ENGINE: u16 = 5_253;
+const ID_ABOUT_AUTOMATION_EXPORT: u16 = 5_254;
 const ID_ABOUT_DOWNLOAD_THREADS: u16 = 5_259;
 const DOWNLOAD_THREAD_OPTIONS: [u8; 3] = [8, 16, 32];
 // Unlike SS_LEFT (zero), this stock STATIC style never wraps a single-line settings label.  A
@@ -69,6 +70,7 @@ pub enum InfoIntent {
     RefreshLanguages,
     ToggleEasyMode,
     ToggleLogging,
+    ToggleAutomationExport,
     SelectWimEngine,
     SelectDownloadThreads,
     OpenLogDirectory,
@@ -131,6 +133,7 @@ pub struct AboutLabels<'a> {
     pub easy_mode_enabled: bool,
     pub easy_mode_available: bool,
     pub log_enabled: bool,
+    pub automation_export_enabled: bool,
     pub wim_engine: u8,
     pub download_threads: u8,
 }
@@ -260,7 +263,7 @@ impl HardwareInfoPage {
             rect.y + s(5),
             rect.width,
             s(22),
-            true,
+            false,
         );
         // Save is exposed in the stable bottom command bar by the main window. Keeping it out of
         // the page body gives the hardware table the full remaining height.
@@ -272,7 +275,7 @@ impl HardwareInfoPage {
             report_y,
             rect.width,
             (rect.y + rect.height - report_y).max(s(100)),
-            true,
+            false,
         );
         let widths = hardware_column_widths(rect.width, dpi);
         for (index, width) in widths.into_iter().enumerate() {
@@ -811,6 +814,7 @@ pub struct AboutPage {
     pub refresh_languages: HWND,
     pub easy_mode: HWND,
     pub logging: HWND,
+    pub automation_export: HWND,
     pub wim_engine_label: HWND,
     pub wim_engine: HWND,
     pub download_threads_label: HWND,
@@ -889,6 +893,14 @@ impl AboutPage {
             ID_ABOUT_LOGGING,
         )?;
         set_checked(logging, labels.log_enabled);
+        let automation_export = child(
+            parent,
+            w!("BUTTON"),
+            &crate::tr!("显示自动化配置导出（高级）"),
+            BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
+            ID_ABOUT_AUTOMATION_EXPORT,
+        )?;
+        set_checked(automation_export, labels.automation_export_enabled);
         let wim_engine_label = child(
             parent,
             w!("STATIC"),
@@ -943,7 +955,7 @@ impl AboutPage {
         let settings_help = child(
             parent,
             w!("STATIC"),
-            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n下载线程数从下一个下载任务开始生效；镜像引擎同时用于正常系统端和 PE 端。"),
+            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n自动化导出会在安装和备份页显示生成按钮；镜像引擎同时用于正常系统端和 PE 端。"),
             0,
             5_257,
         )?;
@@ -990,6 +1002,7 @@ impl AboutPage {
             refresh_languages,
             easy_mode,
             logging,
+            automation_export,
             wim_engine_label,
             wim_engine,
             download_threads_label,
@@ -1012,6 +1025,7 @@ impl AboutPage {
             ID_ABOUT_LANGUAGE => return Some(InfoIntent::SelectLanguage),
             ID_ABOUT_REFRESH_LANGUAGES => return Some(InfoIntent::RefreshLanguages),
             ID_ABOUT_LOGGING => return Some(InfoIntent::ToggleLogging),
+            ID_ABOUT_AUTOMATION_EXPORT => return Some(InfoIntent::ToggleAutomationExport),
             ID_ABOUT_WIM_ENGINE => return Some(InfoIntent::SelectWimEngine),
             ID_ABOUT_DOWNLOAD_THREADS => return Some(InfoIntent::SelectDownloadThreads),
             _ => {}
@@ -1028,16 +1042,20 @@ impl AboutPage {
         AboutLink::ALL.get(index).copied().map(InfoIntent::OpenLink)
     }
 
-    pub unsafe fn set_version(&self, version: &str) {
-        set_text(self.version, version);
-    }
-
     pub unsafe fn easy_mode_enabled(&self) -> bool {
         is_checked(self.easy_mode)
     }
 
     pub unsafe fn logging_enabled(&self) -> bool {
         is_checked(self.logging)
+    }
+
+    pub unsafe fn automation_export_enabled(&self) -> bool {
+        is_checked(self.automation_export)
+    }
+
+    pub unsafe fn set_automation_export_enabled(&self, enabled: bool) {
+        set_checked(self.automation_export, enabled);
     }
 
     pub unsafe fn set_logging_enabled(&self, enabled: bool) {
@@ -1103,11 +1121,15 @@ impl AboutPage {
         set_text(self.refresh_languages, &crate::tr!("刷新"));
         set_text(self.easy_mode, &crate::tr!("启用小白模式"));
         set_text(self.logging, &crate::tr!("启用日志记录"));
+        set_text(
+            self.automation_export,
+            &crate::tr!("显示自动化配置导出（高级）"),
+        );
         set_text(self.wim_engine_label, &crate::tr!("WIM 引擎:"));
         set_text(self.download_threads_label, &crate::tr!("下载线程:"));
         set_text(
             self.settings_help,
-            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n下载线程数从下一个下载任务开始生效；镜像引擎同时用于正常系统端和 PE 端。"),
+            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n自动化导出会在安装和备份页显示生成按钮；镜像引擎同时用于正常系统端和 PE 端。"),
         );
         set_text(
             self.credits,
@@ -1153,7 +1175,7 @@ impl AboutPage {
             rect.y,
             width,
             s(28).min(rect.height.max(0)),
-            true,
+            false,
         );
         let version_y = rect.y + s(36);
         let version_label_width = s(72).min(width / 3);
@@ -1163,7 +1185,7 @@ impl AboutPage {
             version_y + s(4),
             version_label_width,
             s(22),
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.version,
@@ -1171,7 +1193,7 @@ impl AboutPage {
             version_y,
             (width - version_label_width).max(0),
             s(28),
-            true,
+            false,
         );
 
         let description_y = version_y + s(38);
@@ -1185,7 +1207,7 @@ impl AboutPage {
             description_y,
             width,
             description_height,
-            true,
+            false,
         );
 
         let settings_x = rect.x;
@@ -1231,7 +1253,7 @@ impl AboutPage {
             centered_control_y_ceil(language_y, language_row_height, metrics.label_height),
             label_width,
             metrics.label_height,
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.language,
@@ -1239,7 +1261,7 @@ impl AboutPage {
             centered_control_y_ceil(language_y, language_row_height, language_closed_height),
             language_width,
             s(220),
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.refresh_languages,
@@ -1247,20 +1269,29 @@ impl AboutPage {
             centered_control_y_ceil(language_y, language_row_height, language_closed_height),
             refresh_width,
             language_closed_height,
-            true,
+            false,
         );
         let easy_y = language_y + language_row_height + gap;
         let half = (width - gap) / 2;
-        let _ = MoveWindow(self.easy_mode, settings_x, easy_y, half, s(26), true);
+        let _ = MoveWindow(self.easy_mode, settings_x, easy_y, half, s(26), false);
         let _ = MoveWindow(
             self.logging,
             settings_x + half + gap,
             easy_y,
             half,
             s(26),
-            true,
+            false,
         );
-        let engine_y = easy_y + s(26) + gap;
+        let automation_y = easy_y + s(26) + gap;
+        let _ = MoveWindow(
+            self.automation_export,
+            settings_x,
+            automation_y,
+            width,
+            s(26),
+            false,
+        );
+        let engine_y = automation_y + s(26) + gap;
         let engine_width = (width - label_width).min(s(280)).max(0);
         let engine_closed_height = combo_closed_height(self.wim_engine, field_height);
         let engine_row_height = engine_closed_height.max(field_height);
@@ -1270,7 +1301,7 @@ impl AboutPage {
             centered_control_y_ceil(engine_y, engine_row_height, metrics.label_height),
             label_width,
             metrics.label_height,
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.wim_engine,
@@ -1278,7 +1309,7 @@ impl AboutPage {
             centered_control_y_ceil(engine_y, engine_row_height, engine_closed_height),
             engine_width,
             s(220),
-            true,
+            false,
         );
         let download_threads_y = engine_y + engine_row_height + gap;
         let download_threads_width = s(88).min((width - label_width).max(0));
@@ -1290,7 +1321,7 @@ impl AboutPage {
             centered_control_y_ceil(download_threads_y, threads_row_height, metrics.label_height),
             label_width,
             metrics.label_height,
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.download_threads,
@@ -1302,7 +1333,7 @@ impl AboutPage {
             ),
             download_threads_width,
             s(300),
-            true,
+            false,
         );
         let help_y = download_threads_y + threads_row_height + gap;
         let help_height = s(48);
@@ -1312,7 +1343,7 @@ impl AboutPage {
             help_y,
             width,
             help_height,
-            true,
+            false,
         );
         let credits_y = help_y + help_height + gap;
         let credits_height = s(44);
@@ -1322,7 +1353,7 @@ impl AboutPage {
             credits_y,
             width,
             credits_height,
-            true,
+            false,
         );
         let buttons_y = credits_y + credits_height + gap;
         for index in 0..3 {
@@ -1334,7 +1365,7 @@ impl AboutPage {
                 buttons_y + row * (row_height + gap),
                 button_layout.button_width,
                 row_height,
-                true,
+                false,
             );
         }
 
@@ -1348,7 +1379,7 @@ impl AboutPage {
                 buttons_y + row * (row_height + gap),
                 button_layout.button_width,
                 row_height,
-                true,
+                false,
             );
         }
     }
@@ -1373,7 +1404,12 @@ impl AboutPage {
     }
 
     pub unsafe fn apply_theme(&self, palette: Palette) {
-        for control in [self.easy_mode, self.logging, self.refresh_languages] {
+        for control in [
+            self.easy_mode,
+            self.logging,
+            self.automation_export,
+            self.refresh_languages,
+        ] {
             apply_control_theme(control, palette, NativeControlKind::General);
         }
         for control in [self.language, self.wim_engine, self.download_threads] {
@@ -1400,6 +1436,7 @@ impl AboutPage {
             self.refresh_languages,
             self.easy_mode,
             self.logging,
+            self.automation_export,
             self.wim_engine_label,
             self.wim_engine,
             self.download_threads_label,
@@ -1490,6 +1527,10 @@ mod tests {
             (ID_ABOUT_REFRESH_LANGUAGES, InfoIntent::RefreshLanguages),
             (ID_ABOUT_EASY_MODE, InfoIntent::ToggleEasyMode),
             (ID_ABOUT_LOGGING, InfoIntent::ToggleLogging),
+            (
+                ID_ABOUT_AUTOMATION_EXPORT,
+                InfoIntent::ToggleAutomationExport,
+            ),
             (ID_ABOUT_WIM_ENGINE, InfoIntent::SelectWimEngine),
             (ID_ABOUT_DOWNLOAD_THREADS, InfoIntent::SelectDownloadThreads),
         ] {

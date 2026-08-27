@@ -113,7 +113,7 @@ LetRecovery/
 
 ### Prerequisites
 
-- Rust 1.88 or higher (CI uses 1.88.0)
+- Rust 1.88.0 with that toolchain's `rust-src` component (the normal-endpoint Win7 build and CI are pinned to this version)
 - Visual Studio Build Tools 2022 with Desktop development with C++ and a Windows 10/11 SDK
 - Node.js 22 and npm for the website
 - Full release packaging additionally needs 7-Zip and Windows DISM/ADK tooling
@@ -125,8 +125,12 @@ LetRecovery/
 git clone https://github.com/NORMAL-EX/LetRecovery.git
 cd LetRecovery
 
-# Build both Rust applications from the workspace lockfile
-cargo build --workspace --release --locked
+# Rebuild the standard library for the Win7 normal endpoint and verify its imports
+rustup toolchain install 1.88.0 --component rust-src
+powershell -ExecutionPolicy Bypass -File .github/scripts/build-win7-normal.ps1
+
+# The PE endpoint runs only in modern WinPE and is built separately with the normal MSVC target
+cargo +1.88.0 build -p letrecovery-pe --release --locked --target x86_64-pc-windows-msvc
 
 # Build the website
 cd 官网
@@ -135,6 +139,8 @@ npm run lint
 npm run type-check
 npm run build
 ```
+
+> Do not use `cargo build --workspace --release` to produce the normal endpoint for Windows 7. That command uses the host `x86_64-pc-windows-msvc` standard library and can statically import Windows 8+ APIs. Local and Release builds must both use `build-win7-normal.ps1`, which produces and verifies `target/x86_64-win7-windows-msvc/release/LetRecovery.exe`.
 
 Run these checks before submitting changes:
 

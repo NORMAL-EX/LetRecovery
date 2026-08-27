@@ -404,6 +404,11 @@ fn execute_partition_management_production(
     if DiskFingerprint::from(disk) != request.disk {
         return Err(ExistingPartitionResizeError::DiskChanged);
     }
+    let expected_layout = request.disk.layout_snapshot.as_ref().ok_or_else(|| {
+        ExistingPartitionResizeError::Inventory(
+            "canonical physical-disk identity is unavailable; refresh and retry".into(),
+        )
+    })?;
     let running = lr_core::windows_storage::volume_identity(
         lr_core::windows_storage::current_windows_drive_letter().map_err(|error| {
             ExistingPartitionResizeError::Inventory(format!(
@@ -423,8 +428,13 @@ fn execute_partition_management_production(
         PartitionManagementAction::Delete { partition } => {
             let partition = operation_on_partition(partition)?;
             reject_protected_management_target(disk_number, partition, running, true)?;
-            lr_core::windows_storage::delete_partition(disk_number, partition.offset_bytes, true)
-                .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            lr_core::windows_storage::delete_partition_checked(
+                disk_number,
+                partition.offset_bytes,
+                true,
+                expected_layout,
+            )
+            .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
             crate::tr!("分区已删除")
         }
         PartitionManagementAction::Format { partition, options } => {
@@ -440,8 +450,20 @@ fn execute_partition_management_production(
                     "partition needs a drive letter before formatting".into(),
                 )
             })?;
-            lr_core::windows_storage::format_drive_with_options(letter, options)
+            let expected = lr_core::windows_storage::VolumeIdentity {
+                disk_number,
+                offset_bytes: partition.offset_bytes,
+                extent_length_bytes: partition.size_bytes,
+            };
+            let stable = lr_core::windows_storage::stable_volume_identity(letter)
                 .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            if !lr_core::windows_storage::same_volume_identity(stable.extent, expected) {
+                return Err(ExistingPartitionResizeError::PartitionChanged);
+            }
+            lr_core::windows_storage::format_drive_with_options_stable_checked(
+                letter, stable, options,
+            )
+            .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
             crate::tr!("分区已格式化为 {}", options.file_system.name())
         }
         PartitionManagementAction::AssignDriveLetter {
@@ -455,10 +477,11 @@ fn execute_partition_management_production(
                     "partition already has a drive letter".into(),
                 ));
             }
-            lr_core::windows_storage::assign_partition_drive_letter(
+            lr_core::windows_storage::assign_partition_drive_letter_checked(
                 disk_number,
                 partition.offset_bytes,
                 *drive_letter,
+                expected_layout,
             )
             .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
             crate::tr!("已分配盘符 {}:", drive_letter)
@@ -469,8 +492,13 @@ fn execute_partition_management_production(
             let letter = partition.drive_letter.ok_or_else(|| {
                 ExistingPartitionResizeError::InvalidRequest("partition has no drive letter".into())
             })?;
-            lr_core::windows_storage::remove_drive_letter(letter)
-                .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            lr_core::windows_storage::remove_partition_drive_letter_checked(
+                disk_number,
+                partition.offset_bytes,
+                letter,
+                expected_layout,
+            )
+            .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
             crate::tr!("已移除盘符 {}:", letter)
         }
         PartitionManagementAction::SetMbrActive { partition, active } => {
@@ -481,8 +509,13 @@ fn execute_partition_management_production(
                     "active flags are available only on MBR disks".into(),
                 ));
             }
-            lr_core::windows_storage::set_mbr_active(disk_number, partition.offset_bytes, *active)
-                .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+            lr_core::windows_storage::set_mbr_active_checked(
+                disk_number,
+                partition.offset_bytes,
+                *active,
+                expected_layout,
+            )
+            .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
             if *active {
                 crate::tr!("已设为活动分区")
             } else {
@@ -495,12 +528,9 @@ fn execute_partition_management_production(
             drive_letter,
             initialize_style,
         } => {
-            if *size_bytes < 1024 * 1024
-                || offset_bytes % (1024 * 1024) != 0
-                || size_bytes % (1024 * 1024) != 0
-            {
+            if *size_bytes == 0 {
                 return Err(ExistingPartitionResizeError::InvalidRequest(
-                    "unallocated extent is not 1 MiB aligned".into(),
+                    "unallocated extent is empty".into(),
                 ));
             }
             let end = offset_bytes.checked_add(*size_bytes).ok_or_else(|| {
@@ -531,14 +561,24 @@ fn execute_partition_management_production(
                         ));
                     }
                 };
-                lr_core::windows_storage::clean_and_initialize(disk_number, style)
-                    .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
+                lr_core::windows_storage::clean_and_initialize_checked(
+                    disk_number,
+                    expected_layout,
+                    style,
+                )
+                .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
             } else if !disk.is_initialized {
                 return Err(ExistingPartitionResizeError::InvalidRequest(
                     "an uninitialized disk requires an explicit GPT or MBR choice".into(),
                 ));
             }
-            lr_core::windows_storage::create_partition(
+            let create_layout = if initialize_style.is_some() {
+                lr_core::windows_storage::disk_layout_snapshot(disk_number)
+                    .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?
+            } else {
+                expected_layout.clone()
+            };
+            lr_core::windows_storage::create_partition_checked(
                 &lr_core::windows_storage::CreatePartitionRequest {
                     disk_number,
                     offset_bytes: *offset_bytes,
@@ -550,6 +590,7 @@ fn execute_partition_management_production(
                     active: false,
                     preserve_gpt_metadata: None,
                 },
+                &create_layout,
             )
             .map_err(|error| ExistingPartitionResizeError::Execution(error.to_string()))?;
             crate::tr!("已创建分区 {}:", drive_letter)
@@ -730,6 +771,11 @@ pub(crate) fn execute_existing_partition_resize_with_backends(
         return Err(ExistingPartitionResizeError::DiskChanged);
     }
     validate_resize_request_against_disk(request, disk, system_drive)?;
+    if request.disk.layout_snapshot.is_none() {
+        return Err(ExistingPartitionResizeError::Inventory(
+            "canonical physical-disk identity is unavailable; refresh and retry".into(),
+        ));
+    }
     if request.new_size_mb > request.no_move_max_size_mb {
         return Err(ExistingPartitionResizeError::InvalidRequest(
             "this expansion requires the typed WinPE partition-move handoff".into(),
@@ -1858,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_matching_inventory_reaches_injected_runner_and_returns_typed_outcome() {
+    fn missing_canonical_identity_stops_before_injected_runner() {
         let request = resize_request();
         let mut inventory = Inventory(Ok(vec![resizable_disk()]));
         let mut runner = runner();
@@ -1868,10 +1914,12 @@ mod tests {
             &mut inventory,
             &mut runner,
         )
-        .unwrap();
-        assert_eq!(runner.calls, 1);
-        assert_eq!(outcome.new_size_mb, 40 * 1024);
-        assert_eq!(outcome.message, "resized");
+        .unwrap_err();
+        assert!(matches!(
+            outcome,
+            ExistingPartitionResizeError::Inventory(_)
+        ));
+        assert_eq!(runner.calls, 0);
     }
 
     #[test]

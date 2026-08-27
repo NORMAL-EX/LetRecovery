@@ -1,4 +1,4 @@
-﻿//! Side-effect-free routing for the native toolbox page.
+//! Side-effect-free routing for the native toolbox page.
 //!
 //! This module preserves all legacy toolbox entry points while keeping the native
 //! window message handler away from operational code.  A plan only identifies the existing
@@ -32,13 +32,14 @@ pub enum NativeToolAction {
     ResetPassword,
     ExpandC,
     HardwareInspector,
+    EnterPeMaintenance,
 }
 
 impl NativeToolAction {
     pub const FIRST_NATIVE_COMMAND_ID: u16 = 5_100;
 
     /// Existing command IDs remain stable; new tools are appended.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::NvidiaDriverRemoval,
         Self::PartitionCopy,
         Self::BatchFormat,
@@ -60,6 +61,7 @@ impl NativeToolAction {
         Self::ResetPassword,
         Self::ExpandC,
         Self::HardwareInspector,
+        Self::EnterPeMaintenance,
     ];
 
     /// Converts the stable zero-based native button position without accepting unknown IDs.
@@ -165,6 +167,7 @@ pub enum BundledToolRoute {
 pub enum ToolRoute {
     OpenDialog(ToolDialogRoute),
     LaunchBundledTool(BundledToolRoute),
+    EnterPeMaintenance,
 }
 
 /// Data load which the old UI started when opening a dialog.  These are requests only: the
@@ -337,6 +340,12 @@ pub const fn plan_tool(intent: NativeToolAction) -> NativeToolPlan {
             Safety::ReadOnly,
             DesktopOnly,
         ),
+        NativeToolAction::EnterPeMaintenance => (
+            ToolRoute::EnterPeMaintenance,
+            Preload::None,
+            Safety::StorageMutation,
+            DesktopOnly,
+        ),
     };
 
     NativeToolPlan {
@@ -355,7 +364,7 @@ mod tests {
     #[test]
     fn all_native_intents_have_stable_routes() {
         let plans = NativeToolAction::ALL.map(plan_tool);
-        assert_eq!(plans.len(), 21);
+        assert_eq!(plans.len(), 22);
         for (index, plan) in plans.iter().enumerate() {
             assert_eq!(plan.intent, NativeToolAction::ALL[index]);
             assert_eq!(
@@ -371,7 +380,7 @@ mod tests {
         );
         assert_eq!(
             NativeToolAction::from_native_command_id(
-                NativeToolAction::FIRST_NATIVE_COMMAND_ID + 21
+                NativeToolAction::FIRST_NATIVE_COMMAND_ID + 22
             ),
             None
         );
@@ -409,6 +418,11 @@ mod tests {
                     assert!(plan.is_supported(ToolEnvironment::Desktop));
                     assert!(!plan.is_supported(ToolEnvironment::Pe));
                 }
+                NativeToolAction::EnterPeMaintenance => {
+                    assert!(plan.is_supported(ToolEnvironment::Desktop));
+                    assert!(!plan.is_supported(ToolEnvironment::Pe));
+                    assert_eq!(plan.route, ToolRoute::EnterPeMaintenance);
+                }
                 _ => {
                     assert!(plan.is_supported(ToolEnvironment::Desktop));
                     assert!(plan.is_supported(ToolEnvironment::Pe));
@@ -426,6 +440,7 @@ mod tests {
             NativeToolAction::RepairBoot,
             NativeToolAction::ManageBitLocker,
             NativeToolAction::ExpandC,
+            NativeToolAction::EnterPeMaintenance,
         ] {
             let safety = plan_tool(intent).safety;
             assert!(matches!(

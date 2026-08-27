@@ -4,11 +4,10 @@
 //! does not unlock BitLocker, write configuration files, format, install a PE
 //! boot entry, apply an image, or restart the machine.
 
-use lr_core::boot_pca::BootPcaMode;
-
 use crate::core::disk::PartitionStyle;
 use crate::core::install_config::InstallConfig;
 use crate::core::ui_state::{AdvancedOptionsData, BootModeSelection, DriverAction, InstallPrefs};
+use lr_core::boot_pca::BootPcaMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InstallMode {
@@ -24,6 +23,7 @@ pub struct InstallTarget {
     pub disk_size_bytes: Option<u64>,
     pub partition_offset_bytes: Option<u64>,
     pub partition_size_bytes: Option<u64>,
+    pub stable_identity: Option<lr_core::windows_storage::StableVolumeIdentity>,
     /// Bus type captured from the same physical disk identity as this target snapshot.
     pub disk_bus_type: Option<lr_core::windows_storage::DiskBusType>,
     pub style: PartitionStyle,
@@ -68,6 +68,9 @@ pub fn windows7_driver_defaults(
 #[derive(Clone, Debug)]
 pub struct NativeInstallState {
     pub image_path: String,
+    /// Original ISO file that backs `image_path` when the effective source is inside a mounted
+    /// optical volume. Empty for ordinary WIM/ESD/SWM/GHO and XP directory sources.
+    pub image_backing_path: String,
     /// False while the path is empty, being mounted, or has not been identified.
     pub image_ready: bool,
     pub selected_image: Option<SelectedImageMetadata>,
@@ -105,11 +108,24 @@ pub enum InstallValidationError {
     InvalidCustomUsername,
     InvalidBuiltInAdministratorName,
     InvalidBuiltInAdministratorPassword,
+    RequiredCleanupRequiresUnattended,
+    RequiredCleanupConflictsWithCustomUnattend,
+    RequiredCleanupUnsupportedSource,
+    PreinstalledSoftwareRequiresUnattended,
+    PreinstalledSoftwareConflictsWithCustomUnattend,
+    PreinstalledSoftwareUnsupportedSource,
     PartitionRefreshPending,
     PartitionRefreshFailed,
     PcaDetectionPending,
     InvalidPcaSelection,
     XpI386RequiresLegacyMbr,
+    ViaPeUnsupportedAdvancedInputs,
+    InvalidCustomInstallPlan,
+    CustomInstallRequiresPe,
+    PersonalFilesRequireExistingWindows,
+    PersonalFilesUnsupportedSource,
+    PersonalFilesRequirePartitionReinstall,
+    PersonalFilesRequireNormalWindows,
 }
 
 impl std::fmt::Display for InstallValidationError {
@@ -150,12 +166,47 @@ impl std::fmt::Display for InstallValidationError {
                     "请为内置 Administrator 账户设置有效密码（最长 127 个字符，不能包含换行）。"
                 )
             }
+            Self::RequiredCleanupRequiresUnattended => crate::tr!(
+                "移除预装应用或 Windows 安全中心需要启用 LetRecovery 内置无人值守安装。"
+            ),
+            Self::RequiredCleanupConflictsWithCustomUnattend => crate::tr!(
+                "移除预装应用或 Windows 安全中心不能与自定义应答文件同时使用。"
+            ),
+            Self::RequiredCleanupUnsupportedSource => crate::tr!(
+                "移除预装应用或 Windows 安全中心不支持 GHO/GHS 或 XP 文本模式来源。"
+            ),
+            Self::PreinstalledSoftwareRequiresUnattended => {
+                crate::tr!("安装所选软件需要启用 LetRecovery 内置无人值守安装。")
+            }
+            Self::PreinstalledSoftwareConflictsWithCustomUnattend => {
+                crate::tr!("安装所选软件不能与自定义应答文件同时使用。")
+            }
+            Self::PreinstalledSoftwareUnsupportedSource => {
+                crate::tr!("安装所选软件仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。")
+            }
             Self::PartitionRefreshPending => crate::tr!("正在刷新分区信息，请稍候。"),
             Self::PartitionRefreshFailed => crate::tr!("刷新分区信息失败，请手动刷新后重试。"),
             Self::PcaDetectionPending => crate::tr!("正在检测 PCA 兼容性，请稍候。"),
             Self::InvalidPcaSelection => crate::tr!("所选 PCA 启动签名与系统镜像不兼容。"),
             Self::XpI386RequiresLegacyMbr => {
                 crate::tr!("XP 文本模式安装需要 Legacy/MBR 目标。")
+            }
+            Self::ViaPeUnsupportedAdvancedInputs => crate::tr!(
+                "当前 PE 交接格式不能安全传递 Wi-Fi、部署脚本、首次登录脚本、自定义驱动、注册表或自定义文件；请关闭这些选项后重试。"
+            ),
+            Self::InvalidCustomInstallPlan => crate::tr!("全盘重装或双系统计划无效，请重新选择。"),
+            Self::CustomInstallRequiresPe => crate::tr!("全盘重装和双系统必须从完整 Windows 进入受认证 PE 执行。"),
+            Self::PersonalFilesRequireExistingWindows => {
+                crate::tr!("保留个人文件需要选择包含现有 Windows 的目标分区。")
+            }
+            Self::PersonalFilesUnsupportedSource => crate::tr!(
+                "保留个人文件仅支持 Windows 7 或更高版本的 WIM、ESD、SWM 镜像。"
+            ),
+            Self::PersonalFilesRequirePartitionReinstall => {
+                crate::tr!("保留个人文件只支持重装所选分区，不能用于全盘重装或双系统。")
+            }
+            Self::PersonalFilesRequireNormalWindows => {
+                crate::tr!("请从完整 Windows 启动保留个人文件重装，程序将自动进入 PE 执行。")
             }
         };
         formatter.write_str(&message)
@@ -167,11 +218,15 @@ impl std::error::Error for InstallValidationError {}
 /// Runtime options assembled from the validated native install-page controls.
 #[derive(Clone, Debug)]
 pub struct InstallOptions {
+    pub custom_install_plan: lr_core::custom_install::CustomInstallPlan,
     pub format_partition: bool,
     pub repair_boot: bool,
     pub unattended_install: bool,
     pub export_drivers: bool,
     pub auto_reboot: bool,
+    /// Runtime-only automation policy. Production GUI-created intents always leave this false;
+    /// the feature-gated disposable-VM easy-mode harness may opt in after validation.
+    pub automation_shutdown_on_terminal: bool,
     pub boot_mode: BootModeSelection,
     pub boot_pca_mode: BootPcaMode,
     pub advanced_options: AdvancedOptionsData,
@@ -185,13 +240,18 @@ pub struct InstallOptions {
 #[derive(Clone, Debug)]
 pub struct StartInstallIntent {
     pub mode: InstallMode,
+    /// Captured once when the user starts the task. Direct installs launched by the normal
+    /// endpoint inside WinPE must download selected installers only after the target image exists.
+    pub running_in_pe: bool,
     pub target_partition: String,
     pub target_disk_number: u32,
     pub target_partition_number: u32,
     pub target_disk_size_bytes: u64,
     pub target_partition_offset_bytes: u64,
     pub target_partition_size_bytes: u64,
+    pub target_stable_identity: lr_core::windows_storage::StableVolumeIdentity,
     pub image_path: String,
+    pub image_backing_path: String,
     pub volume_index: u32,
     pub is_system_partition: bool,
     pub pe_index: Option<usize>,
@@ -237,8 +297,45 @@ impl NativeInstallState {
         let target_partition_size_bytes = target
             .partition_size_bytes
             .ok_or(InstallValidationError::UnstableTargetIdentity)?;
+        let target_stable_identity = target
+            .stable_identity
+            .ok_or(InstallValidationError::UnstableTargetIdentity)?;
         let is_xp_i386 = self.xp_i386_source.is_some();
         let is_gho = has_extension(&self.image_path, &["gho", "ghs"]);
+        let required_online_cleanup = self.prefs.advanced_options.remove_uwp_apps
+            || self.prefs.advanced_options.disable_windows_defender;
+        if let Err(error) = lr_core::unattend_command::validate_required_builtin_unattend(
+            required_online_cleanup,
+            self.prefs.unattended_install,
+            !self.custom_unattend_path.trim().is_empty(),
+            is_xp_i386 || is_gho,
+        ) {
+            use lr_core::unattend_command::RequiredBuiltinUnattendError as Error;
+            return Err(match error {
+                Error::UnattendedDisabled => {
+                    InstallValidationError::RequiredCleanupRequiresUnattended
+                }
+                Error::CustomUnattend => {
+                    InstallValidationError::RequiredCleanupConflictsWithCustomUnattend
+                }
+                Error::UnsupportedSource => {
+                    InstallValidationError::RequiredCleanupUnsupportedSource
+                }
+            });
+        }
+        if !self.prefs.advanced_options.preinstalled_software.is_empty() {
+            if !self.prefs.unattended_install {
+                return Err(InstallValidationError::PreinstalledSoftwareRequiresUnattended);
+            }
+            if !self.custom_unattend_path.trim().is_empty() {
+                return Err(
+                    InstallValidationError::PreinstalledSoftwareConflictsWithCustomUnattend,
+                );
+            }
+            if is_xp_i386 || is_gho {
+                return Err(InstallValidationError::PreinstalledSoftwareUnsupportedSource);
+            }
+        }
         let builtin = &self.prefs.advanced_options.builtin_administrator;
         if self.prefs.advanced_options.custom_username
             && lr_core::unattend_account::validate_unattended_local_account_name(
@@ -274,7 +371,9 @@ impl NativeInstallState {
                     Error::MissingAccountName
                     | Error::AccountNameTooLong
                     | Error::InvalidAccountName
-                    | Error::ReservedAccountName => {
+                    | Error::ReservedAccountName
+                    | Error::InvalidSpecializeCommand
+                    | Error::InvalidTemporaryAccount => {
                         InstallValidationError::InvalidBuiltInAdministratorName
                     }
                     Error::MissingPassword | Error::PasswordTooLong | Error::InvalidPassword => {
@@ -327,13 +426,60 @@ impl NativeInstallState {
             }
         }
 
-        let mode = if self.is_pe_environment || !target.is_current_system {
+        if self.prefs.custom_install_plan.validate().is_err() {
+            return Err(InstallValidationError::InvalidCustomInstallPlan);
+        }
+        if self.is_pe_environment
+            && self.prefs.custom_install_plan.mode()
+                != lr_core::custom_install::CustomInstallMode::ReinstallPartition
+        {
+            return Err(InstallValidationError::CustomInstallRequiresPe);
+        }
+        let preserve_personal_files = self.prefs.advanced_options.preserve_personal_files;
+        if preserve_personal_files {
+            if !target.has_windows {
+                return Err(InstallValidationError::PersonalFilesRequireExistingWindows);
+            }
+            if is_xp_i386
+                || is_gho
+                || self
+                    .selected_image
+                    .is_some_and(|image| image.major_version.is_some_and(|major| major < 6))
+            {
+                return Err(InstallValidationError::PersonalFilesUnsupportedSource);
+            }
+            if self.prefs.custom_install_plan.mode()
+                != lr_core::custom_install::CustomInstallMode::ReinstallPartition
+            {
+                return Err(InstallValidationError::PersonalFilesRequirePartitionReinstall);
+            }
+            if self.is_pe_environment {
+                return Err(InstallValidationError::PersonalFilesRequireNormalWindows);
+            }
+        }
+        let mode = if preserve_personal_files
+            || self.prefs.custom_install_plan.mode()
+                != lr_core::custom_install::CustomInstallMode::ReinstallPartition
+        {
+            InstallMode::ViaPe
+        } else if self.is_pe_environment || !target.is_current_system {
             InstallMode::Direct
         } else {
             InstallMode::ViaPe
         };
         if mode == InstallMode::ViaPe && !self.pe_available {
             return Err(InstallValidationError::PeUnavailable);
+        }
+        if mode == InstallMode::ViaPe {
+            let advanced = &self.prefs.advanced_options;
+            if advanced.run_script_during_deploy
+                || advanced.run_script_first_login
+                || advanced.import_custom_drivers
+                || advanced.import_registry_file
+                || advanced.import_custom_files
+            {
+                return Err(InstallValidationError::ViaPeUnsupportedAdvancedInputs);
+            }
         }
 
         let volume_index = self
@@ -358,6 +504,13 @@ impl NativeInstallState {
                 is_xp_i386,
             ),
         );
+        if advanced_options.migrate_wifi && advanced_options.wifi_profile_xml.trim().is_empty() {
+            let reason = "missing_session_profile";
+            log::warn!("[ADVANCED WIFI] status=skipped reason={reason}; installation continues");
+            advanced_options.migrate_wifi = false;
+            advanced_options.wifi_profile_xml.clear();
+            advanced_options.wifi_ssid.clear();
+        }
         // Windows 7 compatibility payloads are bundled, locked and selected by hardware policy.
         // They are not user-supplied advanced options: USB3 is considered for every identified
         // Windows 7 image, while the NVMe hotfix pair is allowed only for x64 plus a positively
@@ -390,11 +543,17 @@ impl NativeInstallState {
                 DriverAction::SaveOnly | DriverAction::AutoImport
             );
         let options = InstallOptions {
-            format_partition: self.prefs.format_partition,
+            custom_install_plan: self.prefs.custom_install_plan.clone(),
+            format_partition: if preserve_personal_files {
+                false
+            } else {
+                self.prefs.format_partition
+            },
             repair_boot: self.prefs.repair_boot,
             unattended_install: self.prefs.unattended_install,
             export_drivers,
             auto_reboot: self.prefs.auto_reboot,
+            automation_shutdown_on_terminal: false,
             boot_mode: self.prefs.boot_mode,
             boot_pca_mode,
             advanced_options,
@@ -413,13 +572,16 @@ impl NativeInstallState {
 
         Ok(StartInstallIntent {
             mode,
+            running_in_pe: self.is_pe_environment,
             target_partition: target.partition.clone(),
             target_disk_number,
             target_partition_number,
             target_disk_size_bytes,
             target_partition_offset_bytes,
             target_partition_size_bytes,
+            target_stable_identity,
             image_path,
+            image_backing_path: self.image_backing_path.clone(),
             volume_index,
             is_system_partition: target.is_current_system,
             pe_index: (mode == InstallMode::ViaPe).then_some(0),
@@ -470,18 +632,25 @@ impl StartInstallIntent {
         let advanced = &self.options.advanced_options;
         let pca = pca.cloned().unwrap_or_default();
         InstallConfig {
+            canonical_target: None,
             session_id: String::new(),
             unattended: self.options.unattended_install,
             restore_drivers: self.options.export_drivers,
             driver_action_mode: InstallConfig::driver_action_to_mode(self.options.driver_action),
             auto_reboot: self.options.auto_reboot,
+            automation_shutdown_on_terminal: self.options.automation_shutdown_on_terminal,
             format_partition: self.options.format_partition,
+            preserve_personal_files: advanced.preserve_personal_files,
             repair_boot: self.options.repair_boot,
             original_guid: String::new(),
             volume_index: self.volume_index,
             target_partition: self.target_partition.clone(),
+            custom_install_plan: self.options.custom_install_plan.clone(),
             image_path: staged_image_path.into(),
             is_gho: self.is_gho,
+            migrate_wifi: false,
+            wifi_profile_length: 0,
+            wifi_profile_sha256: String::new(),
             remove_shortcut_arrow: advanced.remove_shortcut_arrow,
             restore_classic_context_menu: advanced.restore_classic_context_menu,
             bypass_nro: advanced.bypass_nro,
@@ -504,6 +673,7 @@ impl StartInstallIntent {
                 String::new()
             },
             custom_unattend_path: self.options.custom_unattend_path.clone(),
+            preinstalled_software_config: String::new(),
             win7_uefi_patch: advanced.win7_uefi_patch,
             win7_inject_usb3_driver: advanced.win7_inject_usb3_driver,
             win7_inject_nvme_driver: advanced.win7_inject_nvme_driver,
@@ -598,6 +768,7 @@ mod tests {
     fn base_state() -> NativeInstallState {
         NativeInstallState {
             image_path: "D:\\install.wim".to_string(),
+            image_backing_path: String::new(),
             image_ready: true,
             selected_image: Some(SelectedImageMetadata {
                 volume_index: 3,
@@ -614,6 +785,18 @@ mod tests {
                 disk_size_bytes: Some(1_000_000_000_000),
                 partition_offset_bytes: Some(1_048_576),
                 partition_size_bytes: Some(500_000_000_000),
+                stable_identity: Some(lr_core::windows_storage::StableVolumeIdentity {
+                    extent: lr_core::windows_storage::VolumeIdentity {
+                        disk_number: 1,
+                        offset_bytes: 1_048_576,
+                        extent_length_bytes: 500_000_000_000,
+                    },
+                    disk: lr_core::windows_storage::StableDiskIdentity::Gpt { disk_id: [1; 16] },
+                    partition: lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                        partition_id: [2; 16],
+                    },
+                    device_id_hash: Some([3; 32]),
+                }),
                 disk_bus_type: Some(lr_core::windows_storage::DiskBusType::Other),
                 style: PartitionStyle::GPT,
                 is_current_system: false,
@@ -633,11 +816,158 @@ mod tests {
     }
 
     #[test]
+    fn mounted_iso_backing_path_survives_state_to_intent_validation() {
+        let mut state = base_state();
+        state.image_path = r"E:\sources\install.wim".into();
+        state.image_backing_path = r"F:\images\windows.iso".into();
+
+        let intent = state.start_intent().unwrap();
+        assert_eq!(intent.image_path, r"E:\sources\install.wim");
+        assert_eq!(intent.image_backing_path, r"F:\images\windows.iso");
+    }
+
+    #[test]
     fn non_system_target_is_direct() {
         let intent = base_state().start_intent().unwrap();
         assert_eq!(intent.mode, InstallMode::Direct);
         assert_eq!(intent.volume_index, 3);
         assert!(!intent.options.export_drivers);
+    }
+
+    #[test]
+    fn personal_file_preservation_forces_authenticated_pe_and_disables_format() {
+        let mut state = base_state();
+        state.target.as_mut().unwrap().has_windows = true;
+        state.pe_available = true;
+        state.prefs.advanced_options.preserve_personal_files = true;
+
+        let intent = state.start_intent().unwrap();
+        assert_eq!(intent.mode, InstallMode::ViaPe);
+        assert!(!intent.options.format_partition);
+        assert!(intent.options.advanced_options.preserve_personal_files);
+        assert!(
+            intent
+                .to_install_config("images\\install.wim", 0, None)
+                .preserve_personal_files
+        );
+    }
+
+    #[test]
+    fn personal_file_preservation_rejects_missing_old_windows_and_unsupported_sources() {
+        let mut state = base_state();
+        state.pe_available = true;
+        state.prefs.advanced_options.preserve_personal_files = true;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::PersonalFilesRequireExistingWindows
+        );
+
+        state.target.as_mut().unwrap().has_windows = true;
+        state.image_path = "D:\\old.gho".into();
+        state.selected_image = None;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::PersonalFilesUnsupportedSource
+        );
+
+        state.image_path = "D:\\install.wim".into();
+        state.selected_image = Some(image(10, 0));
+        state.is_pe_environment = true;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::PersonalFilesRequireNormalWindows
+        );
+    }
+
+    #[test]
+    fn selected_software_requires_the_builtin_first_logon_contract_before_writes() {
+        let package = lr_core::software_install::SelectedSoftwarePackage {
+            id: "sevenzip".into(),
+            name: "7-Zip".into(),
+            download_url: "https://example.test/7z.exe".into(),
+            filename: "7z.exe".into(),
+            silent_command: "\"{installer}\" /S".into(),
+            requires_admin: true,
+        };
+        let mut state = base_state();
+        state
+            .prefs
+            .advanced_options
+            .preinstalled_software
+            .push(package);
+        state.prefs.unattended_install = false;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::PreinstalledSoftwareRequiresUnattended
+        );
+
+        state.prefs.unattended_install = true;
+        state.custom_unattend_path = r"D:\custom.xml".into();
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::PreinstalledSoftwareConflictsWithCustomUnattend
+        );
+    }
+
+    #[test]
+    fn via_pe_rejects_options_that_the_handoff_cannot_preserve() {
+        let mut state = base_state();
+        let target = state.target.as_mut().unwrap();
+        target.is_current_system = true;
+        target.has_windows = true;
+        state.pe_available = true;
+        state.prefs.advanced_options.import_registry_file = true;
+        state.prefs.advanced_options.registry_file_path = r"D:\settings.reg".into();
+
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::ViaPeUnsupportedAdvancedInputs
+        );
+
+        state.prefs.advanced_options.import_registry_file = false;
+        state.prefs.driver_action = DriverAction::SaveOnly;
+        assert_eq!(
+            state.start_intent().unwrap().options.driver_action,
+            DriverAction::SaveOnly
+        );
+    }
+
+    #[test]
+    fn stale_wifi_migration_is_skipped_instead_of_blocking_direct_install() {
+        let mut state = base_state();
+        state.prefs.advanced_options.migrate_wifi = true;
+
+        let intent = state
+            .start_intent()
+            .expect("stale Wi-Fi preference must not block");
+
+        assert_eq!(intent.mode, InstallMode::Direct);
+        assert!(!intent.options.advanced_options.migrate_wifi);
+        assert!(intent.options.advanced_options.wifi_profile_xml.is_empty());
+    }
+
+    #[test]
+    fn wifi_migration_is_preserved_for_via_pe_private_handoff() {
+        let mut state = base_state();
+        let target = state.target.as_mut().unwrap();
+        target.is_current_system = true;
+        target.has_windows = true;
+        state.pe_available = true;
+        state.prefs.advanced_options.migrate_wifi = true;
+        state.prefs.advanced_options.wifi_profile_xml = "<WLANProfile />".to_string();
+        state.prefs.advanced_options.wifi_ssid = "current-network".to_string();
+
+        let intent = state
+            .start_intent()
+            .expect("Wi-Fi migration must not block ViaPE");
+
+        assert_eq!(intent.mode, InstallMode::ViaPe);
+        assert!(intent.options.advanced_options.migrate_wifi);
+        assert_eq!(
+            intent.options.advanced_options.wifi_profile_xml,
+            "<WLANProfile />"
+        );
+        assert_eq!(intent.options.advanced_options.wifi_ssid, "current-network");
     }
 
     #[test]
@@ -850,6 +1180,7 @@ mod tests {
     #[test]
     fn install_intent_requires_a_stable_disk_and_partition_identity() {
         let mut state = base_state();
+        let stable_identity = state.target.as_ref().unwrap().stable_identity;
         state.target.as_mut().unwrap().disk_number = None;
         assert_eq!(
             state.start_intent().unwrap_err(),
@@ -857,6 +1188,13 @@ mod tests {
         );
 
         state.target.as_mut().unwrap().disk_number = Some(1);
+        state.target.as_mut().unwrap().stable_identity = None;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::UnstableTargetIdentity
+        );
+
+        state.target.as_mut().unwrap().stable_identity = stable_identity;
         state.target.as_mut().unwrap().partition_number = None;
         assert_eq!(
             state.start_intent().unwrap_err(),
@@ -1015,6 +1353,32 @@ mod tests {
         assert_eq!(
             state.start_intent().unwrap_err(),
             InstallValidationError::BuiltInAdministratorUnsupportedSource
+        );
+    }
+
+    #[test]
+    fn required_online_cleanup_is_rejected_before_execution_without_builtin_unattend() {
+        let mut state = base_state();
+        state.prefs.advanced_options.remove_uwp_apps = true;
+        state.prefs.unattended_install = false;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::RequiredCleanupRequiresUnattended
+        );
+
+        state.prefs.unattended_install = true;
+        state.custom_unattend_path = "D:\\autounattend.xml".to_string();
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::RequiredCleanupConflictsWithCustomUnattend
+        );
+
+        state.custom_unattend_path.clear();
+        state.image_path = "D:\\backup.gho".to_string();
+        state.selected_image = None;
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::RequiredCleanupUnsupportedSource
         );
     }
 

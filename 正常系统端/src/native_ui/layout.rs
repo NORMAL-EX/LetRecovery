@@ -9,7 +9,6 @@ use windows::Win32::Graphics::Gdi::{
     DrawTextW, GetDC, ReleaseDC, SelectObject, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
     DT_WORDBREAK, HFONT,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
 use super::controls::InnoMetrics;
 
@@ -148,17 +147,6 @@ pub fn arrange_field(
 
 pub fn scale(value: i32, dpi: u32) -> i32 {
     ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32
-}
-
-/// Returns the control's actual on-screen height. This matters for stock ComboBox controls:
-/// `MoveWindow` receives the complete drop-down height, while USER32 independently chooses the
-/// closed field height from the installed font and visual style.
-pub unsafe fn control_height(control: HWND) -> Option<i32> {
-    let mut rect = RECT::default();
-    GetWindowRect(control, &mut rect)
-        .ok()
-        .map(|_| rect.bottom - rect.top)
-        .filter(|height| *height > 0)
 }
 
 /// Centers an item of `item_height` inside a logical row without language- or DPI-specific

@@ -6,7 +6,38 @@
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
-const LARGE_IMAGE_SHRINK_THRESHOLD: u64 = 8 * GIB;
+pub const STAGING_OPERATIONAL_HEADROOM_BYTES: u64 = 2 * GIB;
+
+/// Exact logical bytes that the ViaPE preparation workflow will persist on its data volume.
+///
+/// The caller measures every component from its existing source. No component is copied merely
+/// to discover its size. The fixed 2 GiB headroom is added once by [`required_staging_bytes`] for
+/// filesystem allocation rounding, the bounded handoff log/config, and transactional metadata.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StagingPayloadBudget {
+    pub image_bytes: u64,
+    pub exported_driver_bytes: u64,
+    pub pca_bytes: u64,
+    pub user_driver_bytes: u64,
+    pub uefiseven_bytes: u64,
+    /// Exact bytes of already downloaded, user-selected unattended installers.
+    pub preinstalled_software_bytes: u64,
+}
+
+impl StagingPayloadBudget {
+    pub fn payload_bytes(self) -> Option<u64> {
+        self.image_bytes
+            .checked_add(self.exported_driver_bytes)?
+            .checked_add(self.pca_bytes)?
+            .checked_add(self.user_driver_bytes)?
+            .checked_add(self.uefiseven_bytes)?
+            .checked_add(self.preinstalled_software_bytes)
+    }
+
+    pub fn required_bytes(self) -> Option<u64> {
+        required_staging_bytes(self.payload_bytes()?)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageMedia {
@@ -29,8 +60,6 @@ pub struct StagingCandidate {
     pub media: StorageMedia,
     pub attachment: StorageAttachment,
     pub free_bytes: u64,
-    pub total_bytes: u64,
-    pub is_current_system: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,9 +69,6 @@ pub struct ShrinkCandidate {
     pub media: StorageMedia,
     pub attachment: StorageAttachment,
     pub free_bytes: u64,
-    pub total_bytes: u64,
-    pub is_current_system: bool,
-    pub max_shrink_bytes: u64,
     /// Set only after the caller confirms NTFS/basic-volume and a stable BitLocker state. Windows
     /// permits shrinking the currently unlocked system volume without first decrypting it.
     pub shrink_is_safe: bool,
@@ -64,23 +90,22 @@ pub enum StagingPlan {
     },
 }
 
-/// Includes the image plus bounded room for the PE snapshot, PCA package, drivers, configuration,
-/// filesystem allocation rounding, and a partially written destination that must be cleaned up.
-pub fn required_staging_bytes(image_bytes: u64) -> u64 {
-    let proportional = image_bytes / 10;
-    let variable_headroom = proportional.clamp(GIB, 4 * GIB);
-    image_bytes
-        .saturating_add(variable_headroom)
-        .saturating_add(512 * MIB)
+/// Adds exactly 2 GiB of operational headroom to already-complete payload accounting.
+pub fn required_staging_bytes(payload_bytes: u64) -> Option<u64> {
+    payload_bytes.checked_add(STAGING_OPERATIONAL_HEADROOM_BYTES)
 }
 
 pub fn select_staging_plan(
-    image_bytes: u64,
+    payload_bytes: u64,
     target_disk_number: Option<u32>,
     candidates: &[StagingCandidate],
     shrink_target: Option<ShrinkCandidate>,
 ) -> StagingPlan {
-    let required_bytes = required_staging_bytes(image_bytes);
+    let Some(required_bytes) = required_staging_bytes(payload_bytes) else {
+        return StagingPlan::Unavailable {
+            required_bytes: u64::MAX,
+        };
+    };
     let best_existing = candidates
         .iter()
         .copied()
@@ -90,7 +115,7 @@ pub fn select_staging_plan(
     let safe_shrink = shrink_target.filter(|target| shrink_has_room(*target, required_bytes));
     let prefer_shrink = match (best_existing, safe_shrink) {
         (None, Some(_)) => true,
-        (Some(existing), Some(target)) => should_prefer_fixed_shrink(image_bytes, existing, target),
+        (Some(existing), Some(target)) => should_prefer_fixed_shrink(existing, target),
         _ => false,
     };
 
@@ -122,29 +147,15 @@ pub fn select_staging_plan(
 }
 
 fn candidate_has_room(candidate: StagingCandidate, required_bytes: u64) -> bool {
-    candidate.free_bytes
-        >= required_bytes.saturating_add(volume_reserve_bytes(
-            candidate.is_current_system,
-            candidate.total_bytes,
-        ))
+    candidate.free_bytes >= required_bytes
 }
 
 fn shrink_has_room(target: ShrinkCandidate, required_bytes: u64) -> bool {
-    target.shrink_is_safe
-        && target.max_shrink_bytes >= required_bytes
-        && target.free_bytes
-            >= required_bytes.saturating_add(volume_reserve_bytes(
-                target.is_current_system,
-                target.total_bytes,
-            ))
-}
-
-fn volume_reserve_bytes(is_current_system: bool, total_bytes: u64) -> u64 {
-    if is_current_system {
-        (total_bytes / 10).max(20 * GIB)
-    } else {
-        (total_bytes / 50).max(GIB)
-    }
+    // QueryMaxReclaimableBytes is only an estimate and Microsoft explicitly documents that it may
+    // exceed what Shrink can reclaim. Keeping that estimate in this pure selection data structure
+    // invites it to become a false hard gate. Current free space is a necessary capacity bound;
+    // the real VDS Shrink call and its post-operation extent readback remain authoritative.
+    target.shrink_is_safe && target.free_bytes >= required_bytes
 }
 
 fn candidate_rank(
@@ -168,13 +179,7 @@ fn candidate_rank(
             && target_disk_number.is_some()
             && candidate.disk_number != target_disk_number,
     );
-    let remaining = candidate
-        .free_bytes
-        .saturating_sub(required_bytes)
-        .saturating_sub(volume_reserve_bytes(
-            candidate.is_current_system,
-            candidate.total_bytes,
-        ));
+    let remaining = candidate.free_bytes.saturating_sub(required_bytes);
     // `max_by_key()` uses the final tuple item as the last tie-breaker. `Reverse` keeps a stable
     // preference for the earlier drive letter without relying on scan order.
     (
@@ -185,16 +190,13 @@ fn candidate_rank(
     )
 }
 
-fn should_prefer_fixed_shrink(
-    image_bytes: u64,
-    existing: StagingCandidate,
-    target: ShrinkCandidate,
-) -> bool {
+fn should_prefer_fixed_shrink(existing: StagingCandidate, target: ShrinkCandidate) -> bool {
+    // An already suitable fixed/internal volume is preferred regardless of payload size. A former
+    // 8-GiB threshold abruptly introduced a destructive Shrink transaction for otherwise identical
+    // valid inventories and did not describe any storage-provider capability. Keep only the stable
+    // distinction that avoids depending on removable/external media across the PE reboot.
     target.attachment != StorageAttachment::External
-        && (existing.attachment == StorageAttachment::External
-            || (image_bytes >= LARGE_IMAGE_SHRINK_THRESHOLD
-                && target.media == StorageMedia::SolidState
-                && existing.media != StorageMedia::SolidState))
+        && existing.attachment == StorageAttachment::External
 }
 
 #[cfg(test)]
@@ -218,30 +220,40 @@ mod tests {
             media,
             attachment,
             free_bytes: gib(free_gib),
-            total_bytes: gib(256),
-            is_current_system: false,
         }
     }
 
-    fn shrink_target(media: StorageMedia, image_room_gib: u64, free_gib: u64) -> ShrinkCandidate {
+    fn shrink_target(media: StorageMedia, free_gib: u64) -> ShrinkCandidate {
         ShrinkCandidate {
             letter: 'C',
             disk_number: Some(1),
             media,
             attachment: StorageAttachment::Internal,
             free_bytes: gib(free_gib),
-            total_bytes: gib(256),
-            is_current_system: true,
-            max_shrink_bytes: gib(image_room_gib),
             shrink_is_safe: true,
         }
     }
 
     #[test]
-    fn headroom_is_bounded_and_grows_with_the_image() {
-        assert_eq!(required_staging_bytes(gib(1)), gib(2) + 512 * MIB);
-        assert_eq!(required_staging_bytes(gib(20)), gib(22) + 512 * MIB);
-        assert_eq!(required_staging_bytes(gib(100)), gib(104) + 512 * MIB);
+    fn exact_payload_gets_one_fixed_two_gib_headroom() {
+        assert_eq!(required_staging_bytes(gib(1)), Some(gib(3)));
+        assert_eq!(required_staging_bytes(gib(20)), Some(gib(22)));
+        assert_eq!(required_staging_bytes(gib(100)), Some(gib(102)));
+        assert_eq!(required_staging_bytes(u64::MAX), None);
+    }
+
+    #[test]
+    fn component_budget_counts_every_payload_once() {
+        let budget = StagingPayloadBudget {
+            image_bytes: gib(9),
+            exported_driver_bytes: gib(4),
+            pca_bytes: 128 * MIB,
+            user_driver_bytes: 64 * MIB,
+            uefiseven_bytes: 8 * MIB,
+            preinstalled_software_bytes: 32 * MIB,
+        };
+        assert_eq!(budget.payload_bytes(), Some(gib(13) + 232 * MIB));
+        assert_eq!(budget.required_bytes(), Some(gib(15) + 232 * MIB));
     }
 
     #[test]
@@ -282,14 +294,14 @@ mod tests {
                 gib(6),
                 Some(1),
                 &[hdd],
-                Some(shrink_target(StorageMedia::SolidState, 60, 100))
+                Some(shrink_target(StorageMedia::SolidState, 100))
             ),
             StagingPlan::Existing { letter: 'D', .. }
         ));
     }
 
     #[test]
-    fn large_image_can_use_abundant_system_ssd_instead_of_hdd() {
+    fn large_image_reuses_suitable_internal_hdd_without_a_size_triggered_shrink() {
         let hdd = candidate(
             'D',
             0,
@@ -302,18 +314,14 @@ mod tests {
                 gib(20),
                 Some(1),
                 &[hdd],
-                Some(shrink_target(StorageMedia::SolidState, 60, 100))
+                Some(shrink_target(StorageMedia::SolidState, 100))
             ),
-            StagingPlan::ShrinkTarget {
-                letter: 'C',
-                size_mb,
-                ..
-            } if size_mb == (gib(22) + 512 * MIB) / MIB
+            StagingPlan::Existing { letter: 'D', .. }
         ));
     }
 
     #[test]
-    fn system_volume_reserve_prevents_an_aggressive_shrink() {
+    fn fixed_two_gib_headroom_does_not_force_a_size_triggered_shrink() {
         let hdd = candidate(
             'D',
             0,
@@ -326,20 +334,40 @@ mod tests {
                 gib(20),
                 Some(1),
                 &[hdd],
-                Some(shrink_target(StorageMedia::SolidState, 60, 40))
+                Some(shrink_target(StorageMedia::SolidState, 40))
             ),
+            StagingPlan::Existing { letter: 'D', .. }
+        ));
+    }
+
+    #[test]
+    fn crossing_the_old_eight_gib_boundary_does_not_change_to_destructive_shrink() {
+        let hdd = candidate(
+            'D',
+            0,
+            StorageMedia::Rotational,
+            StorageAttachment::Internal,
+            100,
+        );
+        let target = Some(shrink_target(StorageMedia::SolidState, 100));
+        assert!(matches!(
+            select_staging_plan(gib(8) - 1, Some(1), &[hdd], target),
+            StagingPlan::Existing { letter: 'D', .. }
+        ));
+        assert!(matches!(
+            select_staging_plan(gib(8), Some(1), &[hdd], target),
             StagingPlan::Existing { letter: 'D', .. }
         ));
     }
 
     #[test]
     fn caller_marked_unsafe_target_is_never_selected_for_shrink() {
-        let mut target = shrink_target(StorageMedia::SolidState, 60, 100);
+        let mut target = shrink_target(StorageMedia::SolidState, 100);
         target.shrink_is_safe = false;
         assert_eq!(
             select_staging_plan(gib(6), Some(1), &[], Some(target)),
             StagingPlan::Unavailable {
-                required_bytes: required_staging_bytes(gib(6))
+                required_bytes: required_staging_bytes(gib(6)).expect("bounded")
             }
         );
     }
@@ -406,7 +434,7 @@ mod tests {
                 gib(4),
                 Some(1),
                 &[external_ssd],
-                Some(shrink_target(StorageMedia::Rotational, 20, 100))
+                Some(shrink_target(StorageMedia::Rotational, 100))
             ),
             StagingPlan::ShrinkTarget { letter: 'C', .. }
         ));
@@ -434,5 +462,46 @@ mod tests {
             select_staging_plan(gib(6), Some(1), &candidates, None),
             StagingPlan::Existing { letter: 'E', .. }
         ));
+    }
+
+    #[test]
+    fn fragmented_free_space_is_never_misrepresented_as_one_basic_partition() {
+        // Microsoft defines the largest creatable basic partition by the largest contiguous free
+        // extent, not by adding unrelated tails. Model the reported extreme layout with 5 GiB on
+        // C:, D: and E:. The aggregate 15 GiB exceeds the 12 GiB requirement, but no individual
+        // extent can hold it, so the safe result remains unavailable. A future multi-volume
+        // carrier must be a separately authenticated design; it must not silently turn disks into
+        // dynamic/spanned volumes.
+        let candidates = [
+            candidate(
+                'D',
+                1,
+                StorageMedia::SolidState,
+                StorageAttachment::Internal,
+                5,
+            ),
+            candidate(
+                'E',
+                1,
+                StorageMedia::SolidState,
+                StorageAttachment::Internal,
+                5,
+            ),
+        ];
+        let c = shrink_target(StorageMedia::SolidState, 5);
+        assert_eq!(
+            select_staging_plan(gib(10), Some(1), &candidates, Some(c)),
+            StagingPlan::Unavailable {
+                required_bytes: gib(12)
+            }
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.free_bytes)
+                .sum::<u64>()
+                + c.free_bytes,
+            gib(15)
+        );
     }
 }

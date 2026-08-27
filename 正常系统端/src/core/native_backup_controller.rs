@@ -27,6 +27,12 @@ pub struct DirectBackupIntent {
     pub task: DirectBackupTaskKind,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DirectBackupStableAuthorization {
+    pub source: lr_core::windows_storage::StableVolumeIdentity,
+    pub destination: lr_core::windows_storage::StableVolumeIdentity,
+}
+
 /// Request for the existing PE preparation/handoff pipeline.
 ///
 /// Consumers must still perform cached-artifact verification immediately before use and write
@@ -244,6 +250,7 @@ mod tests {
             format,
             swm_split_size: 4096,
             wim_engine: 1,
+            handoff: None,
         }
     }
 

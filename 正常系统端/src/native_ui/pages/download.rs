@@ -3,43 +3,43 @@
 //! This module only turns Win32 notifications into user intents.  Fetching the
 //! remote catalogue and starting a download remain controller responsibilities.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use windows::core::{w, PWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::UI::Controls::{
-    LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_INSERTCOLUMNW,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_REPORT,
-    LVS_SHOWSELALWAYS,
+    LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_INSERTCOLUMNW,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOCOLUMNHEADER,
+    LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, BS_OWNERDRAW, ES_AUTOHSCROLL, SW_HIDE,
-    SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP,
+    GetClientRect, SendMessageW, SetWindowTextW, ShowWindow, BS_OWNERDRAW, ES_AUTOHSCROLL, SW_HIDE,
+    SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP, WS_VSCROLL,
 };
 
 use crate::core::native_download_controller::ResourceRow;
-use crate::native_ui::controls::{child, wide};
+use crate::native_ui::controls::{child, move_layout_window as MoveWindow, wide};
+use crate::native_ui::layout::measure_text;
 use crate::native_ui::theme::{
     apply_control_theme, apply_list_view_theme, NativeControlKind, Palette,
 };
 
 pub const ID_TAB_SYSTEM: u16 = 5_000;
 pub const ID_TAB_SOFTWARE: u16 = 5_001;
-pub const ID_TAB_GPU_DRIVER: u16 = 5_002;
 pub const ID_RESOURCE_LIST: u16 = 5_003;
 pub const ID_SAVE_PATH: u16 = 5_004;
 pub const ID_BROWSE: u16 = 5_005;
 pub const ID_REFRESH: u16 = 5_006;
 pub const ID_DOWNLOAD: u16 = 5_007;
 pub const ID_INSTALL: u16 = 5_008;
+pub const ID_SOFTWARE_CATEGORIES: u16 = 5_009;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DownloadTab {
     #[default]
     SystemImage,
     Software,
-    GpuDriver,
 }
 
 unsafe fn insert_item(list: HWND, index: i32, value: &str) {
@@ -75,6 +75,37 @@ unsafe fn set_subitem(list: HWND, row: i32, column: i32, value: &str) {
     );
 }
 
+unsafe fn insert_category_column(list: HWND) {
+    let mut title = wide("");
+    let mut column = LVCOLUMNW {
+        mask: LVCF_TEXT | LVCF_WIDTH,
+        cx: 160,
+        pszText: PWSTR(title.as_mut_ptr()),
+        ..Default::default()
+    };
+    let _ = SendMessageW(
+        list,
+        LVM_INSERTCOLUMNW,
+        WPARAM(0),
+        LPARAM((&mut column as *mut LVCOLUMNW) as isize),
+    );
+}
+
+unsafe fn set_selected_list_item(list: HWND, index: usize) {
+    const LVM_SETITEMSTATE: u32 = 0x102B;
+    let mut item = LVITEMW {
+        stateMask: LVIS_SELECTED,
+        state: LVIS_SELECTED,
+        ..Default::default()
+    };
+    let _ = SendMessageW(
+        list,
+        LVM_SETITEMSTATE,
+        WPARAM(index),
+        LPARAM((&mut item as *mut LVITEMW) as isize),
+    );
+}
+
 /// A side-effect-free request emitted by the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DownloadIntent {
@@ -88,7 +119,6 @@ pub enum DownloadIntent {
 pub struct DownloadLabels<'a> {
     pub system_tab: &'a str,
     pub software_tab: &'a str,
-    pub gpu_driver_tab: &'a str,
     pub status_ready: &'a str,
     pub name_column: &'a str,
     pub type_column: &'a str,
@@ -111,6 +141,8 @@ pub struct PageRect {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DownloadVerticalLayout {
+    status_y: i32,
+    status_height: i32,
     list_y: i32,
     list_height: i32,
     field_y: i32,
@@ -132,7 +164,7 @@ fn download_column_widths(tab: DownloadTab, list_width: i32, dpi: u32) -> Downlo
     let usable_width = (list_width - s(20)).max(0);
     let desired_trailing_width = match tab {
         DownloadTab::SystemImage => s(112),
-        DownloadTab::Software | DownloadTab::GpuDriver => s(132),
+        DownloadTab::Software => s(132),
     };
     let trailing_width = desired_trailing_width.min(usable_width * 2 / 5);
     let name_width = (usable_width - trailing_width).max(0);
@@ -143,7 +175,7 @@ fn download_column_widths(tab: DownloadTab, list_width: i32, dpi: u32) -> Downlo
             resource_type: trailing_width,
             size: 0,
         },
-        DownloadTab::Software | DownloadTab::GpuDriver => DownloadColumnWidths {
+        DownloadTab::Software => DownloadColumnWidths {
             name: name_width,
             resource_type: 0,
             size: trailing_width,
@@ -151,16 +183,28 @@ fn download_column_widths(tab: DownloadTab, list_width: i32, dpi: u32) -> Downlo
     }
 }
 
-fn download_vertical_layout(rect: PageRect, dpi: u32) -> DownloadVerticalLayout {
+fn download_vertical_layout(
+    rect: PageRect,
+    dpi: u32,
+    requested_status_height: i32,
+) -> DownloadVerticalLayout {
     let s = |value: i32| value * dpi.max(1) as i32 / 96;
     let height = rect.height.max(0);
     let button_height = s(30).min(height);
     let gap = s(8);
     let page_bottom = rect.y + height;
-    let list_y = (rect.y + button_height + s(10) + s(24)).min(page_bottom);
     let actions_y = (page_bottom - button_height).max(rect.y);
     let field_y = (actions_y - gap - button_height).max(rect.y);
+    let status_y = (rect.y + button_height + s(10)).min(page_bottom);
+    let status_bottom = (field_y - gap).max(status_y);
+    let status_height = requested_status_height
+        .max(0)
+        .min((status_bottom - status_y).max(0));
+    let list_y =
+        (status_y + status_height + if status_height > 0 { gap } else { 0 }).min(status_bottom);
     DownloadVerticalLayout {
+        status_y,
+        status_height,
         list_y,
         list_height: (field_y - gap - list_y).max(0),
         field_y,
@@ -169,8 +213,9 @@ fn download_vertical_layout(rect: PageRect, dpi: u32) -> DownloadVerticalLayout 
 }
 
 pub struct DownloadPage {
-    pub tabs: [HWND; 3],
+    pub tabs: [HWND; 2],
     pub status: HWND,
+    pub software_categories: HWND,
     pub resources: HWND,
     pub save_path_label: HWND,
     pub save_path: HWND,
@@ -181,6 +226,9 @@ pub struct DownloadPage {
     selected_tab: DownloadTab,
     list_width: Cell<i32>,
     dpi: Cell<u32>,
+    font: Cell<HFONT>,
+    status_text: RefCell<String>,
+    last_rect: Cell<PageRect>,
 }
 
 impl DownloadPage {
@@ -205,15 +253,28 @@ impl DownloadPage {
                 BS_OWNERDRAW | WS_TABSTOP.0 as i32,
                 ID_TAB_SOFTWARE,
             )?,
-            child(
-                parent,
-                w!("BUTTON"),
-                labels.gpu_driver_tab,
-                BS_OWNERDRAW | WS_TABSTOP.0 as i32,
-                ID_TAB_GPU_DRIVER,
-            )?,
         ];
         let status = child(parent, w!("STATIC"), labels.status_ready, 0, 5_020)?;
+        let software_categories = child(
+            parent,
+            w!("SysListView32"),
+            "",
+            (LVS_REPORT
+                | LVS_SHOWSELALWAYS
+                | LVS_NOCOLUMNHEADER
+                | LVS_SINGLESEL
+                | WS_BORDER.0
+                | WS_VSCROLL.0
+                | WS_TABSTOP.0) as i32,
+            ID_SOFTWARE_CATEGORIES,
+        )?;
+        let _ = SendMessageW(
+            software_categories,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            WPARAM(0),
+            LPARAM((LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT) as isize),
+        );
+        insert_category_column(software_categories);
         let resources = child(
             parent,
             w!("SysListView32"),
@@ -269,6 +330,7 @@ impl DownloadPage {
         let page = Self {
             tabs,
             status,
+            software_categories,
             resources,
             save_path_label,
             save_path,
@@ -279,6 +341,9 @@ impl DownloadPage {
             selected_tab: DownloadTab::SystemImage,
             list_width: Cell::new(0),
             dpi: Cell::new(96),
+            font: Cell::new(font),
+            status_text: RefCell::new(labels.status_ready.to_owned()),
+            last_rect: Cell::new(PageRect::default()),
         };
         page.apply_font(font);
         page.show(false);
@@ -291,17 +356,28 @@ impl DownloadPage {
 
     pub fn select_tab(&mut self, tab: DownloadTab) {
         self.selected_tab = tab;
+        unsafe {
+            let _ = ShowWindow(
+                self.software_categories,
+                if tab == DownloadTab::Software {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+            self.layout(self.last_rect.get(), self.dpi.get());
+        }
     }
 
     pub unsafe fn relocalize(&self, labels: &DownloadLabels<'_>) {
-        for (control, label) in self.tabs.into_iter().zip([
-            labels.system_tab,
-            labels.software_tab,
-            labels.gpu_driver_tab,
-        ]) {
+        for (control, label) in self
+            .tabs
+            .into_iter()
+            .zip([labels.system_tab, labels.software_tab])
+        {
             set_text(control, label);
         }
-        set_text(self.status, labels.status_ready);
+        self.set_status(labels.status_ready);
         set_text(self.save_path_label, labels.save_path);
         set_text(self.browse, labels.browse);
         set_text(self.refresh, labels.refresh);
@@ -320,8 +396,50 @@ impl DownloadPage {
         self.update_column_widths(self.list_width.get(), self.dpi.get());
     }
 
+    pub unsafe fn replace_software_categories(&self, categories: &[String], selected: usize) {
+        const LVM_DELETEALLITEMS: u32 = 0x1009;
+        let _ = SendMessageW(
+            self.software_categories,
+            LVM_DELETEALLITEMS,
+            WPARAM(0),
+            LPARAM(0),
+        );
+        for (index, category) in categories.iter().enumerate() {
+            insert_item(self.software_categories, index as i32, category);
+        }
+        if selected < categories.len() {
+            set_selected_list_item(self.software_categories, selected);
+        }
+        self.update_category_column_width();
+    }
+
+    pub unsafe fn selected_software_category(&self) -> Option<usize> {
+        const LVM_GETNEXTITEM: u32 = 0x100C;
+        const LVNI_SELECTED: isize = 0x0002;
+        usize::try_from(
+            SendMessageW(
+                self.software_categories,
+                LVM_GETNEXTITEM,
+                WPARAM(usize::MAX),
+                LPARAM(LVNI_SELECTED),
+            )
+            .0,
+        )
+        .ok()
+    }
+
     pub unsafe fn selected_resource(&self) -> Option<usize> {
         usize::try_from(SendMessageW(self.resources, 0x100C, WPARAM(usize::MAX), LPARAM(2)).0).ok()
+    }
+
+    /// Updates the status and immediately reserves the measured wrapped height.
+    pub unsafe fn set_status(&self, value: &str) {
+        set_text(self.status, value);
+        self.status_text.replace(value.to_owned());
+        let rect = self.last_rect.get();
+        if rect.width > 0 && rect.height > 0 {
+            self.layout(rect, self.dpi.get());
+        }
     }
 
     /// Returns an intent only; the caller owns all network and task state changes.
@@ -329,7 +447,6 @@ impl DownloadPage {
         match command_id {
             ID_TAB_SYSTEM => Some(DownloadIntent::SelectTab(DownloadTab::SystemImage)),
             ID_TAB_SOFTWARE => Some(DownloadIntent::SelectTab(DownloadTab::Software)),
-            ID_TAB_GPU_DRIVER => Some(DownloadIntent::SelectTab(DownloadTab::GpuDriver)),
             ID_BROWSE => Some(DownloadIntent::BrowseSaveFolder),
             ID_REFRESH => Some(DownloadIntent::RefreshCatalogue),
             ID_DOWNLOAD => Some(DownloadIntent::DownloadSelected),
@@ -343,7 +460,7 @@ impl DownloadPage {
         let width = rect.width.max(0);
         let height = rect.height.max(0);
         let gap = s(8);
-        let tab_width = ((width - gap * 2) / 3).max(0);
+        let tab_width = ((width - gap) / 2).max(0);
         let button_height = s(30).min(height);
         for (index, tab) in self.tabs.iter().copied().enumerate() {
             let _ = MoveWindow(
@@ -352,34 +469,71 @@ impl DownloadPage {
                 rect.y,
                 tab_width,
                 button_height,
-                true,
+                false,
             );
         }
-        let page_bottom = rect.y + height;
-        let status_y = (rect.y + button_height + s(10)).min(page_bottom);
+        self.last_rect.set(rect);
+        self.dpi.set(dpi);
+        let status_height = if self.status_text.borrow().is_empty() {
+            0
+        } else {
+            measure_text(
+                self.status,
+                self.font.get(),
+                &self.status_text.borrow(),
+                Some(width),
+            )
+            .height
+            .max(s(22))
+        };
+        let vertical = download_vertical_layout(rect, dpi, status_height);
         let _ = MoveWindow(
             self.status,
             rect.x,
-            status_y,
+            vertical.status_y,
             width,
-            s(22).min((page_bottom - status_y).max(0)),
-            true,
+            vertical.status_height,
+            false,
         );
-
-        let vertical = download_vertical_layout(rect, dpi);
-        self.list_width.set(width);
-        self.dpi.set(dpi);
+        let category_width = if self.selected_tab == DownloadTab::Software {
+            s(190).min((width / 3).max(0))
+        } else {
+            0
+        };
+        let list_gap = if category_width > 0 { gap } else { 0 };
+        let resource_x = rect.x + category_width + list_gap;
+        let resource_width = (width - category_width - list_gap).max(0);
         let _ = MoveWindow(
-            self.resources,
+            self.software_categories,
             rect.x,
             vertical.list_y,
-            width,
+            category_width,
             vertical.list_height,
-            true,
+            false,
         );
-        self.update_column_widths(width, dpi);
+        // LVM_SETCOLUMNWIDTH must use the post-MoveWindow client rectangle. Keeping the previous
+        // page width here made the final row surface extend underneath the new scrollbar/frame.
+        self.update_category_column_width();
+        self.list_width.set(resource_width);
+        let _ = MoveWindow(
+            self.resources,
+            resource_x,
+            vertical.list_y,
+            resource_width,
+            vertical.list_height,
+            false,
+        );
+        self.update_column_widths(resource_width, dpi);
 
-        let label_width = s(72).min(width / 3);
+        let label_width = (measure_text(
+            self.save_path_label,
+            self.font.get(),
+            &crate::tr!("保存位置:"),
+            None,
+        )
+        .width
+            + s(8))
+        .clamp(s(72).min(width), (width / 3).max(s(72).min(width)));
         let browse_width = s(82).min(width / 4);
         let _ = MoveWindow(
             self.save_path_label,
@@ -387,7 +541,7 @@ impl DownloadPage {
             vertical.field_y + s(5),
             label_width,
             s(22),
-            true,
+            false,
         );
         let edit_x = rect.x + label_width;
         let edit_width = (width - label_width - browse_width - gap).max(0);
@@ -397,7 +551,7 @@ impl DownloadPage {
             vertical.field_y,
             edit_width,
             button_height,
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.browse,
@@ -405,7 +559,7 @@ impl DownloadPage {
             vertical.field_y,
             browse_width,
             button_height,
-            true,
+            false,
         );
 
         let action_width = s(112).min((width - gap * 2) / 3).max(0);
@@ -415,7 +569,7 @@ impl DownloadPage {
             vertical.actions_y,
             action_width,
             button_height,
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.install,
@@ -423,7 +577,7 @@ impl DownloadPage {
             vertical.actions_y,
             action_width,
             button_height,
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.download,
@@ -431,7 +585,7 @@ impl DownloadPage {
             vertical.actions_y,
             action_width,
             button_height,
-            true,
+            false,
         );
     }
 
@@ -439,9 +593,13 @@ impl DownloadPage {
         for hwnd in self.controls() {
             let _ = ShowWindow(hwnd, if visible { SW_SHOW } else { SW_HIDE });
         }
+        if visible && self.selected_tab != DownloadTab::Software {
+            let _ = ShowWindow(self.software_categories, SW_HIDE);
+        }
     }
 
     pub unsafe fn apply_font(&self, font: HFONT) {
+        self.font.set(font);
         for hwnd in self.controls() {
             let _ = SendMessageW(hwnd, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
         }
@@ -449,6 +607,7 @@ impl DownloadPage {
 
     pub unsafe fn apply_theme(&self, palette: Palette) {
         let _ = apply_list_view_theme(self.resources, palette);
+        let _ = apply_list_view_theme(self.software_categories, palette);
         for control in self.tabs.iter().copied().chain([
             self.browse,
             self.refresh,
@@ -481,6 +640,7 @@ impl DownloadPage {
     fn controls(&self) -> impl Iterator<Item = HWND> + '_ {
         self.tabs.iter().copied().chain([
             self.status,
+            self.software_categories,
             self.resources,
             self.save_path_label,
             self.save_path,
@@ -504,6 +664,18 @@ impl DownloadPage {
                 LPARAM(width as isize),
             );
         }
+    }
+
+    unsafe fn update_category_column_width(&self) {
+        let mut rect = RECT::default();
+        let _ = GetClientRect(self.software_categories, &mut rect);
+        let width = (rect.right - rect.left).max(0);
+        let _ = SendMessageW(
+            self.software_categories,
+            0x101E, // LVM_SETCOLUMNWIDTH
+            WPARAM(0),
+            LPARAM(width as isize),
+        );
     }
 }
 
@@ -600,12 +772,29 @@ mod tests {
                 192,
             ),
         ] {
-            let layout = download_vertical_layout(rect, dpi);
+            let layout = download_vertical_layout(rect, dpi, 24 * dpi as i32 / 96);
             let button_height = 30 * dpi as i32 / 96;
             assert!(layout.actions_y + button_height <= rect.y + rect.height);
             assert!(layout.field_y <= layout.actions_y);
             assert!(layout.list_height >= 0);
         }
+    }
+
+    #[test]
+    fn wrapped_status_pushes_the_catalogue_down_without_moving_the_footer() {
+        let rect = PageRect {
+            x: 0,
+            y: 0,
+            width: 900,
+            height: 620,
+        };
+        let single = download_vertical_layout(rect, 96, 22);
+        let wrapped = download_vertical_layout(rect, 96, 66);
+        assert_eq!(single.field_y, wrapped.field_y);
+        assert_eq!(single.actions_y, wrapped.actions_y);
+        assert!(wrapped.list_y > single.list_y);
+        assert_eq!(wrapped.list_height, single.list_height - 44);
+        assert!(wrapped.status_y + wrapped.status_height <= wrapped.list_y);
     }
 
     #[test]
@@ -615,21 +804,15 @@ mod tests {
         assert!(system.resource_type > 0);
         assert_eq!(system.size, 0);
 
-        for tab in [DownloadTab::Software, DownloadTab::GpuDriver] {
-            let widths = download_column_widths(tab, 960, 96);
-            assert!(widths.name > widths.size);
-            assert_eq!(widths.resource_type, 0);
-            assert!(widths.size > 0);
-        }
+        let widths = download_column_widths(DownloadTab::Software, 960, 96);
+        assert!(widths.name > widths.size);
+        assert_eq!(widths.resource_type, 0);
+        assert!(widths.size > 0);
     }
 
     #[test]
     fn catalogue_columns_stay_non_negative_at_narrow_high_dpi_sizes() {
-        for tab in [
-            DownloadTab::SystemImage,
-            DownloadTab::Software,
-            DownloadTab::GpuDriver,
-        ] {
+        for tab in [DownloadTab::SystemImage, DownloadTab::Software] {
             let widths = download_column_widths(tab, 48, 192);
             assert!(widths.name >= 0);
             assert!(widths.resource_type >= 0);

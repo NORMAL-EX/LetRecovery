@@ -36,14 +36,6 @@ impl DriverTransferState {
             DriverTransferMode::Import => DriverDirectoryRole::ImportSource,
         }
     }
-
-    pub fn selected_label(&self) -> Option<&str> {
-        let selected = self.selected_windows.as_deref()?;
-        self.windows_targets
-            .iter()
-            .find(|entry| entry.value.eq_ignore_ascii_case(selected))
-            .map(|entry| entry.label.as_str())
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

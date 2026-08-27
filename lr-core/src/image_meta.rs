@@ -154,6 +154,9 @@ pub struct ImageInfo {
     pub name: String,
     /// 镜像大小（字节）
     pub size_bytes: u64,
+    /// Bytes represented by hard links inside the selected image. Applying the image writes one
+    /// physical copy, so capacity planning uses `size_bytes - hard_link_bytes`.
+    pub hard_link_bytes: u64,
     /// 安装类型（如 "Client" / "WindowsPE" / "Server"）
     pub installation_type: String,
     /// 镜像描述
@@ -222,6 +225,9 @@ fn parse_image_info_roxml(xml: &str) -> Option<Vec<ImageInfo>> {
         let size_bytes = node_text(image, "TOTALBYTES")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        let hard_link_bytes = node_text(image, "HARDLINKBYTES")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let installation_type = node_text(image, "INSTALLATIONTYPE").unwrap_or_default();
         let description = node_text(image, "DESCRIPTION").unwrap_or_default();
         let major_version = node_text(image, "MAJOR").and_then(|s| s.parse::<u16>().ok());
@@ -234,6 +240,7 @@ fn parse_image_info_roxml(xml: &str) -> Option<Vec<ImageInfo>> {
             index,
             name,
             size_bytes,
+            hard_link_bytes,
             installation_type,
             description,
             major_version,
@@ -417,6 +424,9 @@ fn parse_image_info_fallback(xml: &str) -> Vec<ImageInfo> {
         let size_bytes = extract_xml_tag(image_block, "TOTALBYTES")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        let hard_link_bytes = extract_xml_tag(image_block, "HARDLINKBYTES")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let installation_type =
             extract_xml_tag(image_block, "INSTALLATIONTYPE").unwrap_or_default();
         let description = extract_xml_tag(image_block, "DESCRIPTION").unwrap_or_default();
@@ -433,6 +443,7 @@ fn parse_image_info_fallback(xml: &str) -> Vec<ImageInfo> {
             index: parsed_index,
             name,
             size_bytes,
+            hard_link_bytes,
             installation_type,
             description,
             major_version,
@@ -578,7 +589,7 @@ mod tests {
     #[test]
     fn single_standard_install_uses_name() {
         let xml = r#"<WIM><TOTALBYTES>9000000000</TOTALBYTES>
-<IMAGE INDEX="1"><TOTALBYTES>4000000000</TOTALBYTES>
+<IMAGE INDEX="1"><TOTALBYTES>4000000000</TOTALBYTES><HARDLINKBYTES>750000000</HARDLINKBYTES>
 <WINDOWS><ARCH>9</ARCH><PRODUCTNAME>Microsoft Windows</PRODUCTNAME>
 <EDITIONID>Professional</EDITIONID><INSTALLATIONTYPE>Client</INSTALLATIONTYPE>
 <VERSION><MAJOR>10</MAJOR><MINOR>0</MINOR><BUILD>19045</BUILD></VERSION></WINDOWS>
@@ -592,6 +603,7 @@ mod tests {
         assert_eq!(v[0].build, Some(19045));
         assert_eq!(v[0].architecture, Some(9));
         assert_eq!(v[0].size_bytes, 4_000_000_000);
+        assert_eq!(v[0].hard_link_bytes, 750_000_000);
         assert_eq!(v[0].image_type, WimImageType::StandardInstall);
     }
 
@@ -712,6 +724,7 @@ mod tests {
             index: 1,
             name: name.into(),
             size_bytes: size,
+            hard_link_bytes: 0,
             installation_type: it.into(),
             description: String::new(),
             major_version: major,

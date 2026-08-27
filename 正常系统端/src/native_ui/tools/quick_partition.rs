@@ -549,10 +549,6 @@ impl NativeQuickPartitionDialog {
         self.render_state();
     }
 
-    pub fn has_pending_changes(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
     pub unsafe fn mark_inventory_changed(&mut self) -> bool {
         if self.state.loading {
             return false;
@@ -564,13 +560,6 @@ impl NativeQuickPartitionDialog {
         self.state.message = crate::tr!("磁盘布局已在外部发生变化；请刷新并重新检查暂存修改。");
         self.render_state();
         false
-    }
-
-    pub unsafe fn discard_pending(&mut self) {
-        self.pending.clear();
-        self.inventory_stale = false;
-        self.state.message.clear();
-        self.render_state();
     }
 
     pub unsafe fn finish_pending_apply(&mut self) {

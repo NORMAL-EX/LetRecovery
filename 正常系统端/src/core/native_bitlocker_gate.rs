@@ -5,6 +5,7 @@
 //! non-elevated development builds.
 
 use super::bitlocker::{UnlockResult, VolumeStatus};
+use zeroize::Zeroize;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BitLockerVolumeSnapshot {
@@ -33,6 +34,14 @@ pub enum BitLockerCredential {
     RecoveryKey(String),
 }
 
+impl Drop for BitLockerCredential {
+    fn drop(&mut self) {
+        match self {
+            Self::Password(secret) | Self::RecoveryKey(secret) => secret.zeroize(),
+        }
+    }
+}
+
 impl std::fmt::Debug for BitLockerCredential {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -49,6 +58,12 @@ impl std::fmt::Debug for BitLockerCredential {
 pub struct ValidatedBitLockerCredential {
     kind: BitLockerCredentialKind,
     secret: String,
+}
+
+impl Drop for ValidatedBitLockerCredential {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
 }
 
 impl ValidatedBitLockerCredential {
@@ -92,20 +107,20 @@ impl std::error::Error for NativeBitLockerGateError {}
 /// Validate a credential without touching the host. Password whitespace is preserved because it
 /// can be significant; only a truly empty password is rejected.
 pub fn validate_credential(
-    credential: BitLockerCredential,
+    mut credential: BitLockerCredential,
 ) -> Result<ValidatedBitLockerCredential, NativeBitLockerGateError> {
-    match credential {
+    match &mut credential {
         BitLockerCredential::Password(password) => {
             if password.is_empty() {
                 return Err(NativeBitLockerGateError::EmptyPassword);
             }
             Ok(ValidatedBitLockerCredential {
                 kind: BitLockerCredentialKind::Password,
-                secret: password,
+                secret: std::mem::take(password),
             })
         }
         BitLockerCredential::RecoveryKey(recovery_key) => {
-            let formatted = lr_core::fveapi::format_recovery_key(&recovery_key)
+            let formatted = lr_core::fveapi::format_recovery_key(recovery_key.as_str())
                 .map_err(NativeBitLockerGateError::InvalidRecoveryKey)?;
             Ok(ValidatedBitLockerCredential {
                 kind: BitLockerCredentialKind::RecoveryKey,

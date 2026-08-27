@@ -307,16 +307,6 @@ pub fn delete_copy_marker(target_partition: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 检查是否可以继续对拷（目标分区有标记文件且源分区匹配）
-pub fn can_resume_copy(source_partition: &str, target_partition: &str) -> bool {
-    if let Some(marker) = read_copy_marker(target_partition) {
-        return marker
-            .source_partition
-            .eq_ignore_ascii_case(source_partition);
-    }
-    false
-}
-
 /// 递归收集所有文件（使用 WinAPI）
 #[cfg(windows)]
 fn collect_all_files(root_path: &str) -> Vec<String> {
@@ -627,26 +617,6 @@ pub fn execute_partition_copy(
     progress.completed = true;
     progress.current_file = tr!("复制完成");
     let _ = progress_tx.send(progress);
-}
-
-/// 检查是否有足够的目标空间
-pub fn check_target_space(source_partition: &str, target_partition: &str) -> Result<(), String> {
-    let source_info = get_partition_info(source_partition)
-        .ok_or_else(|| tr!("无法获取源分区 {} 的信息", source_partition))?;
-
-    let target_info = get_partition_info(target_partition)
-        .ok_or_else(|| tr!("无法获取目标分区 {} 的信息", target_partition))?;
-
-    // 检查目标分区可用空间是否足够容纳源分区的已用空间
-    if target_info.free_size_mb < source_info.used_size_mb {
-        return Err(tr!(
-            "目标分区可用空间不足！\n源分区已用: {} GB\n目标分区可用: {} GB",
-            format!("{:.2}", source_info.used_size_mb as f64 / 1024.0),
-            format!("{:.2}", target_info.free_size_mb as f64 / 1024.0)
-        ));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

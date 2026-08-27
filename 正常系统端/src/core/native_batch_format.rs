@@ -4,7 +4,7 @@
 //! receives only a validated plan and formats each volume through the shared
 //! parameterized VDS/WinAPI boundary.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use lr_core::format_command::FormatCommandSpec;
 
@@ -79,20 +79,26 @@ pub fn inventory_current() -> Result<Vec<BatchFormatInventoryVolume>, BatchForma
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedBatchFormatPlan {
-    specs: Vec<FormatCommandSpec>,
+    entries: Vec<ValidatedBatchFormatEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValidatedBatchFormatEntry {
+    spec: FormatCommandSpec,
+    expected: lr_core::windows_storage::StableVolumeIdentity,
 }
 
 impl ValidatedBatchFormatPlan {
     pub fn drives(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.specs.iter().map(FormatCommandSpec::drive)
+        self.entries.iter().map(|entry| entry.spec.drive())
     }
 
     pub fn len(&self) -> usize {
-        self.specs.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.specs.is_empty()
+        self.entries.is_empty()
     }
 }
 
@@ -153,34 +159,44 @@ pub fn validate_current(
 ) -> Result<ValidatedBatchFormatPlan, BatchFormatError> {
     let partitions = DiskManager::get_partitions()
         .map_err(|error| BatchFormatError::Inventory(error.to_string()))?;
+    let system_letter = lr_core::windows_storage::current_windows_drive_letter()
+        .map_err(|error| BatchFormatError::Inventory(error.to_string()))?;
+    let system_drive = format!("{system_letter}:");
+    let system_identity = lr_core::windows_storage::stable_volume_identity(system_letter)
+        .map_err(|error| BatchFormatError::Inventory(error.to_string()))?;
     let allowed = partitions
         .iter()
         .filter(|partition| !partition.is_system_partition)
-        .map(|partition| partition.letter.as_str());
-    let system_drive = format!(
-        "{}:",
-        lr_core::windows_storage::current_windows_drive_letter()
-            .map_err(|error| BatchFormatError::Inventory(error.to_string()))?
-    );
-    validate_against_inventory(request, allowed, &system_drive)
+        .map(|partition| {
+            let letter =
+                partition.letter.chars().next().ok_or_else(|| {
+                    BatchFormatError::Inventory("volume has no drive letter".into())
+                })?;
+            let identity = lr_core::windows_storage::stable_volume_identity(letter)
+                .map_err(|error| BatchFormatError::Inventory(error.to_string()))?;
+            Ok((partition.letter.as_str(), identity))
+        })
+        .collect::<Result<Vec<_>, BatchFormatError>>()?;
+    validate_against_inventory(request, allowed, &system_drive, system_identity)
 }
 
 fn validate_against_inventory<'a>(
     request: &BatchFormatRequest,
-    allowed_drives: impl IntoIterator<Item = &'a str>,
+    allowed_volumes: impl IntoIterator<Item = (&'a str, lr_core::windows_storage::StableVolumeIdentity)>,
     system_drive: &str,
+    system_identity: lr_core::windows_storage::StableVolumeIdentity,
 ) -> Result<ValidatedBatchFormatPlan, BatchFormatError> {
     if request.drives.is_empty() {
         return Err(BatchFormatError::EmptySelection);
     }
 
     let system_drive = normalize_for_comparison(system_drive)?;
-    let allowed = allowed_drives
+    let allowed = allowed_volumes
         .into_iter()
-        .map(normalize_for_comparison)
-        .collect::<Result<HashSet<_>, _>>()?;
+        .map(|(drive, identity)| normalize_for_comparison(drive).map(|drive| (drive, identity)))
+        .collect::<Result<HashMap<_, _>, _>>()?;
     let mut seen = HashSet::new();
-    let mut specs = Vec::new();
+    let mut entries = Vec::new();
 
     for requested_drive in &request.drives {
         let spec = FormatCommandSpec::new(
@@ -194,18 +210,23 @@ fn validate_against_inventory<'a>(
         if drive == system_drive {
             return Err(BatchFormatError::ProtectedDrive(drive));
         }
-        if !allowed.contains(&drive) {
+        let Some(expected) = allowed.get(&drive).copied() else {
             return Err(BatchFormatError::DriveNotAllowed(drive));
+        };
+        if expected.extent.disk_number == system_identity.extent.disk_number
+            && expected.extent.offset_bytes == system_identity.extent.offset_bytes
+        {
+            return Err(BatchFormatError::ProtectedDrive(drive));
         }
         if seen.insert(drive) {
-            specs.push(spec);
+            entries.push(ValidatedBatchFormatEntry { spec, expected });
         }
     }
 
-    if specs.is_empty() {
+    if entries.is_empty() {
         return Err(BatchFormatError::EmptySelection);
     }
-    Ok(ValidatedBatchFormatPlan { specs })
+    Ok(ValidatedBatchFormatPlan { entries })
 }
 
 fn normalize_for_comparison(drive: &str) -> Result<String, BatchFormatError> {
@@ -229,7 +250,7 @@ pub fn execute(
 }
 
 trait VolumeFormatter {
-    fn format(&self, spec: &FormatCommandSpec) -> Result<(), String>;
+    fn format(&self, entry: &ValidatedBatchFormatEntry) -> Result<(), String>;
 }
 
 #[cfg(not(feature = "non-elevated-tests"))]
@@ -237,7 +258,8 @@ struct WinApiVolumeFormatter;
 
 #[cfg(not(feature = "non-elevated-tests"))]
 impl VolumeFormatter for WinApiVolumeFormatter {
-    fn format(&self, spec: &FormatCommandSpec) -> Result<(), String> {
+    fn format(&self, entry: &ValidatedBatchFormatEntry) -> Result<(), String> {
+        let spec = &entry.spec;
         let drive_letter = spec
             .drive()
             .chars()
@@ -253,10 +275,16 @@ impl VolumeFormatter for WinApiVolumeFormatter {
                 lr_core::windows_storage::FileSystem::ExFat
             }
         };
-        lr_core::windows_storage::format_drive(
+        lr_core::windows_storage::format_drive_with_options_stable_checked(
             drive_letter,
-            file_system,
-            spec.volume_label().unwrap_or_default(),
+            entry.expected,
+            &lr_core::windows_storage::FormatOptions {
+                file_system,
+                label: spec.volume_label().unwrap_or_default().to_owned(),
+                allocation_unit_size: 0,
+                quick: true,
+                force_dismount: false,
+            },
         )
         .map_err(|error| error.to_string())
     }
@@ -267,9 +295,10 @@ fn execute_with_formatter<F: VolumeFormatter + ?Sized>(
     plan: &ValidatedBatchFormatPlan,
     formatter: &F,
 ) -> BatchFormatExecutionResult {
-    let mut volumes = Vec::with_capacity(plan.specs.len());
-    for spec in &plan.specs {
-        let result = match formatter.format(spec) {
+    let mut volumes = Vec::with_capacity(plan.entries.len());
+    for entry in &plan.entries {
+        let spec = &entry.spec;
+        let result = match formatter.format(entry) {
             Ok(()) => BatchFormatVolumeResult {
                 drive: spec.drive().to_string(),
                 success: true,
@@ -308,27 +337,88 @@ mod tests {
         }
     }
 
+    fn identity(
+        disk_number: u32,
+        offset_bytes: u64,
+    ) -> lr_core::windows_storage::StableVolumeIdentity {
+        lr_core::windows_storage::StableVolumeIdentity {
+            extent: lr_core::windows_storage::VolumeIdentity {
+                disk_number,
+                offset_bytes,
+                extent_length_bytes: 64 * 1024 * 1024,
+            },
+            disk: lr_core::windows_storage::StableDiskIdentity::Gpt {
+                disk_id: [disk_number as u8 + 1; 16],
+            },
+            partition: lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                partition_id: [(offset_bytes / 4096) as u8 + 1; 16],
+            },
+            device_id_hash: Some([disk_number as u8 + 3; 32]),
+        }
+    }
+
+    fn system_identity() -> lr_core::windows_storage::StableVolumeIdentity {
+        identity(0, 1_048_576)
+    }
+
     #[test]
     fn rejects_empty_protected_and_unlisted_volumes() {
         assert_eq!(
-            validate_against_inventory(&request(&[]), ["D:"], "C:").unwrap_err(),
+            validate_against_inventory(
+                &request(&[]),
+                [("D:", identity(1, 1_048_576))],
+                "C:",
+                system_identity(),
+            )
+            .unwrap_err(),
             BatchFormatError::EmptySelection
         );
         assert!(matches!(
-            validate_against_inventory(&request(&["D:"]), ["C:", "D:"], "D:"),
+            validate_against_inventory(
+                &request(&["D:"]),
+                [("C:", system_identity()), ("D:", identity(1, 1_048_576))],
+                "D:",
+                identity(1, 1_048_576),
+            ),
             Err(BatchFormatError::ProtectedDrive(drive)) if drive == "D:"
         ));
         assert!(matches!(
-            validate_against_inventory(&request(&["E:"]), ["D:"], "C:"),
+            validate_against_inventory(
+                &request(&["E:"]),
+                [("D:", identity(1, 1_048_576))],
+                "C:",
+                system_identity(),
+            ),
             Err(BatchFormatError::DriveNotAllowed(drive)) if drive == "E:"
         ));
     }
 
     #[test]
     fn normalizes_and_deduplicates_before_building_specs() {
-        let plan =
-            validate_against_inventory(&request(&["d", "D:\\", "e:"]), ["D:", "E:"], "C:").unwrap();
+        let plan = validate_against_inventory(
+            &request(&["d", "D:\\", "e:"]),
+            [
+                ("D:", identity(1, 1_048_576)),
+                ("E:", identity(2, 1_048_576)),
+            ],
+            "C:",
+            system_identity(),
+        )
+        .unwrap();
         assert_eq!(plan.drives().collect::<Vec<_>>(), vec!["D:", "E:"]);
+    }
+
+    #[test]
+    fn rejects_an_alias_of_the_running_windows_volume_by_physical_identity() {
+        assert!(matches!(
+            validate_against_inventory(
+                &request(&["D:"]),
+                [("D:", system_identity())],
+                "C:",
+                system_identity(),
+            ),
+            Err(BatchFormatError::ProtectedDrive(drive)) if drive == "D:"
+        ));
     }
 
     #[test]
@@ -336,14 +426,24 @@ mod tests {
         let mut invalid_fs = request(&["D:"]);
         invalid_fs.file_system = "NTFS /X".to_string();
         assert!(matches!(
-            validate_against_inventory(&invalid_fs, ["D:"], "C:"),
+            validate_against_inventory(
+                &invalid_fs,
+                [("D:", identity(1, 1_048_576))],
+                "C:",
+                system_identity(),
+            ),
             Err(BatchFormatError::InvalidParameter(_))
         ));
 
         let mut invalid_label = request(&["D:"]);
         invalid_label.volume_label = "Data|whoami".to_string();
         assert!(matches!(
-            validate_against_inventory(&invalid_label, ["D:"], "C:"),
+            validate_against_inventory(
+                &invalid_label,
+                [("D:", identity(1, 1_048_576))],
+                "C:",
+                system_identity(),
+            ),
             Err(BatchFormatError::InvalidParameter(_))
         ));
     }
@@ -351,21 +451,36 @@ mod tests {
     struct SequencedFormatter {
         outcomes: Mutex<Vec<Result<(), String>>>,
         drives: Mutex<Vec<String>>,
+        identities: Mutex<Vec<lr_core::windows_storage::StableVolumeIdentity>>,
     }
 
     impl VolumeFormatter for SequencedFormatter {
-        fn format(&self, spec: &FormatCommandSpec) -> Result<(), String> {
-            self.drives.lock().unwrap().push(spec.drive().to_owned());
+        fn format(&self, entry: &ValidatedBatchFormatEntry) -> Result<(), String> {
+            self.drives
+                .lock()
+                .unwrap()
+                .push(entry.spec.drive().to_owned());
+            self.identities.lock().unwrap().push(entry.expected);
             self.outcomes.lock().unwrap().remove(0)
         }
     }
 
     #[test]
     fn injected_formatter_preserves_per_volume_success_and_failure() {
-        let plan = validate_against_inventory(&request(&["D:", "E:"]), ["D:", "E:"], "C:").unwrap();
+        let plan = validate_against_inventory(
+            &request(&["D:", "E:"]),
+            [
+                ("D:", identity(1, 1_048_576)),
+                ("E:", identity(2, 1_048_576)),
+            ],
+            "C:",
+            system_identity(),
+        )
+        .unwrap();
         let formatter = SequencedFormatter {
             outcomes: Mutex::new(vec![Ok(()), Err("access denied".to_owned())]),
             drives: Mutex::new(Vec::new()),
+            identities: Mutex::new(Vec::new()),
         };
 
         let result = execute_with_formatter(&plan, &formatter);
@@ -379,12 +494,22 @@ mod tests {
             *formatter.drives.lock().unwrap(),
             vec!["D:".to_owned(), "E:".to_owned()]
         );
+        assert_eq!(
+            *formatter.identities.lock().unwrap(),
+            vec![identity(1, 1_048_576), identity(2, 1_048_576)]
+        );
     }
 
     #[cfg(feature = "non-elevated-tests")]
     #[test]
     fn development_feature_denies_before_any_format_api_call() {
-        let plan = validate_against_inventory(&request(&["D:"]), ["D:"], "C:").unwrap();
+        let plan = validate_against_inventory(
+            &request(&["D:"]),
+            [("D:", identity(1, 1_048_576))],
+            "C:",
+            system_identity(),
+        )
+        .unwrap();
         assert_eq!(
             execute(&plan).unwrap_err(),
             BatchFormatError::DevelopmentBuildDenied

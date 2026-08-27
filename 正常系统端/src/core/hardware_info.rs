@@ -26,11 +26,7 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL,
     RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, SAFEARRAY,
 };
-use windows::Win32::System::Ioctl::{
-    PropertyStandardQuery, StorageDeviceProperty, DISK_GEOMETRY_EX,
-    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_QUERY_PROPERTY,
-    STORAGE_PROPERTY_QUERY,
-};
+use windows::Win32::System::Ioctl::{PropertyStandardQuery, STORAGE_PROPERTY_QUERY};
 use windows::Win32::System::Ole::SafeArrayGetElement;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
@@ -228,9 +224,11 @@ pub struct HardwareInfo {
     pub battery: Option<BatteryInfo>,
 }
 
+#[cfg(test)]
 #[repr(C)]
 #[allow(non_snake_case, dead_code)]
-struct STORAGE_DEVICE_DESCRIPTOR {
+#[derive(Clone, Copy)]
+struct STORAGE_DEVICE_DESCRIPTOR_HEADER {
     Version: u32,
     Size: u32,
     DeviceType: u8,
@@ -243,13 +241,60 @@ struct STORAGE_DEVICE_DESCRIPTOR {
     SerialNumberOffset: u32,
     BusType: u32,
     RawPropertiesLength: u32,
-    RawDeviceProperties: [u8; 1],
 }
 
-#[repr(C)]
-#[allow(non_snake_case, dead_code)]
-struct GET_LENGTH_INFORMATION {
-    length: i64,
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedStorageDeviceDescriptor {
+    model: String,
+    serial_number: String,
+    firmware_revision: String,
+    bus_type: u32,
+    removable_media: bool,
+}
+
+#[cfg(test)]
+fn descriptor_string(buffer: &[u8], offset: u32, upper_bound: usize) -> String {
+    let offset = offset as usize;
+    if offset == 0 || offset >= upper_bound {
+        return String::new();
+    }
+    let bounded = &buffer[offset..upper_bound];
+    let Some(end) = bounded.iter().position(|&byte| byte == 0) else {
+        return String::new();
+    };
+    String::from_utf8_lossy(&bounded[..end]).trim().to_string()
+}
+
+#[cfg(test)]
+fn parse_storage_device_descriptor(
+    buffer: &[u8],
+    bytes_returned: u32,
+) -> Option<ParsedStorageDeviceDescriptor> {
+    let fixed_header_size = size_of::<STORAGE_DEVICE_DESCRIPTOR_HEADER>();
+    let returned_len = (bytes_returned as usize).min(buffer.len());
+    if returned_len < fixed_header_size {
+        return None;
+    }
+
+    let descriptor = unsafe {
+        std::ptr::read_unaligned(buffer.as_ptr().cast::<STORAGE_DEVICE_DESCRIPTOR_HEADER>())
+    };
+    let declared_size = descriptor.Size as usize;
+    if declared_size < fixed_header_size {
+        return None;
+    }
+
+    // Drivers may report a descriptor larger than the caller's buffer. Never
+    // allow offsets or terminator searches beyond bytes actually returned.
+    let upper_bound = returned_len.min(declared_size).min(buffer.len());
+    Some(ParsedStorageDeviceDescriptor {
+        model: descriptor_string(buffer, descriptor.ProductIdOffset, upper_bound),
+        serial_number: descriptor_string(buffer, descriptor.SerialNumberOffset, upper_bound),
+        firmware_revision: descriptor_string(buffer, descriptor.ProductRevisionOffset, upper_bound),
+        bus_type: descriptor.BusType,
+        removable_media: descriptor.RemovableMedia != 0,
+    })
 }
 
 #[repr(C)]
@@ -1444,32 +1489,54 @@ impl HardwareInfo {
     }
 
     fn get_disk_info() -> Vec<DiskInfo> {
-        let mut disks = Vec::new();
-        let partition_layouts = get_disk_partition_styles();
-
-        // 使用 WMI 获取磁盘大小
-        let disk_sizes = get_disk_sizes_wmi();
-
-        for i in 0..16 {
-            let path = format!(r"\\.\PhysicalDrive{}", i);
-            if let Some(mut disk) = query_disk_info(&path) {
-                disk.disk_index = i;
-                // 使用综合检测方法判断是否为SSD
-                disk.is_ssd = detect_disk_is_ssd(i, &disk.model, &disk.interface_type);
-                if let Some((style, partition_count)) = partition_layouts.get(&i) {
-                    disk.partition_style = style.clone();
-                    disk.partitions = *partition_count;
-                }
-                // 如果DeviceIoControl没有获取到大小，使用WMI的结果
-                if disk.size == 0 {
-                    if let Some(&size) = disk_sizes.get(&i) {
-                        disk.size = size;
-                    }
-                }
-                disks.push(disk);
+        let inventory = match crate::core::quick_partition::get_present_physical_disk_inventory() {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                log::warn!("SetupAPI 物理磁盘只读库存失败: {error}");
+                return Vec::new();
             }
-        }
-        disks
+        };
+        // WMI is diagnostic-only and is consulted solely if a future provider ever returns a
+        // zero-sized snapshot. The current inventory rejects such a snapshot before this point.
+        let disk_sizes = get_disk_sizes_wmi();
+        inventory
+            .into_iter()
+            .map(|snapshot| {
+                let index = snapshot.disk.disk_number;
+                let interface_type = storage_bus_name(snapshot.bus_type);
+                let model = snapshot.disk.model.clone();
+                let mut size = snapshot.disk.size_bytes;
+                if size == 0 {
+                    size = disk_sizes.get(&index).copied().unwrap_or(0);
+                }
+                let partition_style = if snapshot.disk.is_initialized {
+                    match snapshot.disk.partition_style {
+                        super::disk::PartitionStyle::GPT => "GPT".to_string(),
+                        super::disk::PartitionStyle::MBR => "MBR".to_string(),
+                        super::disk::PartitionStyle::Unknown => "UNKNOWN".to_string(),
+                    }
+                } else {
+                    "RAW".to_string()
+                };
+                DiskInfo {
+                    model: model.clone(),
+                    interface_type: interface_type.clone(),
+                    media_type: if snapshot.removable_media {
+                        "可移动".to_string()
+                    } else {
+                        "固定".to_string()
+                    },
+                    size,
+                    serial_number: snapshot.serial_number,
+                    firmware_revision: snapshot.firmware_revision,
+                    partitions: snapshot.partition_count,
+                    partition_style,
+                    is_ssd: detect_disk_is_ssd(index, &model, &interface_type),
+                    disk_index: index,
+                    ..DiskInfo::default()
+                }
+            })
+            .collect()
     }
 
     fn get_gpu_info() -> Vec<GpuInfo> {
@@ -1668,104 +1735,15 @@ fn check_cpu_ai_support(cpu_name: &str) -> bool {
     false
 }
 
-/// 使用纯 WinAPI 获取所有物理磁盘的分区样式（GPT/MBR/RAW）
-///
-/// 通过 IOCTL_DISK_GET_DRIVE_LAYOUT_EX 获取磁盘分区布局信息，
-/// 从中提取分区样式字段。
-///
-/// # Returns
-/// HashMap<磁盘编号, 分区样式字符串>，分区样式为 "GPT"、"MBR" 或 "RAW"
-fn get_disk_partition_styles() -> HashMap<u32, (String, u32)> {
-    use windows::Win32::System::Ioctl::{
-        IOCTL_DISK_GET_DRIVE_LAYOUT_EX, PARTITION_STYLE_GPT, PARTITION_STYLE_MBR,
-    };
-
-    // PARTITION_STYLE_RAW = 2 (Windows SDK winioctl.h)
-    const PARTITION_STYLE_RAW_VALUE: u32 = 2;
-
-    /// DRIVE_LAYOUT_INFORMATION_EX 结构体头部
-    /// 我们只需要读取 partition_style 字段，不需要完整的分区信息
-    #[repr(C)]
-    #[allow(non_snake_case, dead_code)]
-    struct DriveLayoutInformationExHeader {
-        partition_style: u32,
-        partition_count: u32,
+fn storage_bus_name(bus_type: u32) -> String {
+    match bus_type {
+        1 => "SCSI".to_string(),
+        3 => "ATA".to_string(),
+        7 => "USB".to_string(),
+        11 => "SATA".to_string(),
+        17 => "NVMe".to_string(),
+        _ => format!("Unknown({bus_type})"),
     }
-
-    let mut styles = HashMap::new();
-
-    // 遍历物理磁盘 0-15（与 get_disk_info 保持一致）
-    for disk_index in 0u32..16 {
-        let partition_layout = unsafe {
-            // 构造物理磁盘路径
-            let disk_path = format!("\\\\.\\PhysicalDrive{}", disk_index);
-            let wide_path: Vec<u16> = disk_path.encode_utf16().chain(std::iter::once(0)).collect();
-
-            // 打开物理磁盘设备
-            // 注意：不需要读写权限（传入0），只需要发送 IOCTL 查询
-            let handle = match CreateFileW(
-                PCWSTR(wide_path.as_ptr()),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                HANDLE::default(),
-            ) {
-                Ok(h) if h != INVALID_HANDLE_VALUE => h,
-                _ => continue, // 磁盘不存在或无法访问，跳过
-            };
-
-            // 分配缓冲区用于接收 DRIVE_LAYOUT_INFORMATION_EX
-            // 该结构体大小可变，取决于分区数量，但我们只需要头部8字节
-            // 使用 4096 字节缓冲区以确保足够容纳最多 128 个分区的信息
-            let mut buffer = vec![0u8; 4096];
-            let mut bytes_returned: u32 = 0;
-
-            let result = DeviceIoControl(
-                handle,
-                IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
-                None,
-                0,
-                Some(buffer.as_mut_ptr() as *mut std::ffi::c_void),
-                buffer.len() as u32,
-                Some(&mut bytes_returned),
-                None,
-            );
-
-            let _ = CloseHandle(handle);
-
-            // 检查 IOCTL 是否成功，且返回了足够的数据（至少8字节用于头部）
-            if result.is_ok()
-                && bytes_returned >= size_of::<DriveLayoutInformationExHeader>() as u32
-            {
-                let layout_header = &*(buffer.as_ptr() as *const DriveLayoutInformationExHeader);
-
-                // 将分区样式常量转换为字符串
-                if layout_header.partition_style == PARTITION_STYLE_GPT.0 as u32 {
-                    Some(("GPT".to_string(), layout_header.partition_count))
-                } else if layout_header.partition_style == PARTITION_STYLE_MBR.0 as u32 {
-                    Some(("MBR".to_string(), layout_header.partition_count))
-                } else if layout_header.partition_style == PARTITION_STYLE_RAW_VALUE {
-                    Some(("RAW".to_string(), layout_header.partition_count))
-                } else {
-                    // 未知的分区样式值
-                    Some((
-                        format!("UNKNOWN({})", layout_header.partition_style),
-                        layout_header.partition_count,
-                    ))
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(layout) = partition_layout {
-            styles.insert(disk_index, layout);
-        }
-    }
-
-    styles
 }
 
 // ============================================================================
@@ -2470,133 +2448,6 @@ fn wchar_to_string(wchars: &[u16]) -> String {
         .to_string()
 }
 
-fn query_disk_info(path: &str) -> Option<DiskInfo> {
-    unsafe {
-        let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-        let handle = match CreateFileW(
-            PCWSTR(path_wide.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            HANDLE::default(),
-        ) {
-            Ok(h) if h != INVALID_HANDLE_VALUE => h,
-            _ => return None,
-        };
-        let mut query: STORAGE_PROPERTY_QUERY = zeroed();
-        query.PropertyId = StorageDeviceProperty;
-        query.QueryType = PropertyStandardQuery;
-        let mut buffer = vec![0u8; 4096];
-        let mut bytes_returned: u32 = 0;
-        if DeviceIoControl(
-            handle,
-            IOCTL_STORAGE_QUERY_PROPERTY,
-            Some(&query as *const _ as *const std::ffi::c_void),
-            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(buffer.as_mut_ptr() as *mut std::ffi::c_void),
-            buffer.len() as u32,
-            Some(&mut bytes_returned),
-            None,
-        )
-        .is_err()
-            || bytes_returned == 0
-        {
-            let _ = CloseHandle(handle);
-            return None;
-        }
-        let descriptor = &*(buffer.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR);
-        let mut disk = DiskInfo::default();
-        if descriptor.ProductIdOffset > 0 && (descriptor.ProductIdOffset as usize) < buffer.len() {
-            let offset = descriptor.ProductIdOffset as usize;
-            if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) {
-                disk.model = String::from_utf8_lossy(&buffer[offset..offset + end])
-                    .trim()
-                    .to_string();
-            }
-        }
-        if descriptor.SerialNumberOffset > 0
-            && (descriptor.SerialNumberOffset as usize) < buffer.len()
-        {
-            let offset = descriptor.SerialNumberOffset as usize;
-            if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) {
-                disk.serial_number = String::from_utf8_lossy(&buffer[offset..offset + end])
-                    .trim()
-                    .to_string();
-            }
-        }
-        if descriptor.ProductRevisionOffset > 0
-            && (descriptor.ProductRevisionOffset as usize) < buffer.len()
-        {
-            let offset = descriptor.ProductRevisionOffset as usize;
-            if let Some(end) = buffer[offset..].iter().position(|&b| b == 0) {
-                disk.firmware_revision = String::from_utf8_lossy(&buffer[offset..offset + end])
-                    .trim()
-                    .to_string();
-            }
-        }
-        disk.interface_type = match descriptor.BusType {
-            1 => "SCSI".to_string(),
-            3 => "ATA".to_string(),
-            7 => "USB".to_string(),
-            11 => "SATA".to_string(),
-            17 => "NVMe".to_string(),
-            _ => format!("Unknown({})", descriptor.BusType),
-        };
-        disk.media_type = if descriptor.RemovableMedia != 0 {
-            "可移动".to_string()
-        } else {
-            "固定".to_string()
-        };
-        let mut length_info: GET_LENGTH_INFORMATION = zeroed();
-        let mut bytes_ret: u32 = 0;
-        if DeviceIoControl(
-            handle,
-            IOCTL_DISK_GET_LENGTH_INFO,
-            None,
-            0,
-            Some(&mut length_info as *mut _ as *mut std::ffi::c_void),
-            size_of::<GET_LENGTH_INFORMATION>() as u32,
-            Some(&mut bytes_ret),
-            None,
-        )
-        .is_ok()
-        {
-            disk.size = length_info.length as u64;
-        }
-        if disk.size == 0 {
-            let mut geometry_buffer = vec![0u8; 256];
-            let mut geometry_bytes = 0u32;
-            if DeviceIoControl(
-                handle,
-                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-                None,
-                0,
-                Some(geometry_buffer.as_mut_ptr().cast()),
-                geometry_buffer.len() as u32,
-                Some(&mut geometry_bytes),
-                None,
-            )
-            .is_ok()
-                && geometry_bytes >= size_of::<DISK_GEOMETRY_EX>() as u32
-            {
-                let geometry =
-                    std::ptr::read_unaligned(geometry_buffer.as_ptr().cast::<DISK_GEOMETRY_EX>());
-                if geometry.DiskSize > 0 {
-                    disk.size = geometry.DiskSize as u64;
-                }
-            }
-        }
-        let _ = CloseHandle(handle);
-        if !disk.model.is_empty() || disk.size > 0 {
-            Some(disk)
-        } else {
-            None
-        }
-    }
-}
-
 fn get_display_mode(device_name: &[u16]) -> Option<(String, u32)> {
     unsafe {
         let mut devmode: DEVMODEW = zeroed();
@@ -2679,7 +2530,33 @@ pub fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::machine_environment_summary;
+    use super::{
+        machine_environment_summary, parse_storage_device_descriptor,
+        STORAGE_DEVICE_DESCRIPTOR_HEADER,
+    };
+    use std::mem::size_of;
+
+    fn write_u32(buffer: &mut [u8], offset: usize, value: u32) {
+        buffer[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+    }
+
+    fn storage_descriptor_buffer(declared_size: usize) -> Vec<u8> {
+        let mut buffer = vec![0u8; 96];
+        write_u32(&mut buffer, 0, 1);
+        write_u32(&mut buffer, 4, declared_size as u32);
+        buffer[10] = 1;
+        write_u32(&mut buffer, 16, 40);
+        write_u32(&mut buffer, 20, 52);
+        write_u32(&mut buffer, 24, 60);
+        write_u32(&mut buffer, 28, 17);
+        buffer[40..47].copy_from_slice(b"Model X");
+        buffer[47] = 0;
+        buffer[52..55].copy_from_slice(b"1.0");
+        buffer[55] = 0;
+        buffer[60..66].copy_from_slice(b"SERIAL");
+        buffer[66] = 0;
+        buffer
+    }
 
     #[test]
     fn identifies_common_virtual_machine_vendors() {
@@ -2699,5 +2576,33 @@ mod diagnostic_tests {
     fn unknown_fingerprint_is_not_asserted_to_be_physical_hardware() {
         let summary = machine_environment_summary("Example Vendor", "Example Model");
         assert!(summary.starts_with("未检测到已知虚拟机特征（可能为实体机；"));
+    }
+
+    #[test]
+    fn storage_descriptor_requires_complete_fixed_header_and_valid_size() {
+        let header_size = size_of::<STORAGE_DEVICE_DESCRIPTOR_HEADER>();
+        let buffer = storage_descriptor_buffer(96);
+        assert!(parse_storage_device_descriptor(&buffer, (header_size - 1) as u32).is_none());
+
+        let buffer = storage_descriptor_buffer(header_size - 1);
+        assert!(parse_storage_device_descriptor(&buffer, buffer.len() as u32).is_none());
+    }
+
+    #[test]
+    fn storage_descriptor_strings_use_returned_and_declared_bounds() {
+        let buffer = storage_descriptor_buffer(96);
+        let parsed = parse_storage_device_descriptor(&buffer, 67).unwrap();
+        assert_eq!(parsed.model, "Model X");
+        assert_eq!(parsed.firmware_revision, "1.0");
+        assert_eq!(parsed.serial_number, "SERIAL");
+        assert_eq!(parsed.bus_type, 17);
+        assert!(parsed.removable_media);
+
+        let parsed = parse_storage_device_descriptor(&buffer, 66).unwrap();
+        assert!(parsed.serial_number.is_empty());
+
+        let buffer = storage_descriptor_buffer(66);
+        let parsed = parse_storage_device_descriptor(&buffer, buffer.len() as u32).unwrap();
+        assert!(parsed.serial_number.is_empty());
     }
 }

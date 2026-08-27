@@ -21,14 +21,6 @@ impl EasyLogoSource {
             value => Some(Self::Remote(value.to_string())),
         }
     }
-
-    pub fn display_hint(&self) -> &str {
-        match self {
-            Self::EmbeddedWindows10 => "Windows 10",
-            Self::EmbeddedWindows11 => "Windows 11",
-            Self::Remote(_) => "Logo",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,28 +117,23 @@ pub struct EasyInstallTarget {
     pub disk_size_bytes: Option<u64>,
     pub partition_offset_bytes: Option<u64>,
     pub partition_size_bytes: Option<u64>,
+    pub stable_identity: Option<lr_core::windows_storage::StableVolumeIdentity>,
 }
 
 impl EasyInstallTarget {
     pub fn matches_current(&self, current: &Self) -> bool {
-        if self.total_size_mb != current.total_size_mb
-            || self.disk_size_bytes != current.disk_size_bytes
-            || self.partition_offset_bytes != current.partition_offset_bytes
-            || self.partition_size_bytes != current.partition_size_bytes
-        {
-            return false;
-        }
-        match (
+        super::native_install_executor::physical_partition_ranges_match(
             self.disk_number,
-            self.partition_number,
+            self.partition_offset_bytes,
+            self.partition_size_bytes,
             current.disk_number,
-            current.partition_number,
-        ) {
-            (Some(expected_disk), Some(expected_partition), Some(disk), Some(partition)) => {
-                expected_disk == disk && expected_partition == partition
-            }
-            _ => self.partition.eq_ignore_ascii_case(&current.partition),
-        }
+            current.partition_offset_bytes,
+            current.partition_size_bytes,
+        ) && matches!(
+            (self.stable_identity, current.stable_identity),
+            (Some(expected), Some(actual))
+                if lr_core::windows_storage::same_stable_volume_identity(expected, actual)
+        )
     }
 }
 
@@ -361,7 +348,7 @@ impl NativeEasyModeController {
         let username = current_username
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("User");
-        let advanced_options = AdvancedOptionsData {
+        let mut advanced_options = AdvancedOptionsData {
             bypass_nro: true,
             remove_uwp_apps: true,
             import_storage_controller_drivers: true,
@@ -371,6 +358,23 @@ impl NativeEasyModeController {
             username: username.to_string(),
             ..Default::default()
         };
+        // Easy mode uses the same session-only capture as the advanced page. The profile XML may
+        // contain a plaintext key, so it is never persisted as a UI preference.
+        match super::native_wifi::capture_connected_wifi() {
+            Ok(profile) => {
+                advanced_options.migrate_wifi = true;
+                advanced_options.wifi_detected = Some(true);
+                advanced_options.wifi_ssid = profile.ssid;
+                advanced_options.wifi_profile_xml = profile.xml;
+            }
+            Err(error) => {
+                advanced_options.migrate_wifi = false;
+                advanced_options.wifi_detected = Some(false);
+                advanced_options.wifi_ssid.clear();
+                advanced_options.wifi_profile_xml.clear();
+                log::info!("[EASY WIFI] no connected profile was captured: {error}");
+            }
+        }
         let prefs = InstallPrefs {
             format_partition: true,
             repair_boot: true,
@@ -432,6 +436,18 @@ mod tests {
             disk_size_bytes: Some(1_000_000_000_000),
             partition_offset_bytes: Some(1_048_576),
             partition_size_bytes: Some(268_435_456_000),
+            stable_identity: Some(lr_core::windows_storage::StableVolumeIdentity {
+                extent: lr_core::windows_storage::VolumeIdentity {
+                    disk_number: 0,
+                    offset_bytes: 1_048_576,
+                    extent_length_bytes: 268_435_456_000,
+                },
+                disk: lr_core::windows_storage::StableDiskIdentity::Gpt { disk_id: [1; 16] },
+                partition: lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                    partition_id: [2; 16],
+                },
+                device_id_hash: Some([3; 32]),
+            }),
         }
     }
 
@@ -532,19 +548,41 @@ mod tests {
     }
 
     #[test]
-    fn easy_target_survives_list_reordering_but_rejects_reused_numbers_or_capacity() {
+    fn easy_target_uses_only_complete_physical_partition_range() {
         let target = target();
         let mut current = target.clone();
         current.partition = "D:".to_string();
+        current.partition_number = Some(99);
+        current.total_size_mb = 128_000;
+        current.disk_size_bytes = Some(2_000_000_000_000);
         assert!(target.matches_current(&current));
 
         current.disk_number = Some(1);
         assert!(!target.matches_current(&current));
         current.disk_number = target.disk_number;
-        current.total_size_mb = 128_000;
+        current.partition_offset_bytes = target.partition_offset_bytes.map(|offset| offset + 4096);
         assert!(!target.matches_current(&current));
-        current.total_size_mb = target.total_size_mb;
+        current.partition_offset_bytes = target.partition_offset_bytes;
         current.partition_size_bytes = target.partition_size_bytes.map(|size| size + 4096);
+        assert!(!target.matches_current(&current));
+
+        current = target.clone();
+        current.disk_number = None;
+        assert!(!target.matches_current(&current));
+        current = target.clone();
+        current.partition_offset_bytes = None;
+        assert!(!target.matches_current(&current));
+        current = target.clone();
+        current.partition_size_bytes = None;
+        assert!(!target.matches_current(&current));
+        current = target.clone();
+        current.stable_identity = None;
+        assert!(!target.matches_current(&current));
+        current = target.clone();
+        current.stable_identity.as_mut().unwrap().partition =
+            lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                partition_id: [9; 16],
+            };
         assert!(!target.matches_current(&current));
     }
 }

@@ -60,8 +60,9 @@ Installation formats the target partition, so **back up important data first**.
 
 When reporting an issue, please attach:
 
-- **Desktop client**: `<program directory>\log\LetRecovery.<date>.log` (e.g. `LetRecovery.2026-06-26.log`)
-- **PE client**: `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`, in the same directory as the PE exe
+- **After a successful ViaPE installation (preferred attachment)**: the normal-system and PE logs are merged into `<new-system drive>\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`.
+- **If installation fails after formatting or the first target write**: the combined log is written, when possible, to `<data drive>\LetRecovery_Data\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`.
+- **If failure occurs before handoff or no combined log exists**: use **About → Open log directory** for `<directory containing LetRecovery.exe>\log\LetRecovery.<date>.log` (for example, `LetRecovery.2026-06-26.log`). The raw PE log is `<directory containing LetRecoveryPE.exe>\LetRecoveryPE.log`; the official package defaults to `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`.
 
 ## How to check the version number
 

@@ -1,4 +1,5 @@
 use lr_core::boot_pca::BootPcaMode;
+use lr_core::software_install::SelectedSoftwarePackage;
 use lr_core::unattend_account::BuiltInAdministratorOptions;
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
@@ -42,6 +43,9 @@ pub enum DriverAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdvancedOptionsData {
+    /// Current-install-only: preserve six local personal directories before deleting the old OS.
+    #[serde(skip)]
+    pub preserve_personal_files: bool,
     pub remove_shortcut_arrow: bool,
     pub restore_classic_context_menu: bool,
     pub bypass_nro: bool,
@@ -51,6 +55,14 @@ pub struct AdvancedOptionsData {
     pub disable_uac: bool,
     pub disable_device_encryption: bool,
     pub remove_uwp_apps: bool,
+    /// Server-catalogue selections are valid only for the current process. They are deliberately
+    /// not persisted because a later catalogue may reuse neither the URL nor the silent command.
+    #[serde(skip)]
+    pub preinstalled_software: Vec<SelectedSoftwarePackage>,
+    /// User preference for the separate VMware Tools option. The runtime catalogue and positive
+    /// VMware detection still gate visibility and execution, so a stale preference cannot install
+    /// a server package on non-VMware hardware.
+    pub install_vmware_tools: bool,
     pub migrate_wifi: bool,
     #[serde(skip)]
     pub wifi_profile_xml: String,
@@ -140,7 +152,21 @@ impl AdvancedOptionCapabilities {
             || matches!((major_version, minor_version), (Some(6), Some(minor)) if minor >= 3);
         let windows_10_family = major_version.is_some_and(|major| major >= 10);
         let windows_11 = windows_10_family && build.is_some_and(|build| build >= 22_000);
-        let reserved_storage = windows_10_family && build.is_some_and(|build| build >= 18_362);
+        // lr-core selects the legacy WUA or modern USO removal profile from the target build and
+        // rechecks that profile's service/file anchors before its first mutation.
+        let windows_update_removal = build
+            .map(lr_core::offline_windows_update_removal::supports_build_number)
+            .unwrap_or(false);
+        let reserved_storage = match (major_version, minor_version, build) {
+            (Some(major), Some(minor), Some(build)) => {
+                lr_core::reserved_storage::is_supported_target_version(
+                    major.into(),
+                    minor.into(),
+                    build,
+                )
+            }
+            _ => false,
+        };
 
         Self {
             // Order matches AdvancedPageHandles::system_checks.
@@ -148,7 +174,7 @@ impl AdvancedOptionCapabilities {
                 vista_or_later,                           // remove shortcut arrow
                 windows_11,                               // restore classic context menu
                 windows_11,                               // bypass NRO
-                vista_or_later,                           // disable Windows Update
+                windows_update_removal,                   // remove Windows Update component
                 windows_10_family || windows_8_or_later,  // remove Defender engine
                 reserved_storage,                         // disable reserved storage
                 vista_or_later,                           // disable UAC
@@ -170,6 +196,7 @@ impl AdvancedOptionCapabilities {
 impl Default for AdvancedOptionsData {
     fn default() -> Self {
         Self {
+            preserve_personal_files: false,
             remove_shortcut_arrow: true,
             restore_classic_context_menu: false,
             bypass_nro: true,
@@ -179,7 +206,12 @@ impl Default for AdvancedOptionsData {
             disable_uac: false,
             disable_device_encryption: true,
             remove_uwp_apps: false,
-            migrate_wifi: false,
+            preinstalled_software: Vec::new(),
+            install_vmware_tools: true,
+            // This is an intent default only. `apply_runtime_defaults` immediately captures the
+            // current connected profile into session-only fields, or clears the intent when no
+            // connected Wi-Fi profile can be read.
+            migrate_wifi: true,
             wifi_profile_xml: String::new(),
             wifi_ssid: String::new(),
             wifi_detected: None,
@@ -219,6 +251,23 @@ impl AdvancedOptionsData {
     /// Old configs can contain neither account mode or an empty volume label. The native page is
     /// a two-choice radio group, so the ordinary current-user path is the deterministic default.
     pub fn apply_runtime_defaults(&mut self) {
+        // The checkbox preference may survive a restart, but the captured WLAN profile is
+        // deliberately session-only (`serde(skip)`). Re-capture it for this process so the
+        // default-on preference is executable rather than a stale checked box.
+        if self.migrate_wifi && self.wifi_profile_xml.trim().is_empty() {
+            match capture_runtime_wifi_profile() {
+                Some((ssid, xml)) => {
+                    self.wifi_detected = Some(true);
+                    self.wifi_ssid = ssid;
+                    self.wifi_profile_xml = xml;
+                }
+                None => {
+                    self.migrate_wifi = false;
+                    self.wifi_detected = Some(false);
+                    self.wifi_ssid.clear();
+                }
+            }
+        }
         if self.username.trim().is_empty() {
             self.username = default_install_username();
         }
@@ -328,6 +377,18 @@ impl AdvancedOptionsData {
     }
 }
 
+#[cfg(windows)]
+fn capture_runtime_wifi_profile() -> Option<(String, String)> {
+    super::native_wifi::capture_connected_wifi()
+        .ok()
+        .map(|profile| (profile.ssid, profile.xml))
+}
+
+#[cfg(not(windows))]
+fn capture_runtime_wifi_profile() -> Option<(String, String)> {
+    None
+}
+
 /// Returns a safe default name for the ordinary local account created by Windows Setup.
 ///
 /// The current token username wins. If USER32/Advapi cannot provide it, use a concise system
@@ -426,6 +487,7 @@ fn manufacturer_account_candidate(manufacturer: &str) -> Option<String> {
 impl From<&AdvancedOptionsData> for super::advanced_options::AdvancedOptions {
     fn from(value: &AdvancedOptionsData) -> Self {
         Self {
+            preserve_personal_files: value.preserve_personal_files,
             remove_shortcut_arrow: value.remove_shortcut_arrow,
             restore_classic_context_menu: value.restore_classic_context_menu,
             bypass_nro: value.bypass_nro,
@@ -435,6 +497,8 @@ impl From<&AdvancedOptionsData> for super::advanced_options::AdvancedOptions {
             disable_uac: value.disable_uac,
             disable_device_encryption: value.disable_device_encryption,
             remove_uwp_apps: value.remove_uwp_apps,
+            preinstalled_software: value.preinstalled_software.clone(),
+            install_vmware_tools: value.install_vmware_tools,
             migrate_wifi: value.migrate_wifi,
             wifi_profile_xml: value.wifi_profile_xml.clone(),
             wifi_ssid: value.wifi_ssid.clone(),
@@ -471,6 +535,9 @@ impl From<&AdvancedOptionsData> for super::advanced_options::AdvancedOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallPrefs {
+    /// Runtime-only destructive layout. Disk selections and random locators are never persisted.
+    #[serde(skip, default)]
+    pub custom_install_plan: lr_core::custom_install::CustomInstallPlan,
     #[serde(default = "default_true")]
     pub format_partition: bool,
     #[serde(default = "default_true")]
@@ -506,6 +573,7 @@ fn default_advanced_options_data() -> AdvancedOptionsData {
 impl Default for InstallPrefs {
     fn default() -> Self {
         Self {
+            custom_install_plan: lr_core::custom_install::CustomInstallPlan::ReinstallPartition,
             format_partition: true,
             repair_boot: true,
             unattended_install: true,
@@ -646,9 +714,19 @@ mod tests {
 
         let windows_10_1903 =
             AdvancedOptionCapabilities::for_target(Some(10), Some(0), Some(18_362), false);
-        assert!(windows_10_1903.system_options[5]);
+        assert!(!windows_10_1903.system_options[5]);
+        assert!(windows_10_1903.system_options[3]);
         assert!(!windows_10_1903.system_options[1]);
         assert!(!windows_10_1903.system_options[2]);
+
+        let windows_10_2004 =
+            AdvancedOptionCapabilities::for_target(Some(10), Some(0), Some(19_041), false);
+        assert!(windows_10_2004.system_options[5]);
+        assert!(windows_10_2004.system_options[3]);
+
+        let windows_11_23h2 =
+            AdvancedOptionCapabilities::for_target(Some(10), Some(0), Some(22_631), false);
+        assert!(windows_11_23h2.system_options[3]);
     }
 
     #[test]
@@ -690,5 +768,34 @@ mod tests {
         assert!(data.bypass_nro);
         assert!(data.disable_reserved_storage);
         assert!(data.disable_device_encryption);
+    }
+
+    #[test]
+    fn runtime_defaults_drop_stale_wifi_migration_without_a_session_profile() {
+        let mut data = AdvancedOptionsData {
+            migrate_wifi: true,
+            wifi_ssid: "stale-network".to_string(),
+            ..AdvancedOptionsData::default()
+        };
+
+        data.apply_runtime_defaults();
+
+        assert!(!data.migrate_wifi);
+        assert!(data.wifi_ssid.is_empty());
+    }
+
+    #[test]
+    fn runtime_defaults_keep_wifi_migration_with_a_captured_session_profile() {
+        let mut data = AdvancedOptionsData {
+            migrate_wifi: true,
+            wifi_profile_xml: "<WLANProfile />".to_string(),
+            wifi_ssid: "current-network".to_string(),
+            ..AdvancedOptionsData::default()
+        };
+
+        data.apply_runtime_defaults();
+
+        assert!(data.migrate_wifi);
+        assert_eq!(data.wifi_ssid, "current-network");
     }
 }

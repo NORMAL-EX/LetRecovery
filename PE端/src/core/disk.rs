@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -15,10 +15,8 @@ use windows::Win32::System::IO::DeviceIoControl;
 use crate::tr;
 
 const DRIVE_FIXED: u32 = 3;
+#[cfg(test)]
 const MAX_ADJACENCY_GAP_BYTES: u64 = 1024 * 1024;
-
-/// 自动创建分区的标志文件名
-pub const AUTO_CREATED_PARTITION_MARKER: &str = "LetRecovery_AutoCreated.marker";
 
 /// 分区表类型
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -70,12 +68,14 @@ struct PartitionGeometry {
     partition_length: u64,
 }
 
+#[cfg(test)]
 impl PartitionGeometry {
     fn end_offset(self) -> Option<u64> {
         self.starting_offset.checked_add(self.partition_length)
     }
 }
 
+#[cfg(test)]
 fn partitions_are_physically_adjacent(
     target: PartitionGeometry,
     temporary: PartitionGeometry,
@@ -94,9 +94,215 @@ fn partitions_are_physically_adjacent(
         .is_some_and(|gap| gap <= MAX_ADJACENCY_GAP_BYTES)
 }
 
+fn collect_canonical_candidate_snapshots<F>(
+    disk_numbers: Result<Vec<u32>>,
+    mut snapshot: F,
+) -> Result<Vec<(u32, lr_core::windows_storage::DiskLayoutSnapshot)>>
+where
+    F: FnMut(u32) -> Result<lr_core::windows_storage::DiskLayoutSnapshot>,
+{
+    disk_numbers?
+        .into_iter()
+        .map(|disk_number| snapshot(disk_number).map(|layout| (disk_number, layout)))
+        .collect()
+}
+
 pub struct DiskManager;
 
 impl DiskManager {
+    /// Resolve one authenticated canonical extent without trusting a drive letter.  The complete
+    /// physical-disk inventory is captured first, cloned layouts remain ambiguous, and the volume
+    /// GUID path is derived only after the unique disk has been selected.
+    pub fn resolve_canonical_volume_root(
+        canonical: &lr_core::install_handoff::CanonicalInstallTargetV2,
+    ) -> Result<(lr_core::windows_storage::VolumeIdentity, String)> {
+        let disk_numbers = lr_core::windows_storage::physical_disk_numbers()
+            .map_err(anyhow::Error::from)
+            .context("enumerate physical disks for authenticated handoff volume")?;
+        let candidates = collect_canonical_candidate_snapshots(Ok(disk_numbers), |disk_number| {
+            lr_core::windows_storage::disk_layout_snapshot(disk_number)
+                .map_err(anyhow::Error::from)
+                .with_context(|| {
+                    format!("capture disk {disk_number} layout for authenticated handoff volume")
+                })
+        })?;
+        let disk_number =
+            lr_core::install_handoff::unique_canonical_target_match(canonical, &candidates)?;
+        let extent = lr_core::windows_storage::VolumeIdentity {
+            disk_number,
+            offset_bytes: canonical.partition_offset_bytes,
+            extent_length_bytes: canonical.partition_length_bytes,
+        };
+        let root = lr_core::windows_storage::volume_guid_path_for_partition(
+            disk_number,
+            canonical.partition_offset_bytes,
+        )
+        .map_err(anyhow::Error::from)
+        .context("resolve authenticated handoff extent to a volume GUID path")?;
+
+        // Re-capture after VDS/volume resolution.  A topology change between inventory and volume
+        // lookup must not turn the selected disk number into an authorization by itself.
+        let rebound = lr_core::windows_storage::disk_layout_snapshot(disk_number)
+            .map_err(anyhow::Error::from)
+            .context("re-capture authenticated handoff disk after volume GUID resolution")?;
+        if !canonical.matches_snapshot(&rebound) {
+            anyhow::bail!(
+                "authenticated handoff disk layout changed while resolving its volume GUID path"
+            );
+        }
+        Ok((extent, root))
+    }
+
+    /// Resolve the current unique drive letter for a canonical extent.  Drive letters are output
+    /// aliases only: authorization is established by `resolve_canonical_volume_root`, and every
+    /// candidate letter is compared with that exact extent before it is returned.
+    pub fn resolve_canonical_drive_letter(
+        canonical: &lr_core::install_handoff::CanonicalInstallTargetV2,
+    ) -> Result<char> {
+        let (expected, _) = Self::resolve_canonical_volume_root(canonical)?;
+        let matches = (b'A'..=b'Z')
+            .filter_map(|value| {
+                let letter = value as char;
+                lr_core::windows_storage::volume_identity(letter)
+                    .ok()
+                    .filter(|actual| {
+                        lr_core::windows_storage::same_volume_identity(*actual, expected)
+                    })
+                    .map(|_| letter)
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [letter] => Ok(*letter),
+            [] => anyhow::bail!("canonical handoff extent has no current drive-letter access path"),
+            _ => anyhow::bail!(
+                "canonical handoff extent has multiple drive-letter access paths: {:?}",
+                matches
+            ),
+        }
+    }
+
+    /// Delete only the manifest-authenticated temporary extent and return the complete
+    /// provider-reclaimed tail (including legal free gaps on either side of the temporary
+    /// partition) to the authenticated source's exact pre-shrink boundary.
+    /// No marker or drive-letter scan participates in
+    /// authorization; both full canonical layouts are rechecked immediately before the checked
+    /// topology mutation.
+    pub fn cleanup_authenticated_auto_staging(
+        authorization: &lr_core::handoff_manifest::AutoStagingAuthorization,
+    ) -> Result<lr_core::windows_storage::VolumeIdentity> {
+        let (source_extent, _) = Self::resolve_canonical_volume_root(&authorization.source)?;
+        let (temporary_extent, _) = Self::resolve_canonical_volume_root(&authorization.temporary)?;
+        if source_extent.disk_number != temporary_extent.disk_number {
+            anyhow::bail!("authenticated auto-staging extents are on different disks");
+        }
+        let source_end = source_extent
+            .offset_bytes
+            .checked_add(source_extent.extent_length_bytes)
+            .ok_or_else(|| anyhow::anyhow!("authenticated source extent end overflows"))?;
+        if source_end > temporary_extent.offset_bytes {
+            anyhow::bail!("authenticated temporary extent overlaps the source extent");
+        }
+        let layout = lr_core::windows_storage::disk_layout_snapshot(source_extent.disk_number)?;
+        if !authorization.source.matches_snapshot(&layout)
+            || !authorization.temporary.matches_snapshot(&layout)
+        {
+            anyhow::bail!("disk layout changed before authenticated staging cleanup");
+        }
+        let reclaim_length = authorization.reclaim_length_bytes()?;
+        let original_source_end = source_extent
+            .offset_bytes
+            .checked_add(authorization.source_length_before_bytes)
+            .ok_or_else(|| anyhow::anyhow!("authenticated original source extent end overflows"))?;
+        let temporary_end = temporary_extent
+            .offset_bytes
+            .checked_add(temporary_extent.extent_length_bytes)
+            .ok_or_else(|| anyhow::anyhow!("authenticated temporary extent end overflows"))?;
+        let current_free =
+            lr_core::windows_storage::current_free_extents(source_extent.disk_number)?;
+        let range_is_free = |start: u64, end: u64| {
+            start == end
+                || current_free.iter().any(|extent| {
+                    extent.offset_bytes <= start
+                        && extent
+                            .offset_bytes
+                            .checked_add(extent.length_bytes)
+                            .is_some_and(|free_end| free_end >= end)
+                })
+        };
+        let gap_length = temporary_extent
+            .offset_bytes
+            .checked_sub(source_end)
+            .ok_or_else(|| anyhow::anyhow!("authenticated staging gap underflows"))?;
+        if gap_length != 0 && !range_is_free(source_end, temporary_extent.offset_bytes) {
+            anyhow::bail!(
+                "provider no longer reports the authenticated gap before staging as free"
+            );
+        }
+        if !range_is_free(temporary_end, original_source_end) {
+            anyhow::bail!("provider no longer reports the authenticated gap after staging as free");
+        }
+        let target_letter = Self::resolve_canonical_drive_letter(&authorization.source)?;
+        let target_identity = lr_core::windows_storage::stable_volume_identity(target_letter)?;
+        if !lr_core::windows_storage::same_volume_identity(target_identity.extent, source_extent) {
+            anyhow::bail!("authenticated source volume changed before staging cleanup");
+        }
+        lr_core::windows_storage::delete_partition_checked(
+            temporary_extent.disk_number,
+            temporary_extent.offset_bytes,
+            true,
+            &layout,
+        )?;
+        lr_core::windows_storage::extend_volume_stable_checked(
+            target_letter,
+            target_identity,
+            reclaim_length,
+        )?;
+        let expected_length = authorization.source_length_before_bytes;
+        let actual = lr_core::windows_storage::volume_identity(target_letter)?;
+        if actual.disk_number != source_extent.disk_number
+            || actual.offset_bytes != source_extent.offset_bytes
+            || actual.extent_length_bytes != expected_length
+        {
+            anyhow::bail!(
+                "temporary extent was removed but final source extent readback is inconsistent"
+            );
+        }
+        Ok(actual)
+    }
+
+    pub fn partition_volume_identity(
+        partition: &str,
+    ) -> Result<lr_core::windows_storage::VolumeIdentity> {
+        let spec = lr_core::format_command::FormatCommandSpec::new(partition, "NTFS", None)
+            .map_err(|error| anyhow::anyhow!("无效的目标分区: {error}"))?;
+        let drive_letter = spec.drive().as_bytes()[0] as char;
+        lr_core::windows_storage::volume_identity(drive_letter).map_err(anyhow::Error::from)
+    }
+
+    /// Re-resolve a drive letter immediately before a destructive install phase.
+    ///
+    /// Only the physical disk extent is compared. Formatting legitimately changes the label,
+    /// file system and free-space snapshot, none of which may invalidate the authorization.
+    pub fn verify_partition_volume_identity(
+        partition: &str,
+        expected: lr_core::windows_storage::VolumeIdentity,
+    ) -> Result<()> {
+        let actual = Self::partition_volume_identity(partition)?;
+        if !lr_core::windows_storage::same_volume_identity(actual, expected) {
+            anyhow::bail!(
+                "target {} now maps to disk {} offset {} length {}; expected disk {} offset {} length {}",
+                partition,
+                actual.disk_number,
+                actual.offset_bytes,
+                actual.extent_length_bytes,
+                expected.disk_number,
+                expected.offset_bytes,
+                expected.extent_length_bytes
+            );
+        }
+        Ok(())
+    }
+
     fn partition_geometry(drive: &str) -> Result<PartitionGeometry> {
         let letter = drive
             .chars()
@@ -321,14 +527,104 @@ impl DiskManager {
         }
     }
 
+    /// Proves that the staged source and running WinPE cannot be overwritten by target writes.
+    /// This is required even when the caller keeps the existing file system.
+    pub fn validate_install_target_dependencies(
+        partition: &str,
+        expected_target: lr_core::windows_storage::VolumeIdentity,
+        source_path: &Path,
+    ) -> Result<()> {
+        let spec = lr_core::format_command::FormatCommandSpec::new(partition, "NTFS", None)
+            .map_err(|error| anyhow::anyhow!("无效的目标分区参数: {error}"))?;
+        let drive = spec.drive().to_string();
+        let drive_letter = drive.as_bytes()[0] as char;
+        let source = std::fs::canonicalize(source_path).with_context(|| {
+            format!(
+                "resolve install source before target write: {}",
+                source_path.display()
+            )
+        })?;
+        let source_letter = lr_core::windows_storage::path_drive_letter(&source)
+            .or_else(|| lr_core::windows_storage::path_drive_letter(source_path))
+            .ok_or_else(|| anyhow::anyhow!("安装镜像没有可验证的本地盘符，已停止写入"))?;
+        if source_letter.eq_ignore_ascii_case(&drive_letter) {
+            anyhow::bail!(
+                "{}",
+                tr!(
+                    "安装镜像位于目标分区 {}，为防止覆盖自身输入已停止写入。",
+                    drive
+                )
+            );
+        }
+        match lr_core::windows_storage::volume_identity(source_letter) {
+            Ok(source_identity)
+                if lr_core::windows_storage::same_physical_partition(
+                    expected_target,
+                    source_identity,
+                ) =>
+            {
+                anyhow::bail!(
+                    "{}",
+                    tr!("安装镜像与目标分区 {} 指向同一物理卷，已停止写入。", drive)
+                );
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    lr_core::windows_storage::drive_kind(source_letter),
+                    Ok(lr_core::windows_storage::DriveKind::Optical)
+                        | Ok(lr_core::windows_storage::DriveKind::RamDisk)
+                ) =>
+            {
+                log::debug!(
+                    "安装源位于只读光驱或 WinPE RAM disk {}:，物理范围不可查询且盘符与目标不同: {}",
+                    source_letter,
+                    error
+                );
+            }
+            Err(error) => return Err(anyhow::Error::from(error)),
+        }
+        let running_windows = lr_core::windows_storage::current_windows_drive_letter()
+            .map_err(anyhow::Error::from)?;
+        if running_windows.eq_ignore_ascii_case(&drive_letter) {
+            anyhow::bail!("{}", tr!("不能写入当前运行的 WinPE 卷 {}。", drive));
+        }
+        match lr_core::windows_storage::volume_identity(running_windows) {
+            Ok(running_identity)
+                if running_identity.disk_number == expected_target.disk_number
+                    && running_identity.offset_bytes == expected_target.offset_bytes =>
+            {
+                anyhow::bail!(
+                    "{}",
+                    tr!("目标分区 {} 与当前运行的 WinPE 指向同一物理卷。", drive)
+                );
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    lr_core::windows_storage::drive_kind(running_windows),
+                    Ok(lr_core::windows_storage::DriveKind::RamDisk)
+                ) =>
+            {
+                log::debug!(
+                    "当前 WinPE 位于 RAM disk {}:，无法查询本地磁盘范围且与目标盘符不同: {}",
+                    running_windows,
+                    error
+                );
+            }
+            Err(error) => return Err(anyhow::Error::from(error)),
+        }
+        Ok(())
+    }
+
     /// 格式化指定分区（带卷标）
     ///
     pub fn format_partition_with_label(
         partition: &str,
+        expected_target: lr_core::windows_storage::VolumeIdentity,
         volume_label: Option<&str>,
     ) -> Result<String> {
         log::info!("格式化分区: {} 卷标: {:?}", partition, volume_label);
-
         let vol_label = match volume_label {
             Some(label) if !label.is_empty() => label,
             _ => "本地磁盘",
@@ -339,10 +635,18 @@ impl DiskManager {
         let drive = spec.drive().to_string();
         let drive_letter = drive.as_bytes()[0] as char;
         let vol_label = spec.volume_label().unwrap_or("本地磁盘");
-        lr_core::windows_storage::format_drive(
+        lr_core::windows_storage::format_drive_with_options_checked(
             drive_letter,
-            lr_core::windows_storage::FileSystem::Ntfs,
-            vol_label,
+            expected_target,
+            &lr_core::windows_storage::FormatOptions {
+                file_system: lr_core::windows_storage::FileSystem::Ntfs,
+                label: vol_label.to_owned(),
+                allocation_unit_size: 0,
+                quick: true,
+                // WinPE commonly leaves read-only probe handles on an offline Windows volume.
+                // The source/current-PE guards above make a forced VDS dismount safe here.
+                force_dismount: true,
+            },
         )
         .map_err(|error| {
             anyhow::anyhow!(
@@ -413,191 +717,6 @@ impl DiskManager {
         }
     }
 
-    fn read_auto_marker_source(letter: char) -> Option<char> {
-        let marker_path = format!("{}:\\{}", letter, AUTO_CREATED_PARTITION_MARKER);
-        let content = std::fs::read_to_string(marker_path).ok()?;
-        for line in content.lines() {
-            let line = line.trim();
-            if let Some(value) = line.strip_prefix("Source:") {
-                return value
-                    .trim()
-                    .chars()
-                    .find(|c| c.is_ascii_alphabetic())
-                    .map(|c| c.to_ascii_uppercase());
-            }
-            if let Some(value) = line.strip_prefix("Source=") {
-                return value
-                    .trim()
-                    .chars()
-                    .find(|c| c.is_ascii_alphabetic())
-                    .map(|c| c.to_ascii_uppercase());
-            }
-        }
-        None
-    }
-
-    /// 查找自动创建的分区（通过标志文件）
-    /// 返回 (盘符, 磁盘号Option, 来源盘符Option) 如果找到的话
-    pub fn find_auto_created_partition() -> Option<(char, Option<u32>, Option<char>)> {
-        for letter in b'A'..=b'Z' {
-            let c = letter as char;
-            // 跳过 X 盘（PE系统盘）
-            if c == 'X' {
-                continue;
-            }
-
-            let marker_path = format!("{}:\\{}", c, AUTO_CREATED_PARTITION_MARKER);
-            if Path::new(&marker_path).exists() {
-                log::info!("找到自动创建的分区: {}:", c);
-
-                // 获取该分区所在的磁盘号
-                let detail = Self::get_partition_style(&format!("{}:", c));
-                return Some((c, detail.disk_number, Self::read_auto_marker_source(c)));
-            }
-        }
-        None
-    }
-
-    /// 删除自动创建的分区并扩展目标分区
-    ///
-    /// # Arguments
-    /// * `target_partition` - 目标安装分区（如 "D:"），删除数据分区后要扩展的分区
-    ///
-    /// 流程：
-    /// 1. 找到自动创建的分区
-    /// 2. 确认该分区和目标分区在同一个磁盘上
-    /// 3. 通过 Win32 分区偏移和长度确认临时分区位于目标分区紧邻后方
-    /// 4. 记录目标分区当前大小
-    /// 5. 删除该分区
-    /// 6. 刷新磁盘信息
-    /// 7. 扩展目标分区以使用释放的空间
-    /// 8. 验证分区大小是否增加
-    pub fn cleanup_auto_created_partition_and_extend(target_partition: &str) -> Result<()> {
-        let target_letter = target_partition
-            .chars()
-            .next()
-            .unwrap_or('C')
-            .to_ascii_uppercase();
-
-        log::info!("[CLEANUP] ========================================");
-        log::info!("[CLEANUP] 开始清理自动创建的分区");
-        log::info!("[CLEANUP] 目标安装分区: {}:", target_letter);
-        log::info!("[CLEANUP] ========================================");
-
-        // 查找自动创建的分区
-        let (auto_letter, _auto_disk_num_opt, marker_source) =
-            match Self::find_auto_created_partition() {
-                Some(info) => info,
-                None => {
-                    log::info!("[CLEANUP] 未找到自动创建的分区，无需清理");
-                    return Ok(());
-                }
-            };
-
-        let auto_geometry =
-            Self::partition_geometry(&format!("{}:", auto_letter)).map_err(|error| {
-                anyhow::anyhow!(
-                    "[CLEANUP] 无法可靠获取自动创建分区 {}: 的身份和几何信息，已取消删除: {}",
-                    auto_letter,
-                    error
-                )
-            })?;
-
-        log::info!(
-            "[CLEANUP] 找到自动创建的分区: {}:, 磁盘 {}, 分区号 {:?}",
-            auto_letter,
-            auto_geometry.disk_number,
-            auto_geometry.partition_number
-        );
-
-        let target_geometry =
-            Self::partition_geometry(&format!("{}:", target_letter)).map_err(|error| {
-                anyhow::anyhow!(
-                    "[CLEANUP] 无法可靠获取目标分区 {}: 的身份和几何信息，已取消删除: {}",
-                    target_letter,
-                    error
-                )
-            })?;
-
-        log::info!(
-            "[CLEANUP] 目标分区: {}:, 磁盘 {}, 分区号 {:?}",
-            target_letter,
-            target_geometry.disk_number,
-            target_geometry.partition_number
-        );
-
-        let source_letter = marker_source.ok_or_else(|| {
-            anyhow::anyhow!(
-                "[CLEANUP] 自动创建分区 {} 的标记缺少 Source，无法确认归属，已取消删除",
-                auto_letter
-            )
-        })?;
-        if source_letter != target_letter {
-            anyhow::bail!(
-                "[CLEANUP] 自动创建分区 {} 的 Source 为 {}:，与目标分区 {}: 不一致，已取消删除",
-                auto_letter,
-                source_letter,
-                target_letter
-            );
-        }
-
-        // 检查是否在同一磁盘
-        if auto_geometry.disk_number != target_geometry.disk_number {
-            anyhow::bail!(
-                "[CLEANUP] 自动创建的分区 (磁盘{}) 和目标分区 (磁盘{}) 不在同一磁盘，已取消删除",
-                auto_geometry.disk_number,
-                target_geometry.disk_number
-            );
-        }
-
-        // 基础卷扩展只能使用目标分区物理末端之后的相邻未分配空间。分区号不能证明
-        // 物理相邻，因此必须使用 IOCTL 返回的起始偏移和长度做 fail-closed 检查。
-        if !partitions_are_physically_adjacent(target_geometry, auto_geometry) {
-            anyhow::bail!(
-                "[CLEANUP] 自动创建分区 {}: 不是目标分区 {}: 的物理紧邻后方分区，已取消删除",
-                auto_letter,
-                target_letter
-            );
-        }
-        log::info!(
-            "[CLEANUP] 物理相邻性检查通过：目标分区{} (末端={:?}) -> 临时分区{} (起点={})",
-            target_geometry.partition_number,
-            target_geometry.end_offset(),
-            auto_geometry.partition_number,
-            auto_geometry.starting_offset
-        );
-
-        // 删除自动创建分区并扩展目标分区
-        log::info!(
-            "[CLEANUP] 开始删除分区 {} 并扩展目标分区 {}...",
-            auto_letter,
-            target_letter
-        );
-        Self::delete_partition_and_extend(
-            auto_letter,
-            target_letter,
-            auto_geometry,
-            target_geometry,
-        )
-    }
-
-    /// 删除指定盘符的分区
-    #[allow(
-        dead_code,
-        reason = "retained as a compatibility fallback for PE cleanup flows"
-    )]
-    fn delete_partition_by_letter(letter: char) -> Result<()> {
-        log::info!("[CLEANUP] 删除分区 {}:", letter);
-        let identity = lr_core::windows_storage::volume_identity(letter)?;
-        lr_core::windows_storage::delete_partition(
-            identity.disk_number,
-            identity.offset_bytes,
-            true,
-        )?;
-        log::info!("[CLEANUP] 分区 {} 删除成功", letter);
-        Ok(())
-    }
-
     /// 获取分区大小（MB）
     fn get_partition_size_mb(letter: char) -> Option<u64> {
         let path = format!("{}:\\", letter);
@@ -621,72 +740,17 @@ impl DiskManager {
         }
     }
 
-    /// 删除分区并扩展目标分区
-    fn delete_partition_and_extend(
-        auto_letter: char,
-        target_letter: char,
-        expected_auto: PartitionGeometry,
-        expected_target: PartitionGeometry,
-    ) -> Result<()> {
-        // 在不可逆删除前重新打开两个卷并比对稳定身份和几何信息，防止扫描后盘符变化、
-        // 磁盘插拔或分区表被其它进程修改而删错目标。
-        let current_auto = Self::partition_geometry(&format!("{}:", auto_letter))?;
-        let current_target = Self::partition_geometry(&format!("{}:", target_letter))?;
-        if current_auto != expected_auto || current_target != expected_target {
-            anyhow::bail!("[CLEANUP] 删除前分区身份或几何信息发生变化，已取消删除");
-        }
-
-        // 记录扩展前的分区大小
-        let size_before = current_target.partition_length;
-        log::info!(
-            "[CLEANUP] 扩展前目标分区大小: {} MB",
-            size_before / 1024 / 1024
-        );
-        log::info!("[CLEANUP] Step 1: 删除分区 {}:", auto_letter);
-        lr_core::windows_storage::delete_partition(
-            expected_auto.disk_number,
-            expected_auto.starting_offset,
-            true,
-        )?;
-        log::info!("[CLEANUP] 分区 {} 删除成功", auto_letter);
-
-        log::info!("[CLEANUP] Step 2: 扩展目标分区 {}", target_letter);
-        lr_core::windows_storage::extend_volume(
-            target_letter,
-            expected_target.disk_number,
-            expected_auto.partition_length,
-        )
-        .map_err(|error| anyhow::anyhow!("临时分区已删除，但扩展目标分区失败: {error}"))?;
-        let current = Self::partition_geometry(&format!("{}:", target_letter))?;
-        let expected_size = size_before
-            .checked_add(expected_auto.partition_length)
-            .ok_or_else(|| anyhow::anyhow!("扩展后的分区大小计算溢出"))?;
-        if current.disk_number != expected_target.disk_number
-            || current.starting_offset != expected_target.starting_offset
-            || current.partition_length != expected_size
-        {
-            anyhow::bail!(
-                "扩展操作返回成功，但操作后核验失败：期望 {} 字节，实际 {} 字节",
-                expected_size,
-                current.partition_length
-            );
-        }
-        log::info!(
-            "[CLEANUP] 分区 {} 扩展成功：{} MB -> {} MB",
-            target_letter,
-            size_before / 1024 / 1024,
-            current.partition_length / 1024 / 1024
-        );
-        Ok(())
-    }
-
     /// 无损扩大分区到指定大小（仅并入紧邻其后的未分配空间；不移动其它分区）。
     ///
     /// - `letter`：目标分区盘符（如 'C'）。在 PE 下应由扩容标记定位后传入。
     /// - `target_size_mb`：期望最终总大小（MB）；0 = 尽可能扩到最大（吃光相邻未分配空间）。
     ///
     /// 实现：VDS 只并入紧跟该卷的连续未分配空间；若其后是别的分区则失败关闭。
-    pub fn expand_partition_lossless(letter: char, target_size_mb: u64) -> Result<String> {
+    pub fn expand_partition_lossless_checked(
+        letter: char,
+        target_size_mb: u64,
+        expected: lr_core::windows_storage::VolumeIdentity,
+    ) -> Result<String> {
         let current_mb = Self::get_partition_size_mb(letter)
             .ok_or_else(|| anyhow::anyhow!("{}", tr!("无法获取分区 {}: 的当前大小", letter)))?;
         log::info!(
@@ -696,12 +760,25 @@ impl DiskManager {
             target_size_mb
         );
 
-        let identity = lr_core::windows_storage::volume_identity(letter)?;
+        let identity = lr_core::windows_storage::stable_volume_identity(letter)?;
+        if !lr_core::windows_storage::same_volume_identity(identity.extent, expected) {
+            anyhow::bail!(
+                "authenticated expand target {}: changed before VDS extend: actual disk={} offset={} length={}, expected disk={} offset={} length={}",
+                letter,
+                identity.extent.disk_number,
+                identity.extent.offset_bytes,
+                identity.extent.extent_length_bytes,
+                expected.disk_number,
+                expected.offset_bytes,
+                expected.extent_length_bytes
+            );
+        }
         let available = lr_core::windows_storage::contiguous_free_bytes_after(
-            identity.disk_number,
+            identity.extent.disk_number,
             identity
+                .extent
                 .offset_bytes
-                .checked_add(identity.extent_length_bytes)
+                .checked_add(identity.extent.extent_length_bytes)
                 .ok_or_else(|| anyhow::anyhow!("分区末端偏移计算溢出"))?,
         )
         .map_err(|_| {
@@ -723,9 +800,10 @@ impl DiskManager {
                 tr!("目标分区后面的连续未分配空间不足。若要从后面的分区夺取空间，需要分区移动功能。")
             );
         }
-        lr_core::windows_storage::extend_volume(letter, identity.disk_number, bytes_to_add)?;
+        Self::verify_partition_volume_identity(&format!("{}:", letter), expected)?;
+        lr_core::windows_storage::extend_volume_stable_checked(letter, identity, bytes_to_add)?;
         let new_mb = Self::get_partition_size_mb(letter).unwrap_or(current_mb);
-        let expected_mb = (identity.extent_length_bytes + bytes_to_add) / 1024 / 1024;
+        let expected_mb = (identity.extent.extent_length_bytes + bytes_to_add) / 1024 / 1024;
         if new_mb != expected_mb {
             anyhow::bail!(
                 "{}",
@@ -748,8 +826,61 @@ impl DiskManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        partitions_are_physically_adjacent, DiskManager, PartitionGeometry, PartitionStyle,
+        collect_canonical_candidate_snapshots, partitions_are_physically_adjacent, DiskManager,
+        PartitionGeometry, PartitionStyle,
     };
+
+    fn canonical_snapshot() -> lr_core::windows_storage::DiskLayoutSnapshot {
+        lr_core::windows_storage::DiskLayoutSnapshot {
+            disk_size_bytes: 10_000_000,
+            disk: lr_core::windows_storage::StableDiskIdentity::Gpt { disk_id: [1; 16] },
+            device_id_hash: Some([2; 32]),
+            partitions: vec![lr_core::windows_storage::DiskLayoutPartitionSnapshot {
+                offset_bytes: 1_048_576,
+                size_bytes: 5_000_000,
+                token: lr_core::windows_storage::DiskLayoutPartitionToken::Gpt {
+                    partition_type: [3; 16],
+                    partition_id: [4; 16],
+                    attributes: 0,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn canonical_inventory_failure_propagates_without_collecting_partial_candidates() {
+        let mut snapshot_called = false;
+        let result = collect_canonical_candidate_snapshots(
+            Err(anyhow::anyhow!("modeled complete inventory failure")),
+            |_| {
+                snapshot_called = true;
+                Ok(canonical_snapshot())
+            },
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("complete inventory"));
+        assert!(!snapshot_called);
+    }
+
+    #[test]
+    fn canonical_inventory_rejects_two_matching_cloned_disks() {
+        let snapshot = canonical_snapshot();
+        let target = lr_core::install_handoff::CanonicalInstallTargetV2::from_snapshot(
+            &snapshot, 1_048_576, 5_000_000,
+        )
+        .unwrap();
+        let candidates =
+            collect_canonical_candidate_snapshots(Ok(vec![2, 8]), |_| Ok(snapshot.clone()))
+                .unwrap();
+        assert!(
+            lr_core::install_handoff::unique_canonical_target_match(&target, &candidates)
+                .unwrap_err()
+                .to_string()
+                .contains("multiple cloned")
+        );
+    }
 
     fn geometry(
         disk_number: u32,

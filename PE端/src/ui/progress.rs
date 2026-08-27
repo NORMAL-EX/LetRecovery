@@ -93,7 +93,10 @@ impl BackupStep {
     pub fn name(&self) -> &'static str {
         match self {
             BackupStep::ReadConfig => "读取配置",
-            BackupStep::CaptureImage => "执行DISM备份",
+            // WIM/ESD capture is routed through the configured libwim/WIMGAPI engine. DISM is
+            // reserved for other offline servicing duties and must not be presented as the backup
+            // capture engine.
+            BackupStep::CaptureImage => "捕获系统镜像",
             BackupStep::VerifyBackup => "验证备份文件",
             BackupStep::RepairBoot => "恢复引导",
             BackupStep::Cleanup => "清理临时文件",
@@ -186,9 +189,9 @@ pub struct ProgressState {
     pub is_failed: bool,
     /// 错误信息
     pub error_message: Option<String>,
-    /// Installation completed successfully, but the user must perform a firmware action before
-    /// the new system can boot. This is terminal success metadata, not an ordinary transient
-    /// status line, so it must survive the completed transition.
+    /// Installation completed successfully, but a post-install warning requires user review.
+    /// This is terminal success metadata, not an ordinary transient status line, so it must
+    /// survive the completed transition.
     pub completion_warning: Option<String>,
 }
 
@@ -239,6 +242,7 @@ impl ProgressState {
         self.current_install_step = step;
         self.has_current_step = true;
         self.step_progress = 0;
+        self.status_message.clear();
         self.update_overall_progress();
     }
 
@@ -247,6 +251,7 @@ impl ProgressState {
         self.current_backup_step = step;
         self.has_current_step = true;
         self.step_progress = 0;
+        self.status_message.clear();
         self.update_overall_progress();
     }
 
@@ -266,15 +271,17 @@ impl ProgressState {
             self.overall_progress = 0;
             return;
         }
-        if self.is_install_mode {
-            self.overall_progress = weighted_progress(
+        let next = if self.is_install_mode {
+            weighted_progress(
                 self.current_install_step.overall_range(),
                 self.step_progress,
-            );
+            )
         } else {
-            self.overall_progress =
-                weighted_progress(self.current_backup_step.overall_range(), self.step_progress);
-        }
+            weighted_progress(self.current_backup_step.overall_range(), self.step_progress)
+        };
+        // A phase transition intentionally resets the per-step bar from 100% to 0%, but delayed
+        // or duplicated worker messages must never make the overall bar move backwards.
+        self.overall_progress = self.overall_progress.max(next);
     }
 
     /// 标记完成
@@ -348,5 +355,47 @@ mod tests {
         assert_eq!(backup.overall_progress, 48);
         backup.set_step_progress(100);
         assert_eq!(backup.overall_progress, 93);
+    }
+
+    #[test]
+    fn phase_transition_clears_the_previous_completed_status() {
+        let mut install = ProgressState::new_install();
+        install.status_message = "校验镜像 100%".to_string();
+        install.set_install_step(InstallStep::ApplyImage);
+        assert_eq!(install.step_progress, 0);
+        assert!(install.status_message.is_empty());
+
+        let mut backup = ProgressState::new_backup();
+        backup.status_message = "准备完成 100%".to_string();
+        backup.set_backup_step(BackupStep::CaptureImage);
+        assert_eq!(backup.step_progress, 0);
+        assert!(backup.status_message.is_empty());
+    }
+
+    #[test]
+    fn every_phase_transition_keeps_overall_progress_monotonic() {
+        let mut install = ProgressState::new_install();
+        let mut previous = 0;
+        for step in InstallStep::all() {
+            install.set_install_step(step);
+            assert!(install.overall_progress >= previous);
+            previous = install.overall_progress;
+            install.set_step_progress(100);
+            assert!(install.overall_progress >= previous);
+            previous = install.overall_progress;
+        }
+        assert_eq!(previous, 100);
+
+        let mut backup = ProgressState::new_backup();
+        previous = 0;
+        for step in BackupStep::all() {
+            backup.set_backup_step(step);
+            assert!(backup.overall_progress >= previous);
+            previous = backup.overall_progress;
+            backup.set_step_progress(100);
+            assert!(backup.overall_progress >= previous);
+            previous = backup.overall_progress;
+        }
+        assert_eq!(previous, 100);
     }
 }

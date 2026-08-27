@@ -35,6 +35,8 @@ pub struct ImageInfo {
     pub index: u32,
     pub name: String,
     pub size_bytes: u64,
+    /// WIM hard-link byte count used by the exact expanded-size budget.
+    pub hard_link_bytes: u64,
     /// 安装类型，用于过滤 WindowsPE 等非系统镜像
     /// 值如: "Client", "WindowsPE", "Server" 等
     pub installation_type: String,
@@ -50,6 +52,49 @@ pub struct ImageInfo {
     pub image_type: lr_core::image_meta::WimImageType,
     /// 是否已验证可安装
     pub verified_installable: bool,
+}
+
+/// Returns whether image inventory metadata describes a volume that the normal installer may
+/// offer as an apply source.
+///
+/// `verified_installable` is not authoritative here: the wimlib XML inventory path initializes
+/// that legacy field to `false` even after it has successfully enumerated a real WIM index.  DISM
+/// applies a WIM by the index returned from image inventory, so all normal-system consumers share
+/// this classification and let the real apply operation plus its integrity checks decide whether
+/// the selected image can actually be applied.
+pub fn is_installable_image(volume: &ImageInfo) -> bool {
+    use lr_core::image_meta::WimImageType;
+
+    match volume.image_type {
+        WimImageType::StandardInstall | WimImageType::FullBackup => return true,
+        WimImageType::WindowsPE => return false,
+        WimImageType::Unknown => {}
+    }
+    let name = volume.name.to_lowercase();
+    let install_type = volume.installation_type.to_lowercase();
+    if install_type == "windowspe"
+        || ["windows pe", "windows setup", "setup media", "winpe"]
+            .iter()
+            .any(|keyword| name.contains(keyword))
+    {
+        return false;
+    }
+    if install_type.is_empty() && volume.major_version.is_none() {
+        return [
+            "windows 10",
+            "windows 11",
+            "windows server",
+            "windows 8",
+            "windows 7",
+            "backup",
+            "备份",
+            "系统镜像",
+            "镜像",
+        ]
+        .iter()
+        .any(|keyword| name.contains(keyword));
+    }
+    true
 }
 
 pub struct Dism {
@@ -135,26 +180,6 @@ impl Dism {
         }
     }
 
-    /// 捕获系统镜像 (备份)
-    /// 使用 wimlib 实现
-    pub fn capture_image(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        self.capture_image_atomic(
-            image_file,
-            capture_dir,
-            name,
-            description,
-            WIM_COMPRESS_LZX,
-            progress_tx,
-        )
-    }
-
     fn capture_image_raw(
         &self,
         image_file: &str,
@@ -209,184 +234,7 @@ impl Dism {
         }
     }
 
-    /// 增量备份镜像
-    /// 使用 wimlib 实现
-    pub fn append_image(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        self.capture_image_raw(
-            image_file,
-            capture_dir,
-            name,
-            description,
-            WIM_COMPRESS_LZX,
-            progress_tx,
-        )?;
-        Self::verify_captured_image(Path::new(image_file), name, description)
-    }
-
-    #[allow(dead_code)]
-    fn append_image_legacy(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        log::info!(
-            "[Dism] 使用 wimlib 追加镜像: {} -> {}",
-            capture_dir,
-            image_file
-        );
-
-        // 对于追加操作，WimManager 的 capture_image 在文件存在时会自动追加
-        self.capture_image(image_file, capture_dir, name, description, progress_tx)
-    }
-
-    /// 捕获系统镜像为 ESD（LZMS solid 高压缩）。目标文件已存在则追加镜像。
-    /// 与 PE 端 `Dism::capture_image_esd` 等价，供桌面 Direct 备份按格式分发使用。
-    pub fn capture_image_esd(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        self.capture_image_atomic(
-            image_file,
-            capture_dir,
-            name,
-            description,
-            WIM_COMPRESS_LZMS,
-            progress_tx,
-        )
-    }
-
-    fn capture_image_esd_raw(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        log::info!(
-            "[Dism] 捕获 ESD 镜像(LZMS): {} -> {}",
-            capture_dir,
-            image_file
-        );
-
-        let wim_manager = WimEngineManager::new_current()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("镜像引擎初始化失败: {}", e)))?;
-
-        let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
-        let progress_tx_clone = progress_tx.clone();
-        let forward_thread = std::thread::spawn(move || {
-            while let Ok(progress) = wim_rx.recv() {
-                if let Some(ref tx) = progress_tx_clone {
-                    let _ = tx.send(DismProgress {
-                        percentage: progress.percentage,
-                        status: progress.status,
-                    });
-                }
-            }
-        });
-
-        let result = wim_manager.capture_image(
-            capture_dir,
-            image_file,
-            name,
-            description,
-            WIM_COMPRESS_LZMS,
-            Some(wim_tx),
-        );
-        let _ = forward_thread.join();
-
-        match result {
-            Ok(_) => {
-                log::info!("[Dism] ESD 镜像捕获成功");
-                Ok(())
-            }
-            Err(e) => anyhow::bail!("{}", tr!("ESD 镜像捕获失败: {}", e)),
-        }
-    }
-
-    /// 增量备份 ESD（文件存在时自动追加镜像）。
-    pub fn append_image_esd(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        self.capture_image_raw(
-            image_file,
-            capture_dir,
-            name,
-            description,
-            WIM_COMPRESS_LZMS,
-            progress_tx,
-        )?;
-        Self::verify_captured_image(Path::new(image_file), name, description)
-    }
-
-    #[allow(dead_code)]
-    fn append_image_esd_legacy(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        log::info!("[Dism] 追加 ESD 镜像: {} -> {}", capture_dir, image_file);
-        self.capture_image_esd(image_file, capture_dir, name, description, progress_tx)
-    }
-
-    /// 捕获为 SWM 分卷：先抓为临时 WIM(LZX)，再用 libwim 分割为 .swm。
-    /// 与 PE 端 `Dism::capture_image_swm` 等价。
-    fn capture_image_atomic(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        compression: u32,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        let target = Path::new(image_file);
-        let parent = target
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let file_name = target
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("backup destination has no file name"))?;
-        let staging =
-            lr_core::scoped_temp_file::ScopedTempDir::create_in(parent, "letrecovery-backup")?;
-        let staged = staging.path().join(file_name);
-        self.capture_image_raw(
-            &staged.to_string_lossy(),
-            capture_dir,
-            name,
-            description,
-            compression,
-            progress_tx,
-        )?;
-        Self::verify_captured_image(&staged, name, description)?;
-        lr_core::scoped_temp_file::atomic_replace_path(&staged, target)?;
-        Ok(())
-    }
-
-    fn verify_captured_image(path: &Path, name: &str, description: &str) -> Result<()> {
+    pub(crate) fn verify_image_integrity(path: &Path) -> Result<i32> {
         let library = lr_core::wimlib::Wimlib::new()
             .map_err(|error| anyhow::anyhow!("captured image verifier unavailable: {error}"))?;
         let handle = library
@@ -399,115 +247,38 @@ impl Dism {
         if index <= 0 {
             anyhow::bail!("captured image contains no image");
         }
-        if handle.get_image_name(index).as_deref() != Some(name) {
-            anyhow::bail!("captured image name does not match the requested name");
-        }
-        if !description.is_empty()
-            && handle.get_image_description(index).as_deref() != Some(description)
-        {
-            anyhow::bail!("captured image description does not match the requested description");
-        }
-        Ok(())
+        Ok(index)
     }
 
-    pub fn capture_image_swm(
+    /// Capture directly into an already private, same-volume publication directory.
+    /// The caller owns atomic publication and must verify/seal the completed file before CAS.
+    pub(crate) fn capture_image_staged(
         &self,
         image_file: &str,
         capture_dir: &str,
         name: &str,
         description: &str,
-        split_size_mb: u32,
+        esd: bool,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!(
-            "[Dism] 捕获 SWM 分卷: {} -> {} (分卷 {}MB)",
-            capture_dir,
+        self.capture_image_raw(
             image_file,
-            split_size_mb
-        );
-
-        // 临时 WIM 与最终 .swm 同目录
-        let target = Path::new(image_file);
-        let parent = target
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let staging =
-            lr_core::scoped_temp_file::ScopedTempDir::create_in(parent, "letrecovery-swm")?;
-        let temp_wim = staging.path().join("capture.wim");
-
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.send(DismProgress {
-                percentage: 0,
-                status: tr!("正在捕获镜像..."),
-            });
-        }
-
-        let engine = WimEngineManager::new_current()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("镜像引擎初始化失败: {}", e)))?;
-
-        let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
-        let progress_tx_clone = progress_tx.clone();
-        let forward_thread = std::thread::spawn(move || {
-            while let Ok(progress) = wim_rx.recv() {
-                if let Some(ref tx) = progress_tx_clone {
-                    // 捕获阶段占 80% 进度，分割占后 20%
-                    let _ = tx.send(DismProgress {
-                        percentage: (progress.percentage as u32 * 80 / 100) as u8,
-                        status: progress.status,
-                    });
-                }
-            }
-        });
-
-        let result = engine.capture_image(
             capture_dir,
-            &temp_wim.to_string_lossy(),
             name,
             description,
-            WIM_COMPRESS_LZX,
-            Some(wim_tx),
-        );
-        let _ = forward_thread.join();
+            if esd {
+                WIM_COMPRESS_LZMS
+            } else {
+                WIM_COMPRESS_LZX
+            },
+            progress_tx,
+        )
+    }
 
-        if let Err(e) = result {
-            let _ = std::fs::remove_file(&temp_wim);
-            anyhow::bail!("{}", tr!("捕获镜像失败: {}", e));
-        }
-        Self::verify_captured_image(&temp_wim, name, description)?;
-
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.send(DismProgress {
-                percentage: 80,
-                status: tr!("正在分割镜像..."),
-            });
-        }
-
-        // 分卷由 libwim 执行（与生成引擎无关）。
-        let wim_manager = WimlibManager::new()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("wimlib 初始化失败: {}", e)))?;
-        let split_result = wim_manager.split_wim(
-            &temp_wim.to_string_lossy(),
-            image_file,
-            split_size_mb as u64,
-        );
-
-        // 清理临时 WIM
-        let _ = std::fs::remove_file(&temp_wim);
-
-        match split_result {
-            Ok(_) => {
-                if let Some(ref tx) = progress_tx {
-                    let _ = tx.send(DismProgress {
-                        percentage: 100,
-                        status: tr!("分卷完成"),
-                    });
-                }
-                log::info!("[Dism] SWM 分卷镜像创建成功");
-                Ok(())
-            }
-            Err(e) => anyhow::bail!("{}", tr!("分割镜像失败: {}", e)),
-        }
+    pub(crate) fn read_verified_backup_catalog(
+        path: &Path,
+    ) -> Result<lr_core::backup_image_catalog::BackupImageCatalog> {
+        lr_core::wimlib::read_verified_backup_catalog(path).map_err(anyhow::Error::msg)
     }
 
     // ========================================================================
@@ -675,52 +446,6 @@ impl Dism {
         Ok(count)
     }
 
-    /// 导入驱动 - 使用 Windows API
-    /// 在PE环境下，自动转为离线操作
-    pub fn add_drivers(&self, target_path: &str, driver_path: &str) -> Result<()> {
-        if self.is_pe {
-            self.add_drivers_offline(target_path, driver_path)
-        } else {
-            self.add_drivers_online(driver_path)
-        }
-    }
-
-    /// 导入驱动到在线系统 (仅在正常Windows环境下可用)
-    /// 使用 Windows API (newdev.dll/setupapi.dll)
-    pub fn add_drivers_online(&self, driver_path: &str) -> Result<()> {
-        if self.is_pe {
-            anyhow::bail!(
-                "{}",
-                tr!("PE环境下无法使用在线方式添加驱动，请使用 add_drivers_offline")
-            );
-        }
-
-        log::info!("[Dism] 使用 Windows API 导入驱动: {}", driver_path);
-
-        let manager = DriverManager::new()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("驱动管理器初始化失败: {}", e)))?;
-
-        let (success, fail, need_reboot) = manager.import_drivers(
-            Path::new(driver_path),
-            true, // force
-        )?;
-
-        log::info!(
-            "[Dism] 驱动导入完成: 成功 {}, 失败 {}, 需要重启: {}",
-            success,
-            fail,
-            need_reboot
-        );
-
-        if success == 0 || fail != 0 {
-            anyhow::bail!(
-                "{}",
-                tr!("驱动导入未完整成功：成功 {}，失败 {}", success, fail)
-            );
-        }
-        Ok(())
-    }
-
     /// 导入驱动到离线系统 (PE和正常环境都可用)
     ///
     /// 使用 dism.exe 命令行进行离线驱动注入：
@@ -771,6 +496,7 @@ impl Dism {
                                 index: img.index,
                                 name: img.name,
                                 size_bytes: img.size_bytes,
+                                hard_link_bytes: img.hard_link_bytes,
                                 installation_type: img.installation_type,
                                 major_version: img.major_version,
                                 minor_version: img.minor_version,
@@ -814,27 +540,6 @@ impl Dism {
         }
 
         anyhow::bail!("{}", tr!("无法获取镜像信息：wimlib 打开文件失败。可能原因：1.镜像文件损坏 2.libwim-15.dll 缺失或版本过旧不支持此格式（程序会自动释放内置的 libwim-15.dll 到程序目录，请确认其存在）"))
-    }
-
-    /// 通过读取 ntdll.dll 文件版本判断是否为 Win10/11 镜像
-    pub fn is_win10_or_11_image_by_ntdll(image_file: &str, index: u32) -> Result<bool> {
-        let lower = image_file.to_lowercase();
-        let is_wim = lower.ends_with(".wim");
-        let is_esd = lower.ends_with(".esd");
-        let is_swm = lower.ends_with(".swm");
-
-        if !is_wim && !is_esd && !is_swm {
-            anyhow::bail!("{}", tr!("仅支持 WIM/ESD/SWM 镜像"));
-        }
-
-        if is_wim || is_esd {
-            if let Ok(major) = Self::get_ntdll_major_version(image_file, index) {
-                return Ok(major >= 10);
-            }
-        }
-
-        let major = Self::get_image_major_version_from_xml(image_file, index)?;
-        Ok(major >= 10)
     }
 
     /// 直接解析 WIM 文件的 XML 元数据
@@ -974,6 +679,9 @@ impl Dism {
                     let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
+                    let hard_link_bytes = Self::extract_xml_tag(image_block, "HARDLINKBYTES")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
 
                     let installation_type =
                         Self::extract_xml_tag(image_block, "INSTALLATIONTYPE").unwrap_or_default();
@@ -1002,6 +710,7 @@ impl Dism {
                             index,
                             name,
                             size_bytes,
+                            hard_link_bytes,
                             installation_type,
                             major_version,
                             minor_version,
@@ -1122,7 +831,37 @@ impl Default for Dism {
 
 #[cfg(test)]
 mod tests {
-    use super::Dism;
+    use super::{is_installable_image, Dism, ImageInfo};
+
+    fn image(image_type: lr_core::image_meta::WimImageType) -> ImageInfo {
+        ImageInfo {
+            index: 1,
+            name: "Windows 11 Pro".to_owned(),
+            size_bytes: 5_000_000_000,
+            hard_link_bytes: 0,
+            installation_type: "Client".to_owned(),
+            major_version: Some(10),
+            minor_version: Some(0),
+            build: Some(26100),
+            architecture: Some(9),
+            image_type,
+            // The production wimlib XML inventory currently reports this legacy flag as false.
+            verified_installable: false,
+        }
+    }
+
+    #[test]
+    fn wimlib_inventory_does_not_require_the_legacy_verified_flag() {
+        assert!(is_installable_image(&image(
+            lr_core::image_meta::WimImageType::StandardInstall
+        )));
+        assert!(is_installable_image(&image(
+            lr_core::image_meta::WimImageType::FullBackup
+        )));
+        assert!(!is_installable_image(&image(
+            lr_core::image_meta::WimImageType::WindowsPE
+        )));
+    }
 
     #[test]
     fn exported_driver_validation_rejects_empty_and_counts_nested_inf_files() {

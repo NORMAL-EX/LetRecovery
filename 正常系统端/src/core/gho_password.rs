@@ -426,39 +426,6 @@ fn is_valid_password(password: &str) -> bool {
     password.chars().all(|c| c.is_ascii_graphic() || c == ' ')
 }
 
-/// 格式化显示 GHO 密码信息
-pub fn format_gho_password_info(info: &GhoPasswordInfo) -> String {
-    let mut result = String::new();
-
-    if !info.is_valid_gho {
-        if let Some(ref err) = info.error {
-            result.push_str(&tr!("无效的GHO文件: {}\n", err));
-        } else {
-            result.push_str(&tr!("无效的GHO文件\n"));
-        }
-        return result;
-    }
-
-    result.push_str(&tr!("有效的GHO文件\n"));
-
-    if !info.has_password {
-        result.push_str(&tr!("未设置密码保护\n"));
-    } else {
-        result.push_str(&tr!("已设置密码保护\n"));
-        result.push_str(&tr!("密码长度: {} 字符\n", info.password_length));
-
-        if let Some(ref pwd) = info.password {
-            result.push_str(&tr!("密码: {}\n", pwd));
-        } else if let Some(ref err) = info.error {
-            result.push_str(&format!("{}\n", err));
-        } else {
-            result.push_str(&tr!("无法解密密码\n"));
-        }
-    }
-
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1677,6 +1677,7 @@ mod tests {
                 size_bytes: 64 * 1024 * 1024 * 1024,
                 partition_style: PartitionStyle::GPT,
                 partitions: Vec::new(),
+                layout_snapshot: None,
             }];
             state.quick_partition_layouts = default_layouts(
                 PartitionStyle::GPT,

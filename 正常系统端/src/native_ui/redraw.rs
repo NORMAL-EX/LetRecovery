@@ -9,7 +9,8 @@
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+    RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_NOCHILDREN,
+    RDW_UPDATENOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SendMessageW, WM_SETREDRAW};
 
@@ -47,6 +48,20 @@ pub(crate) unsafe fn resume_client(root: HWND, transaction: Option<SuspendedRedr
     );
 }
 
+/// Queues one asynchronous client refresh after a non-size state change. Live resize does not use
+/// this helper: USER32 preserves valid pixels and invalidates newly exposed root/child areas while
+/// the deferred window-position batch is committed.
+pub(crate) unsafe fn invalidate_client_tree(root: HWND) {
+    let _ = RedrawWindow(root, None, None, client_refresh_flags());
+}
+
+fn client_refresh_flags() -> windows::Win32::Graphics::Gdi::REDRAW_WINDOW_FLAGS {
+    // The root background is cheap and must erase the old positions of moved children. Child
+    // surfaces are retained across pure moves; only controls whose size changed were invalidated
+    // by `move_layout_window`.
+    RDW_INVALIDATE | RDW_ERASE | RDW_NOCHILDREN
+}
+
 unsafe fn resume_with_flags(
     root: HWND,
     transaction: Option<SuspendedRedraw>,
@@ -57,4 +72,20 @@ unsafe fn resume_with_flags(
     }
     let _ = SendMessageW(root, WM_SETREDRAW, WPARAM(1), LPARAM(0));
     let _ = RedrawWindow(root, None, None, flags);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_refresh_is_one_asynchronous_root_client_frame() {
+        let flags = client_refresh_flags().0;
+        assert_ne!(flags & RDW_INVALIDATE.0, 0);
+        assert_ne!(flags & RDW_ERASE.0, 0);
+        assert_ne!(flags & RDW_NOCHILDREN.0, 0);
+        assert_eq!(flags & RDW_ALLCHILDREN.0, 0);
+        assert_eq!(flags & RDW_FRAME.0, 0);
+        assert_eq!(flags & RDW_UPDATENOW.0, 0);
+    }
 }

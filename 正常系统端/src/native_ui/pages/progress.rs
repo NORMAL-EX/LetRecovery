@@ -3,6 +3,8 @@
 //! Workers, cancellation, reboot and follow-up actions stay in controllers.
 //! This page displays snapshots and emits command intents only.
 
+use std::cell::Cell;
+
 use crate::native_ui::GetDpiForWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
@@ -10,13 +12,14 @@ use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    MoveWindow, SendMessageW, ShowWindow, BS_OWNERDRAW, SW_HIDE, SW_SHOW, WM_GETFONT, WM_SETFONT,
-    WS_TABSTOP,
+    SendMessageW, ShowWindow, BS_OWNERDRAW, SW_HIDE, SW_SHOW, WM_GETFONT, WM_SETFONT, WS_TABSTOP,
 };
 
 use super::super::controls::{
-    child, draw_inno_button, draw_progress, wide, ButtonRole, ProgressRole,
+    child, draw_inno_button, draw_progress, move_layout_window as MoveWindow, wide, ButtonRole,
+    ProgressRole,
 };
+use super::super::layout::measure_text;
 use super::super::theme::Palette;
 
 pub const ID_OVERALL_PROGRESS: u16 = 800;
@@ -25,6 +28,42 @@ pub const ID_CANCEL_OPERATION: u16 = 802;
 pub const ID_PROGRESS_PRIMARY: u16 = 812;
 pub const ID_PROGRESS_SECONDARY: u16 = 813;
 const SS_OWNERDRAW_STYLE: i32 = 0x0000_000D;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProgressContentMetrics {
+    title_height: i32,
+    description_top: i32,
+    description_height: i32,
+    current_step_top: i32,
+    detail_top: i32,
+    detail_height: i32,
+    overall_top: i32,
+    step_top: i32,
+    bar_height: i32,
+    bar_top_offset: i32,
+    percent_top_offset: i32,
+    status_minimum_top: i32,
+}
+
+fn progress_content_metrics(dpi: u32) -> ProgressContentMetrics {
+    let s = |value| scale_for_dpi(value, dpi);
+    let overall_top = s(138);
+    let step_top = overall_top + s(46);
+    ProgressContentMetrics {
+        title_height: s(28),
+        description_top: s(30),
+        description_height: s(34),
+        current_step_top: s(70),
+        detail_top: s(96),
+        detail_height: s(32),
+        overall_top,
+        step_top,
+        bar_height: s(10),
+        bar_top_offset: s(24),
+        percent_top_offset: s(19),
+        status_minimum_top: step_top + s(38),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProgressValue {
@@ -236,6 +275,8 @@ pub struct ProgressPage {
     handles: ProgressPageHandles,
     state: LongTaskProgress,
     completion: ProgressCompletion,
+    font: Cell<HFONT>,
+    last_layout: Cell<(i32, i32, i32, i32, u32)>,
 }
 
 impl ProgressPage {
@@ -285,6 +326,8 @@ impl ProgressPage {
             },
             state: LongTaskProgress::default(),
             completion: ProgressCompletion::Generic,
+            font: Cell::new(HFONT::default()),
+            last_layout: Cell::new((0, 0, 0, 0, 96)),
         };
         page.update(initial);
         page.show(false);
@@ -304,6 +347,7 @@ impl ProgressPage {
         }
         self.completion = completion;
         self.update_commands();
+        self.relayout();
     }
 
     pub fn command_intent(&self, command_id: u16) -> Option<ProgressIntent> {
@@ -370,6 +414,9 @@ impl ProgressPage {
         if step_changed {
             let _ = windows::Win32::Graphics::Gdi::InvalidateRect(h.step_progress, None, false);
         }
+        if status_changed || current_commands != previous_commands {
+            self.relayout();
+        }
     }
 
     unsafe fn update_commands(&self) {
@@ -416,38 +463,64 @@ impl ProgressPage {
     }
 
     pub unsafe fn layout(&self, left: i32, top: i32, width: i32, height: i32, dpi: u32) {
+        self.last_layout.set((left, top, width, height, dpi));
         let s = |value: i32| scale_for_dpi(value, dpi);
         let h = self.handles;
         let content_width = width.max(0);
         let percent_width = s(48);
         let bar_width = (content_width - percent_width - s(8)).max(0);
-        move_control(h.title, left, top, content_width, s(30));
-        move_control(h.description, left, top + s(34), content_width, s(42));
-        move_control(h.current_step, left, top + s(92), content_width, s(24));
-        move_control(h.detail, left, top + s(120), content_width, s(46));
-        let overall_top = top + s(184);
+        let metrics = progress_content_metrics(dpi);
+        move_control(h.title, left, top, content_width, metrics.title_height);
+        move_control(
+            h.description,
+            left,
+            top + metrics.description_top,
+            content_width,
+            metrics.description_height,
+        );
+        move_control(
+            h.current_step,
+            left,
+            top + metrics.current_step_top,
+            content_width,
+            s(22),
+        );
+        move_control(
+            h.detail,
+            left,
+            top + metrics.detail_top,
+            content_width,
+            metrics.detail_height,
+        );
+        let overall_top = top + metrics.overall_top;
         move_control(h.overall_caption, left, overall_top, content_width, s(20));
         move_control(
             h.overall_progress,
             left,
-            overall_top + s(24),
+            overall_top + metrics.bar_top_offset,
             bar_width,
-            s(16),
+            metrics.bar_height,
         );
         move_control(
             h.overall_percent,
             left + bar_width + s(8),
-            overall_top + s(22),
+            overall_top + metrics.percent_top_offset,
             percent_width,
             s(20),
         );
-        let step_top = overall_top + s(62);
+        let step_top = top + metrics.step_top;
         move_control(h.step_caption, left, step_top, content_width, s(20));
-        move_control(h.step_progress, left, step_top + s(24), bar_width, s(16));
+        move_control(
+            h.step_progress,
+            left,
+            step_top + metrics.bar_top_offset,
+            bar_width,
+            metrics.bar_height,
+        );
         move_control(
             h.step_percent,
             left + bar_width + s(8),
-            step_top + s(22),
+            step_top + metrics.percent_top_offset,
             percent_width,
             s(20),
         );
@@ -469,7 +542,22 @@ impl ProgressPage {
                 right -= button_gap;
             }
         }
-        move_control(h.status, left, bottom - s(36), (right - left).max(0), s(28));
+        let status_width = (right - left).max(0);
+        let measured_status_height = measure_text(
+            h.status,
+            self.font.get(),
+            &self.state.status_text,
+            Some(status_width),
+        )
+        .height;
+        let status_minimum_top = top + metrics.status_minimum_top;
+        let (status_y, status_height) = progress_status_band(
+            bottom - s(6),
+            status_minimum_top,
+            measured_status_height,
+            s(28),
+        );
+        move_control(h.status, left, status_y, status_width, status_height);
     }
 
     pub unsafe fn show(&self, visible: bool) {
@@ -498,6 +586,7 @@ impl ProgressPage {
     }
 
     pub unsafe fn apply_font(&self, font: HFONT, heading_font: HFONT) {
+        self.font.set(font);
         for control in self.all_controls() {
             let _ = SendMessageW(control, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
         }
@@ -508,6 +597,13 @@ impl ProgressPage {
                 WPARAM(heading_font.0 as usize),
                 LPARAM(1),
             );
+        }
+    }
+
+    unsafe fn relayout(&self) {
+        let (left, top, width, height, dpi) = self.last_layout.get();
+        if width > 0 && height > 0 {
+            self.layout(left, top, width, height, dpi);
         }
     }
 
@@ -550,6 +646,17 @@ fn scale_for_dpi(value: i32, dpi: u32) -> i32 {
     ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32
 }
 
+fn progress_status_band(
+    bottom: i32,
+    minimum_top: i32,
+    measured_height: i32,
+    minimum_height: i32,
+) -> (i32, i32) {
+    let available = (bottom - minimum_top).max(0);
+    let height = measured_height.max(minimum_height).max(0).min(available);
+    (bottom - height, height)
+}
+
 unsafe fn command_button(parent: HWND, id: u16) -> windows::core::Result<HWND> {
     child(
         parent,
@@ -576,7 +683,7 @@ unsafe fn set_text(control: HWND, text: &str) {
 }
 
 unsafe fn move_control(control: HWND, x: i32, y: i32, width: i32, height: i32) {
-    let _ = MoveWindow(control, x, y, width.max(0), height.max(0), true);
+    let _ = MoveWindow(control, x, y, width.max(0), height.max(0), false);
 }
 
 #[cfg(test)]
@@ -676,5 +783,38 @@ mod tests {
         assert_eq!(scale_for_dpi(104, 144), 156);
         assert_eq!(scale_for_dpi(104, 192), 208);
         assert_eq!(scale_for_dpi(8, 120), 10);
+    }
+
+    #[test]
+    fn compact_progress_geometry_matches_pe_capsule_bars_at_every_supported_dpi() {
+        for dpi in [96, 120, 144, 192] {
+            let metrics = progress_content_metrics(dpi);
+            assert_eq!(metrics.bar_height, scale_for_dpi(10, dpi));
+            assert!(
+                metrics.description_top + metrics.description_height <= metrics.current_step_top
+            );
+            assert!(metrics.detail_top + metrics.detail_height <= metrics.overall_top);
+            assert!(
+                metrics.overall_top + metrics.bar_top_offset + metrics.bar_height
+                    <= metrics.step_top
+            );
+            assert!(
+                metrics.step_top + metrics.bar_top_offset + metrics.bar_height
+                    <= metrics.status_minimum_top
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_terminal_status_grows_upward_without_covering_progress_bars() {
+        let (short_top, short_height) = progress_status_band(600, 360, 20, 28);
+        let (long_top, long_height) = progress_status_band(600, 360, 96, 28);
+        assert_eq!(short_height, 28);
+        assert_eq!(long_height, 96);
+        assert!(long_top < short_top);
+        assert!(long_top >= 360);
+
+        let (clamped_top, clamped_height) = progress_status_band(400, 360, 200, 28);
+        assert_eq!((clamped_top, clamped_height), (360, 40));
     }
 }

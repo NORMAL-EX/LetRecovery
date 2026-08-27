@@ -11,16 +11,19 @@ C: drive full but you don't want to reinstall? **Lossless C: Expansion** in the 
 This feature only plans the operation from within normal Windows; the actual disk operation runs **after rebooting into WinPE** (a running system drive cannot be expanded online).
 :::
 
-## Two expansion methods
+## Currently Enabled Expansion Method
 
-After opening it, enter the target size, and the program will calculate two "ceilings":
+The current production path exposes pure extend only:
 
 | Method | Description | Risk |
 | --- | --- | --- |
 | **Method 1: Pure extend** | Target = current size + the **unallocated space immediately after** the C: drive. No data is moved. | Low (recommended) |
-| **Method 2: Move following partition** | Building on Method 1, it further **shrinks / moves** the data partition behind it (e.g. D:) to free up space. This moves data on that partition. | High, slower |
 
-When the target size you enter exceeds the "Method 1" ceiling, the interface displays a prominent warning, indicating that this will trigger data movement.
+The target must be the authenticated single-extent C: volume, with already-existing contiguous unallocated space immediately after it on the same disk. A requested size beyond that space fails closed before disk writes.
+
+::: warning Partition moving is not enabled
+Shrinking or moving a following partition, borrowing from a left-side donor, and every raw block move currently have no production entry point. Until canonical identities, one retained PhysicalDrive handle, and a recoverable consume journal span every stage, LetRecovery does not fall back to bare drive-letter authorization or experimental moves.
+:::
 
 ::: tip Minimum target size
 The target size cannot be smaller than the current size, and must be at least **used space + 1 GB**.
@@ -34,9 +37,9 @@ The target size cannot be smaller than the current size, and must be at least **
 4. Once expansion is complete, it reboots back into the system, with the C: drive enlarged and your data preserved.
 
 ::: tip No free space after the C: drive?
-If there is no unallocated space immediately after the C: drive at all, you can first use [One-Click Partition](/guide/toolbox) to free up space and then expand; or use "Method 2" directly (note its data-movement risk).
+If no unallocated space exists immediately after C:, the current lossless-expansion task stops. Back up first and use another verified method to re-plan the partition layout so contiguous free space follows the target, then retry pure extend. Do not treat this version as a partition-moving tool.
 :::
 
 ::: danger Back up important data first
-Although this feature is designed to be lossless, any operation involving the partition table and data movement carries risk. Back up important data before expanding, and make sure the power does not go out during the process.
+Although the current path does not move file data, extending a volume still changes the partition table and volume boundary. Back up important data before expanding, and make sure the power does not go out during the process.
 :::

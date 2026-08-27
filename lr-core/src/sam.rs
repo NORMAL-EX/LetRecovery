@@ -9,10 +9,11 @@
 //! 备份**（避免在目标系统留下含账户哈希的 SAM 副本），仅出错时保留以便恢复。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 
-use crate::registry::OfflineRegistry;
+use crate::registry::{OfflineRegistry, ReadOnlyAppHive, ReadOnlyOfflineHive};
 
 /// 离线清除目标系统中指定账户的密码（把 SAM 中该用户 V 结构的 NT/LM hash 长度清零）。
 ///
@@ -121,6 +122,179 @@ pub struct SamAccount {
     pub disabled: bool,
 }
 
+fn sam_account_views_match(indexed_names: &[String], accounts: &[SamAccount]) -> bool {
+    let mut indexed_names = indexed_names
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect::<Vec<_>>();
+    let mut record_names = accounts
+        .iter()
+        .map(|account| account.username.to_lowercase())
+        .collect::<Vec<_>>();
+    indexed_names.sort_unstable();
+    record_names.sort_unstable();
+    indexed_names == record_names
+}
+
+fn sam_users_key_from_root_subkeys(root_subkeys: &[String]) -> Result<Option<&'static str>> {
+    if root_subkeys.is_empty() {
+        // A generalized Microsoft install image can carry a valid, loadable but not-yet-
+        // initialized SAM hive. Windows Setup creates the account domain during specialize/OOBE.
+        return Ok(None);
+    }
+    if root_subkeys
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case("SAM"))
+    {
+        return Ok(Some("SAM\\Domains\\Account\\Users"));
+    }
+    if root_subkeys
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case("Domains"))
+    {
+        return Ok(Some("Domains\\Account\\Users"));
+    }
+    anyhow::bail!("loaded SAM hive has an unexpected root-key layout")
+}
+
+fn enumerate_accounts_from_app_hive(hive: &ReadOnlyAppHive) -> Result<Vec<SamAccount>> {
+    let root_subkeys = hive.subkey_names("")?;
+    let Some(users_key) = sam_users_key_from_root_subkeys(&root_subkeys)? else {
+        return Ok(Vec::new());
+    };
+    let rids = list_user_rids_from_app_hive(hive, users_key)?;
+    let mut accounts = Vec::new();
+    for rid in rids {
+        let user_key = format!("{users_key}\\{rid}");
+        let v = hive
+            .query_binary(&user_key, "V")
+            .map_err(|error| anyhow::anyhow!("failed to read SAM V data for RID {rid}: {error}"))?;
+        let name = parse_v_username(&v).ok_or_else(|| {
+            anyhow::anyhow!("invalid SAM V data for RID {rid}; enumeration stopped")
+        })?;
+        if name.is_empty() {
+            anyhow::bail!("SAM account name is empty for RID {rid}");
+        }
+        let f = hive
+            .query_binary(&user_key, "F")
+            .map_err(|error| anyhow::anyhow!("failed to read SAM F data for {name}: {error}"))?;
+        accounts.push(account_from_records(rid, name, &f)?);
+    }
+    verify_account_name_index(hive.subkey_names(&format!("{users_key}\\Names"))?, accounts)
+}
+
+fn enumerate_accounts_from_offline_hive(hive: &ReadOnlyOfflineHive) -> Result<Vec<SamAccount>> {
+    let root_subkeys = hive.subkey_names("")?;
+    let Some(users_key) = sam_users_key_from_root_subkeys(&root_subkeys)? else {
+        return Ok(Vec::new());
+    };
+    let rids = hive
+        .subkey_names(users_key)?
+        .into_iter()
+        .filter(|name| name.len() == 8 && name.chars().all(|c| c.is_ascii_hexdigit()))
+        .collect::<Vec<_>>();
+    let mut accounts = Vec::new();
+    for rid in rids {
+        let user_key = format!("{users_key}\\{rid}");
+        let v = hive
+            .query_binary(&user_key, "V")
+            .map_err(|error| anyhow::anyhow!("failed to read SAM V data for RID {rid}: {error}"))?;
+        let name = parse_v_username(&v).ok_or_else(|| {
+            anyhow::anyhow!("invalid SAM V data for RID {rid}; enumeration stopped")
+        })?;
+        if name.is_empty() {
+            anyhow::bail!("SAM account name is empty for RID {rid}");
+        }
+        let f = hive
+            .query_binary(&user_key, "F")
+            .map_err(|error| anyhow::anyhow!("failed to read SAM F data for {name}: {error}"))?;
+        accounts.push(account_from_records(rid, name, &f)?);
+    }
+    verify_account_name_index(hive.subkey_names(&format!("{users_key}\\Names"))?, accounts)
+}
+
+fn account_from_records(rid: String, name: String, f: &[u8]) -> Result<SamAccount> {
+    let flags = f
+        .get(0x38..0x3a)
+        .map(|slice| u16::from_le_bytes([slice[0], slice[1]]))
+        .ok_or_else(|| anyhow::anyhow!("invalid SAM F data for {name}"))?;
+    Ok(SamAccount {
+        username: name,
+        rid,
+        disabled: flags & 0x0001 != 0,
+    })
+}
+
+fn verify_account_name_index(
+    indexed_names: Vec<String>,
+    accounts: Vec<SamAccount>,
+) -> Result<Vec<SamAccount>> {
+    if !sam_account_views_match(&indexed_names, &accounts) {
+        anyhow::bail!(
+            "SAM Users\\Names index does not exactly match the parsed RID account records"
+        );
+    }
+    Ok(accounts)
+}
+
+fn read_accounts_from_loaded_hive(hive_name: &str) -> Result<Vec<SamAccount>> {
+    let root = format!("HKLM\\{hive_name}");
+    let root_subkeys = OfflineRegistry::subkey_names(&root)?;
+    let Some(users_key) = sam_users_key_from_root_subkeys(&root_subkeys)? else {
+        return Ok(Vec::new());
+    };
+    let users_key = format!("{root}\\{users_key}");
+    let rids = list_user_rids(&users_key)?;
+    let mut accounts = Vec::new();
+    for rid in rids {
+        let user_key = format!("{users_key}\\{rid}");
+        let v = reg_read_binary(&user_key, "V")
+            .map_err(|error| anyhow::anyhow!("failed to read SAM V data for RID {rid}: {error}"))?;
+        let name = parse_v_username(&v).ok_or_else(|| {
+            anyhow::anyhow!("invalid SAM V data for RID {rid}; enumeration stopped")
+        })?;
+        if name.is_empty() {
+            anyhow::bail!("SAM account name is empty for RID {rid}");
+        }
+        let f = reg_read_binary(&user_key, "F")
+            .map_err(|error| anyhow::anyhow!("failed to read SAM F data for {name}: {error}"))?;
+        accounts.push(account_from_records(rid, name, &f)?);
+    }
+    verify_account_name_index(
+        OfflineRegistry::subkey_names(&format!("{users_key}\\Names"))?,
+        accounts,
+    )
+}
+
+fn unique_read_only_hive_name() -> String {
+    static NEXT_HIVE: AtomicU64 = AtomicU64::new(0);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "LR_SAM_RO_{}_{}_{}",
+        std::process::id(),
+        nonce,
+        NEXT_HIVE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn enumerate_accounts_via_loaded_hive(sam_hive: &str) -> Result<Vec<SamAccount>> {
+    let hive_name = unique_read_only_hive_name();
+    OfflineRegistry::load_hive(&hive_name, sam_hive)?;
+    let operation = read_accounts_from_loaded_hive(&hive_name);
+    let unload = OfflineRegistry::unload_hive(&hive_name);
+    match (operation, unload) {
+        (Ok(accounts), Ok(())) => Ok(accounts),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation), Err(unload)) => anyhow::bail!(
+            "{operation}; additionally failed to unload fallback SAM hive {hive_name}: {unload}"
+        ),
+    }
+}
+
 /// 只读列出目标系统 SAM 中的本地账户（**不修改** SAM，不做备份）。
 ///
 /// - `target_partition`：目标系统盘，形如 `"C:"`。
@@ -131,53 +305,65 @@ pub fn list_accounts(target_partition: &str) -> Result<Vec<SamAccount>> {
         anyhow::bail!("目标 SAM 配置单元不存在: {}", sam_hive);
     }
 
-    // 只读枚举使用独立的挂载名，避免与清除流程（LR_SAM）冲突。
-    OfflineRegistry::load_hive("LR_SAM_RO", &sam_hive)
-        .map_err(|e| anyhow::anyhow!("加载 SAM 配置单元失败: {}", e))?;
-
-    let result = (|| -> Result<Vec<SamAccount>> {
-        let users_key = "HKLM\\LR_SAM_RO\\SAM\\Domains\\Account\\Users";
-        let rids = list_user_rids(users_key)?;
-        let mut accounts = Vec::new();
-        for rid in rids {
-            let user_key = format!("{}\\{}", users_key, rid);
-            let v = reg_read_binary(&user_key, "V").map_err(|error| {
-                anyhow::anyhow!("failed to read SAM V data for RID {rid}: {error}")
-            })?;
-            let name = parse_v_username(&v).ok_or_else(|| {
-                anyhow::anyhow!("invalid SAM V data for RID {rid}; enumeration stopped")
-            })?;
-            if name.is_empty() {
-                anyhow::bail!("SAM account name is empty for RID {rid}");
-            }
-            // 读取 F 结构判断账户是否被禁用（偏移 0x38 处 USHORT 标志位）。
-            let f = reg_read_binary(&user_key, "F").map_err(|error| {
-                anyhow::anyhow!("failed to read SAM F data for {name}: {error}")
-            })?;
-            let flags = f
-                .get(0x38..0x3a)
-                .map(|slice| u16::from_le_bytes([slice[0], slice[1]]))
-                .ok_or_else(|| anyhow::anyhow!("invalid SAM F data for {name}"))?;
-            let disabled = flags & 0x0001 != 0;
-            accounts.push(SamAccount {
-                username: name,
-                rid,
-                disabled,
-            });
-        }
-        Ok(accounts)
-    })();
-
-    let unload_result = OfflineRegistry::unload_hive("LR_SAM_RO")
-        .map_err(|error| anyhow::anyhow!("failed to unload read-only SAM hive: {error}"));
-    match (result, unload_result) {
-        (Err(operation), Err(unload)) => Err(anyhow::anyhow!(
-            "SAM enumeration failed: {operation}; additionally, {unload}"
-        )),
-        (Err(operation), Ok(())) => Err(operation),
-        (Ok(_), Err(unload)) => Err(unload),
-        (Ok(accounts), Ok(())) => Ok(accounts),
+    // Prefer RegLoadAppKeyW: it returns a private root handle, needs no backup/restore privilege,
+    // and unloads when the last handle closes. Some valid Microsoft system SAM templates are not
+    // accepted as application hives (observed ERROR_BADDB/1009 after applying the official
+    // 28000.2113 image). Microsoft's redistributable Offline Registry library validates and reads
+    // these hives without publishing them under HKLM and therefore without applying live-SAM ACLs.
+    // RegLoadKeyW remains the final Win7-compatible system-hive fallback: it requires
+    // SeRestorePrivilege plus SeBackupPrivilege and must be paired with RegUnLoadKeyW. Every path
+    // is read-only, verifies both SAM account views, and treats an explicit close/unload failure as
+    // an error. API contracts:
+    // https://learn.microsoft.com/windows/win32/api/winreg/nf-winreg-regloadappkeyw
+    // https://learn.microsoft.com/windows-hardware/drivers/devtest/offline-registry-library
+    // https://learn.microsoft.com/windows-hardware/drivers/devtest/oropenhive
+    // https://learn.microsoft.com/windows-hardware/drivers/devtest/orenumkey
+    // https://learn.microsoft.com/windows-hardware/drivers/devtest/orgetvalue
+    // https://learn.microsoft.com/windows/win32/api/winreg/nf-winreg-regloadkeyw
+    // https://learn.microsoft.com/windows/win32/api/winreg/nf-winreg-regunloadkeyw
+    let app_result = match ReadOnlyAppHive::open(Path::new(&sam_hive)) {
+        Ok(hive) => enumerate_accounts_from_app_hive(&hive),
+        Err(error) => Err(error),
+    };
+    if let Ok(accounts) = app_result {
+        return Ok(accounts);
     }
+    let app_error = app_result.unwrap_err();
+
+    let offline_result = match ReadOnlyOfflineHive::open(Path::new(&sam_hive)) {
+        Ok(hive) => {
+            let operation = enumerate_accounts_from_offline_hive(&hive);
+            let close = hive.close();
+            match (operation, close) {
+                (Ok(accounts), Ok(())) => Ok(accounts),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(_), Err(error)) => Err(error),
+                (Err(operation), Err(close)) => anyhow::bail!(
+                    "{operation}; additionally failed to close the Offline Registry SAM hive: {close}"
+                ),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    if let Ok(accounts) = offline_result {
+        return Ok(accounts);
+    }
+    let offline_error = offline_result.unwrap_err();
+
+    enumerate_accounts_via_loaded_hive(&sam_hive).map_err(|fallback_error| {
+        anyhow::anyhow!(
+            "RegLoadAppKeyW SAM inspection failed: {app_error}; Microsoft Offline Registry inspection failed: {offline_error}; RegLoadKeyW fallback also failed: {fallback_error}"
+        )
+    })
+}
+
+fn list_user_rids_from_app_hive(hive: &ReadOnlyAppHive, users_key: &str) -> Result<Vec<String>> {
+    hive.subkey_names(users_key).map(|names| {
+        names
+            .into_iter()
+            .filter(|name| name.len() == 8 && name.chars().all(|c| c.is_ascii_hexdigit()))
+            .collect()
+    })
 }
 
 /// 枚举 `Users` 键下的用户 RID 子键（8 位十六进制，如 000001F4）。
@@ -264,6 +450,64 @@ fn enable_account_f(f: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn account(rid: &str, username: &str) -> SamAccount {
+        SamAccount {
+            username: username.to_owned(),
+            rid: rid.to_owned(),
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn sam_name_index_must_exactly_cover_rid_records() {
+        let records = vec![
+            account("000001F4", "Administrator"),
+            account("000003E8", "defaultuser0"),
+        ];
+        assert!(sam_account_views_match(
+            &["DEFAULTUSER0".to_owned(), "administrator".to_owned()],
+            &records
+        ));
+        assert!(!sam_account_views_match(
+            &["Administrator".to_owned(), "ExistingUser".to_owned()],
+            &records
+        ));
+    }
+
+    #[test]
+    fn sam_root_layout_distinguishes_empty_template_and_initialized_hives() {
+        assert_eq!(sam_users_key_from_root_subkeys(&[]).unwrap(), None);
+        assert_eq!(
+            sam_users_key_from_root_subkeys(&["SAM".to_owned()]).unwrap(),
+            Some("SAM\\Domains\\Account\\Users")
+        );
+        assert_eq!(
+            sam_users_key_from_root_subkeys(&["Domains".to_owned()]).unwrap(),
+            Some("Domains\\Account\\Users")
+        );
+        assert!(sam_users_key_from_root_subkeys(&["Unexpected".to_owned()]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires LETRECOVERY_SAM_FIXTURE_ROOT pointing at an extracted offline Windows root"]
+    fn reads_accounts_from_an_external_offline_windows_fixture() {
+        let root = std::env::var("LETRECOVERY_SAM_FIXTURE_ROOT")
+            .expect("LETRECOVERY_SAM_FIXTURE_ROOT must identify the extracted Windows root");
+        let sam_path = Path::new(&root).join("Windows\\System32\\config\\SAM");
+        let hive = ReadOnlyOfflineHive::open(&sam_path)
+            .expect("external SAM must load through Microsoft Offline Registry");
+        eprintln!(
+            "external SAM root subkeys: {:?}",
+            hive.subkey_names("").expect("enumerate external SAM root")
+        );
+        hive.close().expect("close external offline SAM");
+        let accounts = list_accounts(&root).expect("external offline SAM must be readable");
+        eprintln!("external offline SAM accounts: {accounts:?}");
+        assert!(accounts
+            .iter()
+            .all(|account| !account.username.trim().is_empty()));
+    }
 
     /// 合成一个最小可解析的 SAM "V" 结构。
     fn build_v(username: &str, uoff: u32, lm_len: u32, nt_len: u32) -> Vec<u8> {

@@ -40,6 +40,9 @@ foreach ($relativePath in $requiredFiles) {
     Resolve-ExistingFile -Path (Join-Path $source $relativePath) -Description "Required package file" | Out-Null
 }
 
+$releaseTreeAudit = Join-Path $PSScriptRoot "..\.github\scripts\assert-release-tree-clean.ps1"
+& $releaseTreeAudit -Root $source
+
 $appExe = Join-Path $source "LetRecovery.exe"
 $versionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($appExe)
 $numericVersion = $versionInfo.FileVersion

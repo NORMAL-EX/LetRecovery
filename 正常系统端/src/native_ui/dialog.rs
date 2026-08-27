@@ -1012,7 +1012,14 @@ unsafe extern "system" fn dialog_proc(
         }
         WM_DRAWITEM => {
             if let Some(state) = state {
-                state.draw_item(&*(lparam.0 as *const DRAWITEMSTRUCT));
+                let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
+                // ODT_STATIC (5) is reserved for content-owned custom visuals such as the PE
+                // maintenance ProgressRing. DialogShell owns button/header painting; forward a
+                // custom static to the business window exactly like WM_COMMAND/WM_NOTIFY.
+                if item.CtlType.0 == 5 && !state.owner.is_invalid() {
+                    return SendMessageW(state.owner, message, wparam, lparam);
+                }
+                state.draw_item(item);
                 return LRESULT(1);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)

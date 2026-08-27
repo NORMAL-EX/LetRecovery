@@ -61,8 +61,9 @@ description: 下载、运行 LetRecovery 并完成第一次重装。
 
 出问题反馈时请附上：
 
-- **正常系统端**：`<程序目录>\log\LetRecovery.<日期>.log`（如 `LetRecovery.2026-06-26.log`）
-- **PE 端**：PE exe 同目录的 `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`
+- **ViaPE 安装成功后（优先上传）**：正常端与 PE 端已合并为 `<新系统盘>\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`。
+- **格式化或首次写入后安装失败**：合并日志会尽量保存到 `<数据分区>\LetRecovery_Data\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`。
+- **交接前失败或合并日志不存在**：正常系统端点击 **关于 → 打开日志目录**，文件位于 `<LetRecovery.exe 所在目录>\log\LetRecovery.<日期>.log`（如 `LetRecovery.2026-06-26.log`）；原始 PE 日志位于 `<LetRecoveryPE.exe 所在目录>\LetRecoveryPE.log`，正式发布包默认是 `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`。
 
 ## 怎么看版本号？
 

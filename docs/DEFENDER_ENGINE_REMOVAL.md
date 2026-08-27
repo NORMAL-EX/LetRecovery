@@ -2,9 +2,9 @@
 
 ## 用户语义
 
-高级选项中的“深度移除 Defender 杀毒引擎”只处理 Microsoft Defender Antivirus。它不是“删除 Windows 安全体系”，也不是让 LetRecovery 绕过第三方安全软件。
+高级选项中的“移除 Defender 与 Windows 安全中心”会深度移除 Microsoft Defender Antivirus 杀毒引擎，并尽力移除 Windows Security UI 的 AppX 注册。它不会删除防火墙、安全中心服务、UAC、VBS、SmartScreen、MDE 或第三方安全软件。
 
-配置文件为兼容旧版本仍使用字段 `disable_windows_defender`。该字段为 `true` 时，正常端直接安装路径和 PE 端都调用 `lr_core::defender_removal::remove_offline_defender_engine`；不得在任一端复制一份独立删除脚本。
+配置文件为兼容旧版本仍使用字段 `disable_windows_defender`。该字段为 `true` 时，正常端直接安装路径和 PE 端都调用 `lr_core::defender_removal::remove_offline_defender_engine`；Windows Security UI 则复用 `lr_core::sec_health_ui` 的精确 AppX 边界，不得在任一端复制一份独立删除脚本。
 
 ## 为什么会出现“文件包含病毒或潜在的垃圾软件”
 
@@ -43,13 +43,15 @@
 - `Windows\System32\drivers\WdNisDrv.sys`
 - `Windows\System32\Tasks\Microsoft\Windows\Windows Defender`
 
-同时删除 Defender 自身计划任务的 `TaskCache` 树和经过 GUID 格式验证的对应任务记录，以及 `SOFTWARE\Microsoft\Windows Defender` 引擎状态树。保留的 Defender 策略键用于在缺失文件被系统维护重新放回时继续阻止引擎自动启用；现代 Windows 可能忽略旧 `DisableAntiSpyware` 值，因此策略只属于纵深防御，不能代替文件、驱动、服务和结果复核。
+同时删除 Defender 自身计划任务的 `TaskCache` 树和经过 GUID 格式验证的对应任务记录，以及 `SOFTWARE\Microsoft\Windows Defender` 引擎状态树。不得写入已废弃的 Defender 策略键来冒充移除成功；文件、驱动、服务、任务和删除后回读才是引擎移除的承重边界。
+
+Windows Security UI 只允许精确处理 `Microsoft.SecHealthUI_8wekyb3d8bbwe` 与 `Microsoft.Windows.SecHealthUI_cw5n1h2txyewy`。离线阶段必须从 fresh DISM inventory 获取完整包名、移除 provisioning 并再次枚举回读；内置 Win10/11 无人值守路径可在 `specialize` 阶段按完整包名执行 `Remove-AppxPackage -AllUsers` 并回读。禁止通配、删除 `WindowsApps`/`SystemApps` 目录或修改 `AppxAllUserStore`。UI 包可能标记为 `NonRemovable`，此时失败只记录 warning，不得伪装为成功，也不得阻断系统安装。
 
 ## 明确保留
 
 实现不得删除或禁用以下组件：
 
-- Windows Security UI 与 `SecurityHealthService`
+- `SecurityHealthService`（不保留 Windows Security UI 包）
 - Windows Security Center `wscsvc`
 - Windows Defender Firewall `mpssvc`
 - UAC
@@ -80,7 +82,7 @@
 4. `fltmc filters` 不包含 `WdFilter`。
 5. 删除白名单中的目录和驱动不存在。
 6. `SecurityHealthService`、`wscsvc`、`mpssvc` 和 `Sense`（镜像原本包含时）仍存在。
-7. Windows 防火墙、UAC、SmartScreen 和 Windows Security UI 仍可用。
+7. Windows 防火墙、UAC 和 SmartScreen 仍可用；Windows Security UI 的两个精确 PFN 均重新枚举确认不存在，或日志明确记录 `NonRemovable`/其它卸载失败警告。
 8. 复制此前触发 0x800700E1 的同一 LetRecovery 构建，确认不再由 Microsoft Defender Antivirus 阻止；同时记录是否出现独立 SmartScreen 提示。
 9. 再次运行 LetRecovery，确认程序能够启动并读取配置。
 

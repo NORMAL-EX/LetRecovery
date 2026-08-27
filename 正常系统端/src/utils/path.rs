@@ -13,11 +13,6 @@ pub fn get_bin_dir() -> PathBuf {
     get_exe_dir().join("bin")
 }
 
-/// 获取 PE 目录路径（统一放在 bin/pe，注意小写）
-pub fn get_pe_dir() -> PathBuf {
-    get_bin_dir().join("pe")
-}
-
 /// 获取联网下载 PE 的受管缓存目录。
 ///
 /// `bin/pe` 是随包分发、允许用户自行定制的本地 PE；联网下载必须放在独立目录，
@@ -57,9 +52,4 @@ pub fn get_diskpart_scripts_dir() -> PathBuf {
 /// 获取 uefiseven 目录路径（bin/uefiseven）
 pub fn get_uefiseven_dir() -> PathBuf {
     get_bin_dir().join("uefiseven")
-}
-
-/// 获取临时目录
-pub fn get_temp_dir() -> PathBuf {
-    get_exe_dir().join("temp")
 }

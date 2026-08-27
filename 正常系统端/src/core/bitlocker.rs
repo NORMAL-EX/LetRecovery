@@ -443,12 +443,54 @@ impl BitLockerManager {
     /// 获取指定驱动器的恢复密钥（数字密码）
     #[cfg(windows)]
     pub fn get_recovery_key(&self, drive: &str) -> Result<String, String> {
-        let drive_letter = drive.chars().next().unwrap_or('C');
+        let drive_letter = drive
+            .chars()
+            .next()
+            .filter(char::is_ascii_alphabetic)
+            .ok_or_else(|| tr!("无效的驱动器号"))?;
         let drive = format!("{}:", drive_letter);
 
         // 无论是否使用 fveapi，获取恢复密钥目前主要依赖 manage-bde
         // 因为 fveapi 获取密钥需要复杂的结构体解析，且未公开文档
         self.get_recovery_key_manage_bde(&drive)
+    }
+
+    /// Best-effort collection for the optional PE-maintenance handoff. `GetLogicalDrives` is the
+    /// authoritative drive-letter assignment inventory; individual volumes without an accessible
+    /// numerical protector are skipped and never turn the maintenance boot into a failure.
+    #[cfg(windows)]
+    pub fn collect_recovery_keys_best_effort(&self) -> Vec<String> {
+        let mask = match lr_core::windows_storage::assigned_drive_letter_mask() {
+            Ok(mask) => mask,
+            Err(error) => {
+                log::warn!("[PE MAINTENANCE] 无法枚举盘符，跳过 BitLocker 密钥收集: {error}");
+                return Vec::new();
+            }
+        };
+        let mut keys = Vec::new();
+        for index in 0..26_u32 {
+            if mask & (1_u32 << index) == 0 {
+                continue;
+            }
+            let letter = char::from(b'A' + index as u8);
+            match self.get_recovery_key(&format!("{letter}:")) {
+                Ok(key) if !keys.contains(&key) => keys.push(key),
+                Ok(_) => {}
+                Err(error) => log::info!(
+                    "[PE MAINTENANCE] 卷 {letter}: 没有可获取的数字恢复密码，已跳过: {error}"
+                ),
+            }
+        }
+        log::info!(
+            "[PE MAINTENANCE] BitLocker 数字恢复密码收集完成: count={}",
+            keys.len()
+        );
+        keys
+    }
+
+    #[cfg(not(windows))]
+    pub fn collect_recovery_keys_best_effort(&self) -> Vec<String> {
+        Vec::new()
     }
 
     #[cfg(not(windows))]
@@ -459,19 +501,24 @@ impl BitLockerManager {
     /// 使用 manage-bde 获取恢复密钥
     #[cfg(windows)]
     fn get_recovery_key_manage_bde(&self, drive: &str) -> Result<String, String> {
-        use std::process::Command;
+        use lr_core::command::{CommandExecutor, CommandRequest, SystemCommandExecutor};
 
         // manage-bde -protectors -get C: -Type RecoveryPassword
-        let output = match Command::new("manage-bde")
-            .args(["-protectors", "-get", drive, "-Type", "RecoveryPassword"])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output()
-        {
-            Ok(o) => o,
-            Err(e) => return Err(tr!("执行命令失败: {}", e)),
-        };
-
-        let stdout = decode_windows_output(&output.stdout);
+        let request = CommandRequest::new("manage-bde.exe").args([
+            "-protectors",
+            "-get",
+            drive,
+            "-Type",
+            "RecoveryPassword",
+        ]);
+        let output = SystemCommandExecutor
+            .execute(&request)
+            .map_err(|error| tr!("执行命令失败: {}", error))?;
+        if !output.succeeded() {
+            let exit_code = format!("{:?}", output.exit_code());
+            return Err(tr!("获取恢复密钥失败，命令退出代码：{}", exit_code));
+        }
+        let stdout = decode_windows_output(output.stdout());
 
         // 解析输出寻找 48 位数字密码
         // 格式通常为：111111-222222-333333-444444-555555-666666-777777-888888
@@ -995,14 +1042,6 @@ impl BitLockerManager {
         }
     }
 
-    /// 检查指定驱动器是否可以进行彻底解密
-    pub fn can_decrypt(&self, drive_letter: char) -> bool {
-        matches!(
-            self.get_status(drive_letter),
-            VolumeStatus::EncryptedUnlocked
-        )
-    }
-
     /// 挂起 BitLocker 保护（manage-bde -protectors -disable）。
     /// 卷仍解密可读，但密钥以明文存放；重启后仍挂起，直到手动恢复。常用于换 BIOS/固件前。
     #[cfg(windows)]
@@ -1222,31 +1261,6 @@ impl BitLockerManager {
             get_protection_method(&stdout),
             get_encryption_percentage(&stdout),
         )
-    }
-
-    /// 获取所有需要解锁的卷
-    pub fn get_locked_volumes(&self) -> Vec<VolumeInfo> {
-        self.get_encrypted_volumes()
-            .into_iter()
-            .filter(|v| v.needs_unlock())
-            .collect()
-    }
-
-    /// 检查是否有任何锁定的卷
-    pub fn has_locked_volumes(&self) -> bool {
-        !self.get_locked_volumes().is_empty()
-    }
-
-    /// 检查指定的分区列表中是否有锁定的卷
-    pub fn check_partitions_locked(&self, partitions: &[&str]) -> Vec<String> {
-        partitions
-            .iter()
-            .filter(|p| {
-                let letter = p.chars().next().unwrap_or('C');
-                self.needs_unlock(letter)
-            })
-            .map(|p| p.to_string())
-            .collect()
     }
 }
 
@@ -1538,65 +1552,6 @@ fn get_volume_info(drive: &str) -> (String, u64) {
 #[cfg(not(windows))]
 fn get_volume_info(_drive: &str) -> (String, u64) {
     (String::new(), 0)
-}
-
-// ==================== 便捷函数 ====================
-
-/// 检查是否有任何BitLocker锁定的分区
-pub fn has_locked_partitions() -> bool {
-    BitLockerManager::new().has_locked_volumes()
-}
-
-/// 获取所有锁定的分区
-pub fn get_locked_partitions() -> Vec<VolumeInfo> {
-    BitLockerManager::new().get_locked_volumes()
-}
-
-/// 获取所有加密的分区（包括已解锁的）
-pub fn get_encrypted_partitions() -> Vec<VolumeInfo> {
-    BitLockerManager::new().get_encrypted_volumes()
-}
-
-/// 检查指定分区是否需要解锁
-pub fn partition_needs_unlock(drive: &str) -> bool {
-    let letter = drive.chars().next().unwrap_or('C');
-    BitLockerManager::new().needs_unlock(letter)
-}
-
-/// 使用密码解锁分区
-pub fn unlock_partition_with_password(drive: &str, password: &str) -> UnlockResult {
-    BitLockerManager::new().unlock_with_password(drive, password)
-}
-
-/// 使用恢复密钥解锁分区
-pub fn unlock_partition_with_recovery_key(drive: &str, recovery_key: &str) -> UnlockResult {
-    BitLockerManager::new().unlock_with_recovery_key(drive, recovery_key)
-}
-
-/// 彻底解密分区（关闭BitLocker加密）
-pub fn decrypt_partition(drive: &str) -> DecryptResult {
-    BitLockerManager::new().decrypt(drive)
-}
-
-/// 检查指定分区是否可以进行彻底解密
-pub fn partition_can_decrypt(drive: &str) -> bool {
-    let letter = drive.chars().next().unwrap_or('C');
-    BitLockerManager::new().can_decrypt(letter)
-}
-
-/// 获取指定分区的恢复密钥
-pub fn get_recovery_key_partition(drive: &str) -> Result<String, String> {
-    BitLockerManager::new().get_recovery_key(drive)
-}
-
-/// 挂起指定分区的 BitLocker 保护
-pub fn suspend_partition_protection(drive: &str) -> Result<String, String> {
-    BitLockerManager::new().suspend_protection(drive)
-}
-
-/// 恢复指定分区的 BitLocker 保护
-pub fn resume_partition_protection(drive: &str) -> Result<String, String> {
-    BitLockerManager::new().resume_protection(drive)
 }
 
 #[cfg(test)]

@@ -3,16 +3,16 @@
 
 use crate::{
     download::config::{
-        EasyModeConfig, GpuDriverList, OnlineGpuDriver, OnlinePE, OnlineSoftware, OnlineSystem,
-        SoftwareList,
+        EasyModeConfig, OnlinePE, OnlineSoftware, OnlineSystem, SoftwareCategory,
+        SoftwareCategoryList,
     },
     tr,
 };
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-/// v3 单文件资源目录。正常情况下只需要一次 HTTP 请求。
-pub const SERVER_V3_URL: &str = "https://letrecovery.cloud-pe.cn/v3/index.json";
+/// v4 单文件资源目录。正常情况下只需要一次 HTTP 请求。
+pub const SERVER_V4_URL: &str = "https://letrecovery.cloud-pe.cn/v4/";
 
 type RemoteConfigContents = (
     Option<String>,
@@ -28,10 +28,10 @@ type RemoteConfigContents = (
 pub enum SystemImageMode {
     /// 每次启动从微软 MCT 产品目录获取当前正式版长期 ESD。
     Microsoft = 1,
-    /// 只使用 v3 API 的 `data.system_images`。
+    /// 只使用 v4 API 的 `data.system_images`。
     #[default]
     Api = 2,
-    /// 微软官方镜像在前，随后合并 v3 API 镜像。
+    /// 微软官方镜像在前，随后合并 v4 API 镜像。
     MicrosoftAndApi = 3,
 }
 
@@ -53,26 +53,17 @@ fn enabled_by_default() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-struct V3CatalogResponse {
-    schema_version: u32,
-    /// 兼容服务端把模式放在根对象的早期实现；正式位置是 `data` 内。
-    #[serde(
-        default,
-        alias = "mode",
-        deserialize_with = "deserialize_optional_mode"
-    )]
-    system_image_mode: Option<u8>,
-    data: V3CatalogData,
+struct V4CatalogResponse {
+    data: V4CatalogData,
 }
 
 #[derive(Debug, Deserialize)]
-struct V3CatalogData {
-    pe: Vec<V3PeEntry>,
+struct V4CatalogData {
+    pe: Vec<V4PeEntry>,
     #[serde(default)]
-    system_images: Vec<V3SystemEntry>,
+    system_images: Vec<V4SystemEntry>,
     easy_mode: EasyModeConfig,
-    software: Vec<V3SoftwareEntry>,
-    gpu_drivers: Vec<V3GpuDriverEntry>,
+    software: Vec<V4SoftwareCategory>,
     /// 1=微软官方，2=API，3=微软官方+API；缺失时必须保持模式1。
     #[serde(
         default,
@@ -106,7 +97,7 @@ where
 }
 
 #[derive(Debug, Deserialize)]
-struct V3PeEntry {
+struct V4PeEntry {
     #[serde(default = "enabled_by_default")]
     enabled: bool,
     #[serde(flatten)]
@@ -114,27 +105,30 @@ struct V3PeEntry {
 }
 
 #[derive(Debug, Deserialize)]
-struct V3SystemEntry {
+struct V4SystemEntry {
     #[serde(default = "enabled_by_default")]
     enabled: bool,
-    #[serde(flatten)]
-    value: OnlineSystem,
+    download_url: String,
+    display_name: String,
+    filename: Option<String>,
+    #[serde(default)]
+    md5: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    os: Option<u8>,
+    #[serde(default)]
+    legacy_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct V3SoftwareEntry {
-    #[serde(default = "enabled_by_default")]
-    enabled: bool,
-    #[serde(flatten)]
-    value: OnlineSoftware,
-}
-
-#[derive(Debug, Deserialize)]
-struct V3GpuDriverEntry {
-    #[serde(default = "enabled_by_default")]
-    enabled: bool,
-    #[serde(flatten)]
-    value: OnlineGpuDriver,
+struct V4SoftwareCategory {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    items: Vec<OnlineSoftware>,
 }
 
 /// 远程配置
@@ -148,7 +142,7 @@ pub struct RemoteConfig {
     pub soft_content: Option<String>,
     /// 小白模式配置内容（从服务器获取）
     pub easy_content: Option<String>,
-    /// GPU驱动列表内容（从服务器获取）
+    /// 旧调用链兼容字段；v4 不再提供独立显卡驱动目录。
     pub gpu_content: Option<String>,
     /// 是否加载成功
     pub loaded: bool,
@@ -161,7 +155,7 @@ pub struct RemoteConfig {
 impl RemoteConfig {
     /// 从服务器加载配置
     ///
-    /// 只读取固定的 v3 单文件目录。请求或解析失败时直接返回错误，
+    /// 只读取固定的 v4 单文件目录。请求或解析失败时直接返回错误，
     /// 不再静默回退到旧版 v2 多文件目录。
     pub fn load_from_server() -> Self {
         let mut config = RemoteConfig::default();
@@ -195,14 +189,14 @@ impl RemoteConfig {
         config
     }
 
-    /// 获取 v3 单文件目录。v3 是唯一受支持的远程目录协议。
+    /// 获取 v4 单文件目录。v4 是唯一受支持的远程目录协议。
     fn fetch_config() -> Result<RemoteConfigContents> {
         let native_client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .context(tr!("创建 HTTP 客户端失败"))?;
 
-        let mut contents = match Self::fetch_v3_config(&native_client) {
+        let mut contents = match Self::fetch_v4_config(&native_client) {
             Ok(contents) => contents,
             Err(native_error) => {
                 // Windows 7 frequently has a stale WinHTTP/IE proxy or a Schannel installation
@@ -211,7 +205,7 @@ impl RemoteConfig {
                 // and uses the bundled WebPKI root set, without weakening certificate checks or
                 // changing the transport policy for user-provided URLs.
                 log::warn!(
-                    "系统 TLS/代理路径无法读取固定 v3 目录，改用直连 Rustls 重试: {native_error:#}"
+                    "系统 TLS/代理路径无法读取固定 v4 目录，改用直连 Rustls 重试: {native_error:#}"
                 );
                 let direct_client = reqwest::blocking::Client::builder()
                     .use_rustls_tls()
@@ -219,10 +213,10 @@ impl RemoteConfig {
                     .timeout(std::time::Duration::from_secs(10))
                     .build()
                     .context(tr!("创建兼容 HTTP 客户端失败"))?;
-                Self::fetch_v3_config(&direct_client).map_err(|direct_error| {
+                Self::fetch_v4_config(&direct_client).map_err(|direct_error| {
                     anyhow::anyhow!(
                         "{}; system TLS/proxy error: {native_error:#}; direct rustls error: {direct_error:#}",
-                        tr!("v3 远程资源目录不可用")
+                        tr!("v4 远程资源目录不可用")
                     )
                 })?
             }
@@ -261,14 +255,14 @@ impl RemoteConfig {
             serde_json::to_string(&resolved_systems)
                 .context("serialize resolved system image catalogue")?,
         );
-        log::info!("远程资源目录已通过 v3 单请求加载");
+        log::info!("远程资源目录已通过 v4 单请求加载");
         Ok(contents)
     }
 
-    fn fetch_v3_config(client: &reqwest::blocking::Client) -> Result<RemoteConfigContents> {
-        log::info!("请求 v3 服务器配置: {}", SERVER_V3_URL);
+    fn fetch_v4_config(client: &reqwest::blocking::Client) -> Result<RemoteConfigContents> {
+        log::info!("请求 v4 服务器配置: {}", SERVER_V4_URL);
         let response = client
-            .get(SERVER_V3_URL)
+            .get(SERVER_V4_URL)
             .send()
             .context(tr!("请求服务器配置失败"))?;
 
@@ -276,20 +270,15 @@ impl RemoteConfig {
             anyhow::bail!("{}", tr!("服务器返回错误状态码: {}", response.status()));
         }
 
-        let catalog: V3CatalogResponse = response.json().context(tr!("解析服务器响应失败"))?;
-        Self::v3_catalog_to_contents(catalog)
+        let catalog: V4CatalogResponse = response.json().context(tr!("解析服务器响应失败"))?;
+        Self::v4_catalog_to_contents(catalog)
     }
 
-    fn v3_catalog_to_contents(catalog: V3CatalogResponse) -> Result<RemoteConfigContents> {
-        if catalog.schema_version != 3 {
-            anyhow::bail!("unsupported v3 schema version: {}", catalog.schema_version);
-        }
-
+    fn v4_catalog_to_contents(catalog: V4CatalogResponse) -> Result<RemoteConfigContents> {
         let mode = SystemImageMode::try_from(
             catalog
                 .data
                 .system_image_mode
-                .or(catalog.system_image_mode)
                 .unwrap_or(SystemImageMode::Api as u8),
         )?;
         let pe_list: Vec<OnlinePE> = catalog
@@ -304,66 +293,55 @@ impl RemoteConfig {
             .system_images
             .into_iter()
             .filter(|entry| entry.enabled)
-            .map(|entry| entry.value)
+            .map(|entry| OnlineSystem {
+                download_url: entry.download_url,
+                display_name: entry.display_name,
+                is_win11: entry.os == Some(11)
+                    || entry
+                        .legacy_type
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case("win11")),
+                filename: entry.filename,
+                md5: entry.md5,
+                sha256: entry.sha256,
+            })
             .collect();
         if pe_list.is_empty() {
-            anyhow::bail!("v3 catalogue must contain an enabled PE entry");
+            anyhow::bail!("v4 catalogue must contain an enabled PE entry");
         }
         if matches!(mode, SystemImageMode::Api) && system_list.is_empty() {
             anyhow::bail!("system image mode 2 requires an enabled API system image entry");
         }
 
-        let software = catalog
+        let categories: Vec<SoftwareCategory> = catalog
             .data
             .software
             .into_iter()
-            .filter(|entry| entry.enabled)
-            .map(|entry| entry.value)
-            .collect();
-        let gpu_drivers = catalog
-            .data
-            .gpu_drivers
-            .into_iter()
-            .filter(|entry| entry.enabled)
-            .map(|entry| entry.value)
+            .map(|entry| SoftwareCategory {
+                id: entry.id,
+                name: entry.name,
+                description: entry.description,
+                items: entry.items,
+            })
+            .filter(|entry| !entry.items.is_empty())
             .collect();
 
-        let pe_content = serde_json::to_string(&pe_list).context("serialize v3 PE catalogue")?;
+        let pe_content = serde_json::to_string(&pe_list).context("serialize v4 PE catalogue")?;
         let dl_content =
-            serde_json::to_string(&system_list).context("serialize v3 system catalogue")?;
-        let soft_content = serde_json::to_string(&SoftwareList { software })
-            .context("serialize v3 software catalogue")?;
+            serde_json::to_string(&system_list).context("serialize v4 system catalogue")?;
+        let soft_content = serde_json::to_string(&SoftwareCategoryList { categories })
+            .context("serialize v4 software catalogue")?;
         let easy_content = serde_json::to_string(&catalog.data.easy_mode)
-            .context("serialize v3 easy-mode catalogue")?;
-        let gpu_content = serde_json::to_string(&GpuDriverList {
-            software: gpu_drivers,
-        })
-        .context("serialize v3 GPU catalogue")?;
+            .context("serialize v4 easy-mode catalogue")?;
 
         Ok((
             Some(pe_content),
             Some(dl_content),
             Some(soft_content),
             Some(easy_content),
-            Some(gpu_content),
+            None,
             mode,
         ))
-    }
-
-    /// 检查 PE 配置是否可用
-    pub fn is_pe_available(&self) -> bool {
-        self.pe_content
-            .as_ref()
-            .map(|c| !c.trim().is_empty())
-            .unwrap_or(false)
-    }
-
-    /// 检查系统镜像配置是否可用
-    pub fn is_dl_available(&self) -> bool {
-        self.dl_content
-            .as_ref()
-            .map(|c| !c.trim().is_empty())
-            .unwrap_or(false)
     }
 }
 
@@ -401,9 +379,8 @@ mod tests {
     use super::*;
     use crate::download::config::ConfigManager;
 
-    const V3_FIXTURE: &str = r#"
+    const V4_FIXTURE: &str = r#"
     {
-      "schema_version": 3,
       "data": {
         "pe": [
           {
@@ -419,13 +396,17 @@ mod tests {
           {
             "download_url": "https://example.com/windows-11.esd",
             "display_name": "Windows 11",
-            "is_win11": true,
+            "legacy_type": "Win11",
+            "filename": "windows-11.esd",
+            "os": 11,
             "enabled": true
           },
           {
             "download_url": "https://example.com/disabled.esd",
             "display_name": "Disabled",
-            "is_win11": false,
+            "legacy_type": "Win10",
+            "filename": "disabled.esd",
+            "os": 10,
             "enabled": false
           }
         ],
@@ -442,35 +423,33 @@ mod tests {
         },
         "software": [
           {
-            "name": "Tool",
-            "description": "Description",
-            "update_date": "2026-07-15",
-            "file_size": "1 MB",
-            "download_url": "https://example.com/tool.exe",
-            "filename": "tool.exe",
-            "enabled": true
+            "id": "utility",
+            "name": "常用工具",
+            "description": "Utilities",
+            "count": 1,
+            "items": [{
+              "id": "tool",
+              "name": "Tool",
+              "description": "Description",
+              "download_url": "https://example.com/tool.exe",
+              "filename": "tool.exe",
+              "version": "1.0",
+              "silent_command": "\"{installer}\" /S",
+            "requires_admin": true
+            ,"vm_tools": false
+            }]
           }
         ],
-        "gpu_drivers": [
-          {
-            "name": "Driver",
-            "description": "Description",
-            "update_date": "2026-07-15",
-            "file_size": "1 MB",
-            "download_url": "https://example.com/driver.exe",
-            "filename": "driver.exe",
-            "enabled": true
-          }
-        ]
+        "system_image_mode": 2
       }
     }
     "#;
 
     #[test]
-    fn v3_catalogue_maps_to_existing_configuration_contract() {
-        let catalog: V3CatalogResponse = serde_json::from_str(V3_FIXTURE).unwrap();
+    fn v4_catalogue_maps_categories_and_silent_install_metadata() {
+        let catalog: V4CatalogResponse = serde_json::from_str(V4_FIXTURE).unwrap();
         let (pe, systems, software, easy, gpu, mode) =
-            RemoteConfig::v3_catalog_to_contents(catalog).unwrap();
+            RemoteConfig::v4_catalog_to_contents(catalog).unwrap();
         assert_eq!(mode, SystemImageMode::Api);
 
         let pe_content = pe.unwrap();
@@ -494,7 +473,15 @@ mod tests {
             gpu.as_deref(),
         );
         assert_eq!(manager.software_list.len(), 1);
-        assert_eq!(manager.gpu_driver_list.len(), 1);
+        assert_eq!(manager.software_categories.len(), 1);
+        assert_eq!(manager.software_categories[0].name, "常用工具");
+        assert_eq!(
+            manager.software_list[0].silent_command.as_deref(),
+            Some("\"{installer}\" /S")
+        );
+        assert!(manager.software_list[0].requires_admin);
+        assert!(!manager.software_list[0].vm_tools);
+        assert!(manager.gpu_driver_list.is_empty());
         assert_eq!(
             manager
                 .easy_mode_config
@@ -507,60 +494,45 @@ mod tests {
     }
 
     #[test]
-    fn v3_catalogue_rejects_unknown_schema_version() {
-        let mut value: serde_json::Value = serde_json::from_str(V3_FIXTURE).unwrap();
-        value["schema_version"] = serde_json::json!(4);
-        let catalog: V3CatalogResponse = serde_json::from_value(value).unwrap();
-        assert!(RemoteConfig::v3_catalog_to_contents(catalog).is_err());
-    }
-
-    #[test]
     fn system_image_mode_defaults_to_api_when_absent() {
-        let catalog: V3CatalogResponse = serde_json::from_str(V3_FIXTURE).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(V4_FIXTURE).unwrap();
+        value["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("system_image_mode");
+        let catalog: V4CatalogResponse = serde_json::from_value(value).unwrap();
         assert_eq!(
-            RemoteConfig::v3_catalog_to_contents(catalog).unwrap().5,
+            RemoteConfig::v4_catalog_to_contents(catalog).unwrap().5,
             SystemImageMode::Api
         );
     }
 
     #[test]
     fn default_api_mode_requires_an_api_system_image() {
-        let mut value: serde_json::Value = serde_json::from_str(V3_FIXTURE).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(V4_FIXTURE).unwrap();
         value["data"]
             .as_object_mut()
             .unwrap()
             .remove("system_images");
-        let catalog: V3CatalogResponse = serde_json::from_value(value).unwrap();
-        assert!(RemoteConfig::v3_catalog_to_contents(catalog).is_err());
-    }
-
-    #[test]
-    fn data_system_image_mode_takes_precedence_over_root_compatibility_field() {
-        let mut value: serde_json::Value = serde_json::from_str(V3_FIXTURE).unwrap();
-        value["system_image_mode"] = serde_json::json!(2);
-        value["data"]["system_image_mode"] = serde_json::json!(3);
-        let catalog: V3CatalogResponse = serde_json::from_value(value).unwrap();
-        assert_eq!(
-            RemoteConfig::v3_catalog_to_contents(catalog).unwrap().5,
-            SystemImageMode::MicrosoftAndApi
-        );
+        let catalog: V4CatalogResponse = serde_json::from_value(value).unwrap();
+        assert!(RemoteConfig::v4_catalog_to_contents(catalog).is_err());
     }
 
     #[test]
     fn invalid_system_image_mode_is_rejected() {
-        let mut value: serde_json::Value = serde_json::from_str(V3_FIXTURE).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(V4_FIXTURE).unwrap();
         value["data"]["system_image_mode"] = serde_json::json!(9);
-        let catalog: V3CatalogResponse = serde_json::from_value(value).unwrap();
-        assert!(RemoteConfig::v3_catalog_to_contents(catalog).is_err());
+        let catalog: V4CatalogResponse = serde_json::from_value(value).unwrap();
+        assert!(RemoteConfig::v4_catalog_to_contents(catalog).is_err());
     }
 
     #[test]
     fn mode_two_requires_an_api_system_image() {
-        let mut value: serde_json::Value = serde_json::from_str(V3_FIXTURE).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(V4_FIXTURE).unwrap();
         value["data"]["system_image_mode"] = serde_json::json!(2);
         value["data"]["system_images"] = serde_json::json!([]);
-        let catalog: V3CatalogResponse = serde_json::from_value(value).unwrap();
-        assert!(RemoteConfig::v3_catalog_to_contents(catalog).is_err());
+        let catalog: V4CatalogResponse = serde_json::from_value(value).unwrap();
+        assert!(RemoteConfig::v4_catalog_to_contents(catalog).is_err());
     }
 
     #[test]
@@ -591,13 +563,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the live LetRecovery v3 catalogue service"]
+    #[ignore = "requires the live LetRecovery v4 catalogue service"]
     fn live_missing_mode_defaults_to_the_api_catalogue() {
         let config = RemoteConfig::load_from_server();
         assert!(config.loaded, "{:?}", config.error);
         assert_eq!(config.system_image_mode, SystemImageMode::Api);
         let systems = ConfigManager::parse_system_list(config.dl_content.as_deref().unwrap());
-        assert!(systems.len() >= 20);
+        assert!(!systems.is_empty());
         assert!(systems.iter().any(|system| system.is_win11));
         assert!(systems.iter().any(|system| !system.is_win11));
     }

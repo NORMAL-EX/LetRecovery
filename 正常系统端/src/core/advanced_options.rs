@@ -69,15 +69,34 @@ fn with_offline_hives_unloaded<T>(
 #[serde(default)]
 pub struct AdvancedOptions {
     // 系统优化选项
+    /// Current-install-only same-volume preservation. This is intentionally not persisted because
+    /// it changes the reinstall's destructive boundary and must be selected again for each task.
+    #[serde(skip)]
+    pub preserve_personal_files: bool,
     pub remove_shortcut_arrow: bool,
     pub restore_classic_context_menu: bool,
     pub bypass_nro: bool,
     pub disable_windows_update: bool,
+    /// Remove the Defender Antivirus engine and exactly target the Windows Security UI AppX;
+    /// SecurityHealthService, wscsvc, mpssvc, and firewall services remain preserved.
     pub disable_windows_defender: bool,
     pub disable_reserved_storage: bool,
     pub disable_uac: bool,
     pub disable_device_encryption: bool,
+    /// Remove the shared exact-PFN curated provisioned AppX list. Outlook and both AppX/Win32
+    /// OneDrive are intentionally preserved. On Windows 11 the same option also configures the
+    /// default user before first sign-in so Start recommendations and preinstalled content
+    /// delivery do not recreate promotional entries.
     pub remove_uwp_apps: bool,
+    /// Current-install-only v4 catalogue selections. The server response is revalidated before
+    /// download and the value is carried in the authenticated PE handoff; it is never persisted
+    /// as a long-lived preference.
+    #[serde(skip)]
+    pub preinstalled_software: Vec<lr_core::software_install::SelectedSoftwarePackage>,
+    /// UI preference for the separately presented VMware Tools entry. The native window resolves
+    /// it to an ordinary selected package only after positive VMware and live-catalogue checks.
+    #[serde(skip)]
+    pub install_vmware_tools: bool,
     /// 迁移当前 WiFi（重装后自动连接）：勾选时即抓取当前连接的 WiFi 配置
     pub migrate_wifi: bool,
     /// 抓取到的 WiFi 配置 XML（含明文密钥，故不持久化到 config.json）
@@ -180,6 +199,17 @@ impl AdvancedOptions {
         )
     }
 
+    fn target_is_windows_11(target_partition: &str) -> bool {
+        let ntdll = Path::new(target_partition)
+            .join("Windows")
+            .join("System32")
+            .join("ntdll.dll");
+        matches!(
+            crate::core::system_utils::get_file_version(&ntdll),
+            Some((10, _, build, _)) if build >= 22_000
+        )
+    }
+
     /// 获取 XP 驱动目录（bin\drivers\xp\{usb3|nvme|ahci}）
     fn get_xp_driver_dirs() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
         let base = Self::get_program_dir();
@@ -190,31 +220,6 @@ impl AdvancedOptions {
         let nvme = root.as_ref().map(|b| b.join("nvme"));
         let ahci = root.as_ref().map(|b| b.join("ahci"));
         (usb3, nvme, ahci)
-    }
-
-    /// 检测到 XP 镜像时，首次把「注入 USB3 / 注入 NVMe」默认勾选（仅一次，之后尊重用户手动取消）。
-    /// 由 UI（show_ui）与选卷变更（system_install）共同调用，保证即使不打开高级面板也已默认开启。
-    pub fn apply_xp_defaults_if_needed(&mut self, is_xp: bool) {
-        if is_xp && !self.xp_defaults_applied {
-            self.xp_inject_usb3_driver = true;
-            self.xp_inject_nvme_driver = true;
-            self.xp_defaults_applied = true;
-        }
-    }
-
-    pub fn disable_empty_custom_text_options(&mut self) {
-        if self.custom_username && self.username.trim().is_empty() {
-            self.custom_username = false;
-            self.username.clear();
-        }
-        if self.builtin_administrator.enabled {
-            self.custom_username = false;
-        }
-
-        if self.custom_volume_label && self.volume_label.trim().is_empty() {
-            self.custom_volume_label = false;
-            self.volume_label.clear();
-        }
     }
 
     /// 获取 UefiSeven 目录（bin\uefiseven）
@@ -260,46 +265,36 @@ impl AdvancedOptions {
             .map_err(|error| anyhow::anyhow!("查找目标磁盘 EFI 分区失败: {}", error))?;
         let efi_mount_point = esp_mount.letter();
         log::info!("[UEFISEVEN] EFI 分区挂载点: {}", efi_mount_point);
-
-        // Microsoft Boot 目录
-        let ms_boot_dir =
-            std::path::PathBuf::from(format!("{}\\EFI\\Microsoft\\Boot", efi_mount_point));
-        let machine = lr_core::windows_hardware::collect_machine_identity();
-        log::info!("[UEFISEVEN] machine environment: {:?}", machine.environment);
-        for diagnostic in &machine.diagnostics {
-            log::debug!("[UEFISEVEN] hardware probe: {diagnostic}");
-        }
-        if !lr_core::windows_hardware::should_install_uefiseven(machine.environment) {
-            lr_core::boot_pca::restore_native_windows7_uefi_entries(&ms_boot_dir).map_err(
-                |error| anyhow::anyhow!("恢复 VMware 原生 Windows EFI 引导失败: {error}"),
-            )?;
-            log::info!("[UEFISEVEN] confirmed VMware guest; native Microsoft EFI entries restored");
-            return Ok(());
-        }
-
-        lr_core::boot_pca::install_uefiseven_package(&uefiseven_dir, &ms_boot_dir)
-            .map_err(|error| anyhow::anyhow!("部署 UefiSeven 失败: {error}"))?;
-
-        log::info!("[UEFISEVEN] UefiSeven 补丁应用成功");
-        log::info!("[UEFISEVEN] 启动流程: UEFI -> UefiSeven -> bootmgfw.original.efi -> Windows 7");
-
-        Ok(())
-    }
-
-    /// 应用选项到目标系统
-    /// 抓取当前连接的 WiFi（SSID + 含明文密钥的 profile XML），存入瞬态字段。
-    /// 在勾选「迁移 WiFi」时调用（须在有 WiFi 连接的正常系统中）。
-    pub fn capture_current_wifi(&mut self) {
-        match Self::read_current_wifi() {
-            Some((ssid, xml)) => {
-                self.wifi_ssid = ssid;
-                self.wifi_profile_xml = xml;
+        let operation = (|| -> anyhow::Result<()> {
+            // Microsoft Boot 目录
+            let ms_boot_dir =
+                std::path::PathBuf::from(format!("{}\\EFI\\Microsoft\\Boot", efi_mount_point));
+            let machine = lr_core::windows_hardware::collect_machine_identity();
+            log::info!("[UEFISEVEN] machine environment: {:?}", machine.environment);
+            for diagnostic in &machine.diagnostics {
+                log::debug!("[UEFISEVEN] hardware probe: {diagnostic}");
             }
-            None => {
-                self.wifi_ssid.clear();
-                self.wifi_profile_xml.clear();
+            if !lr_core::windows_hardware::should_install_uefiseven(machine.environment) {
+                lr_core::boot_pca::restore_native_windows7_uefi_entries(&ms_boot_dir).map_err(
+                    |error| anyhow::anyhow!("恢复 VMware 原生 Windows EFI 引导失败: {error}"),
+                )?;
+                log::info!(
+                    "[UEFISEVEN] confirmed VMware guest; native Microsoft EFI entries restored"
+                );
+                return Ok(());
             }
-        }
+
+            lr_core::boot_pca::install_uefiseven_package(&uefiseven_dir, &ms_boot_dir)
+                .map_err(|error| anyhow::anyhow!("部署 UefiSeven 失败: {error}"))?;
+
+            log::info!("[UEFISEVEN] UefiSeven 补丁应用成功");
+            log::info!(
+                "[UEFISEVEN] 启动流程: UEFI -> UefiSeven -> bootmgfw.original.efi -> Windows 7"
+            );
+
+            Ok(())
+        })();
+        crate::core::bcdedit::finish_with_esp_cleanup(operation, Some(esp_mount))
     }
 
     /// 当前系统是否检测到 WiFi（已连接到某个无线网络）。
@@ -314,12 +309,7 @@ impl AdvancedOptions {
         false
     }
 
-    fn read_current_wifi() -> Option<(String, String)> {
-        super::native_wifi::capture_connected_wifi()
-            .ok()
-            .map(|profile| (profile.ssid, profile.xml))
-    }
-
+    /// 应用选项到目标系统
     pub fn apply_to_system(&self, target_partition: &str, is_xp: bool) -> anyhow::Result<()> {
         log::info!(
             "[ADVANCED] 开始应用高级选项到: {} (is_xp={})",
@@ -342,6 +332,24 @@ impl AdvancedOptions {
         let default_loaded = OfflineRegistry::load_hive("pc-default", &default_hive).is_ok();
         if default_loaded {
             hive_cleanup.0.push("pc-default");
+        }
+
+        if Self::target_is_windows_11(target_partition) {
+            match lr_core::windows11_shell::apply_offline_defaults("pc-soft") {
+                Ok(report) => log::info!(
+                    "[ADVANCED_WIN11_SHELL] status=completed force_effect_mode={}",
+                    report.force_effect_mode
+                ),
+                Err(error) => log::warn!(
+                    "[ADVANCED_WIN11_SHELL] status=warning detail={error:#}; installation continues"
+                ),
+            }
+            if self.remove_uwp_apps {
+                log::warn!(
+                    "[ADVANCED_WIN11_START] status=not_supported detail={}; AppX package removal continues independently",
+                    lr_core::windows11_shell::START_PIN_CLEANUP_UNSUPPORTED_REASON
+                );
+            }
         }
 
         if Self::target_is_windows_7(target_partition) {
@@ -375,12 +383,17 @@ impl AdvancedOptions {
             self.apply_bypass_nro()?;
         }
 
-        // 4. 禁用Windows自动更新
+        // 4. 按目标系统家族移除 Windows Update 活动组件。
         if self.disable_windows_update {
-            self.apply_disable_windows_update()?;
+            if let Err(error) = self.apply_disable_windows_update(target_partition) {
+                log::warn!(
+                    "[ADVANCED_UPDATE] action=remove_active_components status=warning detail={error:#}; installation continues"
+                );
+            }
         }
 
-        // 5. 仅深度移除 Microsoft Defender Antivirus 引擎，保留安全中心等组件
+        // 5. 移除 Defender Antivirus 引擎并精确移除 Windows Security UI AppX；
+        //    保留 SecurityHealthService、wscsvc、mpssvc 与防火墙服务。
         if self.disable_windows_defender {
             match lr_core::defender_removal::remove_offline_defender_engine(
                 target_partition,
@@ -396,13 +409,19 @@ impl AdvancedOptions {
                     report.deleted_task_records,
                     report.deleted_engine_software_key
                 ),
-                Err(error) => return Err(error),
+                Err(error) => log::warn!(
+                    "[ADVANCED_DEFENDER] status=warning detail={error:#}; optional Defender removal was not completed; installation continues"
+                ),
             }
         }
 
-        // 6. 禁用系统保留空间
+        // 6. 系统保留空间只能由微软支持的在线 DISM 命令修改。
+        // 内置 Win10 2004+ unattend 会在 specialize/SYSTEM 阶段执行并回读；此处不再写
+        // ReserveManager 的内部离线注册表值。
         if self.disable_reserved_storage {
-            self.apply_disable_reserved_storage()?;
+            log::info!(
+                "[ADVANCED_RESERVED_STORAGE] phase=offline status=deferred reason=online_dism_only"
+            );
         }
 
         // 7. 禁用UAC
@@ -415,14 +434,10 @@ impl AdvancedOptions {
             self.apply_disable_device_encryption()?;
         }
 
-        // 9. 删除预装UWP应用 - 通过删除 AppxProvisioned 配置
-        if self.remove_uwp_apps {
-            self.apply_remove_uwp_apps(&scripts_dir)?;
-        }
-
-        // WiFi 迁移：把抓到的 profile XML + SetupComplete.cmd 写到目标系统。
-        // Windows 安装末尾会自动运行 %WINDIR%\Setup\Scripts\SetupComplete.cmd（SYSTEM 身份），
-        // 用 netsh 添加 WiFi 配置后系统即可自动连接（profile 默认 autoconnect）。
+        // 9. Curated AppX servicing is deferred until every externally loaded offline hive has
+        // been unloaded. DISM must not service an image while LetRecovery still owns hive handles.
+        // WiFi 迁移：只暂存已验证可迁移的 profile XML。内置无人值守文件会在首登时
+        // 通过共享 finalizer 隐藏导入、检查退出码，并在所有收尾工作成功后删除脚本目录。
         if self.migrate_wifi && !self.wifi_profile_xml.is_empty() {
             self.apply_migrate_wifi(target_partition)?;
         }
@@ -530,6 +545,18 @@ impl AdvancedOptions {
         log::info!("[ADVANCED] 卸载离线注册表...");
         hive_cleanup.unload_all()?;
 
+        // Curated provisioned-AppX servicing, like SecHealthUI servicing below, must run only
+        // after the offline hive unload has completed successfully. It remains warning-only.
+        if self.remove_uwp_apps {
+            self.apply_remove_uwp_apps(target_partition);
+        }
+
+        // SecHealthUI uses supported AppX servicing only after every offline hive handle is
+        // closed. Failure is an advanced-feature warning and must not block the installation.
+        if self.disable_windows_defender {
+            Self::apply_remove_sec_health_ui(target_partition);
+        }
+
         log::info!("[ADVANCED] 高级选项应用完成");
         Ok(())
     }
@@ -586,35 +613,36 @@ impl AdvancedOptions {
         Ok(())
     }
 
-    /// 4. 禁用Windows自动更新
-    fn apply_disable_windows_update(&self) -> anyhow::Result<()> {
-        log::info!("[ADVANCED] 通过策略禁用Windows自动更新");
-        OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
-            "NoAutoUpdate",
-            1,
+    /// 4. 移除 Windows Update 活动组件并隐藏其设置入口。
+    fn apply_disable_windows_update(&self, target_partition: &str) -> anyhow::Result<()> {
+        log::info!("[ADVANCED_UPDATE] action=remove_active_components status=started");
+        let report = lr_core::offline_windows_update_removal::remove_offline_windows_update(
+            target_partition,
+            "pc-soft",
+            "pc-sys",
         )?;
-        OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
-            "AUOptions",
-            1,
-        )?;
-        Ok(())
-    }
-
-    /// 6. 禁用系统保留空间
-    fn apply_disable_reserved_storage(&self) -> anyhow::Result<()> {
-        log::info!("[ADVANCED] 禁用系统保留空间");
-        OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\ReserveManager",
-            "ShippedWithReserves",
-            0,
-        )?;
-        OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\ReserveManager",
-            "PassedPolicy",
-            0,
-        )?;
+        let status = if report.warnings.is_empty() {
+            "completed"
+        } else {
+            "warning"
+        };
+        log::info!(
+            "[ADVANCED_UPDATE] action=remove_active_components status={} profile={} build={} removed_paths={} removed_services={} removed_task_trees={} removed_task_records={} removed_registry_keys={} deleted_ubpm_values={} settings_visibility={:?} warning_count={}",
+            status,
+            report.profile,
+            report.target_build,
+            report.removed_paths,
+            report.removed_services,
+            report.removed_task_trees,
+            report.removed_task_records,
+            report.removed_registry_keys,
+            report.deleted_ubpm_values,
+            report.settings_page_visibility,
+            report.warnings.len()
+        );
+        for warning in &report.warnings {
+            log::warn!("[ADVANCED_UPDATE] detail={warning}");
+        }
         Ok(())
     }
 
@@ -654,34 +682,106 @@ impl AdvancedOptions {
         Ok(())
     }
 
-    /// 9. 删除预装UWP应用 - 通过删除 AppxProvisioned 配置
-    fn apply_remove_uwp_apps(&self, scripts_dir: &str) -> anyhow::Result<()> {
-        log::info!("[ADVANCED] 配置删除预装UWP应用");
-        // 创建首次登录脚本来删除UWP应用
-        let remove_uwp_script = Self::generate_remove_uwp_script();
-        let uwp_script_path = format!("{}\\remove_uwp.ps1", scripts_dir);
-        std::fs::write(&uwp_script_path, &remove_uwp_script)?;
-        log::info!("[ADVANCED] UWP删除脚本已写入: {}", uwp_script_path);
-        Ok(())
+    /// Remove only the curated provisioned AppX identities from the offline image.
+    fn apply_remove_uwp_apps(&self, target_partition: &str) {
+        log::info!(
+            "[ADVANCED_APPX] action=remove_curated_preinstalled_appx phase=offline_provisioning; exact all-user removal and final verification are required by the built-in unattend hook"
+        );
+        log::info!(
+            "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=started target={:?}",
+            target_partition
+        );
+        match lr_core::offline_appx::remove_curated_preinstalled_appx(target_partition) {
+            Ok(report) => {
+                for item in &report.items {
+                    match item.status {
+                        lr_core::offline_appx::CuratedAppxStatus::Warning => log::warn!(
+                            "[ADVANCED_APPX] action=remove_curated_preinstalled_appx item={} package={:?} status={} reason={:?}",
+                            item.id,
+                            item.package_full_name,
+                            item.status.as_str(),
+                            item.reason
+                        ),
+                        _ => log::info!(
+                            "[ADVANCED_APPX] action=remove_curated_preinstalled_appx item={} package={:?} status={} reason={:?}",
+                            item.id,
+                            item.package_full_name,
+                            item.status.as_str(),
+                            item.reason
+                        ),
+                    }
+                }
+                if report.warnings == 0 {
+                    log::info!(
+                        "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=completed removed={} not_present={} warnings=0",
+                        report.removed,
+                        report.not_present
+                    );
+                } else {
+                    log::warn!(
+                        "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=completed_with_warnings removed={} not_present={} warnings={}",
+                        report.removed,
+                        report.not_present,
+                        report.warnings
+                    );
+                }
+            }
+            Err(error) => log::warn!(
+                "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=warning reason={:?}",
+                error.to_string()
+            ),
+        }
     }
 
-    /// WiFi 迁移：把抓到的 profile XML + SetupComplete.cmd 写到目标系统。
-    fn apply_migrate_wifi(&self, target_partition: &str) -> anyhow::Result<()> {
-        let setup_scripts = format!("{}\\Windows\\Setup\\Scripts", target_partition);
-        std::fs::create_dir_all(&setup_scripts)?;
-        let xml_path = format!("{}\\LR_WiFi.xml", setup_scripts);
-        let cmd_path = format!("{}\\SetupComplete.cmd", setup_scripts);
-        std::fs::write(&xml_path, self.wifi_profile_xml.as_bytes())?;
+    fn apply_remove_sec_health_ui(target_partition: &str) {
+        match lr_core::sec_health_ui::remove_offline_provisioning(target_partition) {
+            Ok(report) => {
+                for item in &report.items {
+                    let message = format!(
+                        "[ADVANCED_SEC_HEALTH_UI] phase=offline_provisioning item={} package={:?} status={} reason={:?}",
+                        item.id,
+                        item.package_full_name,
+                        item.status.as_str(),
+                        item.reason
+                    );
+                    if item.status == lr_core::offline_appx::CuratedAppxStatus::Warning {
+                        log::warn!("{}", message);
+                    } else {
+                        log::info!("{}", message);
+                    }
+                }
+                if report.warnings == 0 {
+                    log::info!(
+                        "[ADVANCED_SEC_HEALTH_UI] phase=offline_provisioning status=completed removed={} not_present={} warnings=0",
+                        report.removed,
+                        report.not_present
+                    );
+                } else {
+                    log::warn!(
+                        "[ADVANCED_SEC_HEALTH_UI] phase=offline_provisioning status=completed_with_warnings removed={} not_present={} warnings={}",
+                        report.removed,
+                        report.not_present,
+                        report.warnings
+                    );
+                }
+            }
+            Err(error) => log::warn!(
+                "[ADVANCED_SEC_HEALTH_UI] phase=offline_provisioning status=warning reason={:?}",
+                error.to_string()
+            ),
+        }
+    }
 
-        use std::io::Write;
-        // 追加，避免覆盖可能已存在的 SetupComplete.cmd
-        let line = "netsh wlan add profile filename=\"%~dp0LR_WiFi.xml\" user=all\r\n";
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&cmd_path)?
-            .write_all(line.as_bytes())?;
-        log::info!("[ADVANCED] 已配置 WiFi 自动迁移: {}", self.wifi_ssid);
+    /// WiFi 迁移：暂存 profile XML，交由共享首登 finalizer 隐藏导入并验证。
+    fn apply_migrate_wifi(&self, target_partition: &str) -> anyhow::Result<()> {
+        let scripts = format!("{}\\{}", target_partition, Self::SCRIPTS_DIR);
+        std::fs::create_dir_all(&scripts)?;
+        let xml_path = format!("{}\\LR_WiFi.xml", scripts);
+        std::fs::write(&xml_path, self.wifi_profile_xml.as_bytes())?;
+        if std::fs::read(&xml_path)? != self.wifi_profile_xml.as_bytes() {
+            anyhow::bail!("staged Wi-Fi profile readback mismatch");
+        }
+        log::info!("[ADVANCED] 已暂存 WiFi 迁移配置: {}", self.wifi_ssid);
         Ok(())
     }
 
@@ -1214,66 +1314,6 @@ impl AdvancedOptions {
             ),
         }
         Ok(())
-    }
-
-    /// 生成删除预装UWP应用的PowerShell脚本
-    fn generate_remove_uwp_script() -> String {
-        r#"# LetRecovery - 删除预装UWP应用脚本
-# 此脚本会删除大部分预装的UWP应用，保留必要的系统组件
-
-$AppsToRemove = @(
-    "Microsoft.3DBuilder"
-    "Microsoft.BingFinance"
-    "Microsoft.BingNews"
-    "Microsoft.BingSports"
-    "Microsoft.BingWeather"
-    "Microsoft.Getstarted"
-    "Microsoft.MicrosoftOfficeHub"
-    "Microsoft.MicrosoftSolitaireCollection"
-    "Microsoft.Office.OneNote"
-    "Microsoft.People"
-    "Microsoft.SkypeApp"
-    "Microsoft.Windows.Photos"
-    "Microsoft.WindowsAlarms"
-    "Microsoft.WindowsCamera"
-    "Microsoft.WindowsFeedbackHub"
-    "Microsoft.WindowsMaps"
-    "Microsoft.WindowsSoundRecorder"
-    "Microsoft.Xbox.TCUI"
-    "Microsoft.XboxApp"
-    "Microsoft.XboxGameOverlay"
-    "Microsoft.XboxGamingOverlay"
-    "Microsoft.XboxIdentityProvider"
-    "Microsoft.XboxSpeechToTextOverlay"
-    "Microsoft.YourPhone"
-    "Microsoft.ZuneMusic"
-    "Microsoft.ZuneVideo"
-    "Microsoft.GetHelp"
-    "Microsoft.Messaging"
-    "Microsoft.Print3D"
-    "Microsoft.MixedReality.Portal"
-    "Microsoft.OneConnect"
-    "Microsoft.Wallet"
-    "Microsoft.WindowsCommunicationsApps"
-    "Microsoft.BingTranslator"
-    "Microsoft.DesktopAppInstaller"
-    "Microsoft.Advertising.Xaml"
-    "Microsoft.549981C3F5F10"
-    "Clipchamp.Clipchamp"
-    "Disney.37853FC22B2CE"
-    "MicrosoftCorporationII.QuickAssist"
-    "MicrosoftTeams"
-    "SpotifyAB.SpotifyMusic"
-)
-
-foreach ($App in $AppsToRemove) {
-    Write-Host "正在删除: $App"
-    Get-AppxPackage -Name $App -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-    Get-AppxProvisionedPackage -Online | Where-Object {$_.PackageName -like "*$App*"} | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
-}
-
-Write-Host "UWP应用清理完成"
-"#.to_string()
     }
 
     /// 转换 .reg 文件内容以适配离线注册表

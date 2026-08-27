@@ -3,18 +3,21 @@
 //! 提供磁盘分区的底层操作功能，所有查询和写入均使用文档化 Windows API。
 
 use anyhow::{anyhow, Result};
+use lr_core::data_staging::StorageAttachment;
 use std::path::Path;
 
 #[cfg(windows)]
 use windows::{
-    core::PCWSTR,
-    Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+    core::{HRESULT, PCWSTR},
+    Win32::Foundation::{
+        CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, GENERIC_READ, HANDLE,
+    },
     Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
     Win32::System::Ioctl::{
         PropertyStandardQuery, StorageDeviceProperty, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-        IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_STYLE_GPT,
-        PARTITION_STYLE_MBR, PARTITION_STYLE_RAW, STORAGE_DEVICE_DESCRIPTOR,
-        STORAGE_PROPERTY_QUERY,
+        IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_QUERY_PROPERTY,
+        PARTITION_STYLE_GPT, PARTITION_STYLE_MBR, PARTITION_STYLE_RAW, STORAGE_DESCRIPTOR_HEADER,
+        STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY,
     },
     Win32::System::IO::DeviceIoControl,
 };
@@ -23,12 +26,9 @@ use windows::{
 /// CTL_CODE(IOCTL_VOLUME_BASE, 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
 /// IOCTL_VOLUME_BASE = 0x56 ('V'), 所以值为 (0x56 << 16) | (0 << 14) | (0 << 2) | 0 = 0x00560000
 #[cfg(windows)]
-const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x00560000;
-
 use crate::tr;
 
 use super::disk::PartitionStyle;
-use super::system_info::BootMode;
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
@@ -52,15 +52,60 @@ pub struct PhysicalDisk {
     pub unallocated_bytes: u64,
 }
 
+/// One successful, read-only snapshot of a currently present SetupAPI disk interface.
+///
+/// Every field below is captured through one `GENERIC_READ` handle opened from the opaque
+/// `SetupDiGetDeviceInterfaceDetailW` path. `disk_number` remains a current-session locator only.
+#[derive(Debug, Clone)]
+pub struct PresentPhysicalDisk {
+    pub disk: PhysicalDisk,
+    pub attachment: StorageAttachment,
+    pub bus_type: u32,
+    pub removable_media: bool,
+    pub serial_number: String,
+    pub firmware_revision: String,
+    pub partition_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CapacitySource {
+    LengthInfo,
+    GeometryEx,
+    Vds,
+}
+
+fn select_capacity_source(
+    length_info: Option<u64>,
+    geometry_ex: Option<u64>,
+    vds: Option<u64>,
+) -> Option<(u64, CapacitySource)> {
+    length_info
+        .filter(|value| *value > 0)
+        .map(|value| (value, CapacitySource::LengthInfo))
+        .or_else(|| {
+            geometry_ex
+                .filter(|value| *value > 0)
+                .map(|value| (value, CapacitySource::GeometryEx))
+        })
+        .or_else(|| {
+            vds.filter(|value| *value > 0)
+                .map(|value| (value, CapacitySource::Vds))
+        })
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DiskDeviceDescriptor {
+    model: String,
+    serial_number: String,
+    firmware_revision: String,
+    bus_type: u32,
+    removable_media: bool,
+}
+
 impl PhysicalDisk {
     /// 获取磁盘大小（GB，保留1位小数）
     pub fn size_gb(&self) -> f64 {
         (self.size_bytes as f64 / 1024.0 / 1024.0 / 1024.0 * 10.0).round() / 10.0
-    }
-
-    /// 获取已分配空间（字节）
-    pub fn allocated_bytes(&self) -> u64 {
-        self.partitions.iter().map(|p| p.size_bytes).sum()
     }
 
     /// 获取显示名称
@@ -212,6 +257,17 @@ struct DiskGeometryEx {
     disk_size: i64, // 8 bytes - 这才是我们需要的磁盘大小
 }
 
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct DiskLengthInfo {
+    length: i64,
+}
+
+fn checked_disk_length(length: i64, bytes_returned: u32, required_size: usize) -> Option<u64> {
+    (length > 0 && bytes_returned as usize >= required_size).then_some(length as u64)
+}
+
 /// DRIVE_LAYOUT_INFORMATION_EX 结构头部
 #[cfg(windows)]
 #[repr(C)]
@@ -219,6 +275,161 @@ struct DiskGeometryEx {
 struct DriveLayoutInfoExHeader {
     partition_style: u32,
     partition_count: u32,
+}
+
+#[cfg(windows)]
+fn is_variable_buffer_error(error: &windows::core::Error) -> bool {
+    error.code() == HRESULT::from_win32(ERROR_MORE_DATA.0)
+        || error.code() == HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0)
+}
+
+#[cfg(windows)]
+unsafe fn query_drive_layout(handle: HANDLE) -> Option<(Vec<u64>, u32)> {
+    let mut capacity = 4096usize;
+    loop {
+        if capacity > 4 * 1024 * 1024 {
+            return None;
+        }
+        let mut buffer = vec![0u64; capacity.div_ceil(std::mem::size_of::<u64>())];
+        let mut returned = 0u32;
+        match DeviceIoControl(
+            handle,
+            IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+            None,
+            0,
+            Some(buffer.as_mut_ptr().cast()),
+            (buffer.len() * std::mem::size_of::<u64>()) as u32,
+            Some(&mut returned),
+            None,
+        ) {
+            Ok(()) => return Some((buffer, returned)),
+            Err(error) if is_variable_buffer_error(&error) => capacity = capacity.checked_mul(2)?,
+            Err(_) => return None,
+        }
+    }
+}
+
+fn storage_attachment(bus_type: u32, removable_media: bool) -> StorageAttachment {
+    // STORAGE_BUS_TYPE values from the Windows SDK. Removable media and buses which normally
+    // represent detachable devices must never be promoted to an internal full-disk target.
+    const BUS_TYPE_IEEE1394: u32 = 4;
+    const BUS_TYPE_USB: u32 = 7;
+    const BUS_TYPE_SD: u32 = 12;
+    const BUS_TYPE_MMC: u32 = 13;
+    const BUS_TYPE_VIRTUAL: u32 = 14;
+    const BUS_TYPE_FILE_BACKED_VIRTUAL: u32 = 15;
+
+    if removable_media
+        || matches!(
+            bus_type,
+            BUS_TYPE_IEEE1394 | BUS_TYPE_USB | BUS_TYPE_SD | BUS_TYPE_MMC
+        )
+    {
+        StorageAttachment::External
+    } else if matches!(bus_type, BUS_TYPE_VIRTUAL | BUS_TYPE_FILE_BACKED_VIRTUAL) {
+        StorageAttachment::Unknown
+    } else {
+        StorageAttachment::Internal
+    }
+}
+
+fn descriptor_text(buffer: &[u8], offset: u32, upper_bound: usize) -> String {
+    let Ok(offset) = usize::try_from(offset) else {
+        return String::new();
+    };
+    if offset == 0 || offset >= upper_bound || upper_bound > buffer.len() {
+        return String::new();
+    }
+    let Some(end) = buffer[offset..upper_bound]
+        .iter()
+        .position(|byte| *byte == 0)
+    else {
+        return String::new();
+    };
+    String::from_utf8_lossy(&buffer[offset..offset + end])
+        .trim()
+        .to_string()
+}
+
+#[cfg(windows)]
+unsafe fn query_disk_device_descriptor(handle: HANDLE) -> anyhow::Result<DiskDeviceDescriptor> {
+    const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
+
+    let query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceProperty,
+        QueryType: PropertyStandardQuery,
+        AdditionalParameters: [0],
+    };
+    let mut header = STORAGE_DESCRIPTOR_HEADER::default();
+    let mut returned = 0_u32;
+    DeviceIoControl(
+        handle,
+        IOCTL_STORAGE_QUERY_PROPERTY,
+        Some((&query as *const STORAGE_PROPERTY_QUERY).cast()),
+        std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+        Some((&mut header as *mut STORAGE_DESCRIPTOR_HEADER).cast()),
+        std::mem::size_of::<STORAGE_DESCRIPTOR_HEADER>() as u32,
+        Some(&mut returned),
+        None,
+    )
+    .map_err(|error| anyhow!("读取存储设备描述符大小失败: {error}"))?;
+    if returned < std::mem::size_of::<STORAGE_DESCRIPTOR_HEADER>() as u32 {
+        return Err(anyhow!("存储设备描述符大小响应不完整"));
+    }
+    let descriptor_size =
+        usize::try_from(header.Size).map_err(|_| anyhow!("存储设备描述符大小超出支持范围"))?;
+    if descriptor_size < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>()
+        || descriptor_size > MAX_DESCRIPTOR_BYTES
+    {
+        return Err(anyhow!("存储设备描述符大小无效: {descriptor_size}"));
+    }
+
+    // u64 storage preserves the native alignment required by STORAGE_DEVICE_DESCRIPTOR.
+    let mut storage = vec![0_u64; descriptor_size.div_ceil(std::mem::size_of::<u64>())];
+    returned = 0;
+    DeviceIoControl(
+        handle,
+        IOCTL_STORAGE_QUERY_PROPERTY,
+        Some((&query as *const STORAGE_PROPERTY_QUERY).cast()),
+        std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+        Some(storage.as_mut_ptr().cast()),
+        (storage.len() * std::mem::size_of::<u64>()) as u32,
+        Some(&mut returned),
+        None,
+    )
+    .map_err(|error| anyhow!("读取存储设备描述符失败: {error}"))?;
+    let returned = usize::try_from(returned).unwrap_or(usize::MAX);
+    if returned < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>()
+        || returned > storage.len() * std::mem::size_of::<u64>()
+    {
+        return Err(anyhow!("存储设备描述符响应长度无效: {returned}"));
+    }
+    let bytes = std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), returned);
+    let descriptor = std::ptr::read_unaligned(bytes.as_ptr().cast::<STORAGE_DEVICE_DESCRIPTOR>());
+    let declared = usize::try_from(descriptor.Size)
+        .unwrap_or(usize::MAX)
+        .min(returned);
+    if declared < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() {
+        return Err(anyhow!("存储设备描述符声明长度无效"));
+    }
+    let vendor = descriptor_text(bytes, descriptor.VendorIdOffset, declared);
+    let product = descriptor_text(bytes, descriptor.ProductIdOffset, declared);
+    let model = match (vendor, product) {
+        (vendor, product)
+            if !vendor.is_empty() && !product.is_empty() && !product.starts_with(&vendor) =>
+        {
+            format!("{vendor} {product}")
+        }
+        (_, product) if !product.is_empty() => product,
+        (vendor, _) => vendor,
+    };
+    Ok(DiskDeviceDescriptor {
+        model,
+        serial_number: descriptor_text(bytes, descriptor.SerialNumberOffset, declared),
+        firmware_revision: descriptor_text(bytes, descriptor.ProductRevisionOffset, declared),
+        bus_type: descriptor.BusType.0 as u32,
+        removable_media: descriptor.RemovableMedia.0 != 0,
+    })
 }
 
 /// PARTITION_INFORMATION_EX 结构（GPT）
@@ -317,16 +528,56 @@ const RECOVERY_PARTITION_TYPE_GUID: [u8; 16] = [
 /// 获取所有物理磁盘列表
 #[cfg(windows)]
 pub fn get_physical_disks() -> Vec<PhysicalDisk> {
-    let mut disks = Vec::new();
-
-    // 通过尝试打开物理磁盘来枚举
-    for disk_num in 0..32 {
-        if let Some(disk) = get_disk_info(disk_num) {
-            disks.push(disk);
+    match get_present_physical_disks() {
+        Ok(disks) => disks,
+        Err(error) => {
+            log::error!("SetupAPI 物理磁盘枚举失败: {error}");
+            Vec::new()
         }
     }
+}
 
-    disks
+/// Enumerate present disk interfaces through SetupAPI, then query only those returned disk
+/// numbers. This deliberately never probes a guessed `PhysicalDrive0..31` range.
+#[cfg(windows)]
+pub fn get_present_physical_disks() -> anyhow::Result<Vec<PhysicalDisk>> {
+    Ok(get_present_physical_disk_inventory()?
+        .into_iter()
+        .map(|snapshot| snapshot.disk)
+        .collect())
+}
+
+/// Capture current disk inventory from exact SetupAPI paths. A broken interface is isolated. The
+/// list is collapsed by current-session disk number only after one exact-path handle produced the
+/// capacity, dynamic layout and device descriptor needed by every inventory consumer.
+#[cfg(windows)]
+pub fn get_present_physical_disk_inventory() -> anyhow::Result<Vec<PresentPhysicalDisk>> {
+    use std::collections::BTreeMap;
+
+    let interfaces = lr_core::windows_storage::present_physical_disk_interfaces()
+        .map_err(|error| anyhow::anyhow!("枚举当前物理磁盘接口失败: {error}"))?;
+    let mut snapshots = BTreeMap::<u32, PresentPhysicalDisk>::new();
+    for interface in interfaces {
+        let candidate = match get_disk_info_from_path(interface.disk_number, &interface.device_path)
+        {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                log::warn!(
+                    "SetupAPI 磁盘接口 {} 的只读库存快照失败，已隔离该接口: {}",
+                    interface.disk_number,
+                    error
+                );
+                continue;
+            }
+        };
+        snapshots.entry(interface.disk_number).or_insert(candidate);
+    }
+    if snapshots.is_empty() {
+        return Err(anyhow!(
+            "SetupAPI 返回了磁盘接口，但没有任何接口能提供完整的容量和分区布局快照"
+        ));
+    }
+    Ok(snapshots.into_values().collect())
 }
 
 /// Read one physical disk through the same IOCTL-backed inventory used by the
@@ -347,94 +598,164 @@ pub fn get_physical_disks() -> Vec<PhysicalDisk> {
     Vec::new()
 }
 
-/// 返回指定磁盘上活动（引导）分区的分区号（MBR BootIndicator=0x80）。
-///
-/// 权威来源：经 IOCTL_DISK_GET_DRIVE_LAYOUT_EX 直接读 MBR 引导字节，不依赖 diskpart 文本输出
-/// （新版 Windows 的 `detail partition` 可能不显示"活动"字段，`list partition` 的 `*` 只是焦点标记）。
-/// 无活动分区或非 MBR 盘返回 None。
-#[cfg(windows)]
-pub fn get_active_partition_number(disk_number: u32) -> Option<u32> {
-    let disk = get_disk_info(disk_number)?;
-    disk.partitions
-        .iter()
-        .find(|p| p.is_active)
-        .map(|p| p.partition_number)
+#[cfg(not(windows))]
+pub fn get_present_physical_disks() -> anyhow::Result<Vec<PhysicalDisk>> {
+    Ok(Vec::new())
 }
 
 #[cfg(not(windows))]
-pub fn get_active_partition_number(_disk_number: u32) -> Option<u32> {
-    None
+pub fn get_present_physical_disk_inventory() -> anyhow::Result<Vec<PresentPhysicalDisk>> {
+    Ok(Vec::new())
 }
 
 /// 获取单个磁盘的详细信息
 #[cfg(windows)]
 fn get_disk_info(disk_number: u32) -> Option<PhysicalDisk> {
+    get_present_physical_disk_inventory()
+        .ok()?
+        .into_iter()
+        .find(|snapshot| snapshot.disk.disk_number == disk_number)
+        .map(|snapshot| snapshot.disk)
+}
+
+#[cfg(windows)]
+fn get_disk_info_from_path(
+    disk_number: u32,
+    disk_path: &str,
+) -> anyhow::Result<PresentPhysicalDisk> {
     unsafe {
-        let disk_path = format!("\\\\.\\PhysicalDrive{}", disk_number);
         let wide_path: Vec<u16> = disk_path.encode_utf16().chain(std::iter::once(0)).collect();
 
         let handle = CreateFileW(
             PCWSTR::from_raw(wide_path.as_ptr()),
-            0,
+            GENERIC_READ.0,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
             Default::default(),
             None,
-        );
+        )
+        .map_err(|error| anyhow!("以只读方式打开当前 SetupAPI 磁盘接口失败: {error}"))?;
 
-        let handle = match handle {
-            Ok(h) => h,
-            Err(_) => return None,
-        };
-
-        if handle == INVALID_HANDLE_VALUE {
-            return None;
+        let current_disk_number = lr_core::windows_storage::present_disk_number_from_handle(handle)
+            .map_err(|error| {
+                let _ = CloseHandle(handle);
+                anyhow!("same-handle current disk-number query failed: {error}")
+            })?;
+        if current_disk_number != Some(disk_number) {
+            let _ = CloseHandle(handle);
+            return Err(anyhow!(
+                "SetupAPI interface changed before snapshot: enumerated disk {disk_number}, same-handle current disk {current_disk_number:?}"
+            ));
         }
 
-        // 获取磁盘大小
-        let mut geometry = DiskGeometryEx::default();
+        let mut length = DiskLengthInfo::default();
         let mut bytes_returned: u32 = 0;
-
-        let size_result = DeviceIoControl(
+        let length_result = DeviceIoControl(
             handle,
-            IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+            IOCTL_DISK_GET_LENGTH_INFO,
             None,
             0,
-            Some(&mut geometry as *mut _ as *mut _),
-            std::mem::size_of::<DiskGeometryEx>() as u32,
+            Some(&mut length as *mut _ as *mut _),
+            std::mem::size_of::<DiskLengthInfo>() as u32,
             Some(&mut bytes_returned),
             None,
         );
-
-        let size_bytes = if size_result.is_ok() {
-            geometry.disk_size as u64
-        } else {
-            let _ = CloseHandle(handle);
-            return None;
+        let length_bytes = length_result.as_ref().ok().and_then(|_| {
+            checked_disk_length(
+                length.length,
+                bytes_returned,
+                std::mem::size_of::<DiskLengthInfo>(),
+            )
+        });
+        let length_context = match &length_result {
+            Ok(()) => format!(
+                "returned length {} in {} bytes",
+                length.length, bytes_returned
+            ),
+            Err(error) => error.to_string(),
         };
-
-        // 获取分区布局信息
-        let mut buffer = vec![0u8; 65536]; // 足够大的缓冲区
-        let mut bytes_returned: u32 = 0;
-
-        let layout_result = DeviceIoControl(
-            handle,
-            IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+        let mut geometry_bytes = None;
+        let mut geometry_context = String::from("not attempted");
+        if length_bytes.is_none() {
+            let mut geometry = DiskGeometryEx::default();
+            bytes_returned = 0;
+            let geometry_result = DeviceIoControl(
+                handle,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                None,
+                0,
+                Some(&mut geometry as *mut _ as *mut _),
+                std::mem::size_of::<DiskGeometryEx>() as u32,
+                Some(&mut bytes_returned),
+                None,
+            );
+            geometry_bytes = geometry_result.as_ref().ok().and_then(|_| {
+                checked_disk_length(
+                    geometry.disk_size,
+                    bytes_returned,
+                    std::mem::size_of::<DiskGeometryEx>(),
+                )
+            });
+            geometry_context = match &geometry_result {
+                Ok(()) => format!(
+                    "returned length {} in {} bytes",
+                    geometry.disk_size, bytes_returned
+                ),
+                Err(error) => error.to_string(),
+            };
+        }
+        let (size_bytes, capacity_source) = match select_capacity_source(
+            length_bytes,
+            geometry_bytes,
             None,
-            0,
-            Some(buffer.as_mut_ptr() as *mut _),
-            buffer.len() as u32,
-            Some(&mut bytes_returned),
-            None,
+        ) {
+            Some(selected) => selected,
+            None => match lr_core::windows_storage::vds_disk_size(disk_number) {
+                Ok(size_bytes) => {
+                    log::warn!(
+                        "SetupAPI 磁盘接口的两个只读容量 IOCTL 均被驱动拒绝；仅容量字段回退到当前磁盘号 {disk_number} 的 VDS 值 {size_bytes} bytes。LENGTH_INFO=({length_context}); GEOMETRY_EX=({geometry_context})"
+                    );
+                    select_capacity_source(None, None, Some(size_bytes)).ok_or_else(|| {
+                        let _ = CloseHandle(handle);
+                        anyhow!("VDS returned a zero disk capacity")
+                    })?
+                }
+                Err(vds_error) => {
+                    let _ = CloseHandle(handle);
+                    return Err(anyhow!(
+                        "exact-path capacity queries failed and the same current disk number had no VDS capacity fallback: LENGTH_INFO=({length_context}); GEOMETRY_EX=({geometry_context}); VDS=({vds_error})"
+                    ));
+                }
+            },
+        };
+        log::debug!(
+            "SetupAPI disk interface {} capacity={} bytes source={capacity_source:?}",
+            disk_path,
+            size_bytes
         );
 
+        let descriptor = query_disk_device_descriptor(handle).map_err(|error| {
+            let _ = CloseHandle(handle);
+            anyhow!("exact-path device descriptor query failed: {error}")
+        })?;
+
+        // DRIVE_LAYOUT_INFORMATION_EX is variable length. Microsoft requires retrying with a
+        // larger buffer when the storage stack reports that the supplied buffer was too small.
+        let layout = query_drive_layout(handle);
         let _ = CloseHandle(handle);
 
-        let (partition_style, is_initialized, partitions) = if layout_result.is_ok()
-            && bytes_returned >= std::mem::size_of::<DriveLayoutInfoExHeader>() as u32
-        {
-            let header = &*(buffer.as_ptr() as *const DriveLayoutInfoExHeader);
+        let (buffer, returned) = layout.ok_or_else(|| {
+            anyhow!("IOCTL_DISK_GET_DRIVE_LAYOUT_EX failed on the exact SetupAPI interface")
+        })?;
+        let (partition_style, is_initialized, partitions, partition_count) = {
+            if returned < std::mem::size_of::<DriveLayoutInfoExHeader>() as u32 {
+                return Err(anyhow!(
+                    "IOCTL_DISK_GET_DRIVE_LAYOUT_EX response is truncated"
+                ));
+            }
+            let bytes = std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned as usize);
+            let header = std::ptr::read_unaligned(bytes.as_ptr().cast::<DriveLayoutInfoExHeader>());
 
             let style = match header.partition_style {
                 x if x == PARTITION_STYLE_MBR.0 as u32 => PartitionStyle::MBR,
@@ -446,28 +767,32 @@ fn get_disk_info(disk_number: u32) -> Option<PhysicalDisk> {
             let is_init = style != PartitionStyle::Unknown;
 
             // 解析分区信息
-            let partitions = parse_partition_layout(&buffer, header, style, disk_number);
+            let partitions = parse_partition_layout(bytes, &header, style, disk_number);
 
-            (style, is_init, partitions)
-        } else {
-            (PartitionStyle::Unknown, false, Vec::new())
+            (style, is_init, partitions, header.partition_count)
         };
 
         // 计算未分配空间
         let allocated: u64 = partitions.iter().map(|p| p.size_bytes).sum();
         let unallocated = size_bytes.saturating_sub(allocated);
 
-        // 获取磁盘型号
-        let model = get_disk_model(disk_number).unwrap_or_default();
-
-        Some(PhysicalDisk {
-            disk_number,
-            size_bytes,
-            model,
-            partition_style,
-            is_initialized,
-            partitions,
-            unallocated_bytes: unallocated,
+        let attachment = storage_attachment(descriptor.bus_type, descriptor.removable_media);
+        Ok(PresentPhysicalDisk {
+            disk: PhysicalDisk {
+                disk_number,
+                size_bytes,
+                model: descriptor.model,
+                partition_style,
+                is_initialized,
+                partitions,
+                unallocated_bytes: unallocated,
+            },
+            attachment,
+            bus_type: descriptor.bus_type,
+            removable_media: descriptor.removable_media,
+            serial_number: descriptor.serial_number,
+            firmware_revision: descriptor.firmware_revision,
+            partition_count,
         })
     }
 }
@@ -613,9 +938,7 @@ fn get_drive_letter_for_partition(disk_number: u32, offset: u64) -> Option<char>
 
         // 检查这个卷的磁盘号与偏移量是否都匹配
         if let Some((vol_disk, vol_offset)) = get_volume_offset(c) {
-            if vol_disk == disk_number
-                && (vol_offset as i64 - offset as i64).unsigned_abs() < 1024 * 1024
-            {
+            if vol_disk == disk_number && vol_offset == offset {
                 return Some(c);
             }
         }
@@ -627,72 +950,8 @@ fn get_drive_letter_for_partition(disk_number: u32, offset: u64) -> Option<char>
 /// DiskNumber 即 \\.\PhysicalDriveN 的 N，与 get_disk_info 用的磁盘号同义。
 #[cfg(windows)]
 fn get_volume_offset(letter: char) -> Option<(u32, u64)> {
-    unsafe {
-        let volume_path = format!("\\\\.\\{}:", letter);
-        let wide_path: Vec<u16> = volume_path
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let handle = CreateFileW(
-            PCWSTR::from_raw(wide_path.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            Default::default(),
-            None,
-        );
-
-        let handle = match handle {
-            Ok(h) => h,
-            Err(_) => return None,
-        };
-
-        if handle == INVALID_HANDLE_VALUE {
-            return None;
-        }
-
-        // VOLUME_DISK_EXTENTS 结构
-        #[repr(C)]
-        struct DiskExtent {
-            disk_number: u32,
-            starting_offset: i64,
-            extent_length: i64,
-        }
-
-        #[repr(C)]
-        struct VolumeDiskExtents {
-            number_of_disk_extents: u32,
-            extents: [DiskExtent; 1],
-        }
-
-        let mut buffer = [0u8; 256];
-        let mut bytes_returned: u32 = 0;
-
-        let result = DeviceIoControl(
-            handle,
-            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-            None,
-            0,
-            Some(buffer.as_mut_ptr() as *mut _),
-            buffer.len() as u32,
-            Some(&mut bytes_returned),
-            None,
-        );
-
-        let _ = CloseHandle(handle);
-
-        if result.is_ok() {
-            let extents = &*(buffer.as_ptr() as *const VolumeDiskExtents);
-            if extents.number_of_disk_extents > 0 {
-                let e = &extents.extents[0];
-                return Some((e.disk_number, e.starting_offset as u64));
-            }
-        }
-
-        None
-    }
+    let identity = lr_core::windows_storage::volume_identity(letter).ok()?;
+    Some((identity.disk_number, identity.offset_bytes))
 }
 
 /// 获取卷信息（卷标、文件系统、已用空间、空闲空间）
@@ -753,119 +1012,13 @@ fn get_volume_info(letter: char) -> (String, String, u64, u64) {
     (label, file_system, used_bytes, free_bytes)
 }
 
-/// 获取磁盘型号
-#[cfg(windows)]
-fn get_disk_model(disk_number: u32) -> Option<String> {
-    unsafe {
-        let path = format!(r"\\.\PhysicalDrive{disk_number}");
-        let wide = path
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        let handle = CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            Default::default(),
-            None,
-        )
-        .ok()?;
-        if handle == INVALID_HANDLE_VALUE {
-            return None;
-        }
-        let query = STORAGE_PROPERTY_QUERY {
-            PropertyId: StorageDeviceProperty,
-            QueryType: PropertyStandardQuery,
-            AdditionalParameters: [0],
-        };
-        // u64 storage gives the descriptor its required native alignment.
-        let mut storage = vec![0_u64; 512];
-        let mut returned = 0_u32;
-        let result = DeviceIoControl(
-            handle,
-            IOCTL_STORAGE_QUERY_PROPERTY,
-            Some((&query as *const STORAGE_PROPERTY_QUERY).cast()),
-            std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(storage.as_mut_ptr().cast()),
-            (storage.len() * std::mem::size_of::<u64>()) as u32,
-            Some(&mut returned),
-            None,
-        );
-        let _ = CloseHandle(handle);
-        if result.is_err() || returned < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() as u32 {
-            return None;
-        }
-        let bytes = std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), returned as usize);
-        let descriptor = &*bytes.as_ptr().cast::<STORAGE_DEVICE_DESCRIPTOR>();
-        let vendor = descriptor_string(bytes, descriptor.VendorIdOffset);
-        let product = descriptor_string(bytes, descriptor.ProductIdOffset);
-        let model = match (vendor, product) {
-            (Some(vendor), Some(product)) if !product.starts_with(&vendor) => {
-                format!("{vendor} {product}")
-            }
-            (_, Some(product)) => product,
-            (Some(vendor), None) => vendor,
-            (None, None) => return None,
-        };
-        (!model.is_empty()).then_some(model)
-    }
-}
-
-fn descriptor_string(buffer: &[u8], offset: u32) -> Option<String> {
-    let offset = usize::try_from(offset).ok()?;
-    if offset == 0 || offset >= buffer.len() {
-        return None;
-    }
-    let end = buffer[offset..].iter().position(|byte| *byte == 0)?;
-    let value = String::from_utf8_lossy(&buffer[offset..offset + end])
-        .trim()
-        .to_string();
-    (!value.is_empty()).then_some(value)
-}
-
-/// 执行一键分区操作
-pub fn execute_quick_partition(
-    disk_number: u32,
-    partition_style: PartitionStyle,
-    layouts: &[PartitionLayout],
-) -> QuickPartitionResult {
-    log::info!(
-        "开始一键分区: 磁盘 {}, 分区表类型: {:?}, 分区数量: {}",
-        disk_number,
-        partition_style,
-        layouts.len()
-    );
-
-    let disks = get_physical_disks();
-
-    let Some(disk) = disks.iter().find(|d| d.disk_number == disk_number) else {
-        return QuickPartitionResult {
-            success: false,
-            message: tr!("磁盘 {} 不存在，已取消一键分区", disk_number),
-            created_partitions: Vec::new(),
-        };
-    };
-
-    let (safe, reason) = can_safely_partition(disk);
-    if !safe {
-        return QuickPartitionResult {
-            success: false,
-            message: reason,
-            created_partitions: Vec::new(),
-        };
-    }
-
-    execute_quick_partition_validated(disk_number, partition_style, layouts)
-}
-
 /// Executes a plan whose physical-disk identity and current safety state were
 /// already revalidated by the caller immediately before this boundary.
 pub(crate) fn execute_quick_partition_validated(
     disk_number: u32,
     partition_style: PartitionStyle,
     layouts: &[PartitionLayout],
+    expected_layout: &lr_core::windows_storage::DiskLayoutSnapshot,
 ) -> QuickPartitionResult {
     let style = match storage_style(partition_style) {
         Ok(style) => style,
@@ -874,11 +1027,20 @@ pub(crate) fn execute_quick_partition_validated(
     if layouts.is_empty() {
         return quick_partition_failure(anyhow!("分区方案不能为空"));
     }
-    if let Err(error) = lr_core::windows_storage::clean_and_initialize(disk_number, style) {
+    if let Err(error) =
+        lr_core::windows_storage::clean_and_initialize_checked(disk_number, expected_layout, style)
+    {
         return quick_partition_failure(anyhow!("清除并初始化磁盘失败: {error}"));
     }
+    let mut current_layout = match lr_core::windows_storage::disk_layout_snapshot(disk_number) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return quick_partition_failure(anyhow!(
+                "初始化后无法重新确认目标磁盘稳定身份: {error}"
+            ));
+        }
+    };
 
-    let mut expected = Vec::with_capacity(layouts.len());
     let mut created_partitions = Vec::new();
     let mut assigned_letters = get_used_drive_letters();
     for (i, layout) in layouts.iter().enumerate() {
@@ -927,9 +1089,8 @@ pub(crate) fn execute_quick_partition_validated(
             active: false,
             preserve_gpt_metadata: None,
         };
-        match lr_core::windows_storage::create_partition(&request) {
-            Ok(created) => {
-                expected.push(created);
+        match lr_core::windows_storage::create_partition_checked(&request, &current_layout) {
+            Ok(_created) => {
                 created_partitions.push(
                     drive_letter
                         .map(|letter| format!("{letter}:"))
@@ -941,6 +1102,23 @@ pub(crate) fn execute_quick_partition_validated(
                             }
                         }),
                 );
+                // The checked create boundary already performs its canonical postcondition
+                // readback. Refresh only when another write still needs a fresh authorization
+                // snapshot; a redundant whole-disk query after the final successful write can
+                // only turn a completed operation into a false failure.
+                if !is_last {
+                    current_layout =
+                        match lr_core::windows_storage::disk_layout_snapshot(disk_number) {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                return quick_partition_failure(anyhow!(
+                                    "创建第 {} 个分区后无法重新确认目标磁盘稳定身份: {}",
+                                    i + 1,
+                                    error
+                                ));
+                            }
+                        };
+                }
             }
             Err(error) => {
                 return quick_partition_failure(anyhow!(
@@ -952,28 +1130,6 @@ pub(crate) fn execute_quick_partition_validated(
         }
     }
 
-    let Some(current) = get_physical_disks()
-        .into_iter()
-        .find(|disk| disk.disk_number == disk_number)
-    else {
-        return quick_partition_failure(anyhow!("操作后无法重新读取目标磁盘"));
-    };
-    if current.partition_style != partition_style {
-        return quick_partition_failure(anyhow!("操作后的分区表类型与请求不一致"));
-    }
-    for created in &expected {
-        let verified = current.partitions.iter().any(|partition| {
-            partition.offset_bytes == created.offset_bytes
-                && partition.size_bytes == created.size_bytes
-        });
-        if !verified {
-            return quick_partition_failure(anyhow!(
-                "操作后核验失败：偏移 {}、大小 {} 字节的分区不存在",
-                created.offset_bytes,
-                created.size_bytes
-            ));
-        }
-    }
     QuickPartitionResult {
         success: true,
         message: tr!("分区操作完成"),
@@ -1019,7 +1175,7 @@ fn gib_to_bytes(size_gb: f64) -> Result<u64> {
     if bytes > u64::MAX as f64 {
         return Err(anyhow!("分区大小超出支持范围"));
     }
-    Ok((bytes.round() as u64 / MIB) * MIB)
+    Ok(bytes.round() as u64)
 }
 
 /// 检查磁盘是否可以安全分区（没有系统盘）
@@ -1081,14 +1237,6 @@ pub fn can_safely_partition(disk: &PhysicalDisk) -> (bool, String) {
     (true, String::new())
 }
 
-/// 根据启动模式获取推荐的分区表类型
-pub fn get_recommended_partition_style(boot_mode: &BootMode) -> PartitionStyle {
-    match boot_mode {
-        BootMode::UEFI => PartitionStyle::GPT,
-        BootMode::Legacy => PartitionStyle::MBR,
-    }
-}
-
 /// 获取下一个可用的盘符
 pub fn get_next_available_drive_letter(used_letters: &[char]) -> Option<char> {
     for letter in 'C'..='Z' {
@@ -1114,75 +1262,17 @@ pub fn get_used_drive_letters() -> Vec<char> {
         .collect()
 }
 
-/// 创建单个分区
-pub fn create_single_partition(
-    disk_number: u32,
-    size_mb: u64,
-    drive_letter: Option<char>,
-    label: &str,
-) -> Result<String> {
-    let vol_label = if label.is_empty() { "OS" } else { label };
-    let letter = drive_letter
-        .map(|letter| letter.to_ascii_uppercase())
-        .or_else(|| get_next_available_drive_letter(&get_used_drive_letters()))
-        .ok_or_else(|| anyhow!("没有可用盘符"))?;
-    let created = lr_core::windows_storage::create_partition(
-        &lr_core::windows_storage::CreatePartitionRequest {
-            disk_number,
-            offset_bytes: 0,
-            size_bytes: size_mb.saturating_mul(MIB),
-            kind: lr_core::windows_storage::PartitionKind::BasicData,
-            file_system: Some(lr_core::windows_storage::FileSystem::Ntfs),
-            label: vol_label.to_string(),
-            drive_letter: Some(letter),
-            active: false,
-            preserve_gpt_metadata: None,
-        },
-    )?;
-    verify_created_partition(
-        disk_number,
-        created.offset_bytes,
-        created.size_bytes,
-        Some(letter),
-    )?;
-    Ok(format!("{letter}:"))
-}
-
-/// 创建 ESP 分区
-pub fn create_esp_partition(disk_number: u32, size_mb: u64) -> Result<String> {
-    let created = lr_core::windows_storage::create_partition(
-        &lr_core::windows_storage::CreatePartitionRequest {
-            disk_number,
-            offset_bytes: 0,
-            size_bytes: size_mb.saturating_mul(MIB),
-            kind: lr_core::windows_storage::PartitionKind::EfiSystem,
-            file_system: Some(lr_core::windows_storage::FileSystem::Fat32),
-            label: "EFI".to_string(),
-            drive_letter: None,
-            active: false,
-            preserve_gpt_metadata: None,
-        },
-    )?;
-    verify_created_partition(disk_number, created.offset_bytes, created.size_bytes, None)?;
-    Ok("ESP".to_string())
-}
-
 /// 删除指定分区
 pub fn delete_partition(disk_number: u32, partition_number: u32) -> Result<String> {
     let partition = current_partition(disk_number, partition_number)?;
     reject_running_system_partition(disk_number, &partition)?;
-    lr_core::windows_storage::delete_partition(disk_number, partition.offset_bytes, true)?;
-    let still_exists = get_physical_disks()
-        .into_iter()
-        .find(|disk| disk.disk_number == disk_number)
-        .is_some_and(|disk| {
-            disk.partitions
-                .iter()
-                .any(|value| value.offset_bytes == partition.offset_bytes)
-        });
-    if still_exists {
-        return Err(anyhow!("删除操作返回成功，但目标分区仍然存在"));
-    }
+    let expected_layout = lr_core::windows_storage::disk_layout_snapshot(disk_number)?;
+    lr_core::windows_storage::delete_partition_checked(
+        disk_number,
+        partition.offset_bytes,
+        true,
+        &expected_layout,
+    )?;
     Ok(tr!("分区已删除"))
 }
 
@@ -1196,15 +1286,73 @@ pub fn shrink_partition(disk_number: u32, partition_number: u32, shrink_mb: u64)
     let requested = shrink_mb
         .checked_mul(MIB)
         .ok_or_else(|| anyhow!("缩小大小超出支持范围"))?;
-    let reclaimed = lr_core::windows_storage::shrink_volume(letter, requested, requested)?;
-    verify_partition_delta(
+    let expected_extent = lr_core::windows_storage::VolumeIdentity {
         disk_number,
-        partition.offset_bytes,
-        partition.size_bytes,
-        reclaimed,
-        false,
-    )?;
+        offset_bytes: partition.offset_bytes,
+        extent_length_bytes: partition.size_bytes,
+    };
+    let expected = lr_core::windows_storage::stable_volume_identity(letter)?;
+    if !lr_core::windows_storage::same_volume_identity(expected.extent, expected_extent) {
+        anyhow::bail!("分区稳定身份与当前库存不一致，已停止缩小");
+    }
+    let reclaimed = match lr_core::windows_storage::shrink_volume_stable_checked(
+        letter, expected, requested, requested,
+    ) {
+        Ok(reclaimed) => reclaimed,
+        Err(error) => {
+            let recovery = recover_observed_quick_partition_shrink(letter, expected);
+            anyhow::bail!("缩小分区失败: {error}; 恢复检查: {recovery}");
+        }
+    };
     Ok(tr!("分区已成功缩小 {} MB", reclaimed / MIB))
+}
+
+fn observed_stable_shrink_bytes(
+    before: lr_core::windows_storage::StableVolumeIdentity,
+    current: lr_core::windows_storage::StableVolumeIdentity,
+) -> Result<Option<u64>> {
+    if lr_core::windows_storage::same_stable_volume_identity(before, current) {
+        return Ok(None);
+    }
+    if !lr_core::windows_storage::same_stable_partition_identity(before, current) {
+        anyhow::bail!("当前盘符不再指向缩卷前认证的同一物理分区");
+    }
+    if current.extent.extent_length_bytes >= before.extent.extent_length_bytes {
+        anyhow::bail!("当前分区范围没有形成可安全恢复的尾部缩小");
+    }
+    Ok(Some(
+        before.extent.extent_length_bytes - current.extent.extent_length_bytes,
+    ))
+}
+
+fn recover_observed_quick_partition_shrink(
+    letter: char,
+    before: lr_core::windows_storage::StableVolumeIdentity,
+) -> String {
+    let current = match lr_core::windows_storage::stable_volume_identity(letter) {
+        Ok(current) => current,
+        Err(error) => return format!("无法重新读取同一分区，未盲目扩容: {error}"),
+    };
+    let reclaimed = match observed_stable_shrink_bytes(before, current) {
+        Ok(None) => return "权威回读显示分区范围未变化，无需恢复".to_owned(),
+        Ok(Some(reclaimed)) => reclaimed,
+        Err(error) => return format!("当前对象不是可证明的原分区尾部缩小，未盲目扩容: {error:#}"),
+    };
+    match lr_core::windows_storage::extend_volume_stable_checked(letter, current, reclaimed) {
+        Ok(()) => match lr_core::windows_storage::stable_volume_identity(letter) {
+            Ok(restored)
+                if lr_core::windows_storage::same_stable_volume_identity(restored, before) =>
+            {
+                format!("已按权威回读恢复实际缩小的 {reclaimed} 字节")
+            }
+            Ok(restored) => format!(
+                "已尝试恢复实际缩小范围，但最终权威回读不等于原范围: {:?}",
+                restored.extent
+            ),
+            Err(error) => format!("已尝试恢复实际缩小范围，但最终回读失败: {error}"),
+        },
+        Err(error) => format!("观察到实际缩小 {reclaimed} 字节，但安全扩回失败: {error}"),
+    }
 }
 
 /// 扩展分区
@@ -1239,14 +1387,16 @@ pub fn extend_partition(
     let requested = requested_mb
         .checked_mul(MIB)
         .ok_or_else(|| anyhow!("扩展大小超出支持范围"))?;
-    lr_core::windows_storage::extend_volume(letter, disk_number, requested)?;
-    verify_partition_delta(
+    let expected_extent = lr_core::windows_storage::VolumeIdentity {
         disk_number,
-        partition.offset_bytes,
-        partition.size_bytes,
-        requested,
-        true,
-    )?;
+        offset_bytes: partition.offset_bytes,
+        extent_length_bytes: partition.size_bytes,
+    };
+    let expected = lr_core::windows_storage::stable_volume_identity(letter)?;
+    if !lr_core::windows_storage::same_volume_identity(expected.extent, expected_extent) {
+        anyhow::bail!("分区稳定身份与当前库存不一致，已停止扩展");
+    }
+    lr_core::windows_storage::extend_volume_stable_checked(letter, expected, requested)?;
     Ok(tr!("分区已成功扩展 {} MB", requested_mb))
 }
 
@@ -1269,70 +1419,6 @@ fn reject_running_system_partition(disk_number: u32, partition: &DiskPartitionIn
     };
     if system_disk == disk_number && system_offset == partition.offset_bytes {
         return Err(anyhow!("不能修改当前运行的系统分区 {system_letter}:"));
-    }
-    Ok(())
-}
-
-fn verify_created_partition(
-    disk_number: u32,
-    offset_bytes: u64,
-    size_bytes: u64,
-    drive_letter: Option<char>,
-) -> Result<()> {
-    let partition = get_physical_disks()
-        .into_iter()
-        .find(|disk| disk.disk_number == disk_number)
-        .and_then(|disk| {
-            disk.partitions
-                .into_iter()
-                .find(|partition| partition.offset_bytes == offset_bytes)
-        })
-        .ok_or_else(|| anyhow!("创建操作返回成功，但重新枚举时找不到新分区"))?;
-    if partition.size_bytes != size_bytes {
-        return Err(anyhow!(
-            "新分区大小核验失败：期望 {} 字节，实际 {} 字节",
-            size_bytes,
-            partition.size_bytes
-        ));
-    }
-    if drive_letter.map(|letter| letter.to_ascii_uppercase())
-        != partition
-            .drive_letter
-            .map(|letter| letter.to_ascii_uppercase())
-    {
-        return Err(anyhow!("新分区盘符核验失败"));
-    }
-    Ok(())
-}
-
-fn verify_partition_delta(
-    disk_number: u32,
-    offset_bytes: u64,
-    previous_size: u64,
-    delta: u64,
-    extending: bool,
-) -> Result<()> {
-    let current = get_physical_disks()
-        .into_iter()
-        .find(|disk| disk.disk_number == disk_number)
-        .and_then(|disk| {
-            disk.partitions
-                .into_iter()
-                .find(|partition| partition.offset_bytes == offset_bytes)
-        })
-        .ok_or_else(|| anyhow!("调整操作后无法重新定位目标分区"))?;
-    let expected = if extending {
-        previous_size.checked_add(delta)
-    } else {
-        previous_size.checked_sub(delta)
-    }
-    .ok_or_else(|| anyhow!("分区大小计算溢出"))?;
-    if current.size_bytes != expected {
-        return Err(anyhow!(
-            "调整操作返回成功，但分区大小核验失败：期望 {} 字节，实际 {} 字节",
-            expected,
-            current.size_bytes
-        ));
     }
     Ok(())
 }
@@ -1457,12 +1543,6 @@ pub fn resize_existing_partition(
     }
 }
 
-/// 查询分区可缩小的最大空间（MB）
-///
-pub fn query_shrink_max(drive_letter: char) -> Result<u64> {
-    Ok(lr_core::windows_storage::query_max_reclaimable_bytes(drive_letter)? / MIB)
-}
-
 /// 获取磁盘上指定分区后面的未分配空间大小（MB）
 ///
 /// 这用于判断分区是否可以扩展
@@ -1520,100 +1600,42 @@ pub fn get_unallocated_space_after_partition_bytes_with_disk(
     }
 }
 
-/// 获取磁盘上指定分区后面的未分配空间大小（MB）
-///
-/// 兼容旧API，内部会获取磁盘信息（较慢）
-pub fn get_unallocated_space_after_partition(disk_number: u32, partition_number: u32) -> u64 {
-    let disks = get_physical_disks();
-    match disks.iter().find(|d| d.disk_number == disk_number) {
-        Some(disk) => get_unallocated_space_after_partition_with_disk(disk, partition_number),
-        None => 0,
-    }
-}
-
-/// 检查分区是否可以调整大小
-///
-/// 返回 (是否可调整, 原因说明, 最小大小MB, 最大大小MB)
-pub fn can_resize_partition(
-    partition: &DiskPartitionInfo,
-    disk: &PhysicalDisk,
-) -> (bool, String, u64, u64) {
-    // 检查是否是特殊分区
-    if partition.is_esp {
-        return (false, tr!("ESP分区不支持调整大小"), 0, 0);
-    }
-    if partition.is_msr {
-        return (false, tr!("MSR分区不支持调整大小"), 0, 0);
-    }
-    if partition.is_recovery {
-        return (false, tr!("恢复分区不支持调整大小"), 0, 0);
-    }
-
-    // 检查是否有盘符（没有盘符的分区可能无法正常操作）
-    if partition.drive_letter.is_none() {
-        return (false, tr!("分区没有盘符，无法调整大小"), 0, 0);
-    }
-
-    let drive_letter = partition.drive_letter.unwrap();
-
-    let system_drive = match lr_core::windows_storage::current_windows_drive_letter() {
-        Ok(letter) => letter,
-        Err(error) => {
-            return (
-                false,
-                tr!("无法确认当前运行的系统卷，已阻止调整大小: {}", error),
-                0,
-                0,
-            );
-        }
-    };
-    if get_volume_offset(system_drive).is_some_and(|(number, offset)| {
-        number == disk.disk_number && offset == partition.offset_bytes
-    }) || drive_letter.eq_ignore_ascii_case(&system_drive)
-    {
-        return (false, tr!("无法调整当前系统分区大小"), 0, 0);
-    }
-
-    // 计算最小大小（已使用空间 + 100MB 余量）
-    let used_mb = partition.used_bytes / 1024 / 1024;
-    let min_size_mb = used_mb + 100;
-
-    // 计算最大大小
-    let current_size_mb = partition.size_bytes / 1024 / 1024;
-    let unallocated_after_mb =
-        get_unallocated_space_after_partition_with_disk(disk, partition.partition_number);
-    let max_size_mb = current_size_mb + unallocated_after_mb;
-
-    // 如果没有可调整的空间
-    if min_size_mb >= max_size_mb {
-        return (
-            false,
-            tr!(
-                "分区无法调整大小，已用空间 {} MB 接近分区大小 {} MB",
-                used_mb,
-                current_size_mb
-            ),
-            0,
-            0,
-        );
-    }
-
-    (
-        true,
-        tr!(
-            "可调整范围: {} MB - {} MB (已用: {} MB)",
-            min_size_mb,
-            max_size_mb,
-            used_mb
-        ),
-        min_size_mb,
-        max_size_mb,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_attachment_uses_descriptor_facts_without_guessing_virtual_disks() {
+        assert_eq!(storage_attachment(7, false), StorageAttachment::External);
+        assert_eq!(storage_attachment(11, true), StorageAttachment::External);
+        assert_eq!(storage_attachment(14, false), StorageAttachment::Unknown);
+        assert_eq!(storage_attachment(17, false), StorageAttachment::Internal);
+    }
+
+    #[test]
+    fn capacity_fallback_order_never_replaces_a_successful_exact_path_result() {
+        assert_eq!(
+            select_capacity_source(Some(100), Some(200), Some(300)),
+            Some((100, CapacitySource::LengthInfo))
+        );
+        assert_eq!(
+            select_capacity_source(None, Some(200), Some(300)),
+            Some((200, CapacitySource::GeometryEx))
+        );
+        assert_eq!(
+            select_capacity_source(None, None, Some(300)),
+            Some((300, CapacitySource::Vds))
+        );
+        assert_eq!(select_capacity_source(None, None, Some(0)), None);
+    }
+
+    #[test]
+    fn descriptor_text_never_reads_past_the_returned_descriptor() {
+        let bytes = b"\0\0\0\0MODEL\0TRAILING";
+        assert_eq!(descriptor_text(bytes, 4, 10), "MODEL");
+        assert!(descriptor_text(bytes, 4, 8).is_empty());
+        assert!(descriptor_text(bytes, 99, bytes.len()).is_empty());
+    }
 
     #[test]
     #[ignore = "requires an explicit Windows integration test because it reads host drive-letter state"]
@@ -1669,5 +1691,55 @@ mod tests {
             101
         );
         assert_eq!(get_unallocated_space_after_partition_with_disk(&disk, 1), 0);
+    }
+
+    #[test]
+    fn shrink_recovery_accepts_only_a_fresh_same_partition_tail_reduction() {
+        let before = lr_core::windows_storage::StableVolumeIdentity {
+            extent: lr_core::windows_storage::VolumeIdentity {
+                disk_number: 7,
+                offset_bytes: 1_048_576 + 512,
+                extent_length_bytes: 90_000_000_321,
+            },
+            disk: lr_core::windows_storage::StableDiskIdentity::Gpt { disk_id: [7; 16] },
+            partition: lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                partition_id: [9; 16],
+            },
+            device_id_hash: Some([3; 32]),
+        };
+        let shrunk = lr_core::windows_storage::StableVolumeIdentity {
+            extent: lr_core::windows_storage::VolumeIdentity {
+                extent_length_bytes: before.extent.extent_length_bytes - 65_537,
+                ..before.extent
+            },
+            ..before
+        };
+        assert_eq!(
+            observed_stable_shrink_bytes(before, shrunk).unwrap(),
+            Some(65_537)
+        );
+        assert_eq!(observed_stable_shrink_bytes(before, before).unwrap(), None);
+        assert!(observed_stable_shrink_bytes(
+            before,
+            lr_core::windows_storage::StableVolumeIdentity {
+                extent: lr_core::windows_storage::VolumeIdentity {
+                    disk_number: 8,
+                    ..shrunk.extent
+                },
+                ..shrunk
+            }
+        )
+        .is_err());
+        assert!(observed_stable_shrink_bytes(
+            before,
+            lr_core::windows_storage::StableVolumeIdentity {
+                extent: lr_core::windows_storage::VolumeIdentity {
+                    extent_length_bytes: before.extent.extent_length_bytes + 512,
+                    ..before.extent
+                },
+                ..before
+            }
+        )
+        .is_err());
     }
 }

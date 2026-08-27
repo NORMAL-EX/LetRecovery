@@ -4,6 +4,28 @@ LetRecovery ships the following third-party binary. Update it only after
 reviewing the upstream release notes, licenses, local patches, and hashes.
 Hashes in this file are for the exact bytes committed to this repository.
 
+## Microsoft Offline Registry Library
+
+| Field | Value |
+| --- | --- |
+| Repository path | `assets/release/bin/offreg.dll` |
+| Upstream component | Microsoft Windows Driver Kit Offline Registry Library |
+| WDK redistributable path | `Redist/10.0.28000.0/offreg/x64/offreg.dll` |
+| File version | `10.0.28000.1839` |
+| Size | `125424` bytes |
+| SHA-256 | `BAEE13B111020107A3CCFE4BEC5FDD2CE6863991066201CA110E02B2DDD495E0` |
+| Authenticode signer | Microsoft Corporation |
+| Signer certificate thumbprint | `F6EECCC7FF116889C2D5466AE7243D7AA7698689` |
+| Official API documentation | <https://learn.microsoft.com/windows-hardware/drivers/devtest/offline-registry-library> |
+
+The normal and PE endpoints load this Microsoft redistributable only from an absolute System32
+or executable-relative path. It provides a read-only, in-memory parser for offline SAM hives that
+`RegLoadAppKeyW` legitimately rejects and avoids applying the live SAM key ACL that blocks a normal
+administrator after `RegLoadKeyW`. Release CI verifies the exact size, SHA-256, Microsoft signature
+and Windows 7 import boundary before copying it to `pkg/bin/` and the PE WIM. The registry wrapper
+uses `OROpenHive`, `OROpenKey`, `OREnumKey`, `ORGetValue`, `ORCloseKey` and `ORCloseHive` according to
+their documented buffer units and handle lifetimes; it does not repair or write the hive.
+
 ## wimlib
 
 | Field | Value |
@@ -14,10 +36,10 @@ Hashes in this file are for the exact bytes committed to this repository.
 | Upstream Git URL | `https://wimlib.net/git/wimlib` |
 | Pinned upstream commit | `cd5e231c348c255ae5088873b5a66ee0eb96fa07` |
 | LetRecovery patch | `docs/third-party/wimlib-1.14.5/letrecovery-parallel-decompression.patch` |
-| Patch SHA-256 | `6EEDE7B504B8ED905A7F86CEB681CA40256D642D2CDC17B65568D2E4FD0122BE` |
+| Patch SHA-256 | `1A381CC7026EC82A8AA5C942A43CC895DE11ECF5BB3E305F24C58642757AE3EA` |
 | Reproducible build script | `.github/scripts/build-wimlib-parallel.ps1` |
-| Committed DLL size | `496640` bytes |
-| Committed DLL SHA-256 | `78822F2CEF8FE4BD9EBD91943373BA8EA8A32ADA17C49AFC496123B2A938F4EF` |
+| Committed DLL size | `497152` bytes |
+| Committed DLL SHA-256 | `238C02E482E1E1603513318AE52E1E0AEE3BEF84A211021822572A88BAB27C9A` |
 | License used for `libwim` and the LetRecovery patch | GNU Lesser General Public License v3.0 or later |
 | Additional bundled notice | `libdivsufsort-lite` license from upstream |
 
@@ -39,7 +61,13 @@ Windows 7 APIs are available, and uses currently available commit memory rather
 than installed physical memory. Linux uses the current process affinity and
 available physical pages. Joined Windows worker handles are always closed.
 Progress and extraction callbacks remain serialized on the caller thread, and
-SHA-1 verification is unchanged.
+SHA-1 verification is unchanged. Parallel verification is an optional
+accelerator: if its thread, codec, index, or buffer allocation returns
+`WIMLIB_ERR_NOMEM`, it restores the caller-visible progress counters and retries
+through the unchanged serial verifier. The Rust caller also selects the
+documented one-worker serial path whenever current available commit memory is
+below 2 GiB or cannot be queried, since the extension's explicit buffer budget
+does not include Win32 thread stacks, codec state, index arrays, or WinPE itself.
 
 The Windows build uses `--without-fuse --without-ntfs-3g`. Upstream 1.14.5
 permits LGPLv2.1-or-later; this repository continues to distribute both libwim

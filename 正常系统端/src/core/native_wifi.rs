@@ -143,9 +143,13 @@ mod native {
     pub fn capture_connected_wifi() -> anyhow::Result<CapturedWifiProfile> {
         let client = open_client()?;
         let interfaces = connected_interfaces(&client)?;
-        let interface = interfaces
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("no connected Wi-Fi interface was found"))?;
+        if interfaces.len() != 1 {
+            bail!(
+                "expected exactly one connected Wi-Fi interface, found {}",
+                interfaces.len()
+            );
+        }
+        let interface = &interfaces[0];
         let (_attributes_memory, attributes) =
             unsafe { connection_attributes(&client, interface)? };
         let profile_name = utf16_array(&attributes.strProfileName)?;
@@ -192,8 +196,45 @@ mod native {
         if xml.is_empty() {
             bail!("WlanGetProfile returned empty profile XML");
         }
+        super::validate_portable_profile_xml(&xml)?;
         Ok(CapturedWifiProfile { ssid, xml })
     }
+}
+
+fn validate_portable_profile_xml(xml: &str) -> anyhow::Result<()> {
+    let document = roxmltree::Document::parse(xml)?;
+    let authentication = document
+        .descendants()
+        .find(|node| node.tag_name().name() == "authentication")
+        .and_then(|node| node.text())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    let shared_key = document
+        .descendants()
+        .find(|node| node.tag_name().name() == "sharedKey");
+    if let Some(shared_key) = shared_key {
+        let protected = shared_key
+            .descendants()
+            .find(|node| node.tag_name().name() == "protected")
+            .and_then(|node| node.text())
+            .unwrap_or("")
+            .trim();
+        let key_material = shared_key
+            .descendants()
+            .find(|node| node.tag_name().name() == "keyMaterial")
+            .and_then(|node| node.text())
+            .unwrap_or("")
+            .trim();
+        if !protected.eq_ignore_ascii_case("false") || key_material.is_empty() {
+            anyhow::bail!("Wi-Fi profile key material was not returned in portable plaintext form");
+        }
+    } else if !matches!(authentication.as_str(), "OPEN" | "OWE") {
+        anyhow::bail!(
+            "Wi-Fi profile uses credentials that are not embedded in the portable profile XML"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(feature = "non-elevated-tests")]
@@ -214,7 +255,7 @@ pub use native::capture_connected_wifi;
 
 #[cfg(test)]
 mod tests {
-    use super::CapturedWifiProfile;
+    use super::{validate_portable_profile_xml, CapturedWifiProfile};
 
     #[test]
     fn captured_profile_keeps_ssid_and_xml_separate() {
@@ -224,5 +265,17 @@ mod tests {
         };
         assert_eq!(profile.ssid, "Test Network");
         assert_eq!(profile.xml, "<WLANProfile />");
+    }
+
+    #[test]
+    fn portable_profile_requires_plaintext_key_or_an_open_authentication_mode() {
+        let personal = r#"<WLANProfile><MSM><security><authEncryption><authentication>WPA2PSK</authentication></authEncryption><sharedKey><protected>false</protected><keyMaterial>secret</keyMaterial></sharedKey></security></MSM></WLANProfile>"#;
+        assert!(validate_portable_profile_xml(personal).is_ok());
+        let encrypted = personal.replace("<protected>false", "<protected>true");
+        assert!(validate_portable_profile_xml(&encrypted).is_err());
+        let enterprise = r#"<WLANProfile><MSM><security><authEncryption><authentication>WPA2</authentication></authEncryption></security></MSM></WLANProfile>"#;
+        assert!(validate_portable_profile_xml(enterprise).is_err());
+        let open = r#"<WLANProfile><MSM><security><authEncryption><authentication>open</authentication></authEncryption></security></MSM></WLANProfile>"#;
+        assert!(validate_portable_profile_xml(open).is_ok());
     }
 }

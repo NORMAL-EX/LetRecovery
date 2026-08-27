@@ -3,10 +3,11 @@
 //! This module only presents and collects backup intent. Starting a backup remains the
 //! controller's responsibility so a window notification can never directly perform disk I/O.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::UI::Controls::{
     LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
     LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETBKCOLOR,
@@ -15,14 +16,14 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetWindowTextLengthW, GetWindowTextW, MoveWindow, SendMessageW, ShowWindow,
-    BM_GETCHECK, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL,
-    CB_RESETCONTENT, CB_SETCURSEL, ES_AUTOHSCROLL, ES_NUMBER, HMENU, SW_HIDE, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETFONT, WS_CHILD, WS_TABSTOP,
+    CreateWindowExW, GetWindowTextLengthW, GetWindowTextW, SendMessageW, ShowWindow, BM_GETCHECK,
+    BS_AUTOCHECKBOX, BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT,
+    CB_SETCURSEL, ES_AUTOHSCROLL, ES_NUMBER, HMENU, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_SETFONT, WS_CHILD, WS_TABSTOP,
 };
 
-use super::super::controls::{child, wide};
-use super::super::layout::{centered_control_y_ceil, LayoutMetrics};
+use super::super::controls::{child, move_layout_window as MoveWindow, wide};
+use super::super::layout::{centered_control_y_ceil, measure_text, LayoutMetrics};
 use super::super::theme::{
     apply_control_theme, apply_list_view_theme, combo_closed_height, NativeControlKind, Palette,
 };
@@ -203,6 +204,7 @@ impl BackupPageState {
             format: self.format.to_config_value(),
             swm_split_size: self.swm_split_size_mb,
             wim_engine,
+            handoff: None,
         })
     }
 }
@@ -283,6 +285,7 @@ pub struct BackupPageHandles {
 
 pub struct BackupPage {
     handles: BackupPageHandles,
+    font: Cell<HFONT>,
     default_timestamp: String,
     generated_name: RefCell<String>,
     generated_description: RefCell<String>,
@@ -408,6 +411,7 @@ impl BackupPage {
                 incremental,
                 warning,
             },
+            font: Cell::new(HFONT::default()),
             default_timestamp: default_timestamp.to_owned(),
             generated_name: RefCell::new(initial.name.clone()),
             generated_description: RefCell::new(initial.description.clone()),
@@ -562,21 +566,23 @@ impl BackupPage {
         let s = |value: i32| value * dpi as i32 / 96;
         let h = self.handles;
         let width = width.max(0);
-        let translated_labels_are_long = [
-            crate::tr!("备份格式:"),
-            crate::tr!("保存位置:"),
-            crate::tr!("备份名称:"),
-            crate::tr!("备份描述:"),
+        let font = self.font.get();
+        let measured_label_widths = [
+            (h.format_label, crate::tr!("备份格式:")),
+            (h.save_label, crate::tr!("保存位置:")),
+            (h.name_label, crate::tr!("备份名称:")),
+            (h.description_label, crate::tr!("备份描述:")),
         ]
-        .iter()
-        .any(|label| label.chars().count() > 7);
-        let label_width = s(if translated_labels_are_long { 116 } else { 76 }).min(width / 3);
+        .map(|(control, label)| measure_text(control, font, &label, None).width);
+        let label_width = backup_label_column_width(&measured_label_widths, width, dpi);
         let metrics = LayoutMetrics::for_dpi(dpi);
         let row_height = metrics.field_height.max(metrics.button_height);
         let table_top = top + s(26);
         let table_height = s(132);
 
-        move_control(h.source_label, left, top, s(180).min(width), s(20));
+        // The heading owns a row above the table.  Giving it the whole content width prevents
+        // translated text from wrapping into a second line that a one-line control would crop.
+        move_control(h.source_label, left, top, width, metrics.label_height);
         move_control(h.source_list, left, table_top, width, table_height);
         for (column, column_width) in backup_column_widths(width, dpi).into_iter().enumerate() {
             let _ = SendMessageW(
@@ -673,7 +679,17 @@ impl BackupPage {
             row_height,
         );
         let options_top = description_top + s(32);
-        let incremental_width = s(230).min(width / 2);
+        let incremental_minimum = s(230).min(width);
+        let incremental_maximum = (width * 2 / 3).max(incremental_minimum);
+        let incremental_width = (measure_text(
+            h.incremental,
+            font,
+            &crate::tr!("增量备份 (追加到现有镜像)"),
+            None,
+        )
+        .width
+            + s(30))
+        .clamp(incremental_minimum, incremental_maximum);
         let options_gap = s(8).min((width - incremental_width).max(0));
         move_control(
             h.incremental,
@@ -730,6 +746,7 @@ impl BackupPage {
     }
 
     pub unsafe fn apply_font(&self, font: windows::Win32::Graphics::Gdi::HFONT) {
+        self.font.set(font);
         for control in self.all_controls() {
             let _ = SendMessageW(control, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
         }
@@ -976,6 +993,24 @@ fn backup_column_widths(table_width: i32, dpi: u32) -> [i32; 6] {
     widths
 }
 
+/// Measures the active translations instead of guessing from character count.  Preserve a useful
+/// editor width, but otherwise keep every ordinary field caption on one line.
+fn backup_label_column_width(measured_widths: &[i32], available_width: i32, dpi: u32) -> i32 {
+    let scale = |value: i32| value * dpi.max(1) as i32 / 96;
+    let minimum = scale(76).min(available_width.max(0));
+    let useful_field = scale(220);
+    let maximum = (available_width - useful_field)
+        .max(minimum)
+        .min((available_width * 2 / 5).max(minimum));
+    measured_widths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or_default()
+        .saturating_add(scale(8))
+        .clamp(minimum, maximum)
+}
+
 unsafe fn edit(parent: HWND, id: u16, text: &str) -> windows::core::Result<HWND> {
     let numeric = if id == ID_SWM_SIZE { ES_NUMBER } else { 0 };
     child(
@@ -1003,7 +1038,7 @@ unsafe fn set_text(hwnd: HWND, text: &str) {
 }
 
 unsafe fn move_control(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
-    let _ = MoveWindow(hwnd, x, y, width.max(0), height.max(0), true);
+    let _ = MoveWindow(hwnd, x, y, width.max(0), height.max(0), false);
 }
 
 #[cfg(test)]
@@ -1094,6 +1129,16 @@ mod tests {
 
         let narrow = backup_column_widths(500, 96);
         assert_eq!(narrow, [132, 104, 104, 96, 108, 104]);
+    }
+
+    #[test]
+    fn translated_field_labels_receive_their_measured_width() {
+        assert_eq!(
+            backup_label_column_width(&[72, 196, 148, 211], 926, 96),
+            219
+        );
+        // A pathological translation cannot consume the editor: the field keeps 220 logical px.
+        assert_eq!(backup_label_column_width(&[900], 926, 96), 370);
     }
 
     #[test]

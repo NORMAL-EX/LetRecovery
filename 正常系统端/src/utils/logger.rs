@@ -6,12 +6,12 @@
 //! - 可在运行时动态开关日志
 //! - 日志状态持久化到配置文件
 
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-use lr_core::operation::{unix_time_millis, OperationError, SupportBundleBuilder};
 use parking_lot::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::SubscriberExt;
@@ -25,9 +25,59 @@ static LOG_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// 全局日志守卫（保持文件写入器存活）
 static LOG_GUARD: OnceLock<RwLock<Option<WorkerGuard>>> = OnceLock::new();
+static LOG_BARRIER_ID: AtomicU64 = AtomicU64::new(0);
+static LOG_BARRIER_NONCE: OnceLock<String> = OnceLock::new();
+
+fn log_barrier_nonce() -> anyhow::Result<&'static str> {
+    if let Some(value) = LOG_BARRIER_NONCE.get() {
+        return Ok(value);
+    }
+    use windows::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_ALG_HANDLE, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+    let mut bytes = [0u8; 16];
+    let status = unsafe {
+        BCryptGenRandom(
+            BCRYPT_ALG_HANDLE::default(),
+            &mut bytes,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status.is_err() {
+        anyhow::bail!("BCryptGenRandom failed while creating the log barrier nonce");
+    }
+    let generated = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let _ = LOG_BARRIER_NONCE.set(generated);
+    LOG_BARRIER_NONCE
+        .get()
+        .map(String::as_str)
+        .ok_or_else(|| anyhow::anyhow!("log barrier nonce was not initialized"))
+}
 
 /// 日志管理器
 pub struct LogManager;
+
+/// A flush-complete log object whose directory entry cannot be replaced while held on Windows.
+///
+/// Consumers that require a byte-accurate snapshot must read from `file()` instead of reopening
+/// `path()`. The path is retained only for diagnostics.
+pub struct LogBarrierSnapshot {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+impl LogBarrierSnapshot {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn file(&self) -> &std::fs::File {
+        &self.file
+    }
+}
 
 /// Converts tracing's platform-independent LF records to CRLF so the legacy Windows 7 Notepad
 /// renders one record per line. Existing CRLF pairs are preserved, including pairs split across
@@ -168,11 +218,157 @@ impl LogManager {
     ///
     /// 强制将所有缓冲的日志写入文件
     pub fn flush() {
-        // non_blocking writer 会在 guard 被 drop 时自动刷新
-        // 这里通过写入一条空日志来触发刷新
-        if Self::is_enabled() {
-            log::trace!("日志刷新");
+        if let Err(error) = Self::flush_barrier() {
+            log::warn!("日志落盘屏障失败: {error:#}");
         }
+    }
+
+    /// Wait until an observable marker has passed through tracing-appender's
+    /// FIFO worker, then flush the containing file through the filesystem.
+    ///
+    /// tracing-appender 0.2.x implements `NonBlocking::flush()` as a no-op, so
+    /// emitting an ordinary record is not a persistence barrier. Observing a
+    /// unique marker in the file proves that every earlier queued record was
+    /// processed. Failure is returned to the caller instead of being presented
+    /// as a successful snapshot boundary.
+    pub fn flush_barrier() -> anyhow::Result<LogBarrierSnapshot> {
+        use anyhow::bail;
+
+        if !Self::is_enabled() {
+            bail!("logging is disabled");
+        }
+        let id = LOG_BARRIER_ID.fetch_add(1, Ordering::Relaxed);
+        let marker = format!(
+            "LR_LOG_BARRIER_{}_{}_{}",
+            std::process::id(),
+            log_barrier_nonce()?,
+            id
+        );
+        log::info!("{marker}");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last_candidate_error = None;
+        loop {
+            // Refresh the bounded set on every poll. The appender can rotate at midnight between
+            // marker emission and its asynchronous write, creating a path which did not exist on
+            // the first poll.
+            let candidates = Self::barrier_log_candidates(8);
+            if let Some(snapshot) = Self::find_log_barrier_candidate(
+                &candidates,
+                marker.as_bytes(),
+                &mut last_candidate_error,
+            )? {
+                return Ok(snapshot);
+            }
+            if Instant::now() >= deadline {
+                match last_candidate_error {
+                    Some(error) => bail!(
+                        "timed out waiting for the asynchronous log writer; last candidate error: {error}"
+                    ),
+                    None => bail!("timed out waiting for the asynchronous log writer"),
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn barrier_log_candidates(limit: usize) -> Vec<PathBuf> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let current = Self::get_current_log_file();
+        let mut candidates = Vec::with_capacity(limit);
+        if current.exists() {
+            candidates.push(current.clone());
+        }
+        for path in Self::latest_log_files(limit) {
+            if candidates.len() >= limit {
+                break;
+            }
+            if path != current {
+                candidates.push(path);
+            }
+        }
+        candidates
+    }
+
+    fn find_log_barrier_candidate(
+        candidates: &[PathBuf],
+        marker: &[u8],
+        last_candidate_error: &mut Option<String>,
+    ) -> anyhow::Result<Option<LogBarrierSnapshot>> {
+        use anyhow::Context;
+
+        for path in candidates {
+            let mut file = match Self::open_log_barrier_candidate(path) {
+                Ok(file) => file,
+                Err(error) => {
+                    *last_candidate_error = Some(format!("{}: {error:#}", path.display()));
+                    continue;
+                }
+            };
+            let contains = match Self::log_tail_contains(&mut file, path, marker) {
+                Ok(contains) => contains,
+                Err(error) => {
+                    *last_candidate_error = Some(format!("{}: {error:#}", path.display()));
+                    continue;
+                }
+            };
+            if contains {
+                file.sync_all()
+                    .with_context(|| format!("flush log to storage: {}", path.display()))?;
+                return Ok(Some(LogBarrierSnapshot {
+                    path: path.clone(),
+                    file,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn open_log_barrier_candidate(path: &Path) -> anyhow::Result<std::fs::File> {
+        use anyhow::Context;
+
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+
+            // Keeping this handle open without FILE_SHARE_DELETE prevents a daily log entry from
+            // being renamed or replaced between marker observation and snapshot consumption.
+            options
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+        }
+        options
+            .open(path)
+            .with_context(|| format!("open log barrier candidate: {}", path.display()))
+    }
+
+    fn log_tail_contains(
+        file: &mut std::fs::File,
+        path: &Path,
+        needle: &[u8],
+    ) -> anyhow::Result<bool> {
+        use anyhow::Context;
+
+        const TAIL_LIMIT: u64 = 256 * 1024;
+        let length = file
+            .metadata()
+            .with_context(|| format!("read log barrier metadata: {}", path.display()))?
+            .len();
+        let start = length.saturating_sub(TAIL_LIMIT);
+        file.seek(SeekFrom::Start(start))
+            .with_context(|| format!("seek log barrier candidate: {}", path.display()))?;
+        let mut tail = Vec::with_capacity((length - start) as usize);
+        file.take(length - start)
+            .read_to_end(&mut tail)
+            .with_context(|| format!("read log barrier candidate: {}", path.display()))?;
+        Ok(tail.windows(needle.len()).any(|window| window == needle))
     }
 
     /// 获取当前日志文件路径
@@ -182,43 +378,6 @@ impl LogManager {
         let log_dir = Self::get_log_dir();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         log_dir.join(format!("LetRecovery.{}.log", today))
-    }
-
-    /// Export a self-contained, sanitized support bundle without collecting
-    /// configuration files or credentials. Unreadable log files are skipped so
-    /// a partially damaged log directory does not prevent diagnostics export.
-    pub fn export_support_bundle(destination: &Path) -> Result<(), OperationError> {
-        Self::flush();
-
-        let mut builder = SupportBundleBuilder::new(
-            "LetRecovery",
-            env!("BUILD_VERSION"),
-            "desktop",
-            unix_time_millis(),
-        )?;
-        builder.add_environment("os", std::env::consts::OS)?;
-        builder.add_environment("architecture", std::env::consts::ARCH)?;
-        builder.add_environment("logging_enabled", Self::is_enabled().to_string())?;
-        builder.add_environment(
-            "build_profile",
-            if cfg!(debug_assertions) {
-                "debug"
-            } else {
-                "release"
-            },
-        )?;
-
-        let mut attached = 0usize;
-        for (index, log_path) in Self::latest_log_files(3).into_iter().enumerate() {
-            match builder.add_text_file(format!("runtime_log_{}", index + 1), &log_path) {
-                Ok(()) => attached += 1,
-                Err(error) => {
-                    log::warn!("跳过无法读取的支持包日志附件: {}", error);
-                }
-            }
-        }
-        builder.add_environment("log_attachment_count", attached.to_string())?;
-        builder.build().write_json(destination)
     }
 
     fn latest_log_files(limit: usize) -> Vec<PathBuf> {
@@ -283,22 +442,6 @@ impl LogManager {
         }
 
         Ok(())
-    }
-
-    /// 获取日志目录大小（字节）
-    pub fn get_log_dir_size() -> u64 {
-        let log_dir = Self::get_log_dir();
-        if !log_dir.exists() {
-            return 0;
-        }
-
-        walkdir::WalkDir::new(&log_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter_map(|e| e.metadata().ok())
-            .map(|m| m.len())
-            .sum()
     }
 
     /// 格式化文件大小为人类可读格式
@@ -405,5 +548,61 @@ mod tests {
     fn test_log_dir_path() {
         let log_dir = LogManager::get_log_dir();
         assert!(log_dir.ends_with("log"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn barrier_candidate_handle_prevents_path_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "lr-log-barrier-share-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("candidate.log");
+        let moved = root.join("candidate.moved.log");
+        std::fs::write(&source, b"before\nunique-marker\nafter\n").unwrap();
+
+        let mut held = LogManager::open_log_barrier_candidate(&source).unwrap();
+        assert!(LogManager::log_tail_contains(&mut held, &source, b"unique-marker").unwrap());
+        assert!(std::fs::rename(&source, &moved).is_err());
+        assert!(std::fs::remove_file(&source).is_err());
+
+        drop(held);
+        std::fs::rename(&source, &moved).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bad_barrier_candidate_does_not_hide_later_matching_log() {
+        let root = std::env::temp_dir().join(format!(
+            "lr-log-barrier-skip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("missing.log");
+        let valid = root.join("valid.log");
+        std::fs::write(&valid, b"before\nunique-marker\nafter\n").unwrap();
+
+        let mut diagnostic = None;
+        let snapshot = LogManager::find_log_barrier_candidate(
+            &[missing, valid.clone()],
+            b"unique-marker",
+            &mut diagnostic,
+        )
+        .unwrap()
+        .expect("the valid second candidate must still be inspected");
+        assert_eq!(snapshot.path(), valid);
+        assert!(diagnostic.is_some());
+
+        drop(snapshot);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

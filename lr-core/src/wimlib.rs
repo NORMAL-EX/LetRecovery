@@ -17,7 +17,7 @@ use std::ffi::c_void;
 use std::os::raw::{c_int, c_uint};
 use std::os::windows::ffi::OsStrExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
@@ -42,6 +42,7 @@ fn ensure_global_init(init: FnGlobalInit) -> bool {
     WIMLIB_INIT_OK.load(Ordering::SeqCst)
 }
 
+use crate::backup_image_catalog::{BackupImageCatalog, BackupImageMetadata};
 use crate::image_meta::{parse_image_info_from_xml, ImageInfo, WimProgress};
 
 // ============================================================================
@@ -70,7 +71,6 @@ const WIMLIB_COMPRESSION_TYPE_LZMS: c_int = 3;
 const WIMLIB_ALL_IMAGES: c_int = -1;
 
 /// open / write / add / ref flags
-const WIMLIB_REF_FLAG_GLOB_ENABLE: c_int = 0x0000_0001;
 const WIMLIB_WRITE_FLAG_SOLID: c_int = 0x0000_1000;
 const WIMLIB_WRITE_FLAG_REBUILD: c_int = 0x0000_0040;
 const WIMLIB_ADD_FLAG_WINCONFIG: c_int = 0x0000_0800;
@@ -79,7 +79,28 @@ const WIMLIB_ITERATE_DIR_TREE_FLAG_RECURSIVE: c_int = 0x0000_0001;
 /// 常用错误码（wimlib 真实取值，有跳号）
 const WIMLIB_ERR_SUCCESS: c_int = 0;
 pub const WIMLIB_ERR_INTEGRITY: c_int = 13;
+pub const WIMLIB_ERR_NOMEM: c_int = 39;
 const WIMLIB_ERR_PATH_DOES_NOT_EXIST: c_int = 49;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WimlibOperationError {
+    code: i32,
+    message: String,
+}
+
+impl WimlibOperationError {
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+impl std::fmt::Display for WimlibOperationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WimlibOperationError {}
 
 /// 把 wimlib 错误码转成中文描述
 fn err_description(code: i32) -> &'static str {
@@ -302,36 +323,51 @@ fn optimal_threads() -> c_uint {
 
 const PARALLEL_MEMORY_FALLBACK: u64 = 256 * 1024 * 1024;
 const PARALLEL_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+const PARALLEL_MIN_AVAILABLE_MEMORY: u64 = 2 * 1024 * 1024 * 1024;
 
 fn parallel_memory_budget_from_available(available: u64) -> u64 {
     (available / 4).clamp(1, PARALLEL_MEMORY_LIMIT)
 }
 
-/// 并行解压只使用当前可提交内存的四分之一，并设置 2 GiB 硬上限。
-///
-/// 不能把物理内存总量当作“可用内存”：低内存 WinPE 或宿主机已经有较大
-/// 内存占用时，这会让 wimlib 同时创建过多工作缓冲区并挤压文件系统缓存。
-fn parallel_memory_budget() -> u64 {
+fn parallel_decompression_policy_from_available(
+    available_threads: c_uint,
+    available_memory: u64,
+) -> (c_uint, u64) {
+    let memory_budget = parallel_memory_budget_from_available(available_memory);
+    // The custom wimlib max_memory argument bounds only compressed/uncompressed
+    // chunk buffers.  It deliberately does not account for Win32 thread stacks,
+    // codec state, blob-index arrays, the caller, or WinPE itself.  In a small
+    // RAM disk, selecting all reported vCPUs can therefore fail before the
+    // upstream serial verifier gets a chance to run.  The extension's documented
+    // value 1 selects that canonical serial path.
+    let threads = if available_memory < PARALLEL_MIN_AVAILABLE_MEMORY {
+        1
+    } else {
+        available_threads
+    };
+    (threads, memory_budget)
+}
+
+fn parallel_decompression_policy() -> (c_uint, u64) {
+    let available_memory = current_available_memory().unwrap_or(PARALLEL_MEMORY_FALLBACK * 4);
+    parallel_decompression_policy_from_available(optimal_threads(), available_memory)
+}
+
+fn current_available_memory() -> Option<u64> {
     use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
     let mut status = MEMORYSTATUSEX {
         dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
         ..Default::default()
     };
-    if unsafe { GlobalMemoryStatusEx(&mut status) }.is_ok() {
-        let available = status
-            .ullAvailPhys
-            .min(status.ullAvailPageFile)
-            .min(status.ullAvailVirtual);
-        if available != 0 {
-            return parallel_memory_budget_from_available(available);
-        }
+    if unsafe { GlobalMemoryStatusEx(&mut status) }.is_err() {
+        return None;
     }
-    PARALLEL_MEMORY_FALLBACK
-}
-
-fn parallel_decompression_policy() -> (c_uint, u64) {
-    (optimal_threads(), parallel_memory_budget())
+    let available = status
+        .ullAvailPhys
+        .min(status.ullAvailPageFile)
+        .min(status.ullAvailVirtual);
+    (available != 0).then_some(available)
 }
 
 /// 在 wimlib 重负载操作（apply/capture/split/verify）期间，临时把**进程**优先级提升到
@@ -690,26 +726,28 @@ pub struct WimHandle<'a> {
 impl<'a> WimHandle<'a> {
     /// 校验完整性（无完整性表时 wimlib 直接返回成功）
     pub fn verify(&self) -> Result<(), String> {
+        self.verify_detailed().map_err(|error| error.to_string())
+    }
+
+    /// 校验完整性并保留 wimlib 原始错误码，供调用方只对明确可恢复的资源错误重试。
+    pub fn verify_detailed(&self) -> Result<(), WimlibOperationError> {
         let _prio = HighPriorityGuard::new();
         let rc = unsafe { (self.lib.verify_wim)(self.wim, 0) };
         if rc != WIMLIB_ERR_SUCCESS {
-            return Err(self.lib.error_message(rc));
+            return Err(WimlibOperationError {
+                code: rc,
+                message: self.lib.error_message(rc),
+            });
         }
         Ok(())
     }
 
-    /// 为分卷 WIM（SWM）引入其余分卷。`globs` 为通配路径（如 "dir/install*.swm"）。
-    pub fn reference_resource_globs(&self, globs: &[&str]) -> Result<(), String> {
-        let wide: Vec<Vec<u16>> = globs.iter().map(|g| to_wide(g)).collect();
+    /// Reference exact resource-file paths without wildcard expansion.
+    pub fn reference_resource_files_exact(&self, paths: &[&str]) -> Result<(), String> {
+        let wide: Vec<Vec<u16>> = paths.iter().map(|path| to_wide(path)).collect();
         let ptrs: Vec<*const u16> = wide.iter().map(|v| v.as_ptr()).collect();
         let rc = unsafe {
-            (self.lib.reference_resource_files)(
-                self.wim,
-                ptrs.as_ptr(),
-                ptrs.len() as c_uint,
-                WIMLIB_REF_FLAG_GLOB_ENABLE,
-                0,
-            )
+            (self.lib.reference_resource_files)(self.wim, ptrs.as_ptr(), ptrs.len() as c_uint, 0, 0)
         };
         if rc != WIMLIB_ERR_SUCCESS {
             return Err(self.lib.error_message(rc));
@@ -745,6 +783,38 @@ impl<'a> WimHandle<'a> {
             self.get_image_description(index).unwrap_or_default(),
         )
     }
+
+    /// Read the complete ordered image catalog. Missing optional string properties are
+    /// normalized to empty strings, matching wimlib's user-visible metadata semantics.
+    pub fn backup_image_catalog(&self) -> Result<BackupImageCatalog, String> {
+        let count = self.get_image_count();
+        if count <= 0 {
+            return Err("backup image contains no image".to_owned());
+        }
+        let capacity =
+            usize::try_from(count).map_err(|_| "backup image count is out of range".to_owned())?;
+        let mut images = Vec::with_capacity(capacity);
+        for index in 1..=count {
+            images.push(BackupImageMetadata::new(
+                self.get_image_name(index).unwrap_or_default(),
+                self.get_image_description(index).unwrap_or_default(),
+            ));
+        }
+        Ok(BackupImageCatalog::new(images))
+    }
+}
+
+/// Open and fully verify a WIM/ESD before returning its complete ordered semantic catalog.
+pub fn read_verified_backup_catalog(path: &Path) -> Result<BackupImageCatalog, String> {
+    let library =
+        Wimlib::new().map_err(|error| format!("captured image verifier unavailable: {error}"))?;
+    let handle = library
+        .open_wim(&path.to_string_lossy())
+        .map_err(|error| format!("cannot reopen captured image: {error}"))?;
+    handle
+        .verify()
+        .map_err(|error| format!("captured image verification failed: {error}"))?;
+    handle.backup_image_catalog()
 }
 
 impl<'a> Drop for WimHandle<'a> {
@@ -907,6 +977,50 @@ impl WimlibManager {
         progress_tx: Option<Sender<WimProgress>>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<(), String> {
+        if image_file.to_lowercase().ends_with(".swm") {
+            let exact_resources =
+                crate::install_source_lock::enumerate_install_image_set(Path::new(image_file))?;
+            return self.apply_image_internal(
+                image_file,
+                Some(&exact_resources),
+                target_dir,
+                index,
+                progress_tx,
+                cancel,
+            );
+        }
+        self.apply_image_internal(image_file, None, target_dir, index, progress_tx, cancel)
+    }
+
+    /// Apply a split WIM using only an authenticated, ordered list of exact resource files.
+    /// No wildcard expansion is performed by wimlib.
+    pub fn apply_image_with_exact_swm_resources(
+        &self,
+        image_file: &str,
+        exact_resource_files: &[PathBuf],
+        target_dir: &str,
+        index: u32,
+        progress_tx: Option<Sender<WimProgress>>,
+    ) -> Result<(), String> {
+        self.apply_image_internal(
+            image_file,
+            Some(exact_resource_files),
+            target_dir,
+            index,
+            progress_tx,
+            None,
+        )
+    }
+
+    fn apply_image_internal(
+        &self,
+        image_file: &str,
+        exact_resource_files: Option<&[PathBuf]>,
+        target_dir: &str,
+        index: u32,
+        progress_tx: Option<Sender<WimProgress>>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<(), String> {
         if cancel
             .as_ref()
             .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
@@ -931,9 +1045,12 @@ impl WimlibManager {
             );
         }
 
-        // SWM：引入同目录其余分卷
+        // SWM: reference only the exact paths selected by the caller or by the shared strict
+        // enumerator. Never let wimlib expand a directory glob behind the authenticated set.
         if image_file.to_lowercase().ends_with(".swm") {
-            if let Err(e) = self.reference_swm(wim, image_file) {
+            let exact_resource_files = exact_resource_files
+                .ok_or_else(|| "split WIM apply requires an exact resource list".to_owned())?;
+            if let Err(e) = self.reference_swm_exact(wim, image_file, exact_resource_files) {
                 unsafe { (self.free_wim)(wim) };
                 return Err(e);
             }
@@ -950,27 +1067,37 @@ impl WimlibManager {
         Ok(())
     }
 
-    /// 引入 SWM 其余分卷：glob = 同目录 <stem 去尾数字>*.swm
-    fn reference_swm(&self, wim: WIMStruct, first_part: &str) -> Result<(), String> {
-        let p = Path::new(first_part);
-        let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let base = stem.trim_end_matches(|c: char| c.is_ascii_digit());
-        let base = if base.is_empty() { stem } else { base };
-        let pattern = format!("{}*.swm", base);
-        let glob = match dir {
-            Some(d) => d.join(pattern).to_string_lossy().into_owned(),
-            None => pattern,
-        };
-        let wglob = to_wide(&glob);
-        let globs: [*const u16; 1] = [wglob.as_ptr()];
+    fn reference_swm_exact(
+        &self,
+        wim: WIMStruct,
+        first_part: &str,
+        exact_resource_files: &[PathBuf],
+    ) -> Result<(), String> {
+        crate::install_source_lock::verify_exact_install_image_span_paths(
+            Path::new(first_part),
+            exact_resource_files,
+        )?;
+        if exact_resource_files.len() <= 1 {
+            return Ok(());
+        }
+        let wide = exact_resource_files[1..]
+            .iter()
+            .map(|path| to_wide(&path.to_string_lossy()))
+            .collect::<Vec<_>>();
+        let paths = wide.iter().map(|path| path.as_ptr()).collect::<Vec<_>>();
         let rc = unsafe {
-            (self.reference_resource_files)(wim, globs.as_ptr(), 1, WIMLIB_REF_FLAG_GLOB_ENABLE, 0)
+            (self.reference_resource_files)(wim, paths.as_ptr(), paths.len() as c_uint, 0, 0)
         };
         if rc != WIMLIB_ERR_SUCCESS {
             return Err(self.error_message(rc));
         }
         Ok(())
+    }
+
+    fn reference_swm_enumerated(&self, wim: WIMStruct, first_part: &str) -> Result<(), String> {
+        let exact_resources =
+            crate::install_source_lock::enumerate_install_image_set(Path::new(first_part))?;
+        self.reference_swm_exact(wim, first_part, &exact_resources)
     }
 
     /// 捕获/备份目录到 WIM/ESD（compression：2=LZX 普通 WIM；3=LZMS 走 solid=ESD）
@@ -1104,7 +1231,7 @@ impl WimlibManager {
     /// - `wim_path`：要修改的 WIM 文件路径
     /// - `image`：镜像序号（1 起；PE 的 boot.wim 通常注入第 1 个可引导镜像）
     /// - `src_file`：本地源文件路径
-    /// - `dest_in_wim`：镜像内目标绝对路径（如 `"\\LR_BitLockerKeys.json"`）
+    /// - `dest_in_wim`：镜像内目标绝对路径（如 `"\\LR_BitLockerKeys.txt"`）
     ///
     /// 用途：把 BitLocker 恢复密钥文件打包进 PE 的 boot.wim，使 PE 启动后可直接读取。
     pub fn add_file_to_image(
@@ -1194,7 +1321,7 @@ impl WimlibManager {
     ) -> Result<bool, String> {
         let wim = self.open(image_file)?;
         if image_file.to_ascii_lowercase().ends_with(".swm") {
-            if let Err(error) = self.reference_swm(wim, image_file) {
+            if let Err(error) = self.reference_swm_enumerated(wim, image_file) {
                 unsafe { (self.free_wim)(wim) };
                 return Err(error);
             }
@@ -1235,7 +1362,7 @@ impl WimlibManager {
     ) -> Result<bool, String> {
         let wim = self.open(image_file)?;
         if image_file.to_ascii_lowercase().ends_with(".swm") {
-            if let Err(error) = self.reference_swm(wim, image_file) {
+            if let Err(error) = self.reference_swm_enumerated(wim, image_file) {
                 unsafe { (self.free_wim)(wim) };
                 return Err(error);
             }
@@ -1277,7 +1404,7 @@ impl WimlibManager {
     ) -> Result<(), String> {
         let wim = self.open(image_file)?;
         if image_file.to_ascii_lowercase().ends_with(".swm") {
-            if let Err(error) = self.reference_swm(wim, image_file) {
+            if let Err(error) = self.reference_swm_enumerated(wim, image_file) {
                 unsafe { (self.free_wim)(wim) };
                 return Err(error);
             }
@@ -1378,6 +1505,22 @@ mod cancellation_tests {
         assert_eq!(
             parallel_memory_budget_from_available(128 * 1024 * 1024 * 1024),
             PARALLEL_MEMORY_LIMIT
+        );
+    }
+
+    #[test]
+    fn constrained_memory_selects_the_documented_serial_path() {
+        assert_eq!(
+            parallel_decompression_policy_from_available(24, PARALLEL_MIN_AVAILABLE_MEMORY - 1),
+            (1, (PARALLEL_MIN_AVAILABLE_MEMORY - 1) / 4)
+        );
+    }
+
+    #[test]
+    fn sufficient_memory_keeps_the_detected_worker_count() {
+        assert_eq!(
+            parallel_decompression_policy_from_available(24, 8 * 1024 * 1024 * 1024),
+            (24, PARALLEL_MEMORY_LIMIT)
         );
     }
 }

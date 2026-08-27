@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::native_ui::{GetDpiForSystem, GetDpiForWindow, SetBestProcessDpiAwareness};
 use windows::core::{w, HRESULT, PCWSTR};
@@ -11,9 +12,10 @@ use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_D
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
     GetMonitorInfoW, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, RedrawWindow,
-    SelectObject, SetBkColor, SetBkMode, SetTextColor, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OPAQUE, PAINTSTRUCT,
-    PEN_STYLE, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
+    SelectObject, SetBkColor, SetBkMode, SetTextColor, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX,
+    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HBRUSH, HDC, HFONT, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, OPAQUE, PAINTSTRUCT, PEN_STYLE, RDW_ALLCHILDREN, RDW_ERASE,
+    RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -29,23 +31,33 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect,
     GetMessageW, GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW,
-    IsWindowVisible, KillTimer, LoadCursorW, LoadImageW, MoveWindow, PostMessageW, PostQuitMessage,
+    IsWindowVisible, KillTimer, LoadCursorW, LoadImageW, PostMessageW, PostQuitMessage,
     RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     TranslateMessage, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE, CBS_DROPDOWNLIST,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, EN_KILLFOCUS, ES_AUTOHSCROLL,
-    GWLP_USERDATA, GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON,
-    LBN_SELCHANGE, LR_SHARED, MINMAXINFO, MSG, SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON,
-    SM_CYSCREEN, SM_CYSMICON, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE,
-    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL,
-    WM_NCCREATE, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE,
+    CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, EN_KILLFOCUS, ES_AUTOHSCROLL, GWLP_USERDATA,
+    GWL_EXSTYLE, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LBN_SELCHANGE,
+    LR_SHARED, MINMAXINFO, MSG, SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN,
+    SM_CYSMICON, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CANCELMODE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM,
+    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HSCROLL, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SIZING,
     WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CHILD,
     WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
-use super::controls::{center_single_line_edit_in_row, child, draw_inno_button, wide, ButtonRole};
+use super::controls::{
+    begin_layout_batch, center_single_line_edit_in_row, child, draw_indeterminate_ring,
+    draw_inno_button, move_layout_window as MoveWindow, wide, ButtonRole,
+};
+
+// SS_CENTERIMAGE vertically centers a one-line label; SS_ENDELLIPSIS prevents Win32 STATIC from
+// word-wrapping long translations into a second line that the fixed row height would clip.
+const SS_CENTERIMAGE_VALUE: i32 = 0x0000_0200;
+const SS_SINGLE_LINE_ELLIPSIS: i32 = SS_CENTERIMAGE_VALUE | 0x0000_4000;
+const SS_PATH_ELLIPSIS: i32 = SS_SINGLE_LINE_ELLIPSIS | 0x0000_0080;
+const SS_OWNERDRAW_VALUE: i32 = 0x0000_000d;
 use super::dialog::{DialogButtons, DialogResult, DialogShell, DialogSpec};
 use super::driver_transfer_dialog::NativeDriverTransferDialog;
 use super::layout::{centered_control_y_ceil, measure_text, LayoutMetrics};
@@ -57,6 +69,7 @@ use super::pages::backup::{
 };
 use super::pages::download::{
     DownloadIntent, DownloadLabels, DownloadPage, DownloadTab, PageRect, ID_RESOURCE_LIST,
+    ID_SOFTWARE_CATEGORIES,
 };
 use super::pages::easy_mode::{EasyModeCommand, EasyModeLabels, EasyModePage};
 use super::pages::info::{
@@ -68,6 +81,7 @@ use super::pages::progress::{
     ProgressStatus, ProgressValue, ID_CANCEL_OPERATION, ID_PROGRESS_PRIMARY, ID_PROGRESS_SECONDARY,
 };
 use super::pages::tools::{ToolIntent, ToolLabels, ToolsPage};
+use super::preinstall_dialog::{NativePreinstallDialog, PreinstallDialogIntent};
 use super::redraw;
 use super::theme::{self, Brushes};
 use super::tool_dialogs::{NativeToolDialog, ToolDialogIntent, ToolDialogKind};
@@ -96,6 +110,11 @@ use super::tools::password_reset::{
 use super::tools::quick_partition::{NativeQuickPartitionDialog, QuickPartitionDialogIntent};
 use super::tools::storage_driver::{NativeStorageDriverDialog, StorageDriverDialogIntent};
 use super::tools::time_sync::{NativeTimeSyncDialog, TimeSyncDialogIntent};
+use crate::core::cli_config::{
+    BackupSpec as CliBackupSpec, CliBackupExecutionMode, CliBackupFormat, CliBackupOutputPolicy,
+    CliBootMode, CliBootPcaMode, CliConfig, CliDriverAction, CliInstallMode, CliOperation,
+    InstallSpec as CliInstallSpec, CLI_CONFIG_SCHEMA_VERSION,
+};
 use crate::core::native_backup_controller::{plan_backup_launch, BackupLaunchIntent};
 use crate::core::native_backup_executor::{execute_backup, BackupExecution, BackupWorkerMessage};
 use crate::core::native_bitlocker_gate::{
@@ -135,6 +154,7 @@ use crate::core::native_tool_executor::{
 use crate::core::ui_state::AdvancedOptionCapabilities;
 use crate::download::config::{ConfigManager, OnlinePE, PeCache};
 use crate::PreloadedConfig;
+use lr_core::windows_hardware::MachineEnvironment;
 
 const CLASS_NAME: PCWSTR = w!("LetRecovery.Native.MainWindow");
 const SS_CENTER_STYLE: i32 = 0x0000_0001;
@@ -148,105 +168,25 @@ fn catalogue_status_message(state: &CatalogueState) -> String {
     }
 }
 
-fn pending_offline_expand_request(
-    operations: &[crate::core::native_quick_partition_dialog::PendingPartitionOperation],
-) -> Option<ExpandCRequest> {
-    use crate::core::native_quick_partition_dialog::PendingPartitionOperation;
-    match operations {
-        [PendingPartitionOperation::Resize(request)]
-            if request.new_size_mb > request.no_move_max_size_mb =>
-        {
-            Some(ExpandCRequest {
-                target_partition: request.drive_letter,
-                expected_disk: Some(request.disk.clone()),
-                expected_partition_number: Some(request.partition_number),
-                target_size_mb: request.new_size_mb,
-                use_maximum: false,
-                requires_partition_move: true,
-                borrow_from_left: false,
-                donor_target_size_mb: 0,
-                minimum_free_mb: 100,
-                analyzed_current_size_mb: request.current_size_mb,
-                analyzed_max_size_mb: request.move_max_size_mb,
-                analyzed_no_move_max_mb: request.no_move_max_size_mb,
-                strict_analysis_snapshot: false,
-            })
-        }
-        [PendingPartitionOperation::Transfer(request)] => {
-            Some(expand_request_from_adjacent_transfer(request))
-        }
-        _ => None,
-    }
+fn maintenance_pe_from_catalogue(catalogue: &[OnlinePE]) -> Option<OnlinePE> {
+    catalogue
+        .iter()
+        .find(|pe| pe.filename.eq_ignore_ascii_case("LetRecovery_PE.wim"))
+        .cloned()
 }
 
-fn expand_request_from_adjacent_transfer(
-    request: &crate::core::native_quick_partition_dialog::AdjacentPartitionTransferRequest,
-) -> ExpandCRequest {
-    let left_grows = request.left_new_size_mb > request.left_current_size_mb;
-    let (
-        target_partition,
-        expected_partition,
-        current_size_mb,
-        target_size_mb,
-        donor_current_size_mb,
-        donor_used_size_mb,
-        borrow_from_left,
-    ) = if left_grows {
-        (
-            request.left_drive_letter,
-            &request.left_partition,
-            request.left_current_size_mb,
-            request.left_new_size_mb,
-            request.right_current_size_mb,
-            request.right_used_size_mb,
-            false,
-        )
-    } else {
-        (
-            request.right_drive_letter,
-            &request.right_partition,
-            request.right_current_size_mb,
-            request.right_new_size_mb,
-            request.left_current_size_mb,
-            request.left_used_size_mb,
-            true,
-        )
-    };
-    ExpandCRequest {
-        target_partition,
-        expected_disk: Some(request.disk.clone()),
-        expected_partition_number: Some(expected_partition.partition_number),
-        target_size_mb,
-        use_maximum: false,
-        requires_partition_move: true,
-        borrow_from_left,
-        donor_target_size_mb: if left_grows {
-            request.right_new_size_mb
-        } else {
-            request.left_new_size_mb
-        },
-        minimum_free_mb: 100,
-        analyzed_current_size_mb: current_size_mb,
-        analyzed_max_size_mb: current_size_mb.saturating_add(
-            donor_current_size_mb.saturating_sub(donor_used_size_mb.saturating_add(100)),
-        ),
-        analyzed_no_move_max_mb: current_size_mb,
-        strict_analysis_snapshot: false,
-    }
+fn pending_offline_expand_request(
+    _operations: &[crate::core::native_quick_partition_dialog::PendingPartitionOperation],
+) -> Option<ExpandCRequest> {
+    // Offline resize/transfer plans require partition shrink or raw movement. Keep them out of
+    // the PE handoff until the checked PhysicalDrive+journal transaction is complete.
+    None
 }
 
 fn pending_compound_offline_expand_preview(
-    operations: &[crate::core::native_quick_partition_dialog::PendingPartitionOperation],
+    _operations: &[crate::core::native_quick_partition_dialog::PendingPartitionOperation],
 ) -> Option<ExpandCRequest> {
-    (operations.len() > 1)
-        .then(|| {
-            crate::core::native_quick_partition_dialog::compound_offline_transfer_preview(
-                operations,
-            )
-            .ok()
-            .map(|request| expand_request_from_adjacent_transfer(&request))
-        })
-        .flatten()
+    None
 }
 
 fn pending_requires_offline_expand(
@@ -260,6 +200,22 @@ fn pending_requires_offline_expand(
                 if request.new_size_mb > request.no_move_max_size_mb
         ) || matches!(operation, PendingPartitionOperation::Transfer(_))
     })
+}
+
+fn whole_gib_for_capacity(bytes: u64) -> u64 {
+    bytes.div_ceil(lr_core::custom_install::GIB)
+}
+
+fn reconcile_dual_boot_size_gib(
+    current: Option<u64>,
+    last_automatic: Option<u64>,
+    required_bytes: u64,
+) -> (u64, Option<u64>) {
+    let required = whole_gib_for_capacity(required_bytes);
+    match current {
+        Some(value) if value >= required && last_automatic != Some(value) => (value, None),
+        _ => (required, Some(required)),
+    }
 }
 
 // Keeps the longest English navigation caption readable at 100-200% DPI without leaving an
@@ -286,6 +242,8 @@ const HARDWARE_COPY_TIMER_ID: usize = 6;
 const INSTALL_VOLUME_LAYOUT_TIMER_ID: usize = 7;
 const PARTITION_REFRESH_TIMER_ID: usize = 8;
 const ADVANCED_SCROLL_TIMER_ID: usize = 9;
+const PE_MAINTENANCE_ANIMATION_TIMER_ID: usize = 10;
+const PE_MAINTENANCE_ANIMATION_INTERVAL_MS: u32 = 16;
 const INSTALL_VOLUME_LAYOUT_TICK_MS: u32 = 40;
 const INSTALL_VOLUME_LAYOUT_FRAMES: u8 = 3;
 const PARTITION_REFRESH_DEBOUNCE_MS: u32 = 350;
@@ -305,6 +263,17 @@ fn device_change_requests_partition_refresh(event: usize) -> bool {
 
 const fn list_view_selection_state_changed(changed: u32, old_state: u32, new_state: u32) -> bool {
     changed & LVIF_STATE.0 != 0 && (old_state ^ new_state) & LVIS_SELECTED.0 != 0
+}
+
+const fn list_view_item_became_selected(changed: u32, old_state: u32, new_state: u32) -> bool {
+    changed & LVIF_STATE.0 != 0
+        && old_state & LVIS_SELECTED.0 == 0
+        && new_state & LVIS_SELECTED.0 != 0
+}
+
+const fn list_view_state_image_changed(changed: u32, old_state: u32, new_state: u32) -> bool {
+    const LVIS_STATEIMAGEMASK: u32 = 0xF000;
+    changed & LVIF_STATE.0 != 0 && (old_state ^ new_state) & LVIS_STATEIMAGEMASK != 0
 }
 
 const fn unattended_checked_for_source_preference(
@@ -424,19 +393,27 @@ struct EasyCatalogueMessage {
 struct RemoteImageInfoMessage {
     generation: u64,
     requested_url: String,
-    result: Result<Vec<lr_core::image_meta::ImageInfo>, String>,
+    result: Result<Vec<lr_core::image_meta::ImageInfo>, RemoteImageInfoFailure>,
+}
+
+enum RemoteImageInfoFailure {
+    RangeUnsupported,
+    Failed(String),
 }
 
 #[derive(Clone, Debug)]
 struct RemoteImageDownload {
     plan: crate::core::native_download_controller::DownloadPlan,
     allow_insecure_http: bool,
+    select_first_installable_after_download: bool,
 }
 
 #[derive(Clone, Debug)]
 struct PendingRemoteInstall {
-    intent: crate::core::native_install_controller::StartInstallIntent,
-    expected_image: crate::core::dism::ImageInfo,
+    /// Absent when the server did not support Range metadata. In that case downloading and local
+    /// image inspection must happen before a capacity-bearing custom-install intent is built.
+    intent: Option<crate::core::native_install_controller::StartInstallIntent>,
+    expected_image: Option<crate::core::dism::ImageInfo>,
     downloaded_path: std::path::PathBuf,
 }
 
@@ -475,6 +452,7 @@ fn reusable_pca_target_result(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InstallControlSnapshot {
+    custom_mode_index: isize,
     format_partition: bool,
     repair_boot: bool,
     unattended_install: bool,
@@ -486,6 +464,14 @@ struct InstallControlSnapshot {
 
 impl InstallControlSnapshot {
     fn apply_to(self, prefs: &mut crate::core::ui_state::InstallPrefs) {
+        let selected_mode = match self.custom_mode_index {
+            1 => lr_core::custom_install::CustomInstallMode::RepartitionAllDisks,
+            2 => lr_core::custom_install::CustomInstallMode::DualBoot,
+            _ => lr_core::custom_install::CustomInstallMode::ReinstallPartition,
+        };
+        if prefs.custom_install_plan.mode() != selected_mode {
+            prefs.custom_install_plan = lr_core::custom_install::CustomInstallPlan::default();
+        }
         prefs.format_partition = self.format_partition;
         prefs.repair_boot = self.repair_boot;
         prefs.unattended_install = self.unattended_install;
@@ -506,6 +492,54 @@ impl InstallControlSnapshot {
             2 => lr_core::boot_pca::BootPcaMode::Pca2023,
             _ => lr_core::boot_pca::BootPcaMode::Auto,
         };
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdvancedStateBoundary {
+    PageExit,
+    InstallSnapshot,
+    ContextRefresh,
+    StorageDefaultsRefresh,
+    WindowClose,
+}
+
+impl AdvancedStateBoundary {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PageExit => "page_exit",
+            Self::InstallSnapshot => "install_snapshot",
+            Self::ContextRefresh => "context_refresh",
+            Self::StorageDefaultsRefresh => "storage_defaults_refresh",
+            Self::WindowClose => "window_close",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdvancedStatePolicy {
+    capture_install_controls: bool,
+    capture_advanced_controls: bool,
+    persist_preferences: bool,
+}
+
+const fn advanced_state_policy(
+    advanced_visible: bool,
+    boundary: AdvancedStateBoundary,
+) -> AdvancedStatePolicy {
+    let capture_install_controls = matches!(
+        boundary,
+        AdvancedStateBoundary::InstallSnapshot | AdvancedStateBoundary::WindowClose
+    );
+    let persist_preferences = matches!(
+        boundary,
+        AdvancedStateBoundary::InstallSnapshot | AdvancedStateBoundary::WindowClose
+    ) || (advanced_visible
+        && matches!(boundary, AdvancedStateBoundary::PageExit));
+    AdvancedStatePolicy {
+        capture_install_controls,
+        capture_advanced_controls: advanced_visible,
+        persist_preferences,
     }
 }
 
@@ -666,10 +700,6 @@ const fn pca_pending_status(
     }
 }
 
-const fn page_switch_requires_full_layout(page: Page) -> bool {
-    matches!(page, Page::Install)
-}
-
 enum ToolWorkerMessage {
     Progress(ToolDialogKind, ReadOnlyToolRequest, ToolExecutionEvent),
     Completed(
@@ -677,11 +707,23 @@ enum ToolWorkerMessage {
         ReadOnlyToolRequest,
         Result<ReadOnlyToolResult, String>,
     ),
-    MutatingCompleted(MutatingToolKind, Result<String, String>),
+    MutatingCompleted {
+        task: WriteTaskToken,
+        kind: MutatingToolKind,
+        result: Result<String, String>,
+    },
     ExternalCompleted(
         crate::core::native_tools_controller::NativeToolAction,
         Result<String, String>,
     ),
+    PeMaintenanceCompleted {
+        task: WriteTaskToken,
+        result: Result<(), String>,
+    },
+    PeMaintenanceProgress {
+        task: WriteTaskToken,
+        stage: crate::core::pe::PeMaintenanceProgress,
+    },
     BitLockerGateCompleted {
         drive: String,
         result: Result<(), String>,
@@ -696,11 +738,19 @@ enum ToolWorkerMessage {
         kind: MutatingToolKind,
         result: Result<Vec<crate::core::native_tool_inventory::InventoryEntry>, String>,
     },
-    BatchFormatInventoryCompleted(Result<Vec<BatchFormatVolume>, String>),
-    StorageDriverTargetsCompleted(
-        Result<Vec<crate::core::native_storage_driver::StorageDriverTarget>, String>,
-    ),
-    StorageDriverPrepared(Result<super::tool_dialogs_mutating::MutatingToolIntent, String>),
+    BatchFormatInventoryCompleted {
+        generation: u64,
+        result: Result<Vec<BatchFormatVolume>, String>,
+    },
+    StorageDriverTargetsCompleted {
+        generation: u64,
+        result: Result<Vec<crate::core::native_storage_driver::StorageDriverTarget>, String>,
+    },
+    StorageDriverPrepared {
+        generation: u64,
+        target: String,
+        result: Result<super::tool_dialogs_mutating::MutatingToolIntent, String>,
+    },
     PasswordResetTargetsCompleted {
         generation: u64,
         result: Result<Vec<PasswordResetTargetOption>, String>,
@@ -763,22 +813,320 @@ enum ToolWorkerMessage {
         generation: u64,
         result: Result<crate::core::native_partition_copy::PartitionCopyExecutionResult, String>,
     },
-    QuickPartitionInventoryCompleted(
-        Result<Vec<crate::core::quick_partition::PhysicalDisk>, String>,
-    ),
-    QuickPartitionPendingCompleted(Result<String, String>),
-    QuickPartitionCompoundOfflinePrepared(Result<ExpandCRequest, String>),
-    BitLockerManageInventoryCompleted(
-        Result<Vec<crate::core::native_bitlocker_manage::BitLockerManageVolume>, String>,
-    ),
+    QuickPartitionInventoryCompleted {
+        generation: u64,
+        result: Result<Vec<crate::core::quick_partition::PhysicalDisk>, String>,
+    },
+    QuickPartitionPendingCompleted {
+        generation: u64,
+        target_disk: u32,
+        task: WriteTaskToken,
+        result: Result<String, String>,
+    },
+    QuickPartitionCompoundOfflinePrepared {
+        generation: u64,
+        target_disk: u32,
+        task: WriteTaskToken,
+        result: Result<ExpandCRequest, String>,
+    },
+    BitLockerManageInventoryCompleted {
+        generation: u64,
+        result: Result<Vec<crate::core::native_bitlocker_manage::BitLockerManageVolume>, String>,
+    },
     BitLockerManageOperationCompleted {
+        generation: u64,
+        volume: String,
         recovery_key: bool,
+        task: Option<WriteTaskToken>,
         result: Result<String, String>,
     },
     HardwareInspectorCompleted {
         generation: u64,
         result: Box<Result<crate::core::hardware_inspector::HardwareInspectorSnapshot, String>>,
     },
+}
+
+const ID_PE_MAINTENANCE_SPINNER: u16 = 63_980;
+const ID_PE_MAINTENANCE_STATUS: u16 = 63_981;
+
+fn pe_maintenance_status_message(stage: crate::core::pe::PeMaintenanceProgress) -> String {
+    use crate::core::pe::PeMaintenanceProgress;
+    match stage {
+        PeMaintenanceProgress::LocatingPe => crate::tr!("正在查找本地 PE WIM…"),
+        PeMaintenanceProgress::SnapshottingPe => {
+            crate::tr!("正在复制 PE WIM 到一次性启动区…")
+        }
+        PeMaintenanceProgress::CollectingBitLockerKeys => {
+            crate::tr!("正在获取可用的 BitLocker 恢复密钥…")
+        }
+        PeMaintenanceProgress::CreatingBootEntry => {
+            crate::tr!("正在写入解锁材料并创建一次性 PE 启动项…")
+        }
+        PeMaintenanceProgress::SchedulingRestart => crate::tr!("正在安排系统重启…"),
+        PeMaintenanceProgress::RestartScheduled => {
+            crate::tr!("准备完成，系统即将重启进入 PE…")
+        }
+    }
+}
+
+#[cfg(feature = "non-elevated-tests")]
+fn running_progress_preview_state() -> LongTaskProgress {
+    LongTaskProgress {
+        title: crate::tr!("正在安装系统"),
+        description: crate::tr!("正在应用系统镜像和安装选项，请勿关闭程序。"),
+        current_step: crate::tr!("应用系统镜像"),
+        detail: crate::tr!("正在释放 Windows 映像并应用安装选项…"),
+        overall: ProgressValue::new(46, 100),
+        step: ProgressValue::new(58, 100),
+        status: ProgressStatus::Running,
+        status_text: crate::tr!("UI 预览：未启动任何安装任务。"),
+        cancellable: false,
+    }
+}
+
+struct PeMaintenanceProgressDialog {
+    shell: DialogShell,
+    spinner: HWND,
+    status: HWND,
+    spinner_started: Instant,
+    running: bool,
+}
+
+impl PeMaintenanceProgressDialog {
+    unsafe fn create(owner: HWND) -> windows::core::Result<Self> {
+        let mut shell = DialogShell::create(
+            owner,
+            DialogSpec {
+                window_title: crate::tr!("正在进入 PE 维护环境"),
+                title: crate::tr!("正在准备 PE 维护环境"),
+                description: crate::tr!("正在创建一次性 PE 启动，完成后系统将自动重启。"),
+                width: 500,
+                height: 220,
+                buttons: DialogButtons {
+                    primary: crate::tr!("请稍候…"),
+                    secondary: None,
+                    cancel: None,
+                },
+            },
+        )?;
+        shell.fit_content_height(48);
+        shell.set_primary_enabled(false);
+        let content = shell.content();
+        let spinner = child(
+            content,
+            w!("STATIC"),
+            "",
+            SS_OWNERDRAW_VALUE,
+            ID_PE_MAINTENANCE_SPINNER,
+        )?;
+        let status = child(
+            content,
+            w!("STATIC"),
+            &crate::tr!("正在查找本地 PE WIM…"),
+            SS_CENTERIMAGE_VALUE,
+            ID_PE_MAINTENANCE_STATUS,
+        )?;
+        let dialog = Self {
+            shell,
+            spinner,
+            status,
+            spinner_started: Instant::now(),
+            running: true,
+        };
+        dialog.layout();
+        Ok(dialog)
+    }
+
+    unsafe fn show_modeless(&mut self) {
+        self.layout();
+        self.shell.show_modeless();
+        self.layout();
+    }
+
+    unsafe fn activate_if_visible(&self) -> bool {
+        self.shell.activate_if_visible()
+    }
+
+    unsafe fn animate(&mut self) {
+        if !self.running {
+            return;
+        }
+        let _ = InvalidateRect(self.spinner, None, false);
+    }
+
+    unsafe fn draw_item(&self, item: &DRAWITEMSTRUCT, palette: theme::Palette) -> bool {
+        if item.CtlID != u32::from(ID_PE_MAINTENANCE_SPINNER) {
+            return false;
+        }
+        draw_indeterminate_ring(
+            item.hDC,
+            item.rcItem,
+            self.spinner_started.elapsed().as_secs_f64(),
+            palette,
+        );
+        true
+    }
+
+    unsafe fn set_stage(&mut self, stage: crate::core::pe::PeMaintenanceProgress) {
+        let message = pe_maintenance_status_message(stage);
+        set_text(self.status, &message);
+    }
+
+    unsafe fn set_error(&mut self, error: &str) {
+        self.running = false;
+        let _ = ShowWindow(self.spinner, SW_HIDE);
+        set_text(self.status, &crate::tr!("准备 PE 维护环境失败：{}", error));
+        self.shell.relocalize(
+            &crate::tr!("无法进入 PE 维护环境"),
+            &crate::tr!("无法进入 PE 维护环境"),
+            &crate::tr!("PE 维护环境没有完成准备。请查看下方错误后重试。"),
+            &crate::tr!("关闭"),
+        );
+        self.shell.set_primary_enabled(true);
+        self.show_modeless();
+    }
+
+    unsafe fn take_close(&mut self) -> bool {
+        !self.running && self.shell.take_result().is_some()
+    }
+
+    unsafe fn layout(&self) {
+        let mut rect = RECT::default();
+        let _ = GetClientRect(self.shell.content(), &mut rect);
+        let width = (rect.right - rect.left).max(0);
+        let height = (rect.bottom - rect.top).max(0);
+        let dpi = GetDpiForWindow(self.shell.hwnd()).max(96);
+        let spinner_size = ((16_i64 * i64::from(dpi) + 48) / 96) as i32;
+        let gap = ((10_i64 * i64::from(dpi) + 48) / 96) as i32;
+        let spinner_top = (height - spinner_size).max(0) / 2;
+        let _ = MoveWindow(
+            self.spinner,
+            0,
+            spinner_top,
+            spinner_size,
+            spinner_size,
+            true,
+        );
+        let _ = MoveWindow(
+            self.status,
+            spinner_size + gap,
+            0,
+            (width - spinner_size - gap).max(0),
+            height,
+            true,
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteTaskKind {
+    Confirmed(MutatingToolKind),
+    QuickPartitionPending,
+    QuickPartitionCompound,
+    ExpandC,
+    BitLockerManage,
+    PeMaintenance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WriteTaskToken {
+    generation: u64,
+    kind: WriteTaskKind,
+}
+
+#[derive(Default)]
+struct WriteTaskGate {
+    generation: u64,
+    active: Option<WriteTaskToken>,
+}
+
+impl WriteTaskGate {
+    fn try_begin(&mut self, kind: WriteTaskKind) -> Option<WriteTaskToken> {
+        if self.active.is_some() {
+            return None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let token = WriteTaskToken {
+            generation: self.generation,
+            kind,
+        };
+        self.active = Some(token);
+        Some(token)
+    }
+
+    fn finish(&mut self, token: WriteTaskToken) -> bool {
+        if self.active != Some(token) {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+
+    fn active(&self) -> Option<WriteTaskToken> {
+        self.active
+    }
+}
+
+fn dialog_response_matches(
+    current_generation: u64,
+    current_target: Option<&str>,
+    response_generation: u64,
+    response_target: Option<&str>,
+) -> bool {
+    current_generation == response_generation
+        && match response_target {
+            Some(response_target) => {
+                current_target.is_some_and(|current| current.eq_ignore_ascii_case(response_target))
+            }
+            None => true,
+        }
+}
+
+fn bitlocker_intent_volume(
+    intent: &crate::core::native_bitlocker_manage::BitLockerManageIntent,
+) -> &str {
+    use crate::core::native_bitlocker_manage::BitLockerManageIntent;
+    match intent {
+        BitLockerManageIntent::Unlock { volume, .. }
+        | BitLockerManageIntent::Decrypt { volume }
+        | BitLockerManageIntent::ReadRecoveryKey { volume }
+        | BitLockerManageIntent::SuspendProtection { volume }
+        | BitLockerManageIntent::ResumeProtection { volume } => volume,
+    }
+}
+
+fn pending_partition_target_disk(
+    operations: &[crate::core::native_quick_partition_dialog::PendingPartitionOperation],
+) -> Option<u32> {
+    use crate::core::native_quick_partition_dialog::PendingPartitionOperation;
+    let disk_number = |operation: &PendingPartitionOperation| match operation {
+        PendingPartitionOperation::Resize(request) => request.disk.disk_number,
+        PendingPartitionOperation::Transfer(request) => request.disk.disk_number,
+        PendingPartitionOperation::Manage(request) => request.disk.disk_number,
+    };
+    let target = operations.first().map(disk_number)?;
+    operations
+        .iter()
+        .all(|operation| disk_number(operation) == target)
+        .then_some(target)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StableTargetProbeResult {
+    Match,
+    Changed(lr_core::windows_storage::StableVolumeIdentity),
+    Unavailable(String),
+}
+
+fn classify_stable_target_probe(
+    expected: StableTargetIdentity,
+    actual: Result<lr_core::windows_storage::StableVolumeIdentity, String>,
+) -> StableTargetProbeResult {
+    match actual {
+        Ok(actual) if expected.matches_stable_volume(actual) => StableTargetProbeResult::Match,
+        Ok(actual) => StableTargetProbeResult::Changed(actual),
+        Err(error) => StableTargetProbeResult::Unavailable(error),
+    }
 }
 
 #[derive(Clone)]
@@ -945,8 +1293,8 @@ fn download_failure_message(error: &DownloadWorkerError) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CommandBarLayout {
-    /// Advanced/Save, Refresh, Primary/Copy positions in control order.
-    x: [Option<i32>; 3],
+    /// Automation, Advanced/Save, Refresh, Primary/Copy positions in control order.
+    x: [Option<i32>; 4],
     left_edge: i32,
 }
 
@@ -972,17 +1320,19 @@ const fn navigation_visibility(easy_mode_enabled: bool, progress_visible: bool) 
 const fn command_bar_visibility(
     page: Page,
     easy_mode_enabled: bool,
+    automation_export_enabled: bool,
     advanced_visible: bool,
     progress_visible: bool,
-) -> [bool; 3] {
+) -> [bool; 4] {
     if progress_visible {
-        [false, false, false]
+        [false, false, false, false]
     } else if advanced_visible {
-        [true, false, false]
+        [false, true, false, false]
     } else {
         let easy_visible = matches!(page, Page::Install) && easy_mode_enabled;
         let install_visible = matches!(page, Page::Install) && !easy_visible;
         [
+            automation_export_enabled && (install_visible || matches!(page, Page::Backup)),
             install_visible || matches!(page, Page::Hardware),
             install_visible,
             !matches!(page, Page::Download | Page::Tools) && !easy_visible,
@@ -994,9 +1344,9 @@ fn command_bar_layout(
     content_right: i32,
     button_gap: i32,
     button_width: i32,
-    visible: [bool; 3],
+    visible: [bool; 4],
 ) -> CommandBarLayout {
-    let mut x = [None; 3];
+    let mut x = [None; 4];
     let mut next_right = content_right;
     for index in (0..x.len()).rev() {
         if visible[index] {
@@ -1007,6 +1357,20 @@ fn command_bar_layout(
     }
     let left_edge = x.into_iter().flatten().min().unwrap_or(content_right);
     CommandBarLayout { x, left_edge }
+}
+
+fn command_button_width(
+    content_width: i32,
+    button_gap: i32,
+    preferred_width: i32,
+    visible: [bool; 4],
+) -> i32 {
+    let count = visible.into_iter().filter(|value| *value).count() as i32;
+    if count == 0 {
+        return 0;
+    }
+    preferred_width
+        .min(((content_width - button_gap.saturating_mul(count.saturating_sub(1))) / count).max(0))
 }
 
 fn centered_command_button_x(content_left: i32, content_width: i32, button_width: i32) -> i32 {
@@ -1038,6 +1402,100 @@ fn shared_install_mode_label_width(
         .clamp(minimum.max(0), maximum.max(minimum.max(0)))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InstallModeSupplementLayout {
+    custom_mode_width: i32,
+    pca_x: i32,
+    pca_label_width: i32,
+    pca_combo_x: i32,
+    pca_combo_width: i32,
+    pca_row_y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InstallModeSupplementMetrics {
+    content_left: i32,
+    content_right: i32,
+    custom_mode_x: i32,
+    preferred_custom_mode_width: i32,
+    desired_pca_label_width: i32,
+    preferred_pca_combo_width: i32,
+    minimum_combo_width: i32,
+    custom_mode_row_y: i32,
+    inline_gap: i32,
+    label_gap: i32,
+    next_row_offset: i32,
+    dual_boot_selected: bool,
+}
+
+fn install_mode_supplement_layout(
+    metrics: InstallModeSupplementMetrics,
+) -> InstallModeSupplementLayout {
+    let InstallModeSupplementMetrics {
+        content_left,
+        content_right,
+        custom_mode_x,
+        preferred_custom_mode_width,
+        desired_pca_label_width,
+        preferred_pca_combo_width,
+        minimum_combo_width,
+        custom_mode_row_y,
+        inline_gap,
+        label_gap,
+        next_row_offset,
+        dual_boot_selected,
+    } = metrics;
+    let available_right = content_right.max(content_left);
+    let inline_gap = inline_gap.max(0);
+    let label_gap = label_gap.max(0);
+    let desired_pca_label_width = desired_pca_label_width.max(0);
+    let preferred_custom_mode_width = preferred_custom_mode_width.max(0);
+    let preferred_pca_combo_width = preferred_pca_combo_width.max(0);
+    let minimum_combo_width = minimum_combo_width.max(0);
+    if dual_boot_selected {
+        let custom_mode_width =
+            preferred_custom_mode_width.min((available_right - custom_mode_x).max(0));
+        let pca_x = content_left;
+        let pca_label_width = desired_pca_label_width
+            .min((available_right - pca_x - label_gap - minimum_combo_width).max(0));
+        let pca_combo_x = pca_x + pca_label_width + label_gap;
+        InstallModeSupplementLayout {
+            custom_mode_width,
+            pca_x,
+            pca_label_width,
+            pca_combo_x,
+            pca_combo_width: preferred_pca_combo_width.min((available_right - pca_combo_x).max(0)),
+            pca_row_y: custom_mode_row_y + next_row_offset.max(0),
+        }
+    } else {
+        let fixed_width = inline_gap
+            .saturating_add(desired_pca_label_width)
+            .saturating_add(label_gap);
+        let combo_budget = (available_right - custom_mode_x - fixed_width).max(0);
+        let preferred_combo_total = preferred_custom_mode_width + preferred_pca_combo_width;
+        let (custom_mode_width, pca_combo_width) = if combo_budget >= preferred_combo_total {
+            (preferred_custom_mode_width, preferred_pca_combo_width)
+        } else if combo_budget >= minimum_combo_width.saturating_mul(2) {
+            let custom = preferred_custom_mode_width
+                .min((combo_budget - minimum_combo_width).max(minimum_combo_width));
+            (custom, combo_budget - custom)
+        } else {
+            let custom = combo_budget / 2;
+            (custom, combo_budget - custom)
+        };
+        let pca_x = custom_mode_x + custom_mode_width + inline_gap;
+        let pca_combo_x = pca_x + desired_pca_label_width + label_gap;
+        InstallModeSupplementLayout {
+            custom_mode_width,
+            pca_x,
+            pca_label_width: desired_pca_label_width,
+            pca_combo_x,
+            pca_combo_width,
+            pca_row_y: custom_mode_row_y,
+        }
+    }
+}
+
 /// Returns the top of the installation partition heading relative to the image row.
 ///
 /// The optional image-volume row must be a true zero-height row while no WIM volume
@@ -1045,6 +1503,85 @@ fn shared_install_mode_label_width(
 /// deterministic and avoids exposing an intermediate blank slot during repaint.
 fn install_partition_heading_y(image_row_y: i32, dpi: u32, row_expansion: i32) -> i32 {
     image_row_y + (32 + row_expansion.clamp(0, 34)) * dpi as i32 / 96
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FooterStatusLayout {
+    y: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FooterStatusHorizontalLayout {
+    x: i32,
+    width: i32,
+}
+
+fn footer_status_horizontal_layout(
+    status_right_edge: i32,
+    dpi: u32,
+) -> FooterStatusHorizontalLayout {
+    let scale = |value: i32| ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32;
+    let x = scale(24);
+    FooterStatusHorizontalLayout {
+        x,
+        width: (status_right_edge - x - scale(8)).max(0),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AutomationInformationLayout {
+    location_label: super::dialog::LogicalRect,
+    path: super::dialog::LogicalRect,
+    note: super::dialog::LogicalRect,
+}
+
+fn automation_information_layout(width: i32, height: i32, dpi: u32) -> AutomationInformationLayout {
+    let s = |value: i32| ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32;
+    let width = width.max(0);
+    let height = height.max(0);
+    let label_height = s(20).min(height);
+    let path_y = (label_height + s(2)).min(height);
+    let path_height = s(20).min(height.saturating_sub(path_y));
+    let note_y = (path_y + path_height + s(12)).min(height);
+    AutomationInformationLayout {
+        location_label: super::dialog::LogicalRect {
+            x: 0,
+            y: 0,
+            width,
+            height: label_height,
+        },
+        path: super::dialog::LogicalRect {
+            x: 0,
+            y: path_y,
+            width,
+            height: path_height,
+        },
+        note: super::dialog::LogicalRect {
+            x: 0,
+            y: note_y,
+            width,
+            height: height.saturating_sub(note_y),
+        },
+    }
+}
+
+/// Vertically aligns the complete wrapped status block with the command buttons.
+///
+/// The STATIC control draws wrapped text from its own top edge. Giving it the measured text
+/// height, instead of the whole footer height, makes one line and several lines share the same
+/// visual centre as the neighbouring buttons.
+fn footer_status_layout(
+    button_top: i32,
+    button_height: i32,
+    measured_text_height: i32,
+    maximum_height: i32,
+) -> FooterStatusLayout {
+    let height = measured_text_height.max(0).min(maximum_height.max(0));
+    FooterStatusLayout {
+        y: button_top + (button_height.saturating_sub(height)) / 2,
+        height,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1080,23 +1617,26 @@ impl InstallVolumeLayoutTransition {
 #[cfg(test)]
 mod layout_tests {
     use super::{
-        bitlocker_gate_completion, catalogue_status_message, centered_command_button_x,
-        centered_window_origin, command_bar_layout, command_bar_visibility, command_button_role,
-        command_status_right_edge, confirmed_tool_backend_request,
+        automation_information_layout, bitlocker_gate_completion, catalogue_status_message,
+        centered_command_button_x, centered_window_origin, command_bar_layout,
+        command_bar_visibility, command_button_role, command_button_width,
+        command_status_right_edge, confirmed_tool_backend_request, custom_install_mode_visibility,
         device_change_requests_partition_refresh, download_failure_message,
-        effective_easy_mode_enabled, initial_mutating_tool_state, install_partition_heading_y,
-        install_primary_enabled, list_view_selection_state_changed,
-        main_window_ex_style_owns_input, may_publish_install_chrome, minimum_window_size,
-        navigation_visibility, network_speed_text, page_switch_requires_full_layout,
-        pca_pending_status, pca_target_error_blocks, pca_target_probe_required,
-        pca_target_result_is_current, pca_target_uses_uefi, preferred_window_size,
-        primary_state_refresh_for_page, reusable_pca_target_result,
-        shared_install_mode_label_width, tool_backend_result_succeeded,
-        unattended_checked_for_source_preference, BitLockerGateCompletion, InstallControlSnapshot,
-        Page, PcaPendingStatus, PcaTargetCacheEntry, PcaTargetContext, PcaTargetKey,
-        PcaTargetMessage, PrimaryStateRefresh, DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL,
-        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, LVIF_STATE, LVIF_TEXT, LVIS_SELECTED,
-        WS_EX_LAYERED, WS_EX_TRANSPARENT,
+        effective_easy_mode_enabled, footer_state_refresh_for_page, footer_status_layout,
+        image_request_start_publishes_chrome, initial_mutating_tool_state,
+        install_mode_supplement_layout, install_partition_heading_y, install_primary_enabled,
+        list_view_item_became_selected, list_view_selection_state_changed,
+        list_view_state_image_changed, main_window_ex_style_owns_input, may_publish_install_chrome,
+        minimum_window_size, navigation_visibility, network_speed_text, pca_pending_status,
+        pca_target_error_blocks, pca_target_probe_required, pca_target_result_is_current,
+        pca_target_uses_uefi, preferred_window_size, primary_state_refresh_for_page,
+        remote_image_chrome_for_page, reusable_pca_target_result, shared_install_mode_label_width,
+        tool_backend_result_succeeded, unattended_checked_for_source_preference,
+        BitLockerGateCompletion, FooterStateRefresh, InstallControlSnapshot,
+        InstallModeSupplementMetrics, Page, PcaPendingStatus, PcaTargetCacheEntry,
+        PcaTargetContext, PcaTargetKey, PcaTargetMessage, PrimaryStateRefresh, RemoteImageChrome,
+        DBT_CONFIGCHANGED, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED,
+        LVIF_STATE, LVIF_TEXT, LVIS_SELECTED, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
     use crate::core::disk::PartitionStyle;
     use crate::core::native_download_controller::CatalogueState;
@@ -1120,6 +1660,44 @@ mod layout_tests {
             catalogue_status_message(&CatalogueState::Failed("network failed".into())),
             "network failed"
         );
+    }
+
+    #[test]
+    fn footer_status_centres_one_or_multiple_measured_lines_on_the_buttons() {
+        assert_eq!(
+            footer_status_layout(112, 28, 17, 44),
+            super::FooterStatusLayout { y: 117, height: 17 }
+        );
+        assert_eq!(
+            footer_status_layout(112, 28, 34, 44),
+            super::FooterStatusLayout { y: 109, height: 34 }
+        );
+        assert_eq!(
+            footer_status_layout(112, 28, 80, 44),
+            super::FooterStatusLayout { y: 104, height: 44 }
+        );
+    }
+
+    #[test]
+    fn footer_status_keeps_a_24px_left_inset_and_8px_right_gap() {
+        assert_eq!(
+            super::footer_status_horizontal_layout(600, 96),
+            super::FooterStatusHorizontalLayout { x: 24, width: 568 }
+        );
+        assert_eq!(
+            super::footer_status_horizontal_layout(900, 144),
+            super::FooterStatusHorizontalLayout { x: 36, width: 852 }
+        );
+    }
+
+    #[test]
+    fn automation_information_keeps_the_path_and_note_above_the_command_bar() {
+        let layout = automation_information_layout(640, 110, 96);
+        assert_eq!(layout.location_label.y, 0);
+        assert_eq!(layout.path.y, 22);
+        assert_eq!(layout.path.height, 20);
+        assert_eq!(layout.note.y, 54);
+        assert_eq!(layout.note.height, 56);
     }
 
     #[test]
@@ -1200,17 +1778,21 @@ mod layout_tests {
 
     #[test]
     fn command_bar_packs_only_visible_buttons_from_the_right() {
-        let hardware = command_bar_layout(1_000, 8, 120, [true, false, true]);
-        assert_eq!(hardware.x, [Some(752), None, Some(880)]);
+        let hardware = command_bar_layout(1_000, 8, 120, [false, true, false, true]);
+        assert_eq!(hardware.x, [None, Some(752), None, Some(880)]);
         assert_eq!(hardware.left_edge, 752);
 
-        let install = command_bar_layout(1_000, 8, 120, [true, true, true]);
-        assert_eq!(install.x, [Some(624), Some(752), Some(880)]);
+        let install = command_bar_layout(1_000, 8, 120, [false, true, true, true]);
+        assert_eq!(install.x, [None, Some(624), Some(752), Some(880)]);
         assert_eq!(install.left_edge, 624);
 
-        let backup = command_bar_layout(1_000, 8, 120, [false, false, true]);
-        assert_eq!(backup.x, [None, None, Some(880)]);
+        let backup = command_bar_layout(1_000, 8, 120, [false, false, false, true]);
+        assert_eq!(backup.x, [None, None, None, Some(880)]);
         assert_eq!(backup.left_edge, 880);
+
+        let automated = command_bar_layout(1_000, 8, 120, [true; 4]);
+        assert_eq!(automated.x, [Some(496), Some(624), Some(752), Some(880)]);
+        assert_eq!(command_button_width(300, 8, 120, [true; 4]), 69);
     }
 
     #[test]
@@ -1223,21 +1805,103 @@ mod layout_tests {
     #[test]
     fn command_visibility_matches_every_install_shell_state() {
         assert_eq!(
-            command_bar_visibility(Page::Install, false, false, false),
-            [true, true, true]
+            command_bar_visibility(Page::Install, false, false, false, false),
+            [false, true, true, true]
         );
         assert_eq!(
-            command_bar_visibility(Page::Install, true, false, false),
-            [false, false, false]
+            command_bar_visibility(Page::Install, false, true, false, false),
+            [true, true, true, true]
         );
         assert_eq!(
-            command_bar_visibility(Page::Install, false, true, false),
-            [true, false, false]
+            command_bar_visibility(Page::Backup, false, true, false, false),
+            [true, false, false, true]
         );
         assert_eq!(
-            command_bar_visibility(Page::Install, false, false, true),
-            [false, false, false]
+            command_bar_visibility(Page::Install, true, true, false, false),
+            [false, false, false, false]
         );
+        assert_eq!(
+            command_bar_visibility(Page::Install, false, true, true, false),
+            [false, true, false, false]
+        );
+        assert_eq!(
+            command_bar_visibility(Page::Install, false, true, false, true),
+            [false, false, false, false]
+        );
+    }
+
+    #[test]
+    fn install_mode_controls_require_a_ready_image_and_never_leak_into_progress() {
+        assert_eq!(
+            custom_install_mode_visibility(true, false, false),
+            [false; 5]
+        );
+        assert_eq!(
+            custom_install_mode_visibility(true, true, false),
+            [true, true, false, false, false]
+        );
+        assert_eq!(custom_install_mode_visibility(true, true, true), [true; 5]);
+        assert_eq!(
+            custom_install_mode_visibility(false, true, true),
+            [false; 5]
+        );
+    }
+
+    #[test]
+    fn pca_shares_the_install_mode_row_except_for_dual_boot() {
+        let metrics = InstallModeSupplementMetrics {
+            content_left: 20,
+            content_right: 620,
+            custom_mode_x: 104,
+            preferred_custom_mode_width: 190,
+            desired_pca_label_width: 132,
+            preferred_pca_combo_width: 144,
+            minimum_combo_width: 96,
+            custom_mode_row_y: 300,
+            inline_gap: 12,
+            label_gap: 4,
+            next_row_offset: 34,
+            dual_boot_selected: false,
+        };
+        let inline = install_mode_supplement_layout(metrics);
+        assert_eq!(inline.pca_x, 306);
+        assert_eq!(inline.pca_row_y, 300);
+        assert!(104 + inline.custom_mode_width + 12 <= inline.pca_x);
+        assert!(inline.pca_combo_width > 0);
+        assert!(inline.pca_combo_x + inline.pca_combo_width <= 620);
+
+        let dual_boot = install_mode_supplement_layout(InstallModeSupplementMetrics {
+            dual_boot_selected: true,
+            ..metrics
+        });
+        assert_eq!(dual_boot.pca_x, 20);
+        assert_eq!(dual_boot.pca_row_y, 334);
+        assert!(dual_boot.pca_combo_x + dual_boot.pca_combo_width <= 620);
+    }
+
+    #[test]
+    fn inline_install_and_pca_fields_remain_non_overlapping_at_minimum_width() {
+        for content_right in [588, 620, 760] {
+            let layout = install_mode_supplement_layout(InstallModeSupplementMetrics {
+                content_left: 20,
+                content_right,
+                custom_mode_x: 132,
+                preferred_custom_mode_width: 190,
+                desired_pca_label_width: 156,
+                preferred_pca_combo_width: 144,
+                minimum_combo_width: 88,
+                custom_mode_row_y: 300,
+                inline_gap: 12,
+                label_gap: 4,
+                next_row_offset: 34,
+                dual_boot_selected: false,
+            });
+            assert!(layout.custom_mode_width > 0);
+            assert!(132 + layout.custom_mode_width + 12 <= layout.pca_x);
+            assert!(layout.pca_label_width > 0);
+            assert!(layout.pca_combo_width > 0);
+            assert!(layout.pca_combo_x + layout.pca_combo_width <= content_right);
+        }
     }
 
     #[test]
@@ -1306,10 +1970,14 @@ mod layout_tests {
     fn hardware_save_and_copy_remain_adjacent_at_supported_dpi() {
         for dpi in [96, 144, 192] {
             let scale = |value: i32| value * dpi / 96;
-            let layout =
-                command_bar_layout(scale(1_000), scale(8), scale(136), [true, false, true]);
-            let save_x = layout.x[0].expect("hardware Save must be visible");
-            let copy_x = layout.x[2].expect("hardware Copy must be visible");
+            let layout = command_bar_layout(
+                scale(1_000),
+                scale(8),
+                scale(136),
+                [false, true, false, true],
+            );
+            let save_x = layout.x[1].expect("hardware Save must be visible");
+            let copy_x = layout.x[3].expect("hardware Copy must be visible");
             assert_eq!(copy_x - (save_x + scale(136)), scale(8));
             assert_eq!(copy_x + scale(136), scale(1_000));
         }
@@ -1321,14 +1989,14 @@ mod layout_tests {
         assert_eq!(centered_command_button_x(41, 501, 100), 241);
         assert_eq!(centered_command_button_x(20, 60, 96), 20);
 
-        let normal = command_bar_layout(1_232, 8, 136, [true, true, true]);
-        assert_eq!(normal.x, [Some(808), Some(952), Some(1_096)]);
+        let normal = command_bar_layout(1_232, 8, 136, [false, true, true, true]);
+        assert_eq!(normal.x, [None, Some(808), Some(952), Some(1_096)]);
     }
 
     #[test]
     fn advanced_status_slot_stops_before_the_centered_save_button() {
         let advanced_x = centered_command_button_x(272, 960, 136);
-        let packed = command_bar_layout(1_232, 8, 136, [true, false, false]);
+        let packed = command_bar_layout(1_232, 8, 136, [false, false, false, true]);
         assert_eq!(packed.left_edge, 1_096);
         assert_eq!(
             command_status_right_edge(true, advanced_x, packed.left_edge),
@@ -1359,6 +2027,51 @@ mod layout_tests {
     }
 
     #[test]
+    fn global_machine_status_remains_visible_on_every_page() {
+        assert_eq!(
+            footer_state_refresh_for_page(Page::Install),
+            FooterStateRefresh::Install
+        );
+        for page in [
+            Page::Backup,
+            Page::Download,
+            Page::Tools,
+            Page::Hardware,
+            Page::About,
+        ] {
+            assert_eq!(
+                footer_state_refresh_for_page(page),
+                FooterStateRefresh::Status
+            );
+        }
+    }
+
+    #[test]
+    fn category_and_checkbox_notifications_are_filtered_by_state_bit() {
+        assert!(list_view_item_became_selected(
+            LVIF_STATE.0,
+            0,
+            LVIS_SELECTED.0
+        ));
+        assert!(!list_view_item_became_selected(
+            LVIF_STATE.0,
+            LVIS_SELECTED.0,
+            0
+        ));
+        assert!(!list_view_item_became_selected(
+            LVIF_TEXT.0,
+            0,
+            LVIS_SELECTED.0
+        ));
+        assert!(list_view_state_image_changed(LVIF_STATE.0, 0x1000, 0x2000));
+        assert!(!list_view_state_image_changed(
+            LVIF_STATE.0,
+            LVIS_SELECTED.0,
+            0
+        ));
+    }
+
+    #[test]
     fn install_async_results_never_overwrite_other_page_chrome() {
         assert!(may_publish_install_chrome(Page::Install, false, false));
         assert!(!may_publish_install_chrome(Page::About, false, false));
@@ -1368,8 +2081,56 @@ mod layout_tests {
     }
 
     #[test]
-    fn every_install_page_entry_rebuilds_inventory_dependent_geometry() {
-        assert!(page_switch_requires_full_layout(Page::Install));
+    fn remote_image_results_only_publish_chrome_on_the_visible_install_page() {
+        for chrome in [
+            RemoteImageChrome::NoInstallableVolumes,
+            RemoteImageChrome::Ready,
+            RemoteImageChrome::Failed,
+        ] {
+            assert_eq!(
+                remote_image_chrome_for_page(Page::Install, false, false, chrome),
+                Some(chrome)
+            );
+            assert_eq!(
+                remote_image_chrome_for_page(Page::Install, true, false, chrome),
+                None
+            );
+            assert_eq!(
+                remote_image_chrome_for_page(Page::Install, false, true, chrome),
+                None
+            );
+            for page in [
+                Page::Backup,
+                Page::Download,
+                Page::Tools,
+                Page::Hardware,
+                Page::About,
+            ] {
+                assert_eq!(
+                    remote_image_chrome_for_page(page, false, false, chrome),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn late_auto_discovery_keeps_other_page_chrome_untouched() {
+        assert!(image_request_start_publishes_chrome(
+            Page::Install,
+            false,
+            false
+        ));
+        assert!(!image_request_start_publishes_chrome(
+            Page::Install,
+            true,
+            false
+        ));
+        assert!(!image_request_start_publishes_chrome(
+            Page::Install,
+            false,
+            true
+        ));
         for page in [
             Page::Backup,
             Page::Download,
@@ -1377,7 +2138,7 @@ mod layout_tests {
             Page::Hardware,
             Page::About,
         ] {
-            assert!(!page_switch_requires_full_layout(page));
+            assert!(!image_request_start_publishes_chrome(page, false, false));
         }
     }
 
@@ -1395,6 +2156,7 @@ mod layout_tests {
             ..InstallPrefs::default()
         };
         InstallControlSnapshot {
+            custom_mode_index: 0,
             format_partition: true,
             repair_boot: true,
             unattended_install: true,
@@ -1679,6 +2441,7 @@ mod layout_tests {
                 letter: "C:".into(),
                 total_size_mb: 100,
                 free_size_mb: 50,
+                free_size_bytes: 50 * 1024 * 1024,
                 label: "Windows".into(),
                 is_system_partition: true,
                 has_windows: true,
@@ -1688,12 +2451,17 @@ mod layout_tests {
                 disk_size_bytes: Some(500_000_000_000),
                 partition_offset_bytes: Some(1_048_576),
                 partition_size_bytes: Some(100 * 1024 * 1024),
+                partition_kind: Some(lr_core::windows_storage::PartitionKind::BasicData),
+                install_target_eligible: true,
+                storage_media: lr_core::data_staging::StorageMedia::SolidState,
+                stable_identity: None,
                 bitlocker_status: crate::core::bitlocker::VolumeStatus::NotEncrypted,
             },
             crate::core::disk::Partition {
                 letter: "D:".into(),
                 total_size_mb: 200,
                 free_size_mb: 100,
+                free_size_bytes: 100 * 1024 * 1024,
                 label: "Data".into(),
                 is_system_partition: false,
                 has_windows: false,
@@ -1703,6 +2471,10 @@ mod layout_tests {
                 disk_size_bytes: Some(1_000_000_000_000),
                 partition_offset_bytes: Some(1_048_576),
                 partition_size_bytes: Some(200 * 1024 * 1024),
+                partition_kind: Some(lr_core::windows_storage::PartitionKind::BasicData),
+                install_target_eligible: true,
+                storage_media: lr_core::data_staging::StorageMedia::Rotational,
+                stable_identity: None,
                 bitlocker_status: crate::core::bitlocker::VolumeStatus::EncryptedUnlocked,
             },
         ];
@@ -1812,6 +2584,11 @@ mod layout_tests {
             "BitLocker 恢复密钥必须是 8 组、每组 6 位数字",
             "请选择当前系统或离线 Windows 目录",
             "请再次确认目标和选项。此操作尚未执行。\r\n{}",
+            "显示自动化配置导出（高级）",
+            "生成自动化",
+            "自动化配置已生成",
+            "无法生成自动化配置",
+            "请检查当前页面设置后重试：{}",
         ] {
             let translated = data
                 .get(key)
@@ -1850,6 +2627,24 @@ const ID_IMAGE_VOLUME: u16 = 213;
 const ID_UNATTEND_BROWSE: u16 = 215;
 const ID_UNATTEND_CLEAR: u16 = 216;
 const ID_PCA_MODE: u16 = 217;
+const ID_CUSTOM_INSTALL_MODE: u16 = 218;
+const ID_DUAL_BOOT_SIZE: u16 = 219;
+const ID_AUTOMATION_EXPORT: u16 = 220;
+
+#[cfg(feature = "ci-automation")]
+fn ci_easy_mode_shutdown_on_terminal() -> bool {
+    std::env::var("LETRECOVERY_CI_EASY_MODE").is_ok_and(|run_id| {
+        run_id.len() == 32
+            && run_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+#[cfg(not(feature = "ci-automation"))]
+const fn ci_easy_mode_shutdown_on_terminal() -> bool {
+    false
+}
 
 const fn command_button_role(id: u16) -> ButtonRole {
     if id == ID_PRIMARY {
@@ -1870,10 +2665,41 @@ enum Page {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveLayoutSurface {
+    Progress,
+    Advanced,
+    Easy,
+    Standard(Page),
+}
+
+fn active_layout_surface(
+    progress_visible: bool,
+    advanced_visible: bool,
+    easy_mode_enabled: bool,
+    page: Page,
+) -> ActiveLayoutSurface {
+    if progress_visible {
+        ActiveLayoutSurface::Progress
+    } else if advanced_visible {
+        ActiveLayoutSurface::Advanced
+    } else if easy_mode_enabled {
+        ActiveLayoutSurface::Easy
+    } else {
+        ActiveLayoutSurface::Standard(page)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrimaryStateRefresh {
     Install,
     Backup,
     None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FooterStateRefresh {
+    Install,
+    Status,
 }
 
 const fn primary_state_refresh_for_page(page: Page) -> PrimaryStateRefresh {
@@ -1884,8 +2710,50 @@ const fn primary_state_refresh_for_page(page: Page) -> PrimaryStateRefresh {
     }
 }
 
+const fn footer_state_refresh_for_page(page: Page) -> FooterStateRefresh {
+    if matches!(page, Page::Install) {
+        FooterStateRefresh::Install
+    } else {
+        FooterStateRefresh::Status
+    }
+}
+
 fn may_publish_install_chrome(page: Page, advanced_visible: bool, progress_visible: bool) -> bool {
     page == Page::Install && !advanced_visible && !progress_visible
+}
+
+fn should_replay_partition_refresh_error(
+    page: Page,
+    advanced_visible: bool,
+    progress_visible: bool,
+    partition_refresh_error: Option<&str>,
+) -> bool {
+    may_publish_install_chrome(page, advanced_visible, progress_visible)
+        && partition_refresh_error.is_some()
+}
+
+fn image_request_start_publishes_chrome(
+    page: Page,
+    advanced_visible: bool,
+    progress_visible: bool,
+) -> bool {
+    may_publish_install_chrome(page, advanced_visible, progress_visible)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteImageChrome {
+    NoInstallableVolumes,
+    Ready,
+    Failed,
+}
+
+fn remote_image_chrome_for_page(
+    page: Page,
+    advanced_visible: bool,
+    progress_visible: bool,
+    chrome: RemoteImageChrome,
+) -> Option<RemoteImageChrome> {
+    may_publish_install_chrome(page, advanced_visible, progress_visible).then_some(chrome)
 }
 
 #[derive(Clone, Copy)]
@@ -1901,6 +2769,11 @@ struct Handles {
     image_volume: HWND,
     partitions_label: HWND,
     partitions: HWND,
+    custom_mode_label: HWND,
+    custom_mode: HWND,
+    dual_boot_size_label: HWND,
+    dual_boot_size: HWND,
+    dual_boot_size_unit: HWND,
     format: HWND,
     boot: HWND,
     unattend: HWND,
@@ -1914,13 +2787,40 @@ struct Handles {
     boot_mode: HWND,
     pca_label: HWND,
     pca_mode: HWND,
+    automation_export: HWND,
     advanced: HWND,
     refresh: HWND,
     status: HWND,
     primary: HWND,
 }
 
+fn custom_install_mode_controls(handles: &Handles) -> [HWND; 5] {
+    [
+        handles.custom_mode_label,
+        handles.custom_mode,
+        handles.dual_boot_size_label,
+        handles.dual_boot_size,
+        handles.dual_boot_size_unit,
+    ]
+}
+
+const fn custom_install_mode_visibility(
+    install_page_visible: bool,
+    image_ready: bool,
+    dual_boot_selected: bool,
+) -> [bool; 5] {
+    let mode_visible = install_page_visible && image_ready;
+    [
+        mode_visible,
+        mode_visible,
+        mode_visible && dual_boot_selected,
+        mode_visible && dual_boot_selected,
+        mode_visible && dual_boot_selected,
+    ]
+}
+
 struct NativeWindow {
+    startup_presentation: StartupPresentation,
     page: Page,
     dpi: u32,
     font: HFONT,
@@ -1947,6 +2847,7 @@ struct NativeWindow {
     mounted_iso: Option<std::path::PathBuf>,
     image_request_generation: u64,
     image_edit_programmatic_change: bool,
+    dual_boot_auto_size_gib: Option<u64>,
     auto_image_discovery_pending: bool,
     advanced_defaults_target: Option<String>,
     custom_unattend_path: String,
@@ -1962,6 +2863,7 @@ struct NativeWindow {
     backup_page: Option<BackupPage>,
     download_page: Option<DownloadPage>,
     download_controller: NativeDownloadController,
+    machine_environment: MachineEnvironment,
     pe_catalogue: Vec<OnlinePE>,
     easy_page: Option<EasyModePage>,
     easy_controller: NativeEasyModeController,
@@ -1989,22 +2891,35 @@ struct NativeWindow {
     download_follow_up: Option<crate::core::native_download_controller::DownloadCompletion>,
     install_messages: Option<Receiver<InstallWorkerMessage>>,
     install_cancel: Option<Arc<AtomicBool>>,
+    install_progress_phase: Option<(
+        crate::core::native_install_executor::InstallExecutionPhase,
+        crate::core::native_install_executor::InstallProgressRange,
+    )>,
     install_auto_reboot: bool,
+    install_has_pending_first_logon_software: bool,
     install_requires_secure_boot_disable: bool,
     catalogue_messages: Option<Receiver<crate::download::server_config::RemoteConfig>>,
     tool_dialogs: Vec<NativeToolDialog>,
     tool_background_jobs: usize,
+    write_task_gate: WriteTaskGate,
     image_verify_cancel: Option<Arc<AtomicBool>>,
     mutating_tool_dialogs: Vec<NativeMutatingToolDialog>,
     time_sync_dialog: Option<NativeTimeSyncDialog>,
     network_reset_dialog: Option<NativeNetworkResetDialog>,
     batch_format_dialog: Option<NativeBatchFormatDialog>,
+    batch_format_generation: u64,
     storage_driver_dialog: Option<NativeStorageDriverDialog>,
+    storage_driver_generation: u64,
     password_reset_dialog: Option<NativePasswordResetDialog>,
     password_reset_generation: u64,
     driver_transfer_dialog: Option<NativeDriverTransferDialog>,
     boot_repair_dialog: Option<NativeBootRepairDialog>,
     boot_repair_generation: u64,
+    preinstall_dialog: Option<NativePreinstallDialog>,
+    /// Session-only distinction between an untouched empty default and an operator who explicitly
+    /// applied an empty selection. A later dialog open must never re-check applications that the
+    /// operator deliberately cleared.
+    preinstall_selection_user_set: bool,
     appx_dialog: Option<NativeAppxDialog>,
     appx_generation: u64,
     nvidia_dialog: Option<NativeNvidiaRemovalDialog>,
@@ -2012,8 +2927,10 @@ struct NativeWindow {
     partition_copy_dialog: Option<NativePartitionCopyDialog>,
     partition_copy_generation: u64,
     quick_partition_dialog: Option<NativeQuickPartitionDialog>,
+    quick_partition_generation: u64,
     pending_quick_partition_command: Option<QuickPartitionDialogIntent>,
     bitlocker_manage_dialog: Option<NativeBitLockerManageDialog>,
+    bitlocker_manage_generation: u64,
     pending_bitlocker_manage_command: Option<BitLockerManageDialogIntent>,
     expand_c_dialog: Option<NativeExpandCDialog>,
     expand_c_analysis: Option<
@@ -2027,10 +2944,25 @@ struct NativeWindow {
     expand_c_execution: Option<Receiver<ExpandCWorkerMessage>>,
     hardware_inspector_dialog: Option<NativeHardwareInspectorDialog>,
     hardware_inspector_generation: u64,
+    pe_maintenance_dialog: Option<PeMaintenanceProgressDialog>,
     tool_worker_sender: std::sync::mpsc::Sender<ToolWorkerMessage>,
     tool_worker_messages: Receiver<ToolWorkerMessage>,
     advanced_visible: bool,
+    size_move_loop: bool,
+    live_resize: bool,
     config: Arc<PreloadedConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum StartupPresentation {
+    #[default]
+    Main,
+    #[cfg(feature = "non-elevated-tests")]
+    ProgressPreview,
+    #[cfg(feature = "non-elevated-tests")]
+    PeMaintenancePreview,
+    #[cfg(feature = "non-elevated-tests")]
+    AboutPreview,
 }
 
 impl Drop for NativeWindow {
@@ -2057,7 +2989,7 @@ impl Drop for NativeWindow {
 }
 
 impl NativeWindow {
-    fn new(config: Arc<PreloadedConfig>) -> Self {
+    fn new(config: Arc<PreloadedConfig>, startup_presentation: StartupPresentation) -> Self {
         let palette = theme::Palette::system();
         let app_config = config.app_config.clone();
         let is_pe_environment = config
@@ -2067,6 +2999,7 @@ impl NativeWindow {
             .unwrap_or_else(crate::core::disk::DiskManager::is_pe_environment);
         let partitions = config.partitions.clone();
         let mut download_controller = NativeDownloadController::default();
+        let machine_environment = lr_core::windows_hardware::collect_machine_identity().environment;
         let mut pe_catalogue = PeCache::load().unwrap_or_default();
         let mut easy_controller = NativeEasyModeController::new(
             effective_easy_mode_enabled(app_config.easy_mode_enabled, is_pe_environment),
@@ -2090,10 +3023,10 @@ impl NativeWindow {
                     .as_deref()
                     .map(ConfigManager::parse_software_list)
                     .unwrap_or_default(),
-                gpu_driver_list: remote
-                    .gpu_content
+                software_categories: remote
+                    .soft_content
                     .as_deref()
-                    .map(ConfigManager::parse_gpu_driver_list)
+                    .map(ConfigManager::parse_software_categories)
                     .unwrap_or_default(),
                 ..ConfigManager::default()
             };
@@ -2119,7 +3052,11 @@ impl NativeWindow {
             }
         }
         let (tool_worker_sender, tool_worker_messages) = std::sync::mpsc::channel();
+        let dual_boot_auto_size_gib = Some(whole_gib_for_capacity(
+            lr_core::custom_install::OPAQUE_IMAGE_FALLBACK_BYTES,
+        ));
         Self {
+            startup_presentation,
             page: Page::Install,
             dpi: 96,
             font: HFONT::default(),
@@ -2146,6 +3083,7 @@ impl NativeWindow {
             mounted_iso: None,
             image_request_generation: 0,
             image_edit_programmatic_change: false,
+            dual_boot_auto_size_gib,
             auto_image_discovery_pending: true,
             advanced_defaults_target: None,
             custom_unattend_path: String::new(),
@@ -2161,6 +3099,7 @@ impl NativeWindow {
             backup_page: None,
             download_page: None,
             download_controller,
+            machine_environment,
             pe_catalogue,
             easy_page: None,
             easy_controller,
@@ -2187,22 +3126,29 @@ impl NativeWindow {
             download_follow_up: None,
             install_messages: None,
             install_cancel: None,
+            install_progress_phase: None,
             install_auto_reboot: false,
+            install_has_pending_first_logon_software: false,
             install_requires_secure_boot_disable: false,
             catalogue_messages: None,
             tool_dialogs: Vec::new(),
             tool_background_jobs: 0,
+            write_task_gate: WriteTaskGate::default(),
             image_verify_cancel: None,
             mutating_tool_dialogs: Vec::new(),
             time_sync_dialog: None,
             network_reset_dialog: None,
             batch_format_dialog: None,
+            batch_format_generation: 0,
             storage_driver_dialog: None,
+            storage_driver_generation: 0,
             password_reset_dialog: None,
             password_reset_generation: 0,
             driver_transfer_dialog: None,
             boot_repair_dialog: None,
             boot_repair_generation: 0,
+            preinstall_dialog: None,
+            preinstall_selection_user_set: false,
             appx_dialog: None,
             appx_generation: 0,
             nvidia_dialog: None,
@@ -2210,17 +3156,22 @@ impl NativeWindow {
             partition_copy_dialog: None,
             partition_copy_generation: 0,
             quick_partition_dialog: None,
+            quick_partition_generation: 0,
             pending_quick_partition_command: None,
             bitlocker_manage_dialog: None,
+            bitlocker_manage_generation: 0,
             pending_bitlocker_manage_command: None,
             expand_c_dialog: None,
             expand_c_analysis: None,
             expand_c_execution: None,
             hardware_inspector_dialog: None,
             hardware_inspector_generation: 0,
+            pe_maintenance_dialog: None,
             tool_worker_sender,
             tool_worker_messages,
             advanced_visible: false,
+            size_move_loop: false,
+            live_resize: false,
             config,
         }
     }
@@ -2473,7 +3424,13 @@ impl NativeWindow {
         )?;
         let _ = ShowWindow(image_volume_label, SW_HIDE);
         let _ = ShowWindow(image_volume, SW_HIDE);
-        let partitions_label = child(hwnd, w!("STATIC"), &crate::tr!("选择安装分区:"), 0, 303)?;
+        let partitions_label = child(
+            hwnd,
+            w!("STATIC"),
+            &crate::tr!("选择安装分区:"),
+            SS_SINGLE_LINE_ELLIPSIS,
+            303,
+        )?;
         let partitions = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             w!("SysListView32"),
@@ -2495,6 +3452,63 @@ impl NativeWindow {
             LPARAM((LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize),
         );
         self.populate_partitions(partitions, true);
+
+        let custom_mode_label = child(
+            hwnd,
+            w!("STATIC"),
+            &crate::tr!("安装模式:"),
+            SS_SINGLE_LINE_ELLIPSIS,
+            311,
+        )?;
+        let custom_mode = child(
+            hwnd,
+            w!("COMBOBOX"),
+            "",
+            CBS_DROPDOWNLIST | WS_TABSTOP.0 as i32,
+            ID_CUSTOM_INSTALL_MODE,
+        )?;
+        for value in [
+            crate::tr!("只重装所选分区"),
+            crate::tr!("全盘重装"),
+            crate::tr!("创建双系统"),
+        ] {
+            let value = wide(&value);
+            let _ = SendMessageW(
+                custom_mode,
+                0x0143,
+                WPARAM(0),
+                LPARAM(value.as_ptr() as isize),
+            );
+        }
+        let custom_mode_index = match self.app_config.install_prefs.custom_install_plan.mode() {
+            lr_core::custom_install::CustomInstallMode::ReinstallPartition => 0,
+            lr_core::custom_install::CustomInstallMode::RepartitionAllDisks => 1,
+            lr_core::custom_install::CustomInstallMode::DualBoot => 2,
+        };
+        let _ = SendMessageW(custom_mode, 0x014E, WPARAM(custom_mode_index), LPARAM(0));
+        let dual_boot_size_label = child(
+            hwnd,
+            w!("STATIC"),
+            &crate::tr!("新系统大小:"),
+            SS_SINGLE_LINE_ELLIPSIS,
+            312,
+        )?;
+        let dual_boot_size_text = self
+            .dual_boot_auto_size_gib
+            .unwrap_or_else(|| {
+                whole_gib_for_capacity(lr_core::custom_install::OPAQUE_IMAGE_FALLBACK_BYTES)
+            })
+            .to_string();
+        let dual_boot_size = child(
+            hwnd,
+            w!("EDIT"),
+            &dual_boot_size_text,
+            ES_AUTOHSCROLL | 0x2000 | WS_TABSTOP.0 as i32, // ES_NUMBER
+            ID_DUAL_BOOT_SIZE,
+        )?;
+        let _ = SendMessageW(dual_boot_size, 0x00C5, WPARAM(4), LPARAM(0));
+        center_single_line_edit_in_row(dual_boot_size);
+        let dual_boot_size_unit = child(hwnd, w!("STATIC"), "GB", SS_CENTERIMAGE_VALUE, 313)?;
 
         let format = child(
             hwnd,
@@ -2540,12 +3554,11 @@ impl NativeWindow {
         )?;
         // SS_CENTERIMAGE keeps this inline field label on the same visual baseline as the
         // checkbox captions and the closed ComboBox in every DPI bucket.
-        const SS_CENTERIMAGE_VALUE: i32 = 0x0000_0200;
         let driver_label = child(
             hwnd,
             w!("STATIC"),
             &crate::tr!("驱动:"),
-            SS_CENTERIMAGE_VALUE,
+            SS_SINGLE_LINE_ELLIPSIS,
             304,
         )?;
         let driver = child(
@@ -2589,7 +3602,7 @@ impl NativeWindow {
             hwnd,
             w!("STATIC"),
             &crate::tr!("引导模式:"),
-            SS_CENTERIMAGE_VALUE,
+            SS_SINGLE_LINE_ELLIPSIS,
             305,
         )?;
         let boot_mode = child(
@@ -2614,7 +3627,13 @@ impl NativeWindow {
             crate::core::ui_state::BootModeSelection::Legacy => 2,
         };
         let _ = SendMessageW(boot_mode, 0x014E, WPARAM(boot_index), LPARAM(0));
-        let pca_label = child(hwnd, w!("STATIC"), &crate::tr!("启动签名:"), 0, 310)?;
+        let pca_label = child(
+            hwnd,
+            w!("STATIC"),
+            &crate::tr!("启动签名:"),
+            SS_SINGLE_LINE_ELLIPSIS,
+            310,
+        )?;
         let pca_mode = child(
             hwnd,
             w!("COMBOBOX"),
@@ -2645,6 +3664,13 @@ impl NativeWindow {
             BS_OWNERDRAW | WS_TABSTOP.0 as i32,
             ID_ADVANCED,
         )?;
+        let automation_export = child(
+            hwnd,
+            w!("BUTTON"),
+            &crate::tr!("生成自动化"),
+            BS_OWNERDRAW | WS_TABSTOP.0 as i32,
+            ID_AUTOMATION_EXPORT,
+        )?;
         let refresh = child(
             hwnd,
             w!("BUTTON"),
@@ -2656,7 +3682,7 @@ impl NativeWindow {
             hwnd,
             w!("STATIC"),
             &crate::tr!("启动模式: 检测中 | TPM: 检测中 | 安全启动: 检测中"),
-            0,
+            SS_OWNERDRAW_VALUE,
             306,
         )?;
         let primary = child(
@@ -2680,6 +3706,11 @@ impl NativeWindow {
             image_volume,
             partitions_label,
             partitions,
+            custom_mode_label,
+            custom_mode,
+            dual_boot_size_label,
+            dual_boot_size,
+            dual_boot_size_unit,
             format,
             boot,
             unattend,
@@ -2693,6 +3724,7 @@ impl NativeWindow {
             boot_mode,
             pca_label,
             pca_mode,
+            automation_export,
             advanced,
             refresh,
             status,
@@ -2711,6 +3743,7 @@ impl NativeWindow {
                 index: 1,
                 name: name.to_owned(),
                 size_bytes: 8 * 1024 * 1024 * 1024,
+                hard_link_bytes: 0,
                 installation_type: "Client".to_owned(),
                 major_version: Some(major_version),
                 minor_version: Some(minor_version),
@@ -2800,9 +3833,22 @@ impl NativeWindow {
         // Keep the first visible status useful: startup PCA work remains silent until a selected
         // image and target make it relevant, while the boot/TPM/Secure Boot summary is immediate.
         self.update_system_status();
-        self.apply_native_dark_theme(hwnd);
+        // ComboBox popup rows and the clipped closed-field surface are sized from the control's
+        // current font. Apply the final DPI-aware UI font first; theming a stock-font ComboBox and
+        // replacing its font afterwards can expose the old selection-field bottom band as a thick
+        // underline and leaves newly added controls with inconsistent text metrics.
         self.apply_fonts();
+        self.apply_native_dark_theme(hwnd);
         self.layout(hwnd);
+        #[cfg(feature = "non-elevated-tests")]
+        match self.startup_presentation {
+            StartupPresentation::Main => {}
+            StartupPresentation::ProgressPreview => self.show_running_progress_preview(hwnd),
+            StartupPresentation::PeMaintenancePreview => {
+                self.show_pe_maintenance_preview(hwnd)?;
+            }
+            StartupPresentation::AboutPreview => self.select_page(hwnd, Page::About),
+        }
         Ok(())
     }
 
@@ -2935,11 +3981,22 @@ impl NativeWindow {
         if !may_publish_install_chrome(self.page, self.advanced_visible, self.progress_visible) {
             return;
         }
+        if should_replay_partition_refresh_error(
+            self.page,
+            self.advanced_visible,
+            self.progress_visible,
+            self.partition_refresh_error.as_deref(),
+        ) {
+            if self.handles.is_some() {
+                self.set_footer_status(&crate::tr!("刷新分区信息失败，请手动刷新后重试。"));
+            }
+            return;
+        }
         let selection_is_relevant = self.pca_selection_is_relevant();
         if !selection_is_relevant {
             return;
         }
-        let Some(handles) = self.handles else { return };
+        let Some(_handles) = self.handles else { return };
         if let Some(pending) = pca_pending_status(
             selection_is_relevant,
             self.pca_detection_pending,
@@ -2953,16 +4010,13 @@ impl NativeWindow {
                     crate::tr!("正在检测目标磁盘的 EFI 引导签名...")
                 }
             };
-            set_text(handles.status, &text);
+            self.set_footer_status(&text);
         } else if let Some(error) = self.pca_target_detection_error.as_ref() {
-            set_text(handles.status, error);
+            self.set_footer_status(error);
         } else if let Some(error) = self.pca_selection_error() {
-            set_text(handles.status, &error);
+            self.set_footer_status(&error);
         } else {
-            set_text(
-                handles.status,
-                &crate::tr!("目标磁盘 EFI 引导签名检测完成。"),
-            );
+            self.set_footer_status(&crate::tr!("目标磁盘 EFI 引导签名检测完成。"));
         }
     }
 
@@ -3022,7 +4076,6 @@ impl NativeWindow {
             &DownloadLabels {
                 system_tab: &crate::tr!("系统镜像"),
                 software_tab: &crate::tr!("常用软件"),
-                gpu_driver_tab: &crate::tr!("显卡驱动"),
                 status_ready: &self.initial_download_status(),
                 name_column: &crate::tr!("名称"),
                 type_column: &crate::tr!("类型"),
@@ -3035,6 +4088,10 @@ impl NativeWindow {
             },
         )?;
         download.apply_theme(self.palette);
+        download.replace_software_categories(
+            &self.download_controller.software_category_names(),
+            self.download_controller.selected_software_category(),
+        );
         download.replace_rows(&self.download_controller.rows());
         let default_download_path = crate::utils::path::get_exe_dir().join("downloads");
         set_text(download.save_path, &default_download_path.to_string_lossy());
@@ -3106,7 +4163,11 @@ impl NativeWindow {
         if !supports_appx {
             log::info!("当前 Windows 不支持 AppX 工具，已从工具箱隐藏相关入口");
         }
-        tools.apply_environment(is_pe_environment, supports_appx);
+        tools.apply_environment(
+            is_pe_environment,
+            supports_appx,
+            self.app_config.pe_maintenance_entry_enabled,
+        );
         self.tools_page = Some(tools);
 
         let hardware = HardwareInfoPage::create(
@@ -3145,6 +4206,7 @@ impl NativeWindow {
                 easy_mode_enabled: self.easy_mode_enabled(),
                 easy_mode_available: !self.is_pe_environment,
                 log_enabled: self.app_config.log_enabled,
+                automation_export_enabled: self.app_config.automation_export_enabled,
                 wim_engine: self.app_config.wim_engine,
                 download_threads: self.app_config.download_threads,
             },
@@ -3186,7 +4248,6 @@ impl NativeWindow {
             (&enabled as *const i32).cast(),
             size_of::<i32>() as u32,
         );
-
         let control_palette = self.control_palette();
         self.brushes = Brushes::new(control_palette);
 
@@ -3204,6 +4265,7 @@ impl NativeWindow {
             h.unattend_browse,
             h.unattend_clear,
             h.reboot,
+            h.automation_export,
             h.advanced,
             h.refresh,
             h.primary,
@@ -3226,6 +4288,8 @@ impl NativeWindow {
         for field in [
             h.image_edit,
             h.image_volume,
+            h.custom_mode,
+            h.dual_boot_size,
             h.driver,
             h.boot_mode,
             h.pca_mode,
@@ -3306,6 +4370,10 @@ impl NativeWindow {
     }
 
     unsafe fn populate_partitions(&self, list: HWND, add_columns: bool) {
+        let preferred_install_target = crate::core::disk::preferred_install_partition_index(
+            &self.partitions,
+            self.is_pe_environment,
+        );
         if add_columns {
             let long_state_labels = crate::tr!("未加密").chars().count() > 6;
             for (index, (title, width)) in [
@@ -3376,7 +4444,7 @@ impl NativeWindow {
                     LPARAM((&mut item as *mut LVITEMW) as isize),
                 );
             }
-            if partition.is_system_partition {
+            if preferred_install_target == Some(row) {
                 let mut item = LVITEMW {
                     stateMask: LVIS_SELECTED,
                     state: LVIS_SELECTED,
@@ -3404,6 +4472,11 @@ impl NativeWindow {
                 h.image_volume,
                 h.partitions_label,
                 h.partitions,
+                h.custom_mode_label,
+                h.custom_mode,
+                h.dual_boot_size_label,
+                h.dual_boot_size,
+                h.dual_boot_size_unit,
                 h.format,
                 h.boot,
                 h.unattend,
@@ -3417,6 +4490,7 @@ impl NativeWindow {
                 h.boot_mode,
                 h.pca_label,
                 h.pca_mode,
+                h.automation_export,
                 h.advanced,
                 h.refresh,
                 h.status,
@@ -3465,6 +4539,10 @@ impl NativeWindow {
 
     unsafe fn layout(&self, hwnd: HWND) {
         let Some(h) = self.handles else { return };
+        let _layout_batch = begin_layout_batch();
+        // Geometry is committed synchronously, but child painting is published once by the root
+        // transaction after the complete visible page has been arranged.
+        let repaint = false;
         let mut rect = RECT::default();
         let _ = GetClientRect(hwnd, &mut rect);
         let width = rect.right - rect.left;
@@ -3488,7 +4566,7 @@ impl NativeWindow {
             self.scale(14),
             nav - self.scale(20),
             self.scale(26),
-            true,
+            repaint,
         );
         let mut visible_nav_row = 0i32;
         let navigation_visibility = navigation_visibility(self.easy_mode_enabled(), false);
@@ -3502,7 +4580,7 @@ impl NativeWindow {
                 self.scale(58 + visible_nav_row * 34),
                 nav - self.scale(20),
                 self.scale(28),
-                true,
+                repaint,
             );
             visible_nav_row += 1;
         }
@@ -3512,7 +4590,7 @@ impl NativeWindow {
             self.scale(16),
             (content_width - self.scale(68)).max(0),
             self.scale(22),
-            true,
+            repaint,
         );
         let _ = MoveWindow(
             h.description,
@@ -3520,313 +4598,448 @@ impl NativeWindow {
             self.scale(42),
             (content_width - self.scale(90)).max(0),
             self.scale(20),
-            true,
+            repaint,
         );
         let y = header + self.scale(14);
-        let metrics = LayoutMetrics::for_dpi(self.dpi);
         let compact_chinese = self
             .app_config
             .language
             .to_ascii_lowercase()
             .starts_with("zh");
-        let label_width = self.scale(if compact_chinese { 68 } else { 108 });
-        let browse_width = self.scale(80);
-        let image_row_height = metrics.field_height.max(self.scale(24));
-        let _ = MoveWindow(
-            h.image_label,
-            content_left,
-            centered_control_y_ceil(y, image_row_height, metrics.label_height),
-            label_width,
-            metrics.label_height,
-            true,
-        );
-        let _ = MoveWindow(
-            h.image_edit,
-            content_left + label_width,
-            centered_control_y_ceil(y, image_row_height, metrics.field_height),
-            (content_width - label_width - browse_width - self.scale(10)).max(0),
-            metrics.field_height,
-            true,
-        );
-        let _ = MoveWindow(
-            h.browse,
-            content_right - browse_width,
-            centered_control_y_ceil(y, image_row_height, self.scale(24)),
-            browse_width,
-            self.scale(24),
-            true,
-        );
-        let volume_y = y + self.scale(32);
-        let volume_closed_height = theme::combo_closed_height(h.image_volume, metrics.field_height);
-        let volume_row_height = volume_closed_height.max(metrics.label_height);
-        let _ = MoveWindow(
-            h.image_volume_label,
-            content_left,
-            centered_control_y_ceil(volume_y, volume_row_height, metrics.label_height),
-            label_width,
-            metrics.label_height,
-            true,
-        );
-        let _ = MoveWindow(
-            h.image_volume,
-            content_left + label_width,
-            centered_control_y_ceil(volume_y, volume_row_height, volume_closed_height),
-            (content_width - label_width).clamp(0, self.scale(420)),
-            self.scale(180),
-            true,
-        );
-        let image_volume_layout_active = self.page == Page::Install
-            && !self.easy_mode_enabled()
-            && !self.advanced_visible
-            && !self.progress_visible;
-        let volume_row_expansion = if image_volume_layout_active {
-            self.install_volume_layout_transition
-                .map(InstallVolumeLayoutTransition::expansion)
-                .unwrap_or(if self.install_volume_row_presented {
-                    34
-                } else {
-                    0
-                })
-        } else {
-            0
-        };
-        let table_label_y = install_partition_heading_y(y, self.dpi, volume_row_expansion);
-        let _ = MoveWindow(
-            h.partitions_label,
-            content_left,
-            table_label_y,
-            self.scale(160),
-            self.scale(22),
-            true,
-        );
-        let table_y = table_label_y + self.scale(26);
-        let option_rows = 6;
-        let reserved_below_table = self.scale(22 + option_rows * 34);
-        let table_height = self
-            .scale(140)
-            .min((footer_y - table_y - reserved_below_table).max(0));
-        let _ = MoveWindow(
-            h.partitions,
-            content_left,
-            table_y,
-            content_width,
-            table_height,
-            true,
-        );
-        let options_y = table_y + table_height + self.scale(12);
-        let second_y = options_y + self.scale(34);
-        let check_width = |control: HWND| {
-            measure_text(hwnd, self.font, &get_text(control), None).width + self.scale(26)
-        };
-        let format_width = check_width(h.format);
-        let boot_width = check_width(h.boot);
-        let unattended_width = check_width(h.unattend);
-        let reboot_width = check_width(h.reboot).max(self.scale(72));
-        let driver_label_width =
-            measure_text(hwnd, self.font, &get_text(h.driver_label), None).width + self.scale(2);
-        let driver_width = self.scale(116);
-        let required_option_width = format_width
-            + boot_width
-            + unattended_width
-            + reboot_width
-            + driver_label_width
-            + driver_width
-            + metrics.control_gap * 5
-            + metrics.tight_gap;
-        let very_compact_options = content_width < required_option_width;
-        let driver_closed_height = theme::combo_closed_height(h.driver, metrics.field_height);
-        let option_row_height = driver_closed_height.max(self.scale(24));
-        let check_y = centered_control_y_ceil(options_y, option_row_height, self.scale(24));
-        let _ = MoveWindow(
-            h.format,
-            content_left,
-            check_y,
-            format_width,
-            self.scale(24),
-            true,
-        );
-        let boot_x = content_left + format_width + metrics.control_gap;
-        let _ = MoveWindow(h.boot, boot_x, check_y, boot_width, self.scale(24), true);
-        let unattended_x = boot_x + boot_width + metrics.control_gap;
-        let _ = MoveWindow(
-            h.unattend,
-            unattended_x,
-            check_y,
-            unattended_width,
-            self.scale(24),
-            true,
-        );
-        let driver_x = if very_compact_options {
-            content_left
-        } else {
-            unattended_x + unattended_width + metrics.control_gap
-        };
-        let driver_y = if very_compact_options {
-            second_y + self.scale(34)
-        } else {
-            options_y
-        };
-        let driver_field_x = driver_x + driver_label_width + metrics.tight_gap;
-        // Checkbox controls include an 8px visual tail after their caption.  Add the same tail
-        // after the driver field so the field-to-Restart glyph distance matches the preceding
-        // checkbox-to-checkbox rhythm instead of appearing cramped in a wide window.
-        let reboot_gap = metrics.control_gap + self.scale(8);
-        let driver_width = if very_compact_options {
-            (content_width - driver_label_width - metrics.tight_gap).max(0)
-        } else {
-            driver_width.min((content_right - driver_field_x - reboot_gap - reboot_width).max(0))
-        };
-        let reboot_x = if very_compact_options {
-            content_right - reboot_width
-        } else {
-            driver_field_x + driver_width + reboot_gap
-        };
-        let _ = MoveWindow(
-            h.driver_label,
-            driver_x,
-            centered_control_y_ceil(driver_y, option_row_height, metrics.label_height),
-            driver_label_width,
-            metrics.label_height,
-            true,
-        );
-        let _ = MoveWindow(
-            h.driver,
-            driver_field_x,
-            centered_control_y_ceil(driver_y, option_row_height, driver_closed_height),
-            driver_width,
-            self.scale(180),
-            true,
-        );
-        let _ = MoveWindow(
-            h.reboot,
-            reboot_x,
-            check_y,
-            reboot_width,
-            self.scale(24),
-            true,
-        );
-        let install_mode_label_width = shared_install_mode_label_width(
-            measure_text(hwnd, self.font, &crate::tr!("引导模式:"), None).width,
-            measure_text(hwnd, self.font, &crate::tr!("启动签名:"), None).width,
-            self.scale(2),
-            self.scale(60),
-            self.scale(132),
-        );
-        let boot_mode_closed_height = theme::combo_closed_height(h.boot_mode, metrics.field_height);
-        let second_row_height = boot_mode_closed_height.max(self.scale(24));
-        let _ = MoveWindow(
-            h.boot_label,
-            content_left,
-            centered_control_y_ceil(second_y, second_row_height, metrics.label_height),
-            install_mode_label_width,
-            metrics.label_height,
-            true,
-        );
-        let boot_mode_x = content_left + install_mode_label_width + self.scale(4);
-        let boot_mode_width = self.scale(124);
-        let _ = MoveWindow(
-            h.boot_mode,
-            boot_mode_x,
-            centered_control_y_ceil(second_y, second_row_height, boot_mode_closed_height),
-            boot_mode_width,
-            self.scale(180),
-            true,
-        );
-        let unattend_browse_width = self.scale(if compact_chinese { 132 } else { 180 });
-        let unattend_clear_width = self.scale(if compact_chinese { 58 } else { 76 });
-        let unattend_x = boot_mode_x + boot_mode_width + self.scale(12);
-        let _ = MoveWindow(
-            h.unattend_browse,
-            unattend_x,
-            second_y,
-            unattend_browse_width.min((content_right - unattend_x).max(0)),
-            self.scale(24),
-            true,
-        );
-        let clear_x = unattend_x + unattend_browse_width + self.scale(8);
-        let has_custom_unattend = !self.custom_unattend_path.trim().is_empty();
-        if has_custom_unattend {
+        if self.install_page_content_visible() {
+            let metrics = LayoutMetrics::for_dpi(self.dpi);
+            let measured_install_label_width = [h.image_label, h.image_volume_label]
+                .into_iter()
+                .map(|control| measure_text(hwnd, self.font, &get_text(control), None).width)
+                .max()
+                .unwrap_or_default()
+                + self.scale(8);
+            let label_width = measured_install_label_width
+                .max(self.scale(if compact_chinese { 68 } else { 108 }))
+                .min(content_width / 3);
+            let browse_width = self.scale(80);
+            let image_row_height = metrics.field_height.max(self.scale(24));
             let _ = MoveWindow(
-                h.unattend_clear,
-                clear_x,
-                second_y,
-                unattend_clear_width.min((content_right - clear_x).max(0)),
-                self.scale(24),
-                true,
+                h.image_label,
+                content_left,
+                centered_control_y_ceil(y, image_row_height, metrics.label_height),
+                label_width,
+                metrics.label_height,
+                repaint,
             );
-        } else {
-            // A hidden owner-drawn button must not overlap the hint. Windows can retain its last
-            // composed pixels while the row is being relaid out, which looked like an unlabeled
-            // button underneath the built-in unattended-config hint.
-            let _ = MoveWindow(h.unattend_clear, 0, 0, 0, 0, false);
-        }
-        // Do not reserve room for Clear until a custom answer file actually exists.
-        let inline_path_x = if !has_custom_unattend {
-            clear_x
-        } else {
-            clear_x + unattend_clear_width + self.scale(8)
-        };
-        let inline_path_width = (content_right - inline_path_x).max(0);
-        let path_on_own_row = inline_path_width < self.scale(260);
-        let path_y = if path_on_own_row {
-            if very_compact_options {
-                driver_y + self.scale(34)
+            let _ = MoveWindow(
+                h.image_edit,
+                content_left + label_width,
+                centered_control_y_ceil(y, image_row_height, metrics.field_height),
+                (content_width - label_width - browse_width - self.scale(10)).max(0),
+                metrics.field_height,
+                repaint,
+            );
+            let _ = MoveWindow(
+                h.browse,
+                content_right - browse_width,
+                centered_control_y_ceil(y, image_row_height, self.scale(24)),
+                browse_width,
+                self.scale(24),
+                repaint,
+            );
+            let volume_y = y + self.scale(32);
+            let volume_closed_height =
+                theme::combo_closed_height(h.image_volume, metrics.field_height);
+            let volume_row_height = volume_closed_height.max(metrics.label_height);
+            let _ = MoveWindow(
+                h.image_volume_label,
+                content_left,
+                centered_control_y_ceil(volume_y, volume_row_height, metrics.label_height),
+                label_width,
+                metrics.label_height,
+                repaint,
+            );
+            let _ = MoveWindow(
+                h.image_volume,
+                content_left + label_width,
+                centered_control_y_ceil(volume_y, volume_row_height, volume_closed_height),
+                (content_width - label_width).clamp(0, self.scale(420)),
+                self.scale(180),
+                repaint,
+            );
+            let image_volume_layout_active = self.page == Page::Install
+                && !self.easy_mode_enabled()
+                && !self.advanced_visible
+                && !self.progress_visible;
+            let volume_row_expansion = if image_volume_layout_active {
+                self.install_volume_layout_transition
+                    .map(InstallVolumeLayoutTransition::expansion)
+                    .unwrap_or(if self.install_volume_row_presented {
+                        34
+                    } else {
+                        0
+                    })
+            } else {
+                0
+            };
+            let table_label_y = install_partition_heading_y(y, self.dpi, volume_row_expansion);
+            let _ = MoveWindow(
+                h.partitions_label,
+                content_left,
+                table_label_y,
+                content_width,
+                metrics.label_height,
+                repaint,
+            );
+            let table_y = table_label_y + self.scale(26);
+            let option_rows = 6;
+            let reserved_below_table = self.scale(22 + option_rows * 34);
+            let table_height = self
+                .scale(140)
+                .min((footer_y - table_y - reserved_below_table).max(0));
+            let _ = MoveWindow(
+                h.partitions,
+                content_left,
+                table_y,
+                content_width,
+                table_height,
+                repaint,
+            );
+            let options_y = table_y + table_height + self.scale(12);
+            let second_y = options_y + self.scale(34);
+            let check_width = |control: HWND| {
+                measure_text(hwnd, self.font, &get_text(control), None).width + self.scale(26)
+            };
+            let format_width = check_width(h.format);
+            let boot_width = check_width(h.boot);
+            let unattended_width = check_width(h.unattend);
+            let reboot_width = check_width(h.reboot).max(self.scale(72));
+            let driver_label_width = measure_text(hwnd, self.font, &get_text(h.driver_label), None)
+                .width
+                + self.scale(2);
+            let driver_width = self.scale(116);
+            let required_option_width = format_width
+                + boot_width
+                + unattended_width
+                + reboot_width
+                + driver_label_width
+                + driver_width
+                + metrics.control_gap * 5
+                + metrics.tight_gap;
+            let very_compact_options = content_width < required_option_width;
+            let driver_closed_height = theme::combo_closed_height(h.driver, metrics.field_height);
+            let option_row_height = driver_closed_height.max(self.scale(24));
+            let check_y = centered_control_y_ceil(options_y, option_row_height, self.scale(24));
+            let _ = MoveWindow(
+                h.format,
+                content_left,
+                check_y,
+                format_width,
+                self.scale(24),
+                repaint,
+            );
+            let boot_x = content_left + format_width + metrics.control_gap;
+            let _ = MoveWindow(h.boot, boot_x, check_y, boot_width, self.scale(24), repaint);
+            let unattended_x = boot_x + boot_width + metrics.control_gap;
+            let _ = MoveWindow(
+                h.unattend,
+                unattended_x,
+                check_y,
+                unattended_width,
+                self.scale(24),
+                repaint,
+            );
+            let driver_x = if very_compact_options {
+                content_left
+            } else {
+                unattended_x + unattended_width + metrics.control_gap
+            };
+            let driver_y = if very_compact_options {
+                second_y + self.scale(34)
+            } else {
+                options_y
+            };
+            let driver_field_x = driver_x + driver_label_width + metrics.tight_gap;
+            // Checkbox controls include an 8px visual tail after their caption.  Add the same tail
+            // after the driver field so the field-to-Restart glyph distance matches the preceding
+            // checkbox-to-checkbox rhythm instead of appearing cramped in a wide window.
+            let reboot_gap = metrics.control_gap + self.scale(8);
+            let driver_width = if very_compact_options {
+                (content_width - driver_label_width - metrics.tight_gap).max(0)
+            } else {
+                driver_width
+                    .min((content_right - driver_field_x - reboot_gap - reboot_width).max(0))
+            };
+            let reboot_x = if very_compact_options {
+                content_right - reboot_width
+            } else {
+                driver_field_x + driver_width + reboot_gap
+            };
+            let _ = MoveWindow(
+                h.driver_label,
+                driver_x,
+                centered_control_y_ceil(driver_y, option_row_height, metrics.label_height),
+                driver_label_width,
+                metrics.label_height,
+                repaint,
+            );
+            let _ = MoveWindow(
+                h.driver,
+                driver_field_x,
+                centered_control_y_ceil(driver_y, option_row_height, driver_closed_height),
+                driver_width,
+                self.scale(180),
+                repaint,
+            );
+            let _ = MoveWindow(
+                h.reboot,
+                reboot_x,
+                check_y,
+                reboot_width,
+                self.scale(24),
+                repaint,
+            );
+            let install_mode_label_width = shared_install_mode_label_width(
+                measure_text(hwnd, self.font, &crate::tr!("引导模式:"), None).width,
+                measure_text(hwnd, self.font, &crate::tr!("启动签名:"), None).width,
+                self.scale(2),
+                self.scale(60),
+                self.scale(132),
+            );
+            let boot_mode_closed_height =
+                theme::combo_closed_height(h.boot_mode, metrics.field_height);
+            let second_row_height = boot_mode_closed_height.max(self.scale(24));
+            let _ = MoveWindow(
+                h.boot_label,
+                content_left,
+                centered_control_y_ceil(second_y, second_row_height, metrics.label_height),
+                install_mode_label_width,
+                metrics.label_height,
+                repaint,
+            );
+            let boot_mode_x = content_left + install_mode_label_width + self.scale(4);
+            let boot_mode_width = self.scale(124);
+            let _ = MoveWindow(
+                h.boot_mode,
+                boot_mode_x,
+                centered_control_y_ceil(second_y, second_row_height, boot_mode_closed_height),
+                boot_mode_width,
+                self.scale(180),
+                repaint,
+            );
+            let unattend_browse_width = self.scale(if compact_chinese { 132 } else { 180 });
+            let unattend_clear_width = self.scale(if compact_chinese { 58 } else { 76 });
+            let unattend_x = boot_mode_x + boot_mode_width + self.scale(12);
+            let _ = MoveWindow(
+                h.unattend_browse,
+                unattend_x,
+                second_y,
+                unattend_browse_width.min((content_right - unattend_x).max(0)),
+                self.scale(24),
+                repaint,
+            );
+            let clear_x = unattend_x + unattend_browse_width + self.scale(8);
+            let has_custom_unattend = !self.custom_unattend_path.trim().is_empty();
+            if has_custom_unattend {
+                let _ = MoveWindow(
+                    h.unattend_clear,
+                    clear_x,
+                    second_y,
+                    unattend_clear_width.min((content_right - clear_x).max(0)),
+                    self.scale(24),
+                    repaint,
+                );
+            } else {
+                // A hidden owner-drawn button must not overlap the hint. Windows can retain its last
+                // composed pixels while the row is being relaid out, which looked like an unlabeled
+                // button underneath the built-in unattended-config hint.
+                let _ = MoveWindow(h.unattend_clear, 0, 0, 0, 0, false);
+            }
+            // Do not reserve room for Clear until a custom answer file actually exists.
+            let inline_path_x = if !has_custom_unattend {
+                clear_x
+            } else {
+                clear_x + unattend_clear_width + self.scale(8)
+            };
+            let inline_path_width = (content_right - inline_path_x).max(0);
+            let path_on_own_row = inline_path_width < self.scale(260);
+            let path_y = if path_on_own_row {
+                if very_compact_options {
+                    driver_y + self.scale(34)
+                } else {
+                    second_y + self.scale(34)
+                }
+            } else {
+                second_y
+            };
+            let path_x = if path_on_own_row {
+                content_left
+            } else {
+                inline_path_x
+            };
+            let _ = MoveWindow(
+                h.unattend_path,
+                path_x,
+                path_y + self.scale(3),
+                (content_right - path_x).max(0),
+                self.scale(20),
+                repaint,
+            );
+            let third_y = if path_on_own_row {
+                path_y + self.scale(28)
             } else {
                 second_y + self.scale(34)
+            };
+            let custom_mode_row_y = third_y;
+            let custom_mode_label_width =
+                measure_text(hwnd, self.font, &get_text(h.custom_mode_label), None)
+                    .width
+                    .clamp(self.scale(60), self.scale(112));
+            let custom_mode_closed_height =
+                theme::combo_closed_height(h.custom_mode, metrics.field_height);
+            let custom_mode_row_height = custom_mode_closed_height.max(metrics.label_height);
+            let custom_mode_x = content_left + custom_mode_label_width + self.scale(4);
+            let dual_boot_selected =
+                SendMessageW(h.custom_mode, 0x0147, WPARAM(0), LPARAM(0)).0 == 2;
+            let desired_pca_label_width =
+                measure_text(hwnd, self.font, &get_text(h.pca_label), None)
+                    .width
+                    .saturating_add(self.scale(2))
+                    .clamp(self.scale(60), self.scale(156));
+            // Partition/full-disk keep both selectors on one row. At the minimum supported window
+            // width the two combo boxes share the remaining space instead of allowing the PCA field
+            // to collapse or overlap the right edge. Dual boot uses its capacity controls on this row,
+            // so PCA moves to the following row and can use its preferred width.
+            let supplement_layout = install_mode_supplement_layout(InstallModeSupplementMetrics {
+                content_left,
+                content_right,
+                custom_mode_x,
+                preferred_custom_mode_width: self.scale(190),
+                desired_pca_label_width,
+                preferred_pca_combo_width: self.scale(144),
+                minimum_combo_width: self.scale(88),
+                custom_mode_row_y,
+                inline_gap: self.scale(12),
+                label_gap: self.scale(4),
+                next_row_offset: self.scale(34),
+                dual_boot_selected,
+            });
+            let _ = MoveWindow(
+                h.custom_mode_label,
+                content_left,
+                centered_control_y_ceil(
+                    custom_mode_row_y,
+                    custom_mode_row_height,
+                    metrics.label_height,
+                ),
+                custom_mode_label_width,
+                metrics.label_height,
+                repaint,
+            );
+            let custom_mode_width = supplement_layout.custom_mode_width;
+            let _ = MoveWindow(
+                h.custom_mode,
+                custom_mode_x,
+                centered_control_y_ceil(
+                    custom_mode_row_y,
+                    custom_mode_row_height,
+                    custom_mode_closed_height,
+                ),
+                custom_mode_width,
+                self.scale(180),
+                repaint,
+            );
+            let image_ready = self
+                .effective_image_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+                || self.xp_i386_source.is_some();
+            let custom_mode_visibility = custom_install_mode_visibility(
+                self.install_page_content_visible(),
+                image_ready,
+                dual_boot_selected,
+            );
+            for (control, visible) in custom_install_mode_controls(&h)
+                .into_iter()
+                .zip(custom_mode_visibility)
+            {
+                let _ = ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE });
             }
-        } else {
-            second_y
-        };
-        let path_x = if path_on_own_row {
-            content_left
-        } else {
-            inline_path_x
-        };
-        let _ = MoveWindow(
-            h.unattend_path,
-            path_x,
-            path_y + self.scale(3),
-            (content_right - path_x).max(0),
-            self.scale(20),
-            true,
-        );
-        let third_y = if path_on_own_row {
-            path_y + self.scale(28)
-        } else {
-            second_y + self.scale(34)
-        };
-        // The removed legacy script controls reserve no hidden layout row. PCA starts at the
-        // normal left edge regardless of whether advanced options are enabled.
-        let pca_row_y = third_y;
-        let pca_x = content_left;
-        let pca_closed_height = theme::combo_closed_height(h.pca_mode, metrics.field_height);
-        let pca_row_height = pca_closed_height.max(metrics.label_height);
-        let _ = MoveWindow(
-            h.pca_label,
-            pca_x,
-            centered_control_y_ceil(pca_row_y, pca_row_height, metrics.label_height),
-            install_mode_label_width.min((content_right - pca_x).max(0)),
-            metrics.label_height,
-            true,
-        );
-        let pca_combo_x = pca_x + install_mode_label_width + self.scale(4);
-        let _ = MoveWindow(
-            h.pca_mode,
-            pca_combo_x,
-            centered_control_y_ceil(pca_row_y, pca_row_height, pca_closed_height),
-            self.scale(144).min((content_right - pca_combo_x).max(0)),
-            self.scale(180),
-            true,
-        );
+            let dual_label_x = custom_mode_x + custom_mode_width + self.scale(12);
+            let dual_label_width =
+                measure_text(hwnd, self.font, &get_text(h.dual_boot_size_label), None)
+                    .width
+                    .clamp(self.scale(72), self.scale(120));
+            let dual_edit_x = dual_label_x + dual_label_width + self.scale(4);
+            let dual_edit_width = self.scale(56);
+            let _ = MoveWindow(
+                h.dual_boot_size_label,
+                dual_label_x,
+                centered_control_y_ceil(
+                    custom_mode_row_y,
+                    custom_mode_row_height,
+                    metrics.label_height,
+                ),
+                dual_label_width,
+                metrics.label_height,
+                repaint,
+            );
+            let _ = MoveWindow(
+                h.dual_boot_size,
+                dual_edit_x,
+                centered_control_y_ceil(
+                    custom_mode_row_y,
+                    custom_mode_row_height,
+                    metrics.field_height,
+                ),
+                dual_edit_width,
+                metrics.field_height,
+                repaint,
+            );
+            let _ = MoveWindow(
+                h.dual_boot_size_unit,
+                dual_edit_x + dual_edit_width + self.scale(4),
+                centered_control_y_ceil(
+                    custom_mode_row_y,
+                    custom_mode_row_height,
+                    metrics.label_height,
+                ),
+                self.scale(28),
+                metrics.label_height,
+                repaint,
+            );
+            let pca_row_y = supplement_layout.pca_row_y;
+            let pca_x = supplement_layout.pca_x;
+            let pca_closed_height = theme::combo_closed_height(h.pca_mode, metrics.field_height);
+            let pca_row_height = pca_closed_height.max(metrics.label_height);
+            let _ = MoveWindow(
+                h.pca_label,
+                pca_x,
+                centered_control_y_ceil(pca_row_y, pca_row_height, metrics.label_height),
+                supplement_layout.pca_label_width,
+                metrics.label_height,
+                repaint,
+            );
+            let pca_combo_x = supplement_layout.pca_combo_x;
+            let _ = MoveWindow(
+                h.pca_mode,
+                pca_combo_x,
+                centered_control_y_ceil(pca_row_y, pca_row_height, pca_closed_height),
+                supplement_layout.pca_combo_width,
+                self.scale(180),
+                repaint,
+            );
+        }
         let button_gap = self.scale(8);
-        let preferred_button_width = self.scale(if compact_chinese { 96 } else { 136 });
-        let command_button_width =
-            preferred_button_width.min(((content_width - button_gap * 2) / 3).max(0));
         let command_visibility = command_bar_visibility(
             self.page,
             self.easy_mode_enabled(),
+            self.app_config.automation_export_enabled,
             self.advanced_visible,
             self.progress_visible,
+        );
+        let preferred_button_width = self.scale(if compact_chinese { 96 } else { 136 });
+        let command_button_width = command_button_width(
+            content_width,
+            button_gap,
+            preferred_button_width,
+            command_visibility,
         );
         // Pack the controls that are actually visible. In particular, Hardware has Save and
         // Copy but no Refresh; reserving the hidden middle slot left an obvious empty gap after a
@@ -3841,19 +5054,29 @@ impl NativeWindow {
         let advanced_x = if self.advanced_visible {
             centered_command_button_x(content_left, content_width, command_button_width)
         } else {
-            command_layout.x[0].unwrap_or(content_right)
+            command_layout.x[1].unwrap_or(content_right)
         };
-        let refresh_x = command_layout.x[1].unwrap_or(content_right);
-        let primary_x = command_layout.x[2].unwrap_or(content_right);
+        let automation_x = command_layout.x[0].unwrap_or(content_right);
+        let refresh_x = command_layout.x[2].unwrap_or(content_right);
+        let primary_x = command_layout.x[3].unwrap_or(content_right);
         let status_right_edge =
             command_status_right_edge(self.advanced_visible, advanced_x, command_layout.left_edge);
+        let status_layout = footer_status_horizontal_layout(status_right_edge, self.dpi);
+        let _ = MoveWindow(
+            h.automation_export,
+            automation_x,
+            footer_y + self.scale(12),
+            command_button_width,
+            self.scale(28),
+            repaint,
+        );
         let _ = MoveWindow(
             h.advanced,
             advanced_x,
             footer_y + self.scale(12),
             command_button_width,
             self.scale(28),
-            true,
+            repaint,
         );
         let _ = MoveWindow(
             h.refresh,
@@ -3861,7 +5084,7 @@ impl NativeWindow {
             footer_y + self.scale(12),
             command_button_width,
             self.scale(28),
-            true,
+            repaint,
         );
         let _ = MoveWindow(
             h.primary,
@@ -3869,15 +5092,15 @@ impl NativeWindow {
             footer_y + self.scale(12),
             command_button_width,
             self.scale(28),
-            true,
+            repaint,
         );
         let _ = MoveWindow(
             h.status,
-            self.scale(16),
-            footer_y + self.scale(18),
-            (status_right_edge - self.scale(24)).max(0),
-            self.scale(20),
-            true,
+            status_layout.x,
+            footer_y + self.scale(6),
+            status_layout.width,
+            (command - self.scale(12)).max(0),
+            repaint,
         );
         let page_top = if self.progress_visible {
             margin
@@ -3889,42 +5112,65 @@ impl NativeWindow {
         } else {
             (footer_y - page_top - self.scale(10)).max(0)
         };
-        if let Some(page) = &self.backup_page {
-            page.layout(content_left, page_top, content_width, self.dpi);
-        }
         let page_rect = PageRect {
             x: content_left,
             y: page_top,
             width: content_width,
             height: page_height,
         };
-        if let Some(page) = &self.download_page {
-            page.layout(page_rect, self.dpi);
-        }
-        if let Some(page) = &self.easy_page {
-            page.layout(page_rect, self.dpi);
-        }
-        if let Some(page) = &self.tools_page {
-            page.layout(page_rect, self.dpi);
-        }
-        if let Some(page) = &self.hardware_page {
-            page.layout(page_rect, self.dpi);
-        }
-        if let Some(page) = &self.about_page {
-            page.layout(page_rect, self.dpi);
-        }
-        if let Some(page) = &self.advanced_page {
-            page.layout(content_left, page_top, content_width, page_height, self.dpi);
-        }
-        if let Some(page) = &self.progress_page {
-            page.layout(content_left, page_top, content_width, page_height, self.dpi);
+        match active_layout_surface(
+            self.progress_visible,
+            self.advanced_visible,
+            self.easy_mode_enabled(),
+            self.page,
+        ) {
+            ActiveLayoutSurface::Progress => {
+                if let Some(page) = &self.progress_page {
+                    page.layout(content_left, page_top, content_width, page_height, self.dpi);
+                }
+            }
+            ActiveLayoutSurface::Advanced => {
+                if let Some(page) = &self.advanced_page {
+                    page.layout(content_left, page_top, content_width, page_height, self.dpi);
+                }
+            }
+            ActiveLayoutSurface::Easy => {
+                if let Some(page) = &self.easy_page {
+                    page.layout(page_rect, self.dpi);
+                }
+            }
+            ActiveLayoutSurface::Standard(Page::Install) => {}
+            ActiveLayoutSurface::Standard(Page::Backup) => {
+                if let Some(page) = &self.backup_page {
+                    page.layout(content_left, page_top, content_width, self.dpi);
+                }
+            }
+            ActiveLayoutSurface::Standard(Page::Download) => {
+                if let Some(page) = &self.download_page {
+                    page.layout(page_rect, self.dpi);
+                }
+            }
+            ActiveLayoutSurface::Standard(Page::Tools) => {
+                if let Some(page) = &self.tools_page {
+                    page.layout(page_rect, self.dpi);
+                }
+            }
+            ActiveLayoutSurface::Standard(Page::Hardware) => {
+                if let Some(page) = &self.hardware_page {
+                    page.layout(page_rect, self.dpi);
+                }
+            }
+            ActiveLayoutSurface::Standard(Page::About) => {
+                if let Some(page) = &self.about_page {
+                    page.layout(page_rect, self.dpi);
+                }
+            }
         }
     }
 
-    /// Page controls are created and laid out together at startup and on every real size, DPI or
-    /// language change. Navigation only changes visibility and the small command bar at the
-    /// bottom; rerunning every hidden page's text measurement and dozens of MoveWindow calls here
-    /// made a simple navigation click hundreds of milliseconds slower on a high-DPI display.
+    /// Repositions only global command-bar controls. Page switches use `layout`, which now lays out
+    /// exactly one visible surface; this helper remains for settings that change only footer
+    /// visibility without changing the active page.
     unsafe fn layout_page_switch_chrome(&self, hwnd: HWND) {
         let Some(h) = self.handles else { return };
         let mut rect = RECT::default();
@@ -3948,14 +5194,19 @@ impl NativeWindow {
             .to_ascii_lowercase()
             .starts_with("zh");
         let button_gap = self.scale(8);
-        let preferred_button_width = self.scale(if compact_chinese { 96 } else { 136 });
-        let command_button_width =
-            preferred_button_width.min(((content_width - button_gap * 2) / 3).max(0));
         let command_visibility = command_bar_visibility(
             self.page,
             self.easy_mode_enabled(),
+            self.app_config.automation_export_enabled,
             self.advanced_visible,
             self.progress_visible,
+        );
+        let preferred_button_width = self.scale(if compact_chinese { 96 } else { 136 });
+        let command_button_width = command_button_width(
+            content_width,
+            button_gap,
+            preferred_button_width,
+            command_visibility,
         );
         let command_layout = command_bar_layout(
             content_right,
@@ -3966,14 +5217,19 @@ impl NativeWindow {
         let advanced_x = if self.advanced_visible {
             centered_command_button_x(content_left, content_width, command_button_width)
         } else {
-            command_layout.x[0].unwrap_or(content_right)
+            command_layout.x[1].unwrap_or(content_right)
         };
         let status_right_edge =
             command_status_right_edge(self.advanced_visible, advanced_x, command_layout.left_edge);
+        let status_layout = footer_status_horizontal_layout(status_right_edge, self.dpi);
         for (control, x) in [
+            (
+                h.automation_export,
+                command_layout.x[0].unwrap_or(content_right),
+            ),
             (h.advanced, advanced_x),
-            (h.refresh, command_layout.x[1].unwrap_or(content_right)),
-            (h.primary, command_layout.x[2].unwrap_or(content_right)),
+            (h.refresh, command_layout.x[2].unwrap_or(content_right)),
+            (h.primary, command_layout.x[3].unwrap_or(content_right)),
         ] {
             let _ = MoveWindow(
                 control,
@@ -3986,12 +5242,18 @@ impl NativeWindow {
         }
         let _ = MoveWindow(
             h.status,
-            self.scale(16),
-            footer_y + self.scale(18),
-            (status_right_edge - self.scale(24)).max(0),
-            self.scale(20),
+            status_layout.x,
+            footer_y + self.scale(6),
+            status_layout.width,
+            (command - self.scale(12)).max(0),
             false,
         );
+    }
+
+    unsafe fn set_footer_status(&self, text: &str) {
+        let Some(handles) = self.handles else { return };
+        set_text(handles.status, text);
+        let _ = InvalidateRect(handles.status, None, false);
     }
 
     fn install_page_content_visible(&self) -> bool {
@@ -4097,6 +5359,7 @@ impl NativeWindow {
 
     unsafe fn select_page_impl(&mut self, hwnd: HWND, page: Page, manage_redraw: bool) {
         let Some(h) = self.handles else { return };
+        self.synchronize_install_state(AdvancedStateBoundary::PageExit);
         // Navigation and advanced-page switches settle any in-flight three-frame transition. The
         // target is derived from the already accepted image inventory, never from focus/selection.
         let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
@@ -4159,6 +5422,7 @@ impl NativeWindow {
         set_text(h.title, &title);
         set_text(h.description, &description);
         set_text(h.primary, &primary);
+        set_text(h.automation_export, &crate::tr!("生成自动化"));
         set_text(
             h.advanced,
             &if page == Page::Hardware {
@@ -4189,7 +5453,10 @@ impl NativeWindow {
             h.reboot,
             h.boot_label,
             h.boot_mode,
-        ] {
+        ]
+        .into_iter()
+        .chain(custom_install_mode_controls(&h))
+        {
             let _ = ShowWindow(
                 control,
                 if install_visible {
@@ -4199,6 +5466,16 @@ impl NativeWindow {
                 },
             );
         }
+        let _ = ShowWindow(
+            h.automation_export,
+            if self.app_config.automation_export_enabled
+                && (install_visible || page == Page::Backup)
+            {
+                SW_SHOW
+            } else {
+                windows::Win32::UI::WindowsAndMessaging::SW_HIDE
+            },
+        );
         let _ = ShowWindow(
             h.advanced,
             if install_visible || page == Page::Hardware {
@@ -4255,25 +5532,19 @@ impl NativeWindow {
             PrimaryStateRefresh::Backup => self.update_backup_primary_state(),
             PrimaryStateRefresh::None => {}
         }
-        // The footer belongs to the currently visible page. Never carry an asynchronous install
-        // probe caption onto Tools/Hardware/About, and rebuild the Install caption from live state
-        // when the user returns.
-        set_text(h.status, "");
-        if page == Page::Install {
-            self.update_pca_detection_status();
+        // Firmware/boot-mode status is global machine state, so it remains visible on every page.
+        // The install page may then replace the stable summary with its PCA-specific status.
+        match footer_state_refresh_for_page(page) {
+            FooterStateRefresh::Install => {
+                self.update_system_status();
+                self.update_pca_detection_status();
+            }
+            FooterStateRefresh::Status => self.update_system_status(),
         }
-        if page_switch_requires_full_layout(page) {
-            // The install geometry is inventory-dependent: loading an ISO adds the image-volume
-            // row even while another page is visible. Re-entering Install must rebuild its
-            // complete geometry from accepted inventory, not merely restore HWND visibility and
-            // assume the startup layout is still valid.
-            self.layout(hwnd);
-        } else {
-            // Ordinary navigation keeps page geometry stable from startup/WM_SIZE. Only the
-            // command bar depends on page visibility; relayout of every hidden page here caused
-            // the visible controls to be presented one by one and made Tools especially slow.
-            self.layout_page_switch_chrome(hwnd);
-        }
+        // Hidden surfaces are intentionally not laid out during startup or resize. Arrange the
+        // newly visible surface here before publishing the atomic page-switch frame; otherwise a
+        // page first opened after startup still has its child HWNDs at their creation geometry.
+        self.layout(hwnd);
         for nav in h.nav {
             let _ = InvalidateRect(nav, None, false);
         }
@@ -4290,6 +5561,7 @@ impl NativeWindow {
         };
         let checked = |control: HWND| SendMessageW(control, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
         Some(InstallControlSnapshot {
+            custom_mode_index: SendMessageW(h.custom_mode, 0x0147, WPARAM(0), LPARAM(0)).0,
             format_partition: checked(h.format),
             repair_boot: checked(h.boot),
             unattended_install: checked(h.unattend),
@@ -4310,6 +5582,43 @@ impl NativeWindow {
         self.sync_install_preferences_from_controls();
         if let Err(error) = self.app_config.save() {
             log::warn!("保存原生 UI 安装偏好失败: {error}");
+        }
+    }
+
+    unsafe fn synchronize_install_state(&mut self, boundary: AdvancedStateBoundary) {
+        let policy = advanced_state_policy(self.advanced_visible, boundary);
+        if policy.capture_install_controls {
+            self.sync_install_preferences_from_controls();
+        }
+        if policy.capture_advanced_controls {
+            if let Some(advanced) = &self.advanced_page {
+                let data = &mut self.app_config.install_prefs.advanced_options;
+                advanced.read_into(data);
+                data.apply_runtime_defaults();
+                log::info!(
+                    "[ADVANCED STATE] captured boundary={} update={} defender={} reserved_storage={} remove_apps={}",
+                    boundary.label(),
+                    data.disable_windows_update,
+                    data.disable_windows_defender,
+                    data.disable_reserved_storage,
+                    data.remove_uwp_apps
+                );
+            } else {
+                log::warn!(
+                    "[ADVANCED STATE] advanced page is visible without controls at boundary={}; retaining the in-memory model",
+                    boundary.label()
+                );
+            }
+        }
+        if policy.persist_preferences {
+            if let Err(error) = self.app_config.save() {
+                // Preferences are already captured in memory. A local config write failure must
+                // not interrupt installation or turn an optional optimization into a blocking UI.
+                log::warn!(
+                    "[ADVANCED STATE] failed to persist preferences at boundary={}; continuing with the in-memory snapshot: {error}",
+                    boundary.label()
+                );
+            }
         }
     }
 
@@ -4394,6 +5703,12 @@ impl NativeWindow {
         if self.advanced_page.is_none() {
             return;
         }
+        if self.advanced_visible {
+            // `select_page_impl` owns the page-exit capture and best-effort persistence. Keeping a
+            // single exit boundary prevents this button path from diverging from navigation.
+            self.select_page(hwnd, Page::Install);
+            return;
+        }
         if !self.advanced_visible
             && self
                 .app_config
@@ -4407,25 +5722,6 @@ impl NativeWindow {
         }
         self.update_advanced_install_context();
         let Some(h) = &self.handles else { return };
-        if self.advanced_visible {
-            if let Some(advanced) = &self.advanced_page {
-                let data = &mut self.app_config.install_prefs.advanced_options;
-                advanced.read_into(data);
-                data.apply_runtime_defaults();
-                // Re-publish the normalized session values before hiding the page. This makes an
-                // automatically restored username/Administrator name visible on the next open
-                // without persisting the current login name to config.json.
-                advanced.apply(data);
-            }
-            if let Err(error) = self.app_config.save() {
-                log::warn!("保存高级选项失败: {error}");
-            }
-            // `select_page_impl` rebuilds the inventory-dependent Install geometry before it
-            // publishes the page. Keep the advanced flag set until that transaction has hidden
-            // the embedded page and restored the ordinary Install controls.
-            self.select_page(hwnd, Page::Install);
-            return;
-        }
 
         // The same owner-draw button is reused at a different position as “Save and return”.
         // Clear the hot/pressed state left by the click before moving it; otherwise the old
@@ -4435,6 +5731,9 @@ impl NativeWindow {
         let redraw = redraw::suspend(hwnd);
         self.advanced_visible = true;
         if let Some(advanced) = &self.advanced_page {
+            // Hidden child controls are not authoritative. Publish the latest in-memory model on
+            // every entry so a previous page session or late background refresh cannot reappear.
+            advanced.apply(&self.app_config.install_prefs.advanced_options);
             let ssid = self
                 .app_config
                 .install_prefs
@@ -4464,9 +5763,13 @@ impl NativeWindow {
             h.boot_mode,
             h.pca_label,
             h.pca_mode,
+            h.automation_export,
             h.refresh,
             h.primary,
-        ] {
+        ]
+        .into_iter()
+        .chain(custom_install_mode_controls(h))
+        {
             let _ = ShowWindow(control, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
         }
         set_text(h.title, &crate::tr!("高级选项"));
@@ -4498,6 +5801,14 @@ impl NativeWindow {
     }
 
     unsafe fn update_install_primary_state(&mut self) {
+        // Creating an EDIT control with non-empty initial text synchronously sends EN_CHANGE to
+        // its parent before `create_children` has published the complete `Handles` set.  Startup
+        // notifications are not user input and must not run validation against a half-built UI.
+        // A panic here crosses the Win32 callback boundary and terminates the GUI process with
+        // FAST_FAIL_FATAL_APP_EXIT before the main window can be shown.
+        if self.handles.is_none() {
+            return;
+        }
         // Programmatic defaults (CB_SETCURSEL/BM_SETCHECK) do not emit CBN_SELCHANGE or
         // BN_CLICKED. Synchronize the visible controls first so the enabled state and the click
         // path both use the same current preferences even before the user touches a ComboBox.
@@ -4522,7 +5833,7 @@ impl NativeWindow {
                 if let Err(error) = validation {
                     log::warn!("安装按钮因校验状态变化被禁用: {error:?}");
                     if !pca_pending {
-                        set_text(h.status, &error.to_string());
+                        self.set_footer_status(&error.to_string());
                     }
                 }
             }
@@ -4599,6 +5910,7 @@ impl NativeWindow {
         self.request_pca_target_detection(hwnd);
         self.update_pca_detection_status();
         self.update_install_primary_state();
+        redraw::invalidate_client_tree(hwnd);
     }
 
     unsafe fn update_unattend_conflict(&mut self) {
@@ -4746,6 +6058,10 @@ impl NativeWindow {
     }
 
     unsafe fn update_advanced_install_context(&mut self) {
+        // Capture under the old capability set before rows are hidden or reshaped. Otherwise a
+        // late image/unattend callback can make `read_into` skip the user's last visible edit.
+        self.synchronize_install_state(AdvancedStateBoundary::ContextRefresh);
+        self.sync_dual_boot_size_with_selected_image();
         let Some(handles) = &self.handles else { return };
         let selected_index = SendMessageW(handles.image_volume, 0x0147, WPARAM(0), LPARAM(0)).0;
         let selected = usize::try_from(selected_index)
@@ -4786,6 +6102,12 @@ impl NativeWindow {
             extension.eq_ignore_ascii_case("gho") || extension.eq_ignore_ascii_case("ghs")
         });
         if let Some(page) = &mut self.advanced_page {
+            let preinstall_catalogue_available = !self
+                .download_controller
+                .preinstall_software_categories()
+                .is_empty();
+            let vmware_tools_available = self.machine_environment == MachineEnvironment::Vmware
+                && self.download_controller.vmware_tools_entry().is_some();
             page.set_context(AdvancedPageContext {
                 unattended_enabled,
                 builtin_administrator_available: unattended_enabled
@@ -4798,6 +6120,8 @@ impl NativeWindow {
                     .advanced_options
                     .wifi_detected
                     .unwrap_or(false),
+                preinstall_catalogue_available,
+                vmware_tools_available,
                 target_capabilities: capabilities,
             });
         }
@@ -4861,7 +6185,11 @@ impl NativeWindow {
     }
 
     unsafe fn update_storage_driver_default(&mut self) {
-        let Some(handles) = &self.handles else { return };
+        let Some(handles) = self.handles else { return };
+        // This refresh may publish controller-owned Win7/storage defaults back to every control.
+        // First merge visible user-owned fields into the model so a later full apply cannot replay
+        // a stale snapshot over them. Do this before borrowing the selected image inventory.
+        self.synchronize_install_state(AdvancedStateBoundary::StorageDefaultsRefresh);
         let selected_index = SendMessageW(handles.image_volume, 0x0147, WPARAM(0), LPARAM(0)).0;
         let selected = usize::try_from(selected_index)
             .ok()
@@ -4924,33 +6252,27 @@ impl NativeWindow {
     }
 
     unsafe fn update_system_status(&self) {
-        let Some(status) = self.handles.as_ref().map(|handles| handles.status) else {
+        if self.handles.is_none() {
             return;
-        };
+        }
         let info = self.config.system_info.clone();
         if let Some(info) = info {
-            set_text(
-                status,
-                &crate::tr!(
-                    "启动模式: {} | TPM: {} | 安全启动: {}",
-                    info.boot_mode,
-                    if info.tpm_enabled {
-                        crate::tr!("已启用")
-                    } else {
-                        crate::tr!("未启用")
-                    },
-                    if info.secure_boot {
-                        crate::tr!("已开启")
-                    } else {
-                        crate::tr!("未开启")
-                    }
-                ),
-            );
+            self.set_footer_status(&crate::tr!(
+                "启动模式: {} | TPM: {} | 安全启动: {}",
+                info.boot_mode,
+                if info.tpm_enabled {
+                    crate::tr!("已启用")
+                } else {
+                    crate::tr!("未启用")
+                },
+                if info.secure_boot {
+                    crate::tr!("已开启")
+                } else {
+                    crate::tr!("未开启")
+                }
+            ));
         } else {
-            set_text(
-                status,
-                &crate::tr!("启动模式: 未知 | TPM: 未知 | 安全启动: 未知"),
-            );
+            self.set_footer_status(&crate::tr!("启动模式: 未知 | TPM: 未知 | 安全启动: 未知"));
         }
     }
 
@@ -5060,6 +6382,7 @@ impl NativeWindow {
                         RemoteImageDownload {
                             plan,
                             allow_insecure_http,
+                            select_first_installable_after_download: false,
                         },
                     ),
                     Err(error) => set_text(
@@ -5077,6 +6400,11 @@ impl NativeWindow {
         self.auto_image_discovery_pending = false;
         self.remote_image_download = None;
         let Some(h) = self.handles else { return };
+        let publish_install_chrome = image_request_start_publishes_chrome(
+            self.page,
+            self.advanced_visible,
+            self.progress_visible,
+        );
         if let Some(previous) = self.mounted_iso.take() {
             if let Err(error) =
                 crate::core::iso::IsoMounter::unmount_iso_by_path(&previous.to_string_lossy())
@@ -5094,8 +6422,10 @@ impl NativeWindow {
         self.update_advanced_install_context();
         let _ = SendMessageW(h.image_volume, 0x014B, WPARAM(0), LPARAM(0));
         self.set_install_volume_row_visible(hwnd, false);
-        let _ = EnableWindow(h.primary, false);
-        set_text(h.status, &crate::tr!("正在读取系统镜像卷..."));
+        if publish_install_chrome {
+            let _ = EnableWindow(h.primary, false);
+            self.set_footer_status(&crate::tr!("正在读取系统镜像卷..."));
+        }
         self.image_request_generation = self.image_request_generation.wrapping_add(1);
         self.request_image_info(
             hwnd,
@@ -5126,10 +6456,9 @@ impl NativeWindow {
         let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
         self.set_install_volume_row_visible(hwnd, false);
         let _ = EnableWindow(handles.primary, false);
-        set_text(
-            handles.status,
-            &crate::tr!("正在验证远程镜像链接、断点续传能力和分卷信息..."),
-        );
+        self.set_footer_status(&crate::tr!(
+            "正在验证远程镜像链接、断点续传能力和分卷信息..."
+        ));
         self.image_request_generation = self.image_request_generation.wrapping_add(1);
         let generation = self.image_request_generation;
         let url = source.plan.url.clone();
@@ -5137,9 +6466,16 @@ impl NativeWindow {
         self.remote_image_download = Some(source);
         let window = hwnd.0 as usize;
         std::thread::spawn(move || {
-            let result =
-                crate::core::remote_wim_metadata::read_remote_image_info(&url, allow_insecure_http)
-                    .map_err(|error| error.to_string());
+            let result = match crate::core::remote_wim_metadata::read_remote_image_info(
+                &url,
+                allow_insecure_http,
+            ) {
+                Ok(images) => Ok(images),
+                Err(error) if crate::core::remote_wim_metadata::is_range_unsupported(&error) => {
+                    Err(RemoteImageInfoFailure::RangeUnsupported)
+                }
+                Err(error) => Err(RemoteImageInfoFailure::Failed(error.to_string())),
+            };
             let payload = Box::into_raw(Box::new(RemoteImageInfoMessage {
                 generation,
                 requested_url: url,
@@ -5233,11 +6569,19 @@ impl NativeWindow {
         let previous_install_target = self.selected_install_partition_key(list);
         let previous_backup_source = self.selected_backup_partition_key();
         self.partitions = partitions;
-        let selected_install_target = previous_install_target.as_ref().and_then(|key| {
-            self.partitions
-                .iter()
-                .position(|partition| key.matches(partition))
-        });
+        let selected_install_target = previous_install_target
+            .as_ref()
+            .and_then(|key| {
+                self.partitions
+                    .iter()
+                    .position(|partition| key.matches(partition))
+            })
+            .or_else(|| {
+                crate::core::disk::preferred_install_partition_index(
+                    &self.partitions,
+                    self.is_pe_environment,
+                )
+            });
         let selected_backup_source = previous_backup_source.as_ref().and_then(|key| {
             self.partitions
                 .iter()
@@ -5284,7 +6628,7 @@ impl NativeWindow {
     }
 
     unsafe fn refresh_partitions(&mut self) -> bool {
-        match crate::core::disk::DiskManager::get_partitions() {
+        match crate::core::disk::DiskManager::get_install_partitions() {
             Ok(partitions) => {
                 self.partition_refresh_error = None;
                 self.apply_partition_inventory(partitions)
@@ -5292,7 +6636,11 @@ impl NativeWindow {
             Err(error) => {
                 log::warn!("原生 UI 刷新分区失败: {error}");
                 self.partition_refresh_error = Some(error.to_string());
-                if self.page == Page::Install {
+                if may_publish_install_chrome(
+                    self.page,
+                    self.advanced_visible,
+                    self.progress_visible,
+                ) {
                     if let Some(handles) = self.handles {
                         set_text(
                             handles.status,
@@ -5317,7 +6665,7 @@ impl NativeWindow {
             // so a transient snapshot cannot replace a previously stable target.
             return;
         }
-        if self.page == Page::Install {
+        if may_publish_install_chrome(self.page, self.advanced_visible, self.progress_visible) {
             if let Some(handles) = self.handles {
                 set_text(handles.status, &crate::tr!("正在刷新分区信息，请稍候。"));
             }
@@ -5345,8 +6693,8 @@ impl NativeWindow {
         let generation = self.partition_refresh_generation;
         let window = hwnd.0 as usize;
         std::thread::spawn(move || {
-            let result =
-                crate::core::disk::DiskManager::get_partitions().map_err(|error| error.to_string());
+            let result = crate::core::disk::DiskManager::get_install_partitions()
+                .map_err(|error| error.to_string());
             let payload = Box::into_raw(Box::new(PartitionRefreshMessage { generation, result }));
             unsafe {
                 if PostMessageW(
@@ -5371,7 +6719,8 @@ impl NativeWindow {
                 if let Some(dialog) = &mut self.quick_partition_dialog {
                     dialog.set_loading();
                 }
-                self.start_quick_partition_inventory();
+                self.quick_partition_generation = self.quick_partition_generation.wrapping_add(1);
+                self.start_quick_partition_inventory(self.quick_partition_generation);
             }
         }
     }
@@ -5392,7 +6741,11 @@ impl NativeWindow {
             Err(error) => {
                 log::warn!("设备变更后的异步分区刷新失败: {error}");
                 self.partition_refresh_error = Some(error);
-                if self.page == Page::Install {
+                if may_publish_install_chrome(
+                    self.page,
+                    self.advanced_visible,
+                    self.progress_visible,
+                ) {
                     if let Some(handles) = self.handles {
                         set_text(
                             handles.status,
@@ -5405,7 +6758,7 @@ impl NativeWindow {
         if self.partition_refresh_requested {
             self.schedule_partition_refresh(hwnd);
         }
-        if self.page == Page::Install {
+        if may_publish_install_chrome(self.page, self.advanced_visible, self.progress_visible) {
             self.update_install_primary_state();
         }
     }
@@ -5442,13 +6795,16 @@ impl NativeWindow {
                 let category = match tab {
                     DownloadTab::SystemImage => ResourceCategory::SystemImage,
                     DownloadTab::Software => ResourceCategory::Software,
-                    DownloadTab::GpuDriver => ResourceCategory::GpuDriver,
                 };
                 let _ = self
                     .download_controller
                     .apply_intent(ControllerIntent::SelectCategory(category));
                 if let Some(page) = &mut self.download_page {
                     page.select_tab(tab);
+                    page.replace_software_categories(
+                        &self.download_controller.software_category_names(),
+                        self.download_controller.selected_software_category(),
+                    );
                     page.replace_rows(&self.download_controller.rows());
                     for button in page.tabs {
                         let _ = InvalidateRect(button, None, true);
@@ -5470,20 +6826,16 @@ impl NativeWindow {
                     .download_controller
                     .apply_intent(ControllerIntent::RefreshCatalogue);
                 if let Some(page) = &self.download_page {
-                    set_text(
-                        page.status,
-                        &catalogue_status_message(self.download_controller.state()),
-                    );
+                    page.set_status(&catalogue_status_message(self.download_controller.state()));
                 }
                 #[cfg(feature = "non-elevated-tests")]
                 {
                     let message = crate::tr!("开发预览构建不会发起网络请求。");
                     self.download_controller.fail_refresh(message);
                     if let Some(page) = &self.download_page {
-                        set_text(
-                            page.status,
-                            &catalogue_status_message(self.download_controller.state()),
-                        );
+                        page.set_status(&catalogue_status_message(
+                            self.download_controller.state(),
+                        ));
                     }
                 }
                 #[cfg(not(feature = "non-elevated-tests"))]
@@ -5554,18 +6906,17 @@ impl NativeWindow {
                                     // The plan came verbatim from the fixed HTTPS catalogue and
                                     // already passed the controller's scoped legacy-HTTP policy.
                                     allow_insecure_http: true,
+                                    select_first_installable_after_download: false,
                                 },
                             );
                             return;
                         }
                         match NativeDownloadExecutor::start(plan) {
                             Ok(worker) => self.show_download_progress(hwnd, worker),
-                            Err(error) => {
-                                set_text(page.status, &crate::tr!("无法启动下载：{}", error))
-                            }
+                            Err(error) => page.set_status(&crate::tr!("无法启动下载：{}", error)),
                         }
                     }
-                    Err(error) => set_text(page.status, &crate::tr!("无法创建下载任务：{}", error)),
+                    Err(error) => page.set_status(&crate::tr!("无法创建下载任务：{}", error)),
                 }
             }
         }
@@ -5611,6 +6962,7 @@ impl NativeWindow {
                         disk_size_bytes: partition.disk_size_bytes,
                         partition_offset_bytes: partition.partition_offset_bytes,
                         partition_size_bytes: partition.partition_size_bytes,
+                        stable_identity: partition.stable_identity,
                     });
                 let download_directory = dirs::download_dir()
                     .unwrap_or_else(|| std::env::temp_dir().join("LetRecovery"));
@@ -5742,6 +7094,10 @@ impl NativeWindow {
                 .as_ref()
                 .is_some_and(|dialog| dialog.shell.activate_if_visible())
             || self
+                .preinstall_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.shell.activate_if_visible())
+            || self
                 .appx_dialog
                 .as_ref()
                 .is_some_and(|dialog| dialog.shell.activate_if_visible())
@@ -5801,6 +7157,10 @@ impl NativeWindow {
             plan.route,
             plan.safety
         );
+        if intent == ToolIntent::EnterPeMaintenance {
+            self.start_pe_maintenance(hwnd);
+            return;
+        }
         if intent == ToolIntent::HardwareInspector {
             match NativeHardwareInspectorDialog::create(hwnd) {
                 Ok(mut dialog) => {
@@ -5850,11 +7210,13 @@ impl NativeWindow {
             return;
         }
         if intent == ToolIntent::BatchFormat {
+            self.batch_format_generation = self.batch_format_generation.wrapping_add(1);
+            let generation = self.batch_format_generation;
             match NativeBatchFormatDialog::create(hwnd) {
                 Ok(mut dialog) => {
                     dialog.show_modeless();
                     self.batch_format_dialog = Some(dialog);
-                    self.start_batch_format_inventory();
+                    self.start_batch_format_inventory(generation);
                     let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
                 }
                 Err(error) => log::error!("创建批量格式化对话框失败: {error}"),
@@ -5862,11 +7224,13 @@ impl NativeWindow {
             return;
         }
         if intent == ToolIntent::ImportStorageDriver {
+            self.storage_driver_generation = self.storage_driver_generation.wrapping_add(1);
+            let generation = self.storage_driver_generation;
             match NativeStorageDriverDialog::create(hwnd) {
                 Ok(mut dialog) => {
                     dialog.show_modeless();
                     self.storage_driver_dialog = Some(dialog);
-                    self.start_storage_driver_inventory();
+                    self.start_storage_driver_inventory(generation);
                     let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
                 }
                 Err(error) => log::error!("创建存储控制器驱动导入对话框失败: {error}"),
@@ -5999,6 +7363,8 @@ impl NativeWindow {
             return;
         }
         if intent == ToolIntent::QuickPartition {
+            self.quick_partition_generation = self.quick_partition_generation.wrapping_add(1);
+            let generation = self.quick_partition_generation;
             let recommended_style =
                 if self.config.system_info.as_ref().is_some_and(|info| {
                     info.boot_mode == crate::core::system_info::BootMode::Legacy
@@ -6029,7 +7395,7 @@ impl NativeWindow {
                 Ok(mut dialog) => {
                     dialog.show_modeless();
                     self.quick_partition_dialog = Some(dialog);
-                    self.start_quick_partition_inventory();
+                    self.start_quick_partition_inventory(generation);
                     let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
                 }
                 Err(error) => log::error!("创建一键分区对话框失败: {error}"),
@@ -6037,11 +7403,13 @@ impl NativeWindow {
             return;
         }
         if intent == ToolIntent::ManageBitLocker {
+            self.bitlocker_manage_generation = self.bitlocker_manage_generation.wrapping_add(1);
+            let generation = self.bitlocker_manage_generation;
             match NativeBitLockerManageDialog::create(hwnd) {
                 Ok(mut dialog) => {
                     dialog.show_modeless();
                     self.bitlocker_manage_dialog = Some(dialog);
-                    self.start_bitlocker_manage_inventory();
+                    self.start_bitlocker_manage_inventory(generation);
                     let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
                 }
                 Err(error) => log::error!("创建 BitLocker 管理对话框失败: {error}"),
@@ -6105,7 +7473,7 @@ impl NativeWindow {
         let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
     }
 
-    fn start_quick_partition_inventory(&self) {
+    fn start_quick_partition_inventory(&self, generation: u64) {
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
             #[cfg(feature = "non-elevated-tests")]
@@ -6116,14 +7484,44 @@ impl NativeWindow {
             };
             #[cfg(not(feature = "non-elevated-tests"))]
             let result = Ok(crate::core::quick_partition::get_physical_disks());
-            let _ = sender.send(ToolWorkerMessage::QuickPartitionInventoryCompleted(result));
+            let _ = sender
+                .send(ToolWorkerMessage::QuickPartitionInventoryCompleted { generation, result });
         });
     }
 
     fn start_quick_partition_pending(
-        &self,
+        &mut self,
         operations: Vec<crate::core::native_quick_partition_dialog::PendingPartitionOperation>,
     ) {
+        let Some(target_disk) = pending_partition_target_disk(&operations) else {
+            if let Some(dialog) = &mut self.quick_partition_dialog {
+                unsafe {
+                    dialog.set_operation_error(crate::tr!(
+                        "分区操作目标为空或跨越多个物理磁盘，已拒绝执行。"
+                    ));
+                    dialog.show_modeless();
+                }
+            }
+            return;
+        };
+        let Some(task) = self
+            .write_task_gate
+            .try_begin(WriteTaskKind::QuickPartitionPending)
+        else {
+            if let Some(dialog) = &mut self.quick_partition_dialog {
+                unsafe {
+                    dialog.set_operation_error(crate::tr!(
+                        "另一个写入任务正在执行，请等待其完成后再试。"
+                    ));
+                    dialog.show_modeless();
+                }
+            }
+            return;
+        };
+        if let Some(dialog) = &mut self.quick_partition_dialog {
+            unsafe { dialog.finish_pending_apply() };
+        }
+        let generation = self.quick_partition_generation;
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
             let result =
@@ -6131,56 +7529,82 @@ impl NativeWindow {
                     &operations,
                 )
                 .map_err(|error| error.to_string());
-            let _ = sender.send(ToolWorkerMessage::QuickPartitionPendingCompleted(result));
+            let _ = sender.send(ToolWorkerMessage::QuickPartitionPendingCompleted {
+                generation,
+                target_disk,
+                task,
+                result,
+            });
         });
     }
 
     fn start_quick_partition_compound_offline(
-        &self,
-        operations: Vec<crate::core::native_quick_partition_dialog::PendingPartitionOperation>,
+        &mut self,
+        _operations: Vec<crate::core::native_quick_partition_dialog::PendingPartitionOperation>,
     ) {
-        let sender = self.tool_worker_sender.clone();
-        std::thread::spawn(move || {
-            let result =
-                crate::core::native_quick_partition_dialog::prepare_compound_offline_transfer(
-                    &operations,
-                )
-                .map(|request| expand_request_from_adjacent_transfer(&request))
-                .map_err(|error| error.to_string());
-            let _ = sender.send(ToolWorkerMessage::QuickPartitionCompoundOfflinePrepared(
-                result,
-            ));
-        });
+        if let Some(dialog) = &mut self.quick_partition_dialog {
+            unsafe {
+                dialog.set_operation_error(crate::tr!(
+                    "当前版本只支持使用目标卷后方已有连续未分配空间的纯扩展；需要收缩、转移或移动分区的方案尚未开放。"
+                ));
+                dialog.show_modeless();
+            }
+        }
     }
 
-    fn start_bitlocker_manage_inventory(&self) {
+    fn start_bitlocker_manage_inventory(&self, generation: u64) {
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
             let result = crate::core::native_bitlocker_manage::read_inventory()
                 .map_err(|error| error.to_string());
-            let _ = sender.send(ToolWorkerMessage::BitLockerManageInventoryCompleted(result));
+            let _ = sender
+                .send(ToolWorkerMessage::BitLockerManageInventoryCompleted { generation, result });
         });
     }
 
     fn start_bitlocker_manage_operation(
-        &self,
+        &mut self,
         intent: crate::core::native_bitlocker_manage::BitLockerManageIntent,
     ) {
         let recovery_key = matches!(
             intent,
             crate::core::native_bitlocker_manage::BitLockerManageIntent::ReadRecoveryKey { .. }
         );
+        let task = if recovery_key {
+            None
+        } else {
+            let Some(task) = self
+                .write_task_gate
+                .try_begin(WriteTaskKind::BitLockerManage)
+            else {
+                if let Some(dialog) = &mut self.bitlocker_manage_dialog {
+                    unsafe {
+                        dialog.set_operation_result(crate::tr!(
+                            "另一个写入任务正在执行，请等待其完成后再试。"
+                        ));
+                        dialog.show_modeless();
+                    }
+                }
+                return;
+            };
+            Some(task)
+        };
+        let generation = self.bitlocker_manage_generation;
+        let volume = bitlocker_intent_volume(&intent).to_owned();
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
             let result = crate::core::native_bitlocker_manage::execute_intent(intent);
             let _ = sender.send(ToolWorkerMessage::BitLockerManageOperationCompleted {
+                generation,
+                volume,
                 recovery_key,
+                task,
                 result,
             });
         });
     }
 
-    fn start_batch_format_inventory(&self) {
+    fn start_batch_format_inventory(&self, generation: u64) {
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
             let result = crate::core::native_batch_format::inventory_current()
@@ -6199,11 +7623,12 @@ impl NativeWindow {
                         .collect()
                 })
                 .map_err(|error| error.to_string());
-            let _ = sender.send(ToolWorkerMessage::BatchFormatInventoryCompleted(result));
+            let _ = sender
+                .send(ToolWorkerMessage::BatchFormatInventoryCompleted { generation, result });
         });
     }
 
-    fn start_storage_driver_inventory(&self) {
+    fn start_storage_driver_inventory(&self, generation: u64) {
         let sender = self.tool_worker_sender.clone();
         let partitions = self.partitions.clone();
         std::thread::spawn(move || {
@@ -6222,14 +7647,17 @@ impl NativeWindow {
                             .collect()
                     })
                     .map_err(|error| error.to_string());
-            let _ = sender.send(ToolWorkerMessage::StorageDriverTargetsCompleted(result));
+            let _ = sender
+                .send(ToolWorkerMessage::StorageDriverTargetsCompleted { generation, result });
         });
     }
 
     fn start_storage_driver_prepare(
         &self,
+        generation: u64,
         request: crate::core::native_storage_driver::StorageDriverImportRequest,
     ) {
+        let target = request.target.clone();
         let sender = self.tool_worker_sender.clone();
         std::thread::spawn(move || {
             #[cfg(feature = "non-elevated-tests")]
@@ -6290,7 +7718,11 @@ impl NativeWindow {
                 )
             })();
 
-            let _ = sender.send(ToolWorkerMessage::StorageDriverPrepared(result));
+            let _ = sender.send(ToolWorkerMessage::StorageDriverPrepared {
+                generation,
+                target,
+                result,
+            });
         });
     }
 
@@ -6671,12 +8103,60 @@ impl NativeWindow {
                 Ok(lr_core::cached_artifact::CachedArtifactStatus::Missing) => {
                     Err(crate::tr!("所选 PE 文件不存在，请重新下载。"))
                 }
-                Err(error) => Err(crate::tr!("PE 文件安全校验失败：{}", error)),
+                Err(error) => Err(crate::tr!("PE 文件不可用：{}", error)),
+            }
+        }
+    }
+
+    fn finish_expand_write_task(&mut self) {
+        if let Some(task) = self.write_task_gate.active() {
+            if matches!(
+                task.kind,
+                WriteTaskKind::QuickPartitionCompound | WriteTaskKind::ExpandC
+            ) {
+                let _ = self.write_task_gate.finish(task);
             }
         }
     }
 
     unsafe fn start_expand_c_execution(&mut self, _hwnd: HWND, request: ExpandCRequest) {
+        if request.requires_unsupported_raw_move() {
+            let message = crate::tr!(
+                "当前版本只支持使用目标卷后方已有连续未分配空间的纯扩展；未创建 PE 交接或启动项。"
+            );
+            if let Some(dialog) = &mut self.expand_c_dialog {
+                dialog.set_error(message.clone());
+            }
+            if let Some(dialog) = &mut self.quick_partition_dialog {
+                dialog.set_operation_error(message);
+                dialog.show_modeless();
+            }
+            return;
+        }
+        let task = match self.write_task_gate.active() {
+            Some(task)
+                if matches!(
+                    task.kind,
+                    WriteTaskKind::QuickPartitionCompound | WriteTaskKind::ExpandC
+                ) =>
+            {
+                task
+            }
+            Some(_) => {
+                let message = crate::tr!("另一个写入任务正在执行，请等待其完成后再试。");
+                if let Some(dialog) = &mut self.expand_c_dialog {
+                    dialog.set_error(message.clone());
+                }
+                if let Some(dialog) = &mut self.quick_partition_dialog {
+                    dialog.set_operation_error(message);
+                }
+                return;
+            }
+            None => self
+                .write_task_gate
+                .try_begin(WriteTaskKind::ExpandC)
+                .expect("empty write-task gate must accept expand-C task"),
+        };
         self.expand_from_quick_partition =
             self.quick_partition_dialog.is_some() && self.expand_c_dialog.is_none();
         let pe = self.available_pe();
@@ -6689,6 +8169,7 @@ impl NativeWindow {
                     dialog.set_operation_error(crate::tr!("没有可用的 PE 环境，无法扩容"));
                 }
             }
+            let _ = self.write_task_gate.finish(task);
             return;
         };
         #[cfg(not(feature = "non-elevated-tests"))]
@@ -6713,6 +8194,7 @@ impl NativeWindow {
                                     .set_operation_error(crate::tr!("PE 校验配置无效：{}", error));
                             }
                         }
+                        let _ = self.write_task_gate.finish(task);
                         return;
                     }
                 };
@@ -6724,8 +8206,10 @@ impl NativeWindow {
                     completion: crate::core::native_download_controller::DownloadCompletion::None,
                     download_threads: self.app_config.download_threads,
                 };
+                let mut download_started = false;
                 match NativeDownloadExecutor::start(plan) {
                     Ok(worker) => {
+                        download_started = true;
                         self.pending_expand_after_pe_download = Some(request);
                         if let Some(dialog) = &self.expand_c_dialog {
                             let _ = ShowWindow(dialog.shell.hwnd(), SW_HIDE);
@@ -6746,18 +8230,22 @@ impl NativeWindow {
                         }
                     }
                 }
+                if !download_started {
+                    let _ = self.write_task_gate.finish(task);
+                }
                 return;
             }
             Ok(lr_core::cached_artifact::CachedArtifactStatus::Ready { .. }) => {}
             Err(error) => {
                 if let Some(dialog) = &mut self.expand_c_dialog {
-                    dialog.set_error(crate::tr!("PE 文件安全校验失败：{}", error));
+                    dialog.set_error(crate::tr!("PE 文件不可用：{}", error));
                 }
                 if self.expand_from_quick_partition {
                     if let Some(dialog) = &mut self.quick_partition_dialog {
-                        dialog.set_operation_error(crate::tr!("PE 文件安全校验失败：{}", error));
+                        dialog.set_operation_error(crate::tr!("PE 文件不可用：{}", error));
                     }
                 }
+                let _ = self.write_task_gate.finish(task);
                 return;
             }
         }
@@ -6798,6 +8286,7 @@ impl NativeWindow {
                         dialog.set_operation_error(error.to_string());
                     }
                 }
+                let _ = self.write_task_gate.finish(task);
             }
         }
     }
@@ -6825,6 +8314,87 @@ impl NativeWindow {
                 .map(format_tool_backend_result)
                 .unwrap_or_else(|error| Err(error.to_string()));
             let _ = sender.send(ToolWorkerMessage::ExternalCompleted(action, result));
+        });
+    }
+
+    unsafe fn start_pe_maintenance(&mut self, hwnd: HWND) {
+        if self.is_pe_environment || !self.app_config.pe_maintenance_entry_enabled {
+            log::warn!("拒绝未启用或 PE 环境中的维护入口请求");
+            return;
+        }
+        if self
+            .pe_maintenance_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.activate_if_visible())
+        {
+            return;
+        }
+        let Some(task) = self.write_task_gate.try_begin(WriteTaskKind::PeMaintenance) else {
+            self.show_information(
+                hwnd,
+                crate::tr!("无法进入 PE 维护环境"),
+                crate::tr!("另一个写入任务正在执行，请等待其完成后再试。"),
+            );
+            return;
+        };
+        let mut dialog = match PeMaintenanceProgressDialog::create(hwnd) {
+            Ok(dialog) => dialog,
+            Err(error) => {
+                let _ = self.write_task_gate.finish(task);
+                self.show_information(
+                    hwnd,
+                    crate::tr!("无法进入 PE 维护环境"),
+                    crate::tr!("无法打开 PE 准备进度窗口：{}", error),
+                );
+                return;
+            }
+        };
+        dialog.show_modeless();
+        self.pe_maintenance_dialog = Some(dialog);
+        let _ = SetTimer(
+            hwnd,
+            PE_MAINTENANCE_ANIMATION_TIMER_ID,
+            PE_MAINTENANCE_ANIMATION_INTERVAL_MS,
+            None,
+        );
+        let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
+        let pe = maintenance_pe_from_catalogue(&self.pe_catalogue).or_else(|| {
+            matches!(
+                crate::core::pe::PeManager::find_cached_pe("LetRecovery_PE.wim", None, None),
+                Ok(lr_core::cached_artifact::CachedArtifactPresence::Present { .. })
+            )
+            .then(|| OnlinePE {
+                download_url: String::new(),
+                display_name: "LetRecovery PE".to_owned(),
+                filename: "LetRecovery_PE.wim".to_owned(),
+                md5: None,
+                sha256: None,
+            })
+        });
+        let Some(pe) = pe else {
+            let _ = self.write_task_gate.finish(task);
+            if let Some(dialog) = &mut self.pe_maintenance_dialog {
+                dialog.set_error(&crate::tr!("没有可用的 PE 环境，请先在下载页面获取 PE。"));
+            }
+            return;
+        };
+        let language = self.app_config.language.clone();
+        let sender = self.tool_worker_sender.clone();
+        self.tool_background_jobs = self.tool_background_jobs.saturating_add(1);
+        let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
+        std::thread::spawn(move || {
+            #[cfg(feature = "non-elevated-tests")]
+            let result = {
+                let _ = (&pe, &language);
+                Err("PE maintenance boot is disabled in non-elevated test builds".to_owned())
+            };
+            #[cfg(not(feature = "non-elevated-tests"))]
+            let result =
+                crate::core::pe::enter_pe_maintenance_with_progress(&pe, &language, |stage| {
+                    let _ = sender.send(ToolWorkerMessage::PeMaintenanceProgress { task, stage });
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ToolWorkerMessage::PeMaintenanceCompleted { task, result });
         });
     }
 
@@ -6956,7 +8526,11 @@ impl NativeWindow {
                     apply_tool_result(dialog, &request, result);
                     dialog.show_modeless();
                 }
-                ToolWorkerMessage::MutatingCompleted(kind, result) => {
+                ToolWorkerMessage::MutatingCompleted { task, kind, result } => {
+                    if !self.write_task_gate.finish(task) {
+                        log::warn!("忽略非当前写任务的迟到完成消息: {task:?}");
+                        continue;
+                    }
                     self.tool_background_jobs = self.tool_background_jobs.saturating_sub(1);
                     if let Some(dialog) = self
                         .mutating_tool_dialogs
@@ -6985,6 +8559,38 @@ impl NativeWindow {
                         Err(error) => {
                             log::error!("外部工具启动失败: action={action:?}, error={error}")
                         }
+                    }
+                }
+                ToolWorkerMessage::PeMaintenanceCompleted { task, result } => {
+                    if !self.write_task_gate.finish(task) {
+                        log::warn!("忽略非当前 PE 维护任务的迟到完成消息: {task:?}");
+                        continue;
+                    }
+                    self.tool_background_jobs = self.tool_background_jobs.saturating_sub(1);
+                    match result {
+                        Ok(()) => {
+                            if let Some(dialog) = &mut self.pe_maintenance_dialog {
+                                dialog.set_stage(
+                                    crate::core::pe::PeMaintenanceProgress::RestartScheduled,
+                                );
+                            }
+                            log::info!("PE 维护启动事务已提交，等待系统重启");
+                        }
+                        Err(error) => {
+                            log::error!("进入 PE 维护环境失败: {error}");
+                            if let Some(dialog) = &mut self.pe_maintenance_dialog {
+                                dialog.set_error(&error);
+                            }
+                        }
+                    }
+                }
+                ToolWorkerMessage::PeMaintenanceProgress { task, stage } => {
+                    if self.write_task_gate.active() != Some(task) {
+                        log::warn!("忽略非当前 PE 维护任务的迟到进度消息: {task:?}");
+                        continue;
+                    }
+                    if let Some(dialog) = &mut self.pe_maintenance_dialog {
+                        dialog.set_stage(stage);
                     }
                 }
                 ToolWorkerMessage::BitLockerGateCompleted { drive, result } => {
@@ -7023,33 +8629,75 @@ impl NativeWindow {
                         self.start_dynamic_tool_inventory(kind, target, generation);
                     }
                 }
-                ToolWorkerMessage::BatchFormatInventoryCompleted(result) => {
+                ToolWorkerMessage::BatchFormatInventoryCompleted { generation, result } => {
+                    if !dialog_response_matches(
+                        self.batch_format_generation,
+                        None,
+                        generation,
+                        None,
+                    ) {
+                        continue;
+                    }
                     if let Some(dialog) = &mut self.batch_format_dialog {
                         dialog.set_inventory(result);
                         dialog.show_modeless();
                     }
                 }
-                ToolWorkerMessage::StorageDriverTargetsCompleted(result) => {
+                ToolWorkerMessage::StorageDriverTargetsCompleted { generation, result } => {
+                    if !dialog_response_matches(
+                        self.storage_driver_generation,
+                        None,
+                        generation,
+                        None,
+                    ) {
+                        continue;
+                    }
                     if let Some(dialog) = &mut self.storage_driver_dialog {
                         dialog.set_targets(result);
                         dialog.show_modeless();
                     }
                 }
-                ToolWorkerMessage::StorageDriverPrepared(result) => match result {
-                    Ok(execution) => {
-                        self.storage_driver_dialog = None;
-                        self.start_confirmed_tool(
-                            MutatingToolKind::ImportStorageDriver,
-                            &execution,
-                        );
+                ToolWorkerMessage::StorageDriverPrepared {
+                    generation,
+                    target,
+                    result,
+                } => {
+                    let current_target = self
+                        .storage_driver_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.state().selected_target());
+                    if !dialog_response_matches(
+                        self.storage_driver_generation,
+                        current_target,
+                        generation,
+                        Some(&target),
+                    ) {
+                        continue;
                     }
-                    Err(error) => {
-                        if let Some(dialog) = &mut self.storage_driver_dialog {
-                            dialog.set_targets(Err(error));
-                            dialog.show_modeless();
+                    match result {
+                        Ok(execution) => {
+                            if self.start_confirmed_tool(
+                                MutatingToolKind::ImportStorageDriver,
+                                &execution,
+                            ) {
+                                self.storage_driver_generation =
+                                    self.storage_driver_generation.wrapping_add(1);
+                                self.storage_driver_dialog = None;
+                            } else if let Some(dialog) = &mut self.storage_driver_dialog {
+                                dialog.set_targets(Err(crate::tr!(
+                                    "另一个写入任务正在执行，请等待其完成后再试。"
+                                )));
+                                dialog.show_modeless();
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(dialog) = &mut self.storage_driver_dialog {
+                                dialog.set_targets(Err(error));
+                                dialog.show_modeless();
+                            }
                         }
                     }
-                },
+                }
                 ToolWorkerMessage::PasswordResetTargetsCompleted { generation, result } => {
                     if generation != self.password_reset_generation {
                         continue;
@@ -7281,13 +8929,39 @@ impl NativeWindow {
                         }
                     }
                 }
-                ToolWorkerMessage::QuickPartitionInventoryCompleted(result) => {
+                ToolWorkerMessage::QuickPartitionInventoryCompleted { generation, result } => {
+                    if !dialog_response_matches(
+                        self.quick_partition_generation,
+                        None,
+                        generation,
+                        None,
+                    ) {
+                        continue;
+                    }
                     if let Some(dialog) = &mut self.quick_partition_dialog {
                         dialog.set_inventory(result);
                         dialog.show_modeless();
                     }
                 }
-                ToolWorkerMessage::QuickPartitionPendingCompleted(result) => {
+                ToolWorkerMessage::QuickPartitionPendingCompleted {
+                    generation,
+                    target_disk,
+                    task,
+                    result,
+                } => {
+                    if !self.write_task_gate.finish(task) {
+                        log::warn!("忽略非当前快速分区写任务的迟到完成消息: {task:?}");
+                        continue;
+                    }
+                    let current_target = self
+                        .quick_partition_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.state().selected_disk_number);
+                    if self.quick_partition_generation != generation
+                        || current_target != Some(target_disk)
+                    {
+                        continue;
+                    }
                     if let Some(dialog) = &mut self.quick_partition_dialog {
                         match result {
                             Ok(message) => dialog.set_operation_status(message),
@@ -7296,35 +8970,93 @@ impl NativeWindow {
                             }
                         }
                     }
-                    self.start_quick_partition_inventory();
+                    self.start_quick_partition_inventory(generation);
                 }
-                ToolWorkerMessage::QuickPartitionCompoundOfflinePrepared(result) => match result {
+                ToolWorkerMessage::QuickPartitionCompoundOfflinePrepared {
+                    generation,
+                    target_disk,
+                    task,
+                    result,
+                } => match result {
                     Ok(request) => {
-                        if let Some(dialog) = &mut self.quick_partition_dialog {
-                            dialog.set_operation_status(crate::tr!("正在准备扩容环境..."));
+                        if self.write_task_gate.active() != Some(task) {
+                            log::warn!("忽略非当前连续分区写任务的迟到完成消息: {task:?}");
+                            continue;
+                        }
+                        let response_matches = self.quick_partition_generation == generation
+                            && self
+                                .quick_partition_dialog
+                                .as_ref()
+                                .and_then(|dialog| dialog.state().selected_disk_number)
+                                == Some(target_disk);
+                        if response_matches {
+                            if let Some(dialog) = &mut self.quick_partition_dialog {
+                                dialog.set_operation_status(crate::tr!("正在准备扩容环境..."));
+                            }
                         }
                         self.start_expand_c_execution(hwnd, request);
                     }
                     Err(error) => {
-                        if let Some(dialog) = &mut self.quick_partition_dialog {
-                            dialog.set_operation_error(crate::tr!(
-                                "连续分区调整失败：{}。请刷新磁盘布局后再继续。",
-                                error
-                            ));
-                            dialog.show_modeless();
+                        if !self.write_task_gate.finish(task) {
+                            log::warn!("忽略非当前连续分区写任务的迟到失败消息: {task:?}");
+                            continue;
+                        }
+                        let response_matches = self.quick_partition_generation == generation
+                            && self
+                                .quick_partition_dialog
+                                .as_ref()
+                                .and_then(|dialog| dialog.state().selected_disk_number)
+                                == Some(target_disk);
+                        if response_matches {
+                            if let Some(dialog) = &mut self.quick_partition_dialog {
+                                dialog.set_operation_error(crate::tr!(
+                                    "连续分区调整失败：{}。请刷新磁盘布局后再继续。",
+                                    error
+                                ));
+                                dialog.show_modeless();
+                            }
                         }
                     }
                 },
-                ToolWorkerMessage::BitLockerManageInventoryCompleted(result) => {
+                ToolWorkerMessage::BitLockerManageInventoryCompleted { generation, result } => {
+                    if !dialog_response_matches(
+                        self.bitlocker_manage_generation,
+                        None,
+                        generation,
+                        None,
+                    ) {
+                        continue;
+                    }
                     if let Some(dialog) = &mut self.bitlocker_manage_dialog {
                         dialog.set_inventory(result);
                         dialog.show_modeless();
                     }
                 }
                 ToolWorkerMessage::BitLockerManageOperationCompleted {
+                    generation,
+                    volume,
                     recovery_key,
+                    task,
                     result,
                 } => {
+                    if let Some(task) = task {
+                        if !self.write_task_gate.finish(task) {
+                            log::warn!("忽略非当前 BitLocker 写任务的迟到完成消息: {task:?}");
+                            continue;
+                        }
+                    }
+                    let current_volume = self
+                        .bitlocker_manage_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.state().selected_volume.as_deref());
+                    if !dialog_response_matches(
+                        self.bitlocker_manage_generation,
+                        current_volume,
+                        generation,
+                        Some(&volume),
+                    ) {
+                        continue;
+                    }
                     if let Some(dialog) = &mut self.bitlocker_manage_dialog {
                         if recovery_key {
                             dialog.set_recovery_key(result);
@@ -7336,7 +9068,9 @@ impl NativeWindow {
                         dialog.show_modeless();
                     }
                     if !recovery_key {
-                        self.start_bitlocker_manage_inventory();
+                        self.bitlocker_manage_generation =
+                            self.bitlocker_manage_generation.wrapping_add(1);
+                        self.start_bitlocker_manage_inventory(self.bitlocker_manage_generation);
                     }
                 }
                 ToolWorkerMessage::HardwareInspectorCompleted { generation, result } => {
@@ -7403,7 +9137,7 @@ impl NativeWindow {
         &mut self,
         kind: MutatingToolKind,
         execution: &super::tool_dialogs_mutating::MutatingToolIntent,
-    ) {
+    ) -> bool {
         let request = match confirmed_tool_backend_request(kind, execution) {
             Ok(request) => request,
             Err(error) => {
@@ -7417,8 +9151,27 @@ impl NativeWindow {
                     dialog.set_state(state);
                     dialog.show_modeless();
                 }
-                return;
+                return false;
             }
+        };
+        let Some(task) = self
+            .write_task_gate
+            .try_begin(WriteTaskKind::Confirmed(kind))
+        else {
+            let message = crate::tr!("另一个写入任务正在执行，请等待其完成后再试。");
+            if let Some(dialog) = self
+                .mutating_tool_dialogs
+                .iter_mut()
+                .find(|dialog| dialog.kind() == kind)
+            {
+                let mut state = dialog.state().clone();
+                state.loading = false;
+                state.status = message.clone();
+                dialog.set_state(state);
+                dialog.show_modeless();
+            }
+            log::warn!("拒绝并发启动工具写任务 {kind:?}: {message}");
+            return false;
         };
         if let Some(dialog) = self
             .mutating_tool_dialogs
@@ -7438,8 +9191,9 @@ impl NativeWindow {
                 Ok(result) => format_tool_backend_result(result),
                 Err(error) => Err(error.to_string()),
             };
-            let _ = sender.send(ToolWorkerMessage::MutatingCompleted(kind, result));
+            let _ = sender.send(ToolWorkerMessage::MutatingCompleted { task, kind, result });
         });
+        true
     }
 
     unsafe fn begin_bitlocker_gate(
@@ -7806,7 +9560,7 @@ impl NativeWindow {
                 if let Some(page) = &self.backup_page {
                     set_text(
                         page.handles().warning,
-                        &crate::tr!("PE 文件安全校验失败：{}", error),
+                        &crate::tr!("PE 文件不可用：{}", error),
                     );
                 }
                 true
@@ -7897,6 +9651,37 @@ impl NativeWindow {
     }
 
     unsafe fn poll_tool_dialogs(&mut self, hwnd: HWND) {
+        if let Some(dialog) = &mut self.pe_maintenance_dialog {
+            if dialog.take_close() {
+                self.pe_maintenance_dialog = None;
+                let _ = KillTimer(hwnd, PE_MAINTENANCE_ANIMATION_TIMER_ID);
+            }
+        } else {
+            let _ = KillTimer(hwnd, PE_MAINTENANCE_ANIMATION_TIMER_ID);
+        }
+        if let Some(dialog) = &mut self.preinstall_dialog {
+            dialog.reconcile_category_selection();
+        }
+        match self
+            .preinstall_dialog
+            .as_mut()
+            .and_then(|dialog| dialog.take_intent())
+        {
+            Some(PreinstallDialogIntent::Apply(packages)) => {
+                let selected = packages.len();
+                self.preinstall_selection_user_set = true;
+                self.app_config
+                    .install_prefs
+                    .advanced_options
+                    .preinstalled_software = packages;
+                if let Some(page) = &self.advanced_page {
+                    page.set_preinstalled_software_count(selected);
+                }
+                self.preinstall_dialog = None;
+            }
+            Some(PreinstallDialogIntent::Close) => self.preinstall_dialog = None,
+            None => {}
+        }
         match self
             .time_sync_dialog
             .as_mut()
@@ -7934,8 +9719,14 @@ impl NativeWindow {
             .as_mut()
             .and_then(|dialog| dialog.take_intent());
         match batch_format_intent {
-            Some(BatchFormatDialogIntent::Refresh) => self.start_batch_format_inventory(),
-            Some(BatchFormatDialogIntent::Close) => self.batch_format_dialog = None,
+            Some(BatchFormatDialogIntent::Refresh) => {
+                self.batch_format_generation = self.batch_format_generation.wrapping_add(1);
+                self.start_batch_format_inventory(self.batch_format_generation);
+            }
+            Some(BatchFormatDialogIntent::Close) => {
+                self.batch_format_generation = self.batch_format_generation.wrapping_add(1);
+                self.batch_format_dialog = None;
+            }
             Some(BatchFormatDialogIntent::RequestConfirmation(execution)) => {
                 let selected = match &execution {
                     super::tool_dialogs_mutating::MutatingToolIntent::BatchFormat {
@@ -7963,8 +9754,17 @@ impl NativeWindow {
                     Ok(mut confirmation) => {
                         confirmation.fit_content_height(0);
                         if confirmation.show_modal() == DialogResult::Primary {
-                            self.batch_format_dialog = None;
-                            self.start_confirmed_tool(MutatingToolKind::BatchFormat, &execution);
+                            if self.start_confirmed_tool(MutatingToolKind::BatchFormat, &execution)
+                            {
+                                self.batch_format_generation =
+                                    self.batch_format_generation.wrapping_add(1);
+                                self.batch_format_dialog = None;
+                            } else if let Some(dialog) = &mut self.batch_format_dialog {
+                                dialog.set_inventory(Err(crate::tr!(
+                                    "另一个写入任务正在执行，请等待其完成后再试。"
+                                )));
+                                dialog.show_modeless();
+                            }
                         } else if let Some(dialog) = &mut self.batch_format_dialog {
                             dialog.show_modeless();
                         }
@@ -7984,7 +9784,10 @@ impl NativeWindow {
             .as_mut()
             .and_then(|dialog| dialog.take_intent());
         match storage_driver_intent {
-            Some(StorageDriverDialogIntent::Close) => self.storage_driver_dialog = None,
+            Some(StorageDriverDialogIntent::Close) => {
+                self.storage_driver_generation = self.storage_driver_generation.wrapping_add(1);
+                self.storage_driver_dialog = None;
+            }
             Some(StorageDriverDialogIntent::RequestConfirmation(request)) => {
                 let spec = DialogSpec {
                     window_title: crate::tr!("确认导入存储控制器驱动"),
@@ -8004,7 +9807,14 @@ impl NativeWindow {
                 match DialogShell::create(hwnd, spec) {
                     Ok(mut confirmation) => {
                         if confirmation.show_modal() == DialogResult::Primary {
-                            self.start_storage_driver_prepare(request);
+                            if let Some(dialog) = &mut self.storage_driver_dialog {
+                                dialog.set_preparing();
+                                dialog.show_modeless();
+                            }
+                            self.start_storage_driver_prepare(
+                                self.storage_driver_generation,
+                                request,
+                            );
                         } else if let Some(dialog) = &mut self.storage_driver_dialog {
                             dialog.show_modeless();
                         }
@@ -8407,9 +10217,13 @@ impl NativeWindow {
                 .and_then(|dialog| dialog.take_intent())
         });
         match quick_partition_intent {
-            Some(QuickPartitionDialogIntent::Close) => self.quick_partition_dialog = None,
+            Some(QuickPartitionDialogIntent::Close) => {
+                self.quick_partition_generation = self.quick_partition_generation.wrapping_add(1);
+                self.quick_partition_dialog = None;
+            }
             Some(QuickPartitionDialogIntent::RefreshInventory) => {
-                self.start_quick_partition_inventory();
+                self.quick_partition_generation = self.quick_partition_generation.wrapping_add(1);
+                self.start_quick_partition_inventory(self.quick_partition_generation);
             }
             Some(QuickPartitionDialogIntent::RequestConfirmation(request)) => {
                 let spec = DialogSpec {
@@ -8430,13 +10244,22 @@ impl NativeWindow {
                 match DialogShell::create(hwnd, spec) {
                     Ok(mut confirmation) => {
                         if confirmation.show_modal() == DialogResult::Primary {
-                            self.quick_partition_dialog = None;
-                            self.start_confirmed_tool(
+                            let started = self.start_confirmed_tool(
                                 MutatingToolKind::QuickPartition,
                                 &super::tool_dialogs_mutating::MutatingToolIntent::QuickPartition {
                                     request,
                                 },
                             );
+                            if started {
+                                self.quick_partition_generation =
+                                    self.quick_partition_generation.wrapping_add(1);
+                                self.quick_partition_dialog = None;
+                            } else if let Some(dialog) = &mut self.quick_partition_dialog {
+                                dialog.set_operation_error(crate::tr!(
+                                    "另一个写入任务正在执行，请等待其完成后再试。"
+                                ));
+                                dialog.show_modeless();
+                            }
                         } else if let Some(dialog) = &mut self.quick_partition_dialog {
                             dialog.show_modeless();
                         }
@@ -8445,7 +10268,8 @@ impl NativeWindow {
                 }
             }
             Some(QuickPartitionDialogIntent::RequestFormatOptions(target)) => {
-                if let Some(options) = prompt_partition_format_options(hwnd, &target.current_label)
+                if let Some(options) =
+                    prompt_partition_format_options(hwnd, self.font, &target.current_label)
                 {
                     if let Some(dialog) = &mut self.quick_partition_dialog {
                         dialog.stage_format(target, options);
@@ -8462,7 +10286,7 @@ impl NativeWindow {
                 if has_offline_expand && offline_expand.is_none() && compound_expand.is_none() {
                     if let Some(dialog) = &mut self.quick_partition_dialog {
                         dialog.set_operation_error(crate::tr!(
-                            "暂存的连续分区调整无法形成安全、确定的执行顺序；请刷新磁盘布局后重新拖动。"
+                            "当前版本只支持使用目标卷后方已有连续未分配空间的纯扩展；需要收缩、转移或移动分区的暂存方案不会创建 PE 交接。"
                         ));
                         dialog.show_modeless();
                     }
@@ -8521,16 +10345,12 @@ impl NativeWindow {
                                     return;
                                 }
                                 if let Some(dialog) = &mut self.quick_partition_dialog {
-                                    dialog.finish_pending_apply();
                                     dialog.set_operation_status(crate::tr!(
                                         "正在应用右侧分区扩容并复核磁盘布局..."
                                     ));
                                 }
                                 self.start_quick_partition_compound_offline(operations);
                             } else {
-                                if let Some(dialog) = &mut self.quick_partition_dialog {
-                                    dialog.finish_pending_apply();
-                                }
                                 self.start_quick_partition_pending(operations);
                             }
                         } else if let Some(dialog) = &mut self.quick_partition_dialog {
@@ -8575,7 +10395,7 @@ impl NativeWindow {
                                     {
                                         if let Some(dialog) = &mut self.quick_partition_dialog {
                                             dialog.set_operation_error(crate::tr!(
-                                                "暂存的连续分区调整无法形成安全、确定的执行顺序；请刷新磁盘布局后重新拖动。"
+                                                "当前版本只支持使用目标卷后方已有连续未分配空间的纯扩展；需要收缩、转移或移动分区的暂存方案不会创建 PE 交接。"
                                             ));
                                             dialog.show_modeless();
                                         }
@@ -8598,21 +10418,21 @@ impl NativeWindow {
                                             return;
                                         }
                                         if let Some(dialog) = &mut self.quick_partition_dialog {
-                                            dialog.finish_pending_apply();
                                             dialog.set_operation_status(crate::tr!(
                                                 "正在应用右侧分区扩容并复核磁盘布局..."
                                             ));
                                         }
                                         self.start_quick_partition_compound_offline(operations);
                                     } else {
-                                        if let Some(dialog) = &mut self.quick_partition_dialog {
-                                            dialog.finish_pending_apply();
-                                        }
                                         self.start_quick_partition_pending(operations);
                                     }
                                 }
                             }
-                            DialogResult::Secondary => self.quick_partition_dialog = None,
+                            DialogResult::Secondary => {
+                                self.quick_partition_generation =
+                                    self.quick_partition_generation.wrapping_add(1);
+                                self.quick_partition_dialog = None;
+                            }
                             DialogResult::Cancel => {
                                 if let Some(dialog) = &mut self.quick_partition_dialog {
                                     dialog.show_modeless();
@@ -8631,9 +10451,13 @@ impl NativeWindow {
                 .and_then(|dialog| dialog.take_intent())
         });
         match bitlocker_intent {
-            Some(BitLockerManageDialogIntent::Close) => self.bitlocker_manage_dialog = None,
+            Some(BitLockerManageDialogIntent::Close) => {
+                self.bitlocker_manage_generation = self.bitlocker_manage_generation.wrapping_add(1);
+                self.bitlocker_manage_dialog = None;
+            }
             Some(BitLockerManageDialogIntent::RefreshInventory) => {
-                self.start_bitlocker_manage_inventory();
+                self.bitlocker_manage_generation = self.bitlocker_manage_generation.wrapping_add(1);
+                self.start_bitlocker_manage_inventory(self.bitlocker_manage_generation);
             }
             Some(BitLockerManageDialogIntent::ExportRecoveryKey(key)) => {
                 if let Some(path) = rfd::FileDialog::new()
@@ -8923,6 +10747,7 @@ impl NativeWindow {
             .as_ref()
             .map(|receiver| receiver.try_iter().collect())
             .unwrap_or_default();
+        let mut show_expand_failure_log_prompt = false;
         for message in expand_messages {
             match message {
                 ExpandCWorkerMessage::Progress(status) => {
@@ -8949,6 +10774,7 @@ impl NativeWindow {
                     }
                     self.expand_c_execution = None;
                     self.expand_from_quick_partition = false;
+                    self.finish_expand_write_task();
                     crate::core::pe::PeManager::reboot();
                 }
                 ExpandCWorkerMessage::Failed(error) => {
@@ -8962,8 +10788,13 @@ impl NativeWindow {
                     }
                     self.expand_c_execution = None;
                     self.expand_from_quick_partition = false;
+                    self.finish_expand_write_task();
+                    show_expand_failure_log_prompt = true;
                 }
             }
+        }
+        if show_expand_failure_log_prompt {
+            self.show_terminal_error_log_prompt(hwnd);
         }
         let expand_intent = self
             .expand_c_dialog
@@ -9000,7 +10831,7 @@ impl NativeWindow {
                 match DialogShell::create(hwnd, spec) {
                     Ok(mut confirmation) => {
                         if confirmation.show_modal() == DialogResult::Primary {
-                            self.start_expand_c_execution(hwnd, request);
+                            self.start_expand_c_execution(hwnd, *request);
                         } else if let Some(dialog) = &mut self.expand_c_dialog {
                             dialog.show_modeless();
                         }
@@ -9033,6 +10864,7 @@ impl NativeWindow {
             || self.password_reset_dialog.is_some()
             || self.driver_transfer_dialog.is_some()
             || self.boot_repair_dialog.is_some()
+            || self.preinstall_dialog.is_some()
             || self.appx_dialog.is_some()
             || self.nvidia_dialog.is_some()
             || self.partition_copy_dialog.is_some()
@@ -9042,7 +10874,9 @@ impl NativeWindow {
             || self.expand_c_analysis.is_some()
             || self.expand_c_execution.is_some()
             || self.hardware_inspector_dialog.is_some()
+            || self.pe_maintenance_dialog.is_some()
             || self.tool_background_jobs != 0
+            || self.write_task_gate.active().is_some()
     }
 
     fn request_hardware_refresh(&self, hwnd: HWND) {
@@ -9091,11 +10925,198 @@ impl NativeWindow {
             disk_size_bytes: partition.disk_size_bytes,
             partition_offset_bytes: partition.partition_offset_bytes,
             partition_size_bytes: partition.partition_size_bytes,
+            stable_identity: partition.stable_identity,
             disk_bus_type,
             style: partition.partition_style,
             is_current_system: partition.is_system_partition,
             has_windows: partition.has_windows,
         })
+    }
+
+    unsafe fn final_install_intent(
+        &mut self,
+    ) -> Result<
+        crate::core::native_install_controller::StartInstallIntent,
+        crate::core::native_install_controller::InstallValidationError,
+    > {
+        // The returned intent owns a clone of these preferences. A config write failure is only a
+        // persistence warning; it cannot invalidate the already captured in-memory snapshot.
+        self.synchronize_install_state(AdvancedStateBoundary::InstallSnapshot);
+        self.install_intent()
+    }
+
+    unsafe fn selected_partition_record(&self) -> Option<&crate::core::disk::Partition> {
+        let handles = self.handles.as_ref()?;
+        let selected = SendMessageW(handles.partitions, 0x100C, WPARAM(usize::MAX), LPARAM(2)).0;
+        self.partitions.get(usize::try_from(selected).ok()?)
+    }
+
+    unsafe fn selected_image_space_requirement(
+        &self,
+    ) -> lr_core::custom_install::ImageSpaceRequirement {
+        let Some(handles) = self.handles else {
+            return lr_core::custom_install::ImageSpaceRequirement::fallback();
+        };
+        let selected = SendMessageW(handles.image_volume, 0x0147, WPARAM(0), LPARAM(0)).0;
+        self.image_volumes
+            .get(usize::try_from(selected).unwrap_or(usize::MAX))
+            .map(|image| {
+                lr_core::custom_install::image_space_requirement(
+                    image.size_bytes,
+                    image.hard_link_bytes,
+                )
+            })
+            .unwrap_or_else(lr_core::custom_install::ImageSpaceRequirement::fallback)
+    }
+
+    unsafe fn sync_dual_boot_size_with_selected_image(&mut self) {
+        let Some(handles) = self.handles else { return };
+        if SendMessageW(handles.custom_mode, 0x0147, WPARAM(0), LPARAM(0)).0 != 2 {
+            return;
+        }
+        let current = get_text(handles.dual_boot_size).trim().parse::<u64>().ok();
+        let (value, automatic) = reconcile_dual_boot_size_gib(
+            current,
+            self.dual_boot_auto_size_gib,
+            self.selected_image_space_requirement()
+                .windows_partition_bytes,
+        );
+        self.dual_boot_auto_size_gib = automatic;
+        if current != Some(value) {
+            set_text(handles.dual_boot_size, &value.to_string());
+        }
+    }
+
+    unsafe fn note_dual_boot_size_edited(&mut self) {
+        let Some(handles) = self.handles else { return };
+        let current = get_text(handles.dual_boot_size).trim().parse::<u64>().ok();
+        if current != self.dual_boot_auto_size_gib {
+            self.dual_boot_auto_size_gib = None;
+        }
+    }
+
+    unsafe fn prepare_custom_install_plan(&mut self, hwnd: HWND) -> Result<bool, String> {
+        let handles = self
+            .handles
+            .ok_or_else(|| crate::tr!("安装界面尚未准备完成。"))?;
+        let mode_index = SendMessageW(handles.custom_mode, 0x0147, WPARAM(0), LPARAM(0)).0;
+        if mode_index <= 0 {
+            self.app_config.install_prefs.custom_install_plan =
+                lr_core::custom_install::CustomInstallPlan::ReinstallPartition;
+            return Ok(true);
+        }
+        let selected = self
+            .selected_partition_record()
+            .cloned()
+            .ok_or_else(|| crate::tr!("请选择一个用于当前安装模式的分区。"))?;
+        let image = self.selected_image_space_requirement();
+        let plan = if mode_index == 1 {
+            let windows_disk = selected
+                .disk_number
+                .ok_or_else(|| crate::tr!("所选分区没有可确认的物理磁盘。"))?;
+            let inventory = crate::core::custom_install_plan::capture_disk_inventory()
+                .map_err(|error| crate::tr!("读取当前内部硬盘列表失败：{}", error))?;
+            let internal = inventory
+                .iter()
+                .filter(|disk| {
+                    disk.attachment == lr_core::data_staging::StorageAttachment::Internal
+                        && disk.marker_letter.is_some()
+                })
+                .collect::<Vec<_>>();
+            if internal.is_empty() {
+                return Err(crate::tr!("没有找到可由用户确认的电脑内部硬盘。"));
+            }
+            // The partition list currently authorizes one Windows target disk; it is not a
+            // multi-disk picker. Never turn every visible internal disk into an implicit erase
+            // selection merely because it can host a marker.
+            let confirmed = vec![windows_disk];
+            let plan = crate::core::custom_install_plan::build_full_disk_plan(
+                &inventory,
+                &confirmed,
+                windows_disk,
+                image,
+            )
+            .map_err(|error| error.to_string())?;
+            let disk_list = internal
+                .iter()
+                .filter(|disk| confirmed.contains(&disk.disk_number))
+                .map(|disk| format!("• {}", disk.display_name()))
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            let spec = DialogSpec {
+                window_title: crate::tr!("全盘重装前最后确认"),
+                title: crate::tr!("全盘重装前最后确认"),
+                description: crate::tr!(
+                    "即将清空以下电脑内置硬盘：\r\n{}\r\n\r\n这些硬盘上现有的 Windows、分区和个人文件都会被删除，请先确认重要文件已经备份。\r\n\r\n新系统将安装到你选择的硬盘，程序会自动分配 Windows 分区和数据分区；其他内置硬盘会重新建立为数据盘。安装过程中请勿关机或拔出硬盘。",
+                    disk_list
+                ),
+                width: 700,
+                height: 420,
+                buttons: DialogButtons {
+                    primary: crate::tr!("我已备份，开始全盘重装"),
+                    secondary: None,
+                    cancel: Some(crate::tr!("返回检查")),
+                },
+            };
+            let confirmed = DialogShell::create(hwnd, spec)
+                .map(|mut dialog| {
+                    dialog.fit_content_height(0);
+                    dialog.show_modal() == DialogResult::Primary
+                })
+                .map_err(|error| error.to_string())?;
+            if !confirmed {
+                return Ok(false);
+            }
+            plan
+        } else if mode_index == 2 {
+            let size_gib = get_text(handles.dual_boot_size)
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| crate::tr!("请输入有效的新系统分区大小（GB）。"))?;
+            let requested = size_gib
+                .checked_mul(lr_core::custom_install::GIB)
+                .ok_or_else(|| crate::tr!("新系统分区大小超出支持范围。"))?;
+            if requested < image.windows_partition_bytes {
+                return Err(crate::tr!(
+                    "新系统分区至少需要 {:.1} GB（所选镜像展开大小加 2 GB）。",
+                    image.windows_partition_bytes as f64 / lr_core::custom_install::GIB as f64
+                ));
+            }
+            let dual =
+                crate::core::custom_install_plan::build_dual_boot_request(&selected, requested, 0)
+                    .map_err(|error| error.to_string())?;
+            let spec = DialogSpec {
+                window_title: crate::tr!("创建双系统前最后确认"),
+                title: crate::tr!("创建双系统前最后确认"),
+                description: crate::tr!(
+                    "将在 {}: 分区末尾划出 {} GB 空间，新建一个 Windows 分区，并把新系统加入开机启动菜单。若没有其它空间足够的数据分区，程序会在同一次缩卷中额外建立一个数据分区，用于存放本次安装文件；其最低大小按实际文件总量加 2 GB 计算。\r\n\r\n原来的 Windows 和其他分区不会被格式化，但缩小分区和修改启动项仍有风险，请先备份重要文件。如果空间不足或磁盘布局不符合要求，程序会在正常 Windows 中停止，不会重启后才报错。",
+                    dual.source_drive_letter,
+                    size_gib
+                ),
+                width: 700,
+                height: 350,
+                buttons: DialogButtons {
+                    primary: crate::tr!("我已备份，开始创建双系统"),
+                    secondary: None,
+                    cancel: Some(crate::tr!("返回检查")),
+                },
+            };
+            let confirmed = DialogShell::create(hwnd, spec)
+                .map(|mut dialog| {
+                    dialog.fit_content_height(0);
+                    dialog.show_modal() == DialogResult::Primary
+                })
+                .map_err(|error| error.to_string())?;
+            if !confirmed {
+                return Ok(false);
+            }
+            lr_core::custom_install::CustomInstallPlan::DualBoot(dual)
+        } else {
+            return Err(crate::tr!("未知的安装模式。"));
+        };
+        self.app_config.install_prefs.custom_install_plan = plan;
+        self.app_config.install_prefs.repair_boot = true;
+        Ok(true)
     }
 
     unsafe fn install_intent(
@@ -9105,6 +11126,36 @@ impl NativeWindow {
         crate::core::native_install_controller::InstallValidationError,
     > {
         let handles = self.handles.as_ref().expect("native controls must exist");
+        let mut prefs = self.app_config.install_prefs.clone();
+        // Preinstalled packages are implemented by the built-in unattended first-logon plan.
+        // If unattended setup was disabled after a previous selection, the now-hidden choices
+        // must not survive into the execution snapshot or turn into a late validation failure.
+        if !prefs.unattended_install {
+            prefs.advanced_options.preinstalled_software.clear();
+            prefs.advanced_options.install_vmware_tools = false;
+        }
+        // VMware Tools is deliberately not part of the general selection dialog. Resolve the
+        // separate checkbox into the same validated runtime package list only when every current
+        // gate still holds at the installation snapshot boundary.
+        if prefs.unattended_install
+            && prefs.advanced_options.install_vmware_tools
+            && self.machine_environment == MachineEnvironment::Vmware
+        {
+            if let Some(software) = self.download_controller.vmware_tools_entry() {
+                if !prefs
+                    .advanced_options
+                    .preinstalled_software
+                    .iter()
+                    .any(|selected| selected.id.eq_ignore_ascii_case(&software.id))
+                {
+                    if let Some(package) =
+                        crate::core::native_download_controller::NativeDownloadController::selected_package(software)
+                    {
+                        prefs.advanced_options.preinstalled_software.push(package);
+                    }
+                }
+            }
+        }
         let image_path = self.effective_image_path.clone().unwrap_or_default();
         let is_gho = std::path::Path::new(&image_path)
             .extension()
@@ -9130,6 +11181,11 @@ impl NativeWindow {
                     })
             },
             image_path,
+            image_backing_path: self
+                .mounted_iso
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             xp_i386_source: self.xp_i386_source.clone(),
             target: self.selected_install_target(),
             is_pe_environment: crate::core::disk::DiskManager::is_pe_environment(),
@@ -9142,7 +11198,7 @@ impl NativeWindow {
             pca_detection_pending: self.pca_detection_pending || self.pca_target_detection_pending,
             pca_selection_error: self.pca_selection_error(),
             advanced_options_enabled: self.advanced_page.is_some(),
-            prefs: self.app_config.install_prefs.clone(),
+            prefs,
         }
         .start_intent()
     }
@@ -9288,35 +11344,41 @@ impl NativeWindow {
         let Some(handles) = &self.handles else { return };
         let redraw = redraw::suspend(hwnd);
         self.progress_visible = true;
-        for control in handles.nav.into_iter().chain([
-            handles.brand,
-            handles.title,
-            handles.description,
-            handles.image_label,
-            handles.image_edit,
-            handles.browse,
-            handles.image_volume_label,
-            handles.image_volume,
-            handles.partitions_label,
-            handles.partitions,
-            handles.format,
-            handles.boot,
-            handles.unattend,
-            handles.unattend_browse,
-            handles.unattend_clear,
-            handles.unattend_path,
-            handles.driver_label,
-            handles.driver,
-            handles.reboot,
-            handles.boot_label,
-            handles.boot_mode,
-            handles.pca_label,
-            handles.pca_mode,
-            handles.advanced,
-            handles.refresh,
-            handles.status,
-            handles.primary,
-        ]) {
+        for control in handles
+            .nav
+            .into_iter()
+            .chain([
+                handles.brand,
+                handles.title,
+                handles.description,
+                handles.image_label,
+                handles.image_edit,
+                handles.browse,
+                handles.image_volume_label,
+                handles.image_volume,
+                handles.partitions_label,
+                handles.partitions,
+                handles.format,
+                handles.boot,
+                handles.unattend,
+                handles.unattend_browse,
+                handles.unattend_clear,
+                handles.unattend_path,
+                handles.driver_label,
+                handles.driver,
+                handles.reboot,
+                handles.boot_label,
+                handles.boot_mode,
+                handles.pca_label,
+                handles.pca_mode,
+                handles.automation_export,
+                handles.advanced,
+                handles.refresh,
+                handles.status,
+                handles.primary,
+            ])
+            .chain(custom_install_mode_controls(handles))
+        {
             let _ = ShowWindow(control, SW_HIDE);
         }
         if let Some(page) = &self.backup_page {
@@ -9349,6 +11411,36 @@ impl NativeWindow {
             let _ = InvalidateRect(hwnd, None, false);
         }
         let _ = SetTimer(hwnd, timer_id, 100, None);
+    }
+
+    #[cfg(feature = "non-elevated-tests")]
+    unsafe fn show_running_progress_preview(&mut self, hwnd: HWND) {
+        // Reuse the production transition so the preview exercises the exact same visibility,
+        // layout, font, theme and progress-painting path. No controller or worker is attached.
+        self.enter_progress(hwnd, running_progress_preview_state(), INSTALL_TIMER_ID);
+        // enter_progress normally attaches the controller polling timer. The preview has no
+        // controller by design, so remove it before the message loop can dispatch a tick.
+        let _ = KillTimer(hwnd, INSTALL_TIMER_ID);
+    }
+
+    #[cfg(feature = "non-elevated-tests")]
+    unsafe fn show_pe_maintenance_preview(&mut self, hwnd: HWND) -> windows::core::Result<()> {
+        // Keep the toolbox visible behind the exact production dialog so the preview matches the
+        // real button flow. This intentionally bypasses PeManager, BCD, BitLocker and restart
+        // controllers; only the dialog's UI timer is active.
+        self.select_page(hwnd, Page::Tools);
+        let mut dialog = PeMaintenanceProgressDialog::create(hwnd)?;
+        dialog.set_stage(crate::core::pe::PeMaintenanceProgress::CollectingBitLockerKeys);
+        dialog.show_modeless();
+        self.pe_maintenance_dialog = Some(dialog);
+        let _ = SetTimer(
+            hwnd,
+            PE_MAINTENANCE_ANIMATION_TIMER_ID,
+            PE_MAINTENANCE_ANIMATION_INTERVAL_MS,
+            None,
+        );
+        let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
+        Ok(())
     }
 
     unsafe fn show_backup_progress(&mut self, hwnd: HWND, execution: BackupExecution) {
@@ -9403,32 +11495,72 @@ impl NativeWindow {
             }
             return;
         }
-        let partition = self.partitions.iter().find(|partition| {
-            partition
-                .letter
-                .eq_ignore_ascii_case(&intent.target_partition)
-        });
-        let stable_target = partition.and_then(|partition| {
-            Some(StableTargetIdentity {
-                disk_number: partition.disk_number?,
-                partition_number: partition.partition_number?,
-                disk_size_bytes: partition.disk_size_bytes?,
-                partition_offset_bytes: partition.partition_offset_bytes?,
-                partition_size_bytes: partition.partition_size_bytes?,
-            })
-        });
         let expected_target = StableTargetIdentity {
             disk_number: intent.target_disk_number,
             partition_number: intent.target_partition_number,
             disk_size_bytes: intent.target_disk_size_bytes,
             partition_offset_bytes: intent.target_partition_offset_bytes,
             partition_size_bytes: intent.target_partition_size_bytes,
+            stable_volume: intent.target_stable_identity,
         };
-        if stable_target != Some(expected_target) {
+        let target_letter = intent
+            .target_partition
+            .chars()
+            .next()
+            .filter(|letter| letter.is_ascii_alphabetic());
+        let probe = target_letter
+            .ok_or_else(|| crate::tr!("安装目标盘符无效：{}", intent.target_partition))
+            .and_then(|letter| {
+                lr_core::windows_storage::stable_volume_identity(letter)
+                    .map_err(|error| error.to_string())
+            });
+        match classify_stable_target_probe(expected_target, probe) {
+            StableTargetProbeResult::Match => {}
+            StableTargetProbeResult::Changed(actual) => {
+                log::warn!(
+                    "[INSTALL TARGET IDENTITY] physical range changed: expected={expected_target:?}, actual={actual:?}"
+                );
+                if let Some(handles) = &self.handles {
+                    set_text(
+                        handles.status,
+                        &crate::tr!("安装目标的物理分区身份已确认发生变化，请重新选择目标后再试。"),
+                    );
+                }
+                return;
+            }
+            StableTargetProbeResult::Unavailable(error) => {
+                log::error!(
+                    "[INSTALL TARGET IDENTITY] cannot query {}: {}",
+                    intent.target_partition,
+                    error
+                );
+                if let Some(handles) = &self.handles {
+                    set_text(
+                        handles.status,
+                        &crate::tr!(
+                            "无法读取安装目标的物理身份，安装已停止。请刷新分区后重试；若仍失败，请检查管理员权限和存储控制器状态。"
+                        ),
+                    );
+                }
+                return;
+            }
+        }
+        let partition = self.partitions.iter().find(|partition| {
+            partition
+                .letter
+                .eq_ignore_ascii_case(&intent.target_partition)
+        });
+        if partition.is_none() {
+            log::error!(
+                "[INSTALL TARGET IDENTITY] verified volume {} is absent from refreshed partition and BitLocker inventory",
+                intent.target_partition
+            );
             if let Some(handles) = &self.handles {
                 set_text(
                     handles.status,
-                    &crate::tr!("安装目标的磁盘或分区身份已变化，请重新选择目标后再试。"),
+                    &crate::tr!(
+                        "无法重新读取安装目标的分区和 BitLocker 状态，安装已停止。请刷新后重试。"
+                    ),
                 );
             }
             return;
@@ -9466,7 +11598,7 @@ impl NativeWindow {
             _ => BitLockerRequirement::Ready,
         };
         let context = InstallExecutionContext {
-            stable_target,
+            stable_target: Some(expected_target),
             bitlocker,
         };
         if let Err(error) = NativeInstallExecutor::build_plan(&intent, &context) {
@@ -9474,6 +11606,7 @@ impl NativeWindow {
             if let Some(handles) = &self.handles {
                 set_text(handles.status, &error.user_message());
             }
+            self.show_terminal_error_log_prompt(hwnd);
             return;
         }
 
@@ -9486,6 +11619,12 @@ impl NativeWindow {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         self.install_auto_reboot = intent.options.auto_reboot;
+        self.install_has_pending_first_logon_software = intent.mode == InstallMode::Direct
+            && !intent
+                .options
+                .advanced_options
+                .preinstalled_software
+                .is_empty();
         self.install_requires_secure_boot_disable = intent.mode == InstallMode::Direct
             && intent.options.repair_boot
             && intent.options.advanced_options.win7_uefi_patch
@@ -9628,26 +11767,37 @@ impl NativeWindow {
             }
         }
         let mut reboot_after_completion = false;
+        let mut show_failure_log_prompt = false;
         for message in messages {
             let mut terminal = false;
             if let Some(page) = &mut self.progress_page {
                 let mut state = page.state().clone();
                 match message {
                     InstallWorkerMessage::Event(InstallExecutionEvent::Started {
-                        total_phases,
+                        total_phases: _,
                     }) => {
-                        state.overall = ProgressValue::new(0, total_phases as u64);
+                        self.install_progress_phase = None;
+                        state.overall = ProgressValue::new(0, 100);
                         state.current_step = crate::tr!("安装任务已启动");
                         state.status_text.clear();
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::PhaseStarted {
                         phase,
+                        cancellable,
+                        overall,
                         ..
                     }) => {
-                        state.overall =
-                            ProgressValue::new(u64::from(phase.weighted_overall_progress(0)), 100);
+                        self.install_progress_phase = Some((phase, overall));
+                        state.overall = ProgressValue::new(
+                            state.overall.completed.max(u64::from(overall.start)),
+                            100,
+                        );
                         state.step = ProgressValue::new(0, 100);
                         state.current_step = install_phase_label(phase);
+                        state.cancellable = cancellable;
+                        // Do not keep the preceding phase's "100%" detail while the new phase is
+                        // already at 0%. The next progress event supplies phase-specific detail.
+                        state.detail.clear();
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::Progress {
                         phase,
@@ -9655,18 +11805,26 @@ impl NativeWindow {
                         detail,
                     }) => {
                         state.step = ProgressValue::new(u64::from(percentage), 100);
-                        state.overall = ProgressValue::new(
-                            u64::from(phase.weighted_overall_progress(percentage)),
-                            100,
-                        );
+                        let mapped = self
+                            .install_progress_phase
+                            .filter(|(active, _)| *active == phase)
+                            .map(|(_, range)| range.map(percentage))
+                            .unwrap_or_else(|| {
+                                log::warn!(
+                                    "[NATIVE INSTALL PROGRESS] ignored a phase/range mismatch for {phase:?}"
+                                );
+                                state.overall.completed.min(100) as u8
+                            });
+                        state.overall =
+                            ProgressValue::new(state.overall.completed.max(u64::from(mapped)), 100);
                         state.detail = detail;
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::PhaseCompleted {
-                        phase,
+                        overall_end,
                         ..
                     }) => {
                         state.overall = ProgressValue::new(
-                            u64::from(phase.weighted_overall_progress(100)),
+                            state.overall.completed.max(u64::from(overall_end)),
                             100,
                         );
                         state.step = ProgressValue::new(100, 100);
@@ -9676,17 +11834,29 @@ impl NativeWindow {
                         state.step = state.overall;
                         state.status = ProgressStatus::Succeeded;
                         state.cancellable = false;
-                        state.current_step = crate::tr!("系统安装已完成");
                         state.status_text = match outcome {
                             crate::core::native_install_executor::InstallExecutionOutcome::DirectInstallCompleted => {
+                                state.current_step = crate::tr!("系统安装已完成");
                                 page.set_completion(ProgressCompletion::DirectInstall);
                                 if self.install_requires_secure_boot_disable {
-                                    crate::tr!("Windows 7 UEFI 已安装完成，但当前 Secure Boot（安全启动）仍处于开启状态。请先进入 BIOS/UEFI 关闭 Secure Boot，再启动新系统。程序不会自动重启。")
+                                    let warning = crate::tr!("Windows 7 UEFI 已安装完成，但当前 Secure Boot（安全启动）仍处于开启状态。请先进入 BIOS/UEFI 关闭 Secure Boot，再启动新系统。程序不会自动重启。");
+                                    if self.install_has_pending_first_logon_software {
+                                        format!(
+                                            "{}\r\n{}",
+                                            warning,
+                                            crate::tr!("Windows 离线部署已完成。预装软件将在首次登录阶段继续安装。")
+                                        )
+                                    } else {
+                                        warning
+                                    }
+                                } else if self.install_has_pending_first_logon_software {
+                                    crate::tr!("Windows 离线部署已完成。预装软件将在首次登录阶段继续安装。")
                                 } else {
                                     crate::tr!("系统安装已完成。")
                                 }
                             }
                             crate::core::native_install_executor::InstallExecutionOutcome::ReadyToRebootIntoPe => {
+                                state.current_step = crate::tr!("PE 环境准备完成");
                                 page.set_completion(ProgressCompletion::ViaPePrepared);
                                 crate::tr!("PE 环境准备完成，请选择立即重启或稍后重启。")
                             }
@@ -9700,6 +11870,7 @@ impl NativeWindow {
                         state.current_step = crate::tr!("安装失败");
                         state.detail = error;
                         state.status_text = crate::tr!("安装已安全停止，请检查错误信息。");
+                        show_failure_log_prompt = true;
                         terminal = true;
                     }
                     InstallWorkerMessage::Cancelled => {
@@ -9733,6 +11904,10 @@ impl NativeWindow {
             self.install_messages = None;
             self.install_cancel = None;
             let _ = KillTimer(hwnd, INSTALL_TIMER_ID);
+            show_failure_log_prompt = true;
+        }
+        if show_failure_log_prompt {
+            self.show_terminal_error_log_prompt(hwnd);
         }
         if reboot_after_completion {
             log::info!("安装完成，用户已选择立即重启");
@@ -9753,10 +11928,7 @@ impl NativeWindow {
                 let error = crate::tr!("远程资源目录加载线程异常结束，请重试。");
                 self.download_controller.fail_refresh(error.clone());
                 if let Some(page) = &self.download_page {
-                    set_text(
-                        page.status,
-                        &catalogue_status_message(self.download_controller.state()),
-                    );
+                    page.set_status(&catalogue_status_message(self.download_controller.state()));
                 }
                 return;
             }
@@ -9771,10 +11943,7 @@ impl NativeWindow {
                 .unwrap_or_else(|| crate::tr!("远程资源目录加载失败"));
             self.download_controller.fail_refresh(error.clone());
             if let Some(page) = &self.download_page {
-                set_text(
-                    page.status,
-                    &catalogue_status_message(self.download_controller.state()),
-                );
+                page.set_status(&catalogue_status_message(self.download_controller.state()));
             }
             return;
         }
@@ -9795,10 +11964,10 @@ impl NativeWindow {
                 .as_deref()
                 .map(ConfigManager::parse_software_list)
                 .unwrap_or_default(),
-            gpu_driver_list: remote
-                .gpu_content
+            software_categories: remote
+                .soft_content
                 .as_deref()
-                .map(ConfigManager::parse_gpu_driver_list)
+                .map(ConfigManager::parse_software_categories)
                 .unwrap_or_default(),
             ..ConfigManager::default()
         };
@@ -9813,14 +11982,16 @@ impl NativeWindow {
             if self.handles.is_some() {
                 self.layout(hwnd);
                 self.update_install_primary_state();
+                redraw::invalidate_client_tree(hwnd);
             }
         }
         if let Some(page) = &mut self.download_page {
-            page.replace_rows(&self.download_controller.rows());
-            set_text(
-                page.status,
-                &catalogue_status_message(self.download_controller.state()),
+            page.replace_software_categories(
+                &self.download_controller.software_category_names(),
+                self.download_controller.selected_software_category(),
             );
+            page.replace_rows(&self.download_controller.rows());
+            page.set_status(&catalogue_status_message(self.download_controller.state()));
         }
 
         let easy_config = remote
@@ -9924,15 +12095,52 @@ impl NativeWindow {
                     self.leave_progress_to(hwnd, Page::Install);
                     self.load_image_path(hwnd, path);
                 }
-                Some(
-                    crate::core::native_download_controller::DownloadCompletion::RunDownloadedFile(
-                        path,
-                    ),
-                ) => {
+                Some(crate::core::native_download_controller::DownloadCompletion::RunDownloadedInstaller {
+                    path,
+                    silent_command,
+                    requires_admin,
+                }) => {
                     #[cfg(feature = "non-elevated-tests")]
-                    log::warn!("开发隔离构建拒绝启动下载文件: {}", path.display());
-                    #[cfg(not(feature = "non-elevated-tests"))]
                     {
+                        let _ = (&silent_command, requires_admin);
+                        log::warn!("开发隔离构建拒绝启动下载文件: {}", path.display());
+                    }
+                    #[cfg(not(feature = "non-elevated-tests"))]
+                    if let Some(template) = silent_command {
+                        let parsed = match lr_core::software_install::parse_silent_install_template(&template, &path) {
+                            Ok(parsed) => parsed,
+                            Err(error) => {
+                                log::error!("静默安装命令无效: {error}");
+                                self.leave_progress(hwnd);
+                                return;
+                            }
+                        };
+                        let program = match parsed.program {
+                            lr_core::software_install::SilentInstallerProgram::DownloadedInstaller(program) => program,
+                            lr_core::software_install::SilentInstallerProgram::WindowsInstaller => {
+                                let Some(root) = std::env::var_os("SystemRoot") else {
+                                    log::error!("无法解析 SystemRoot，不能启动 Windows Installer");
+                                    self.leave_progress(hwnd);
+                                    return;
+                                };
+                                PathBuf::from(root).join("System32").join("msiexec.exe")
+                            }
+                        };
+                        let request = lr_core::command::CommandRequest::new(program).args(parsed.arguments);
+                        match lr_core::command::CommandExecutor::execute(&lr_core::command::SystemCommandExecutor, &request) {
+                                Ok(outcome) if outcome.succeeded() => {
+                                log::info!("软件下载后的静默安装已完成 requires_admin={requires_admin}");
+                            }
+                            Ok(outcome) => {
+                                log::error!(
+                                    "软件下载后的静默安装失败 exit={:?} stderr={}",
+                                    outcome.exit_code(),
+                                    String::from_utf8_lossy(outcome.stderr()).trim()
+                                );
+                            }
+                            Err(error) => log::error!("无法启动软件下载后的静默安装: {error}"),
+                        }
+                    } else {
                         let verb = wide("open");
                         let target = wide(&path);
                         let _ = ShellExecuteW(
@@ -10049,8 +12257,12 @@ impl NativeWindow {
                             crate::core::native_download_controller::DownloadCompletion::OpenSystemImage(_) => {
                                 crate::tr!("下载已完成，可继续选择安装目标。")
                             }
-                            crate::core::native_download_controller::DownloadCompletion::RunDownloadedFile(_) => {
-                                crate::tr!("下载已完成，可继续打开文件。")
+                            crate::core::native_download_controller::DownloadCompletion::RunDownloadedInstaller { silent_command, .. } => {
+                                if silent_command.is_some() {
+                                    crate::tr!("下载已完成，可继续静默安装。")
+                                } else {
+                                    crate::tr!("下载已完成，可继续打开文件。")
+                                }
                             }
                         };
                     completion = Some(
@@ -10072,6 +12284,9 @@ impl NativeWindow {
                     terminal = true;
                 }
                 DownloadWorkerMessage::Cancelled => {
+                    if self.pending_expand_after_pe_download.is_some() {
+                        self.finish_expand_write_task();
+                    }
                     self.pending_easy_install = None;
                     self.pending_remote_install = None;
                     self.pending_install_after_pe_download = None;
@@ -10085,6 +12300,9 @@ impl NativeWindow {
                     terminal = true;
                 }
                 DownloadWorkerMessage::Failed(error) => {
+                    if self.pending_expand_after_pe_download.is_some() {
+                        self.finish_expand_write_task();
+                    }
                     self.pending_easy_install = None;
                     self.pending_remote_install = None;
                     self.pending_install_after_pe_download = None;
@@ -10106,6 +12324,9 @@ impl NativeWindow {
             }
         }
         if disconnected && !terminal {
+            if self.pending_expand_after_pe_download.is_some() {
+                self.finish_expand_write_task();
+            }
             self.pending_easy_install = None;
             self.pending_remote_install = None;
             self.pending_install_after_pe_download = None;
@@ -10190,18 +12411,33 @@ impl NativeWindow {
             ));
             return;
         };
-        let Some(actual) = volumes.iter().find(|image| {
-            image.index == pending.expected_image.index && is_installable_image(image)
-        }) else {
+        let installable_volumes = volumes
+            .into_iter()
+            .filter(is_installable_image)
+            .collect::<Vec<_>>();
+        let select_first_installable = pending.expected_image.is_none();
+        let selected_position = select_downloaded_installable_position(
+            &installable_volumes,
+            pending.expected_image.as_ref(),
+        );
+        let Some(selected_position) = selected_position else {
             if let Some(path) = mounted_iso.as_ref() {
                 let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(&path.to_string_lossy());
             }
-            self.fail_remote_install_after_download(crate::tr!(
-                "下载后的镜像中已找不到先前选择的安装卷。"
-            ));
+            let detail = if pending.expected_image.is_some() {
+                crate::tr!("下载后的镜像中已找不到先前选择的安装卷。")
+            } else {
+                crate::tr!("下载后的镜像中没有明确可安装的 Windows 分卷。")
+            };
+            self.fail_remote_install_after_download(detail);
             return;
         };
-        if !remote_image_identity_matches(&pending.expected_image, actual) {
+        let actual = installable_volumes[selected_position].clone();
+        if pending
+            .expected_image
+            .as_ref()
+            .is_some_and(|expected| !remote_image_identity_matches(expected, &actual))
+        {
             if let Some(path) = mounted_iso.as_ref() {
                 let _ = crate::core::iso::IsoMounter::unmount_iso_by_path(&path.to_string_lossy());
             }
@@ -10210,18 +12446,31 @@ impl NativeWindow {
             ));
             return;
         }
-        let selected_position = volumes
-            .iter()
-            .filter(|image| is_installable_image(image))
-            .position(|image| image.index == pending.expected_image.index)
+        let capacity_requirement_changed = pending
+            .expected_image
+            .as_ref()
+            .is_some_and(|expected| remote_image_capacity_requirement_changed(expected, &actual));
+        let custom_plan_needs_reconfirmation = capacity_requirement_changed
+            && pending.intent.as_ref().is_some_and(|intent| {
+                intent.options.custom_install_plan.mode()
+                    != lr_core::custom_install::CustomInstallMode::ReinstallPartition
+            });
+        let effective_image_text = effective_image_path.to_string_lossy().into_owned();
+        let image_backing_path = mounted_iso
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut intent = pending.intent;
-        intent.image_path = effective_image_path.to_string_lossy().into_owned();
+        if let Some(intent) = intent.as_mut() {
+            intent.image_path.clone_from(&effective_image_text);
+            intent.volume_index = actual.index;
+            intent.image_backing_path.clone_from(&image_backing_path);
+        }
         if let Some(handles) = self.handles {
             self.image_edit_programmatic_change = true;
-            set_text(handles.image_edit, &intent.image_path);
+            set_text(handles.image_edit, &effective_image_text);
             self.image_edit_programmatic_change = false;
-            self.image_volumes = volumes.into_iter().filter(is_installable_image).collect();
+            self.image_volumes = installable_volumes;
             let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
             for volume in &self.image_volumes {
                 let label = wide(&volume.name);
@@ -10239,7 +12488,7 @@ impl NativeWindow {
                 LPARAM(0),
             );
         }
-        self.effective_image_path = Some(intent.image_path.clone());
+        self.effective_image_path = Some(effective_image_text);
         self.xp_i386_source = None;
         self.mounted_iso = mounted_iso;
         self.source_has_unattend = false;
@@ -10250,7 +12499,28 @@ impl NativeWindow {
         self.download_follow_up = None;
         self.remote_image_download = None;
         self.leave_progress_to(hwnd, Page::Install);
-        self.start_install_execution(hwnd, intent);
+        if select_first_installable || custom_plan_needs_reconfirmation || intent.is_none() {
+            self.request_pca_target_detection(hwnd);
+            self.update_pca_detection_status();
+            self.update_install_primary_state();
+            if let Some(handles) = self.handles {
+                set_text(
+                    handles.status,
+                    &if custom_plan_needs_reconfirmation {
+                        crate::tr!(
+                            "下载完成，已按本地镜像的实际展开容量刷新安装计划；请确认后再次点击安装。"
+                        )
+                    } else {
+                        crate::tr!("下载完成，已默认选择第一个可安装分卷；请确认后再次点击安装。")
+                    },
+                );
+            }
+            return;
+        }
+        self.start_install_execution(
+            hwnd,
+            intent.expect("a metadata-confirmed remote install keeps its validated intent"),
+        );
     }
 
     unsafe fn fail_remote_install_after_download(&mut self, detail: String) {
@@ -10376,6 +12646,7 @@ impl NativeWindow {
                     disk_size_bytes: partition.disk_size_bytes,
                     partition_offset_bytes: partition.partition_offset_bytes,
                     partition_size_bytes: partition.partition_size_bytes,
+                    stable_identity: partition.stable_identity,
                 })
             })
             .map(|partition| InstallTarget {
@@ -10385,6 +12656,7 @@ impl NativeWindow {
                 disk_size_bytes: partition.disk_size_bytes,
                 partition_offset_bytes: partition.partition_offset_bytes,
                 partition_size_bytes: partition.partition_size_bytes,
+                stable_identity: partition.stable_identity,
                 disk_bus_type: partition.disk_number.and_then(|disk_number| {
                     match lr_core::windows_storage::disk_bus_type(disk_number) {
                         Ok(bus) => Some(bus),
@@ -10409,6 +12681,11 @@ impl NativeWindow {
         let pe = self.available_pe();
         let state = NativeInstallState {
             image_path: effective_image_path.to_string_lossy().into_owned(),
+            image_backing_path: self
+                .mounted_iso
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             image_ready: true,
             selected_image: Some(selected_image),
             xp_i386_source: None,
@@ -10425,7 +12702,14 @@ impl NativeWindow {
             prefs: intent.prefs,
         };
         match state.start_intent() {
-            Ok(install) => self.start_install_execution(hwnd, install),
+            Ok(mut install) => {
+                // Production builds always return false here.  The ci-automation build accepts
+                // only the exact session-shaped opt-in set by the disposable-VM interactive
+                // runner, so first logon can publish a terminal state before evidence collection.
+                install.options.automation_shutdown_on_terminal =
+                    ci_easy_mode_shutdown_on_terminal();
+                self.start_install_execution(hwnd, install);
+            }
             Err(error) => {
                 if let Some(page) = &mut self.progress_page {
                     let mut state = page.state().clone();
@@ -10465,6 +12749,7 @@ impl NativeWindow {
                 }
             }
         }
+        let mut show_failure_log_prompt = false;
         for message in messages {
             let mut terminal = false;
             if let Some(page) = &mut self.progress_page {
@@ -10528,6 +12813,7 @@ impl NativeWindow {
                         state.current_step = crate::tr!("备份失败");
                         state.detail = error;
                         state.status_text = crate::tr!("请检查错误信息后重试。");
+                        show_failure_log_prompt = true;
                         terminal = true;
                     }
                 }
@@ -10550,69 +12836,123 @@ impl NativeWindow {
             }
             self.backup_execution = None;
             let _ = KillTimer(hwnd, BACKUP_TIMER_ID);
+            show_failure_log_prompt = true;
+        }
+        if show_failure_log_prompt {
+            self.show_terminal_error_log_prompt(hwnd);
         }
     }
 
     unsafe fn handle_primary_action(&mut self, hwnd: HWND) {
         match self.page {
-            Page::Install => match self.install_intent() {
-                Ok(intent) => {
-                    if let Some(handles) = &self.handles {
-                        set_text(
-                            handles.status,
-                            &crate::tr!("安装配置已通过安全校验，正在准备执行环境。"),
-                        );
-                    }
-                    log::info!(
-                        "原生安装意图已生成: mode={:?}, target={}, volume={}",
-                        intent.mode,
-                        intent.target_partition,
-                        intent.volume_index
-                    );
-                    if let Some(remote) = self.remote_image_download.clone() {
-                        let downloaded_path =
-                            remote.plan.save_directory.join(&remote.plan.filename);
-                        let selected = self.handles.and_then(|handles| {
-                            let index =
-                                SendMessageW(handles.image_volume, 0x0147, WPARAM(0), LPARAM(0)).0;
-                            self.image_volumes
-                                .get(usize::try_from(index).ok()?)
-                                .cloned()
-                        });
-                        let Some(expected_image) = selected else {
+            Page::Install => {
+                // A server without Range support has not supplied any trustworthy per-volume
+                // TOTALBYTES/HARDLINKBYTES yet. Download and inspect it locally before building or
+                // confirming a full-disk/dual-boot plan; the opaque 80-GiB fallback is not a
+                // download eligibility gate and must not reject an image that actually fits.
+                if let Some(remote) = self.remote_image_download.clone().filter(|remote| {
+                    remote_metadata_requires_download_before_plan(
+                        remote.select_first_installable_after_download,
+                    )
+                }) {
+                    let downloaded_path = remote.plan.save_directory.join(&remote.plan.filename);
+                    match NativeDownloadExecutor::start(remote.plan) {
+                        Ok(worker) => {
+                            self.pending_remote_install = Some(PendingRemoteInstall {
+                                intent: None,
+                                expected_image: None,
+                                downloaded_path,
+                            });
+                            self.show_download_progress(hwnd, worker);
+                        }
+                        Err(error) => {
                             if let Some(handles) = self.handles {
-                                set_text(handles.status, &crate::tr!("请选择要安装的镜像卷。"));
+                                set_text(
+                                    handles.status,
+                                    &crate::tr!("鏃犳硶鍚姩闀滃儚涓嬭浇锛歿}", error),
+                                );
                             }
-                            return;
-                        };
-                        match NativeDownloadExecutor::start(remote.plan) {
-                            Ok(worker) => {
-                                self.pending_remote_install = Some(PendingRemoteInstall {
-                                    intent,
-                                    expected_image,
-                                    downloaded_path,
-                                });
-                                self.show_download_progress(hwnd, worker);
-                            }
-                            Err(error) => {
-                                if let Some(handles) = self.handles {
-                                    set_text(
-                                        handles.status,
-                                        &crate::tr!("无法启动镜像下载：{}", error),
-                                    );
-                                }
-                            }
+                        }
+                    }
+                    return;
+                }
+                match self.prepare_custom_install_plan(hwnd) {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        if let Some(handles) = self.handles {
+                            set_text(handles.status, &error);
                         }
                         return;
                     }
-                    self.start_install_execution(hwnd, intent);
                 }
-                Err(error) => {
-                    if let Some(handles) = &self.handles {
-                        set_text(handles.status, &error.to_string());
+                match self.final_install_intent() {
+                    Ok(intent) => {
+                        if let Some(handles) = &self.handles {
+                            set_text(
+                                handles.status,
+                                &crate::tr!("安装配置已通过安全校验，正在准备执行环境。"),
+                            );
+                        }
+                        log::info!(
+                            "原生安装意图已生成: mode={:?}, target={}, volume={}",
+                            intent.mode,
+                            intent.target_partition,
+                            intent.volume_index
+                        );
+                        if let Some(remote) = self.remote_image_download.clone() {
+                            let downloaded_path =
+                                remote.plan.save_directory.join(&remote.plan.filename);
+                            let selected = self.handles.and_then(|handles| {
+                                let index = SendMessageW(
+                                    handles.image_volume,
+                                    0x0147,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                )
+                                .0;
+                                self.image_volumes
+                                    .get(usize::try_from(index).ok()?)
+                                    .cloned()
+                            });
+                            let Some(expected_image) = selected else {
+                                if let Some(handles) = self.handles {
+                                    set_text(handles.status, &crate::tr!("请选择要安装的镜像卷。"));
+                                }
+                                return;
+                            };
+                            let select_first_installable_after_download =
+                                remote.select_first_installable_after_download;
+                            match NativeDownloadExecutor::start(remote.plan) {
+                                Ok(worker) => {
+                                    self.pending_remote_install = Some(PendingRemoteInstall {
+                                        intent: Some(intent),
+                                        expected_image: (!select_first_installable_after_download)
+                                            .then_some(expected_image),
+                                        downloaded_path,
+                                    });
+                                    self.show_download_progress(hwnd, worker);
+                                }
+                                Err(error) => {
+                                    if let Some(handles) = self.handles {
+                                        set_text(
+                                            handles.status,
+                                            &crate::tr!("无法启动镜像下载：{}", error),
+                                        );
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                        self.start_install_execution(hwnd, intent);
+                    }
+                    Err(error) => {
+                        if let Some(handles) = &self.handles {
+                            set_text(handles.status, &error.to_string());
+                        }
                     }
                 }
-            },
+            }
             Page::Backup => self.prepare_backup_from_page(hwnd),
             Page::Hardware => {
                 if let Some(page) = &self.hardware_page {
@@ -10674,6 +13014,29 @@ impl NativeWindow {
             set_text(handles.browse, &crate::tr!("浏览..."));
             set_text(handles.image_volume_label, &crate::tr!("镜像卷:"));
             set_text(handles.partitions_label, &crate::tr!("选择安装分区:"));
+            set_text(handles.custom_mode_label, &crate::tr!("安装模式:"));
+            set_text(handles.dual_boot_size_label, &crate::tr!("新系统大小:"));
+            let selected_mode = SendMessageW(handles.custom_mode, 0x0147, WPARAM(0), LPARAM(0)).0;
+            let _ = SendMessageW(handles.custom_mode, 0x014B, WPARAM(0), LPARAM(0));
+            for value in [
+                crate::tr!("只重装所选分区"),
+                crate::tr!("全盘重装"),
+                crate::tr!("创建双系统"),
+            ] {
+                let value = wide(&value);
+                let _ = SendMessageW(
+                    handles.custom_mode,
+                    0x0143,
+                    WPARAM(0),
+                    LPARAM(value.as_ptr() as isize),
+                );
+            }
+            let _ = SendMessageW(
+                handles.custom_mode,
+                0x014E,
+                WPARAM(usize::try_from(selected_mode.max(0)).unwrap_or_default()),
+                LPARAM(0),
+            );
             set_text(handles.format, &crate::tr!("格式化分区"));
             set_text(handles.boot, &crate::tr!("添加引导"));
             set_text(handles.unattend, &crate::tr!("无人值守"));
@@ -10702,6 +13065,7 @@ impl NativeWindow {
             );
             set_text(handles.pca_label, &crate::tr!("启动签名:"));
             self.update_pca_combo_labels();
+            set_text(handles.automation_export, &crate::tr!("生成自动化"));
             set_text(handles.advanced, &crate::tr!("高级选项..."));
             set_text(handles.refresh, &crate::tr!("刷新分区"));
             update_list_column_titles(
@@ -10743,7 +13107,6 @@ impl NativeWindow {
             page.relocalize(&DownloadLabels {
                 system_tab: &crate::tr!("系统镜像"),
                 software_tab: &crate::tr!("常用软件"),
-                gpu_driver_tab: &crate::tr!("显卡驱动"),
                 status_ready: &self.initial_download_status(),
                 name_column: &crate::tr!("名称"),
                 type_column: &crate::tr!("类型"),
@@ -10891,8 +13254,288 @@ impl NativeWindow {
             },
         };
         if let Ok(mut dialog) = DialogShell::create(hwnd, spec) {
+            dialog.fit_content_height(0);
             let _ = dialog.show_modal();
         }
+    }
+
+    unsafe fn show_terminal_error_log_prompt(&self, hwnd: HWND) {
+        let snapshot = match crate::utils::logger::LogManager::flush_barrier() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log::error!("[DIAGNOSTIC UI] 无法在错误弹窗前完成正常端日志落盘: {error:#}");
+                self.show_information(
+                    hwnd,
+                    crate::tr!("操作出错"),
+                    crate::tr!(
+                        "操作已停止，但日志文件未能完成落盘。请保留当前界面并将此情况告知开发者。"
+                    ),
+                );
+                return;
+            }
+        };
+        let log_path = snapshot.path().to_path_buf();
+        let content = crate::tr!(
+            "操作已停止。请将下面的日志文件提供给开发者，以便定位并解决问题。\r\n\r\n日志文件：{}",
+            log_path.display()
+        );
+        match lr_core::windows_diagnostics::show_error_log_prompt(
+            hwnd,
+            &crate::tr!("操作出错"),
+            &crate::tr!("LetRecovery 遇到错误"),
+            &content,
+            &crate::tr!("打开文件"),
+        ) {
+            Ok(true) => {
+                if let Err(error) =
+                    lr_core::windows_diagnostics::reveal_file_in_explorer(log_path.clone())
+                {
+                    log::error!(
+                        "[DIAGNOSTIC UI] 无法启动日志文件定位线程 {}: {error}",
+                        log_path.display()
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::error!("[DIAGNOSTIC UI] 无法显示错误日志弹窗: {error}");
+                self.show_information(hwnd, crate::tr!("操作出错"), content);
+            }
+        }
+    }
+
+    unsafe fn show_automation_export_success(
+        &self,
+        hwnd: HWND,
+        bundle: &crate::core::automation_export::ExportedAutomation,
+    ) {
+        let spec = DialogSpec {
+            window_title: crate::tr!("自动化配置已生成"),
+            title: crate::tr!("自动化配置已生成"),
+            description: crate::tr!("已根据当前页面设置生成 CLI 配置和启动脚本。"),
+            width: 700,
+            height: 300,
+            buttons: DialogButtons {
+                primary: crate::tr!("确定"),
+                secondary: None,
+                cancel: None,
+            },
+        };
+        let Ok(mut dialog) = DialogShell::create(hwnd, spec) else {
+            return;
+        };
+        dialog.fit_content_height(110);
+        let content = dialog.content();
+        let location = match child(content, w!("STATIC"), &crate::tr!("位置："), 0, 61_100) {
+            Ok(control) => control,
+            Err(_) => return,
+        };
+        let path_text = bundle.directory.display().to_string();
+        let path = match child(content, w!("STATIC"), &path_text, SS_PATH_ELLIPSIS, 61_101) {
+            Ok(control) => control,
+            Err(_) => return,
+        };
+        let note = match child(
+            content,
+            w!("STATIC"),
+            &crate::tr!("请先检查 JSON，再以管理员身份运行对应的 CMD 文件。磁盘编号和已挂载镜像路径只适用于当前硬件与当前会话；换机或重新挂载镜像后请重新生成。"),
+            0,
+            61_102,
+        ) {
+            Ok(control) => control,
+            Err(_) => return,
+        };
+        let mut rect = RECT::default();
+        let _ = GetClientRect(content, &mut rect);
+        let layout = automation_information_layout(
+            rect.right.saturating_sub(rect.left),
+            rect.bottom.saturating_sub(rect.top),
+            GetDpiForWindow(dialog.hwnd()).max(96),
+        );
+        for (control, rect) in [
+            (location, layout.location_label),
+            (path, layout.path),
+            (note, layout.note),
+        ] {
+            let _ = MoveWindow(control, rect.x, rect.y, rect.width, rect.height, true);
+        }
+        let _ = dialog.show_modal();
+    }
+
+    unsafe fn export_current_automation(&mut self, hwnd: HWND) {
+        let result = match self.page {
+            Page::Install => self.export_install_automation(),
+            Page::Backup => self.export_backup_automation(),
+            _ => Err(crate::tr!("当前页面不支持生成自动化配置。")),
+        };
+        match result {
+            Ok(bundle) => self.show_automation_export_success(hwnd, &bundle),
+            Err(error) => self.show_information(
+                hwnd,
+                crate::tr!("无法生成自动化配置"),
+                crate::tr!("请检查当前页面设置后重试：{}", error),
+            ),
+        }
+    }
+
+    unsafe fn export_install_automation(
+        &mut self,
+    ) -> Result<crate::core::automation_export::ExportedAutomation, String> {
+        self.synchronize_install_state(AdvancedStateBoundary::InstallSnapshot);
+        let handles = self
+            .handles
+            .ok_or_else(|| crate::tr!("安装界面尚未准备完成。"))?;
+        let target = self
+            .selected_partition_record()
+            .cloned()
+            .ok_or_else(|| crate::tr!("请选择安装目标分区。"))?;
+        let target_partition = target.letter.trim().to_owned();
+        if target_partition.is_empty() {
+            return Err(crate::tr!("所选安装目标没有有效盘符。"));
+        }
+        let image_path = self
+            .xp_i386_source
+            .clone()
+            .or_else(|| self.effective_image_path.clone())
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| crate::tr!("请选择系统镜像。"))?;
+        let selected_volume = SendMessageW(handles.image_volume, 0x0147, WPARAM(0), LPARAM(0)).0;
+        let volume_index = usize::try_from(selected_volume)
+            .ok()
+            .and_then(|index| self.image_volumes.get(index))
+            .map(|image| image.index)
+            .unwrap_or(1);
+        let mode_index = SendMessageW(handles.custom_mode, 0x0147, WPARAM(0), LPARAM(0)).0;
+        let (install_mode, confirmed_disk_numbers, dual_boot_size_gib) = match mode_index {
+            index if index <= 0 => (CliInstallMode::ReinstallPartition, Vec::new(), None),
+            1 => (
+                CliInstallMode::RepartitionAllDisks,
+                vec![target
+                    .disk_number
+                    .ok_or_else(|| crate::tr!("所选分区没有可确认的物理磁盘。"))?],
+                None,
+            ),
+            2 => (
+                CliInstallMode::DualBoot,
+                Vec::new(),
+                Some(
+                    get_text(handles.dual_boot_size)
+                        .trim()
+                        .parse::<u64>()
+                        .map_err(|_| crate::tr!("请输入有效的新系统分区大小（GB）。"))?,
+                ),
+            ),
+            _ => return Err(crate::tr!("未知的安装模式。")),
+        };
+        let prefs = self.app_config.install_prefs.clone();
+        let repair_boot = prefs.repair_boot || install_mode != CliInstallMode::ReinstallPartition;
+        let preinstalled_software_ids = prefs
+            .advanced_options
+            .preinstalled_software
+            .iter()
+            .map(|package| package.id.clone())
+            .collect();
+        let advanced =
+            crate::core::automation_export::advanced_spec_from_options(&prefs.advanced_options);
+        let config = CliConfig {
+            schema_version: CLI_CONFIG_SCHEMA_VERSION,
+            operation: CliOperation::Install(Box::new(CliInstallSpec {
+                target_partition,
+                install_mode,
+                confirmed_disk_numbers,
+                dual_boot_size_gib,
+                image_path,
+                image_backing_path: self
+                    .mounted_iso
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                volume_index,
+                format_partition: prefs.format_partition,
+                repair_boot,
+                unattended: prefs.unattended_install,
+                auto_reboot: prefs.auto_reboot,
+                // The ordinary GUI never powers a newly installed system off. The disposable VM
+                // easy-mode matrix needs an observable terminal state after first logon, so the
+                // CI-only binary accepts one exact session-shaped opt-in inherited by the GUI.
+                automation_shutdown_on_terminal: ci_easy_mode_shutdown_on_terminal(),
+                driver_action: match prefs.driver_action {
+                    crate::core::ui_state::DriverAction::None => CliDriverAction::None,
+                    crate::core::ui_state::DriverAction::SaveOnly => CliDriverAction::SaveOnly,
+                    crate::core::ui_state::DriverAction::AutoImport => CliDriverAction::AutoImport,
+                },
+                boot_mode: match prefs.boot_mode {
+                    crate::core::ui_state::BootModeSelection::Auto => CliBootMode::Auto,
+                    crate::core::ui_state::BootModeSelection::UEFI => CliBootMode::Uefi,
+                    crate::core::ui_state::BootModeSelection::Legacy => CliBootMode::Legacy,
+                },
+                boot_pca_mode: match prefs.boot_pca_mode {
+                    lr_core::boot_pca::BootPcaMode::Auto => CliBootPcaMode::Auto,
+                    lr_core::boot_pca::BootPcaMode::Pca2011 => CliBootPcaMode::Pca2011,
+                    lr_core::boot_pca::BootPcaMode::Pca2023 => CliBootPcaMode::Pca2023,
+                },
+                custom_unattend_path: if prefs.unattended_install {
+                    self.custom_unattend_path.clone()
+                } else {
+                    String::new()
+                },
+                inherit_app_install_prefs: false,
+                preinstalled_software_ids,
+                advanced,
+            })),
+        };
+        crate::core::automation_export::export(config, "install", "install")
+            .map_err(|error| error.to_string())
+    }
+
+    unsafe fn export_backup_automation(
+        &self,
+    ) -> Result<crate::core::automation_export::ExportedAutomation, String> {
+        let page = self
+            .backup_page
+            .as_ref()
+            .ok_or_else(|| crate::tr!("备份界面尚未准备完成。"))?;
+        let state = page.read_state();
+        let rows = self.backup_partition_rows();
+        state.validate(&rows).map_err(|error| error.to_string())?;
+        let source = rows
+            .get(
+                state
+                    .source_partition
+                    .ok_or_else(|| crate::tr!("请选择要备份的分区"))?,
+            )
+            .ok_or_else(|| crate::tr!("所选备份分区已不可用，请重新选择"))?;
+        let format = match state.format {
+            super::pages::backup::BackupFormat::Wim => CliBackupFormat::Wim,
+            super::pages::backup::BackupFormat::Esd => CliBackupFormat::Esd,
+            super::pages::backup::BackupFormat::Swm | super::pages::backup::BackupFormat::Gho => {
+                return Err(crate::tr!(
+                    "当前 CLI 自动化仅支持 WIM 和 ESD 备份；请切换格式后重新生成。"
+                ))
+            }
+        };
+        let output_policy = if state.incremental {
+            CliBackupOutputPolicy::Append
+        } else if std::path::Path::new(state.save_path.trim()).exists() {
+            CliBackupOutputPolicy::Replace
+        } else {
+            CliBackupOutputPolicy::Create
+        };
+        let config = CliConfig {
+            schema_version: CLI_CONFIG_SCHEMA_VERSION,
+            operation: CliOperation::Backup(CliBackupSpec {
+                source_partition: source.volume.clone(),
+                save_path: state.save_path,
+                name: state.name,
+                description: state.description,
+                format,
+                execution_mode: CliBackupExecutionMode::Auto,
+                output_policy,
+                auto_reboot: false,
+            }),
+        };
+        crate::core::automation_export::export(config, "backup", "backup")
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -10941,6 +13584,7 @@ unsafe fn get_text(hwnd: HWND) -> String {
 
 unsafe fn prompt_partition_format_options(
     owner: HWND,
+    font: HFONT,
     current_label: &str,
 ) -> Option<lr_core::windows_storage::FormatOptions> {
     let mut dialog = DialogShell::create(
@@ -11019,7 +13663,13 @@ unsafe fn prompt_partition_format_options(
     let mut rect = RECT::default();
     let _ = GetClientRect(parent, &mut rect);
     let width = (rect.right - rect.left).max(1);
-    let label_width = 120 * dpi as i32 / 96;
+    let label_width = [fs_label, volume_label, unit_label]
+        .into_iter()
+        .map(|label| measure_text(parent, font, &get_text(label), None).width)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(8 * dpi as i32 / 96)
+        .clamp(120 * dpi as i32 / 96, width * 2 / 5);
     let field_x = label_width + metrics.control_gap;
     let field_width = (width - field_x).max(1);
     let mut y = 0;
@@ -11063,6 +13713,7 @@ unsafe fn prompt_partition_format_options(
         label: get_text(volume),
         allocation_unit_size,
         quick: SendMessageW(quick, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1,
+        force_dismount: false,
     })
 }
 
@@ -11077,6 +13728,7 @@ fn install_phase_label(
         Phase::ResolveStableTarget => crate::tr!("确认目标磁盘"),
         Phase::RunDiskpartScripts => crate::tr!("执行分区脚本"),
         Phase::ResolveTargetAfterDiskpart => crate::tr!("重新确认目标分区"),
+        Phase::PreparePreinstalledSoftware => crate::tr!("下载预装软件"),
         Phase::FormatTarget => crate::tr!("格式化目标分区"),
         Phase::ExportHostDrivers => crate::tr!("导出驱动"),
         Phase::ApplyXpTextModeSource => crate::tr!("准备 XP/2003 文本安装"),
@@ -11084,6 +13736,7 @@ fn install_phase_label(
         Phase::ApplyWimImage => crate::tr!("释放系统镜像"),
         Phase::ProcessDrivers => crate::tr!("处理驱动"),
         Phase::RepairBoot => crate::tr!("修复引导"),
+        Phase::StageDirectPreinstalledSoftware => crate::tr!("准备预装软件到新系统"),
         Phase::ApplyAdvancedOptions => crate::tr!("应用高级选项"),
         Phase::FinishDirectInstall => crate::tr!("完成安装"),
         Phase::VerifyPeEnvironment => crate::tr!("验证 PE 环境"),
@@ -11093,6 +13746,7 @@ fn install_phase_label(
         Phase::ExportDriversToPeData => crate::tr!("导出驱动到 PE 数据区"),
         Phase::VerifySourceImage => crate::tr!("校验镜像"),
         Phase::CopySourceImage => crate::tr!("复制镜像文件"),
+        Phase::StagePreinstalledSoftware => crate::tr!("暂存预装软件"),
         Phase::StageUefiSeven => crate::tr!("准备 UEFI 兼容文件"),
         Phase::StageUserDrivers => crate::tr!("准备用户驱动"),
         Phase::WritePeInstallConfig => crate::tr!("写入配置文件"),
@@ -11101,38 +13755,44 @@ fn install_phase_label(
 }
 
 fn is_installable_image(volume: &crate::core::dism::ImageInfo) -> bool {
-    use lr_core::image_meta::WimImageType;
+    crate::core::dism::is_installable_image(volume)
+}
 
-    match volume.image_type {
-        WimImageType::StandardInstall | WimImageType::FullBackup => return true,
-        WimImageType::WindowsPE => return false,
-        WimImageType::Unknown => {}
-    }
-    let name = volume.name.to_lowercase();
-    let install_type = volume.installation_type.to_lowercase();
-    if install_type == "windowspe"
-        || ["windows pe", "windows setup", "setup media", "winpe"]
+fn select_downloaded_installable_position(
+    installable_volumes: &[crate::core::dism::ImageInfo],
+    expected: Option<&crate::core::dism::ImageInfo>,
+) -> Option<usize> {
+    match expected {
+        Some(expected) => installable_volumes
             .iter()
-            .any(|keyword| name.contains(keyword))
-    {
-        return false;
+            .position(|image| image.index == expected.index),
+        None => (!installable_volumes.is_empty()).then_some(0),
     }
-    if install_type.is_empty() && volume.major_version.is_none() {
-        return [
-            "windows 10",
-            "windows 11",
-            "windows server",
-            "windows 8",
-            "windows 7",
-            "backup",
-            "备份",
-            "系统镜像",
-            "镜像",
-        ]
-        .iter()
-        .any(|keyword| name.contains(keyword));
+}
+
+fn remote_metadata_requires_download_before_plan(
+    select_first_installable_after_download: bool,
+) -> bool {
+    // This flag is set only after the metadata probe reports RangeUnsupported. Until the complete
+    // file is inspected locally there is no selected image capacity on which a destructive plan
+    // can be based.
+    select_first_installable_after_download
+}
+
+fn download_first_volume_placeholder() -> crate::core::dism::ImageInfo {
+    crate::core::dism::ImageInfo {
+        index: 1,
+        name: crate::tr!("下载后自动选择第一个可安装分卷"),
+        size_bytes: 0,
+        hard_link_bytes: 0,
+        installation_type: "Client".to_string(),
+        major_version: None,
+        minor_version: None,
+        build: None,
+        architecture: None,
+        image_type: lr_core::image_meta::WimImageType::StandardInstall,
+        verified_installable: true,
     }
-    true
 }
 
 fn dism_image_from_core(image: lr_core::image_meta::ImageInfo) -> crate::core::dism::ImageInfo {
@@ -11140,6 +13800,7 @@ fn dism_image_from_core(image: lr_core::image_meta::ImageInfo) -> crate::core::d
         index: image.index,
         name: image.name,
         size_bytes: image.size_bytes,
+        hard_link_bytes: image.hard_link_bytes,
         installation_type: image.installation_type,
         major_version: image.major_version,
         minor_version: image.minor_version,
@@ -11162,6 +13823,17 @@ fn remote_image_identity_matches(
         && expected
             .installation_type
             .eq_ignore_ascii_case(&actual.installation_type)
+}
+
+fn remote_image_capacity_requirement_changed(
+    expected: &crate::core::dism::ImageInfo,
+    actual: &crate::core::dism::ImageInfo,
+) -> bool {
+    lr_core::custom_install::image_space_requirement(expected.size_bytes, expected.hard_link_bytes)
+        != lr_core::custom_install::image_space_requirement(
+            actual.size_bytes,
+            actual.hard_link_bytes,
+        )
 }
 
 unsafe fn discard_stale_inspected_source(
@@ -11229,6 +13901,28 @@ pub(crate) fn enable_process_dpi_awareness() {
 }
 
 pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
+    run_with_presentation(config, StartupPresentation::Main)
+}
+
+#[cfg(feature = "non-elevated-tests")]
+pub fn run_progress_preview(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
+    run_with_presentation(config, StartupPresentation::ProgressPreview)
+}
+
+#[cfg(feature = "non-elevated-tests")]
+pub fn run_pe_maintenance_preview(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
+    run_with_presentation(config, StartupPresentation::PeMaintenancePreview)
+}
+
+#[cfg(feature = "non-elevated-tests")]
+pub fn run_about_preview(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
+    run_with_presentation(config, StartupPresentation::AboutPreview)
+}
+
+fn run_with_presentation(
+    config: Arc<PreloadedConfig>,
+    startup_presentation: StartupPresentation,
+) -> windows::core::Result<()> {
     unsafe {
         // Keep this idempotent call for embedders, while `main` establishes the same context before
         // any startup validation can display an early MessageBox.
@@ -11245,7 +13939,11 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
         let (large_icon, small_icon) = load_application_icons(HINSTANCE(instance.0))?;
         let class = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW,
+            // Preserve the existing client image during live resize. Microsoft documents that
+            // CS_HREDRAW/CS_VREDRAW invalidate the complete client on every width/height change;
+            // this UI instead preserves valid client pixels and lets USER32 invalidate only the
+            // newly exposed areas of the root and its resized children.
+            style: Default::default(),
             lpfnWndProc: Some(window_proc),
             hInstance: HINSTANCE(instance.0),
             hCursor: cursor,
@@ -11258,7 +13956,7 @@ pub fn run(config: Arc<PreloadedConfig>) -> windows::core::Result<()> {
         if RegisterClassExW(&class) == 0 {
             return Err(windows::core::Error::from_win32());
         }
-        let mut state = Box::new(NativeWindow::new(config));
+        let mut state = Box::new(NativeWindow::new(config, startup_presentation));
         let title_text = crate::build_info::window_title();
         let title = wide(&title_text);
         let initial_dpi = GetDpiForSystem().max(96) as i32;
@@ -11418,9 +14116,50 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_ENTERSIZEMOVE => {
+            if let Some(state) = state {
+                // Entering the modal move/size loop does not tell us whether the user grabbed a
+                // caption or a sizing border. Defer paint suppression until WM_SIZING/WM_SIZE so
+                // an ordinary window move keeps its current smooth DWM path.
+                state.size_move_loop = true;
+            }
+            LRESULT(0)
+        }
+        WM_SIZING => {
+            if let Some(state) = state {
+                state.live_resize = true;
+            }
+            // The proposed RECT is not modified.
+            LRESULT(1)
+        }
         WM_SIZE => {
             if let Some(state) = state {
+                if state.size_move_loop {
+                    state.live_resize = true;
+                    // A browser can continuously resize one compositor surface. This UI is made
+                    // from many independent USER32 child windows; repositioning all of them from
+                    // the synchronous WM_SIZE path stalls the modal sizing loop and exposes their
+                    // intermediate paints. Keep the retained child surface stable while the mouse
+                    // is down, then publish one complete layout from WM_EXITSIZEMOVE.
+                    return LRESULT(0);
+                }
                 state.layout(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_EXITSIZEMOVE => {
+            if let Some(state) = state {
+                state.size_move_loop = false;
+                if state.live_resize {
+                    state.live_resize = false;
+                    state.layout(hwnd);
+                    let _ = RedrawWindow(
+                        hwnd,
+                        None,
+                        None,
+                        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                    );
+                }
             }
             LRESULT(0)
         }
@@ -11439,6 +14178,10 @@ unsafe extern "system" fn window_proc(
                 state.dpi = GetDpiForWindow(hwnd);
                 state.create_fonts();
                 state.apply_fonts();
+                // Recompute ComboBox selection/popup metrics and the clipped closed-field region
+                // from the new DPI font. Keeping the old region after WM_DPICHANGED can recreate
+                // the same bottom-band artifact fixed during initial construction.
+                state.apply_native_dark_theme(hwnd);
                 state.layout(hwnd);
             }
             LRESULT(0)
@@ -11720,17 +14463,35 @@ unsafe extern "system" fn window_proc(
                         if state.image_volumes.is_empty() {
                             state.effective_image_path = None;
                             state.remote_image_download = None;
-                            set_text(
-                                handles.status,
-                                &crate::tr!("远程系统镜像中没有可用的安装卷。"),
-                            );
+                            if remote_image_chrome_for_page(
+                                state.page,
+                                state.advanced_visible,
+                                state.progress_visible,
+                                RemoteImageChrome::NoInstallableVolumes,
+                            )
+                            .is_some()
+                            {
+                                set_text(
+                                    handles.status,
+                                    &crate::tr!("远程系统镜像中没有可用的安装卷。"),
+                                );
+                            }
                         } else {
                             state.effective_image_path = Some(message.requested_url);
                             let _ =
                                 SendMessageW(handles.image_volume, 0x014E, WPARAM(0), LPARAM(0));
                             state.update_storage_driver_default();
                             state.update_advanced_install_context();
-                            set_text(handles.status, "");
+                            if remote_image_chrome_for_page(
+                                state.page,
+                                state.advanced_visible,
+                                state.progress_visible,
+                                RemoteImageChrome::Ready,
+                            )
+                            .is_some()
+                            {
+                                set_text(handles.status, "");
+                            }
                         }
                         state.source_has_unattend = false;
                         state.apply_unattend_default();
@@ -11740,21 +14501,59 @@ unsafe extern "system" fn window_proc(
                         state.update_pca_detection_status();
                         state.update_install_primary_state();
                     }
-                    Err(error) => {
+                    Err(RemoteImageInfoFailure::RangeUnsupported) => {
+                        if let Some(remote) = state.remote_image_download.as_mut() {
+                            remote.select_first_installable_after_download = true;
+                        }
+                        state.image_volumes = vec![download_first_volume_placeholder()];
+                        state.effective_image_path = Some(message.requested_url);
+                        let _ = SendMessageW(handles.image_volume, 0x014B, WPARAM(0), LPARAM(0));
+                        let label = wide(&state.image_volumes[0].name);
+                        let _ = SendMessageW(
+                            handles.image_volume,
+                            0x0143,
+                            WPARAM(0),
+                            LPARAM(label.as_ptr() as isize),
+                        );
+                        let _ = SendMessageW(handles.image_volume, 0x014E, WPARAM(0), LPARAM(0));
+                        state.source_has_unattend = false;
+                        state.clear_pca_target_detection();
+                        state.update_advanced_install_context();
+                        state.apply_unattend_default();
+                        state.set_install_volume_row_visible(hwnd, true);
+                        state.update_unattend_conflict();
+                        set_text(
+                            handles.status,
+                            &crate::tr!(
+                                "服务器不支持分段读取；将先完整下载，并自动选择下载后确认的第一个可安装分卷。"
+                            ),
+                        );
+                        state.update_install_primary_state();
+                    }
+                    Err(RemoteImageInfoFailure::Failed(error)) => {
                         state.image_volumes.clear();
                         state.effective_image_path = None;
                         state.remote_image_download = None;
                         state.set_install_volume_row_visible(hwnd, false);
                         state.clear_pca_target_detection();
                         state.update_advanced_install_context();
-                        set_text(
-                            handles.status,
-                            &crate::tr!(
-                                "读取远程系统镜像失败（仅支持可断点续传的 WIM/ESD/ISO 直链）：{}",
-                                error
-                            ),
-                        );
-                        let _ = EnableWindow(handles.primary, false);
+                        if remote_image_chrome_for_page(
+                            state.page,
+                            state.advanced_visible,
+                            state.progress_visible,
+                            RemoteImageChrome::Failed,
+                        )
+                        .is_some()
+                        {
+                            set_text(
+                                handles.status,
+                                &crate::tr!(
+                                    "读取远程系统镜像失败（支持 WIM/ESD/ISO 直链；若服务器不支持分段读取会先完整下载）：{}",
+                                    error
+                                ),
+                            );
+                            let _ = EnableWindow(handles.primary, false);
+                        }
                     }
                 }
             }
@@ -11875,8 +14674,83 @@ unsafe extern "system" fn window_proc(
                     .advanced_page
                     .as_ref()
                     .and_then(|page| page.intent_for_command(command_id));
-                if let Some(AdvancedPageIntent::Browse(target)) = advanced_intent {
-                    state.browse_advanced_path(target);
+                match advanced_intent {
+                    Some(AdvancedPageIntent::Browse(target)) => {
+                        state.browse_advanced_path(target);
+                    }
+                    Some(AdvancedPageIntent::SelectPreinstalledSoftware) => {
+                        if state
+                            .preinstall_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.shell.activate_if_visible())
+                        {
+                            return LRESULT(0);
+                        }
+                        let categories = state.download_controller.preinstall_software_categories();
+                        if categories.is_empty() {
+                            log::warn!("预装应用目录当前不可用，不显示选择窗口");
+                            return LRESULT(0);
+                        }
+                        let mut selected = state
+                            .app_config
+                            .install_prefs
+                            .advanced_options
+                            .preinstalled_software
+                            .clone();
+                        if selected.is_empty() && !state.preinstall_selection_user_set {
+                            if let Some(target) = state
+                                .selected_partition_record()
+                                .map(|partition| partition.letter.clone())
+                            {
+                                match crate::core::native_software_detection::detect_installed_display_names(&target)
+                                    .and_then(|installed| {
+                                        crate::core::native_software_detection::default_packages_for_installed_names(
+                                            &categories,
+                                            &installed,
+                                        )
+                                    })
+                                {
+                                    Ok(defaults) => {
+                                        if !defaults.is_empty() {
+                                            log::info!(
+                                                "[SOFTWARE DETECTION] target={} matched {} server-catalogue application(s) for the initial selection",
+                                                target,
+                                                defaults.len()
+                                            );
+                                            selected = defaults;
+                                            state
+                                                .app_config
+                                                .install_prefs
+                                                .advanced_options
+                                                .preinstalled_software = selected.clone();
+                                            if let Some(page) = &state.advanced_page {
+                                                page.set_preinstalled_software_selection(
+                                                    selected.len(),
+                                                    true,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(error) => log::warn!(
+                                        "[SOFTWARE DETECTION] target={} default selection skipped: {error:#}",
+                                        target
+                                    ),
+                                }
+                            }
+                        }
+                        match NativePreinstallDialog::create(hwnd, categories, &selected) {
+                            Ok(mut dialog) => {
+                                dialog.show_modeless();
+                                state.preinstall_dialog = Some(dialog);
+                                let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
+                            }
+                            Err(error) => {
+                                log::error!("创建预装应用选择窗口失败: {error}");
+                            }
+                        }
+                        return LRESULT(0);
+                    }
+                    None => {}
                 }
                 if notification == EN_CHANGE as u16 {
                     let control = HWND(lparam.0 as *mut _);
@@ -12032,6 +14906,17 @@ unsafe extern "system" fn window_proc(
                         state.update_pca_detection_status();
                         state.update_install_primary_state();
                     }
+                    ID_CUSTOM_INSTALL_MODE if notification == CBN_SELCHANGE as u16 => {
+                        state.sync_install_preferences_from_controls();
+                        state.sync_dual_boot_size_with_selected_image();
+                        state.layout(hwnd);
+                        state.update_install_primary_state();
+                        redraw::invalidate_client_tree(hwnd);
+                    }
+                    ID_DUAL_BOOT_SIZE if notification == EN_CHANGE as u16 => {
+                        state.note_dual_boot_size_edited();
+                        state.update_install_primary_state();
+                    }
                     ID_PCA_MODE if notification == CBN_SELCHANGE as u16 => {
                         state.persist_install_preferences();
                         if let (Some(handles), Some(error)) =
@@ -12074,6 +14959,7 @@ unsafe extern "system" fn window_proc(
                     }
                     ID_IMAGE_EDIT => {}
                     ID_IMAGE_VOLUME if notification == CBN_SELCHANGE as u16 => {
+                        state.sync_dual_boot_size_with_selected_image();
                         state.refresh_source_unattend();
                         state.update_unattend_conflict();
                         state.update_storage_driver_default();
@@ -12091,6 +14977,7 @@ unsafe extern "system" fn window_proc(
                     }
                     ID_UNATTEND_BROWSE => state.browse_for_unattend(),
                     ID_UNATTEND_CLEAR => state.clear_custom_unattend(),
+                    ID_AUTOMATION_EXPORT => state.export_current_automation(hwnd),
                     ID_PRIMARY => state.handle_primary_action(hwnd),
                     _ => {}
                 }
@@ -12191,6 +15078,14 @@ unsafe extern "system" fn window_proc(
                                 page.set_logging_enabled(enabled);
                             }
                         }
+                        Some(InfoIntent::ToggleAutomationExport) => {
+                            if let Some(page) = &state.about_page {
+                                let enabled = page.automation_export_enabled();
+                                state.app_config.set_automation_export_enabled(enabled);
+                                page.set_automation_export_enabled(enabled);
+                                state.layout_page_switch_chrome(hwnd);
+                            }
+                        }
                         Some(InfoIntent::SelectWimEngine) => {
                             if let Some(page) = &state.about_page {
                                 state.app_config.set_wim_engine(page.selected_wim_engine());
@@ -12265,6 +15160,12 @@ unsafe extern "system" fn window_proc(
                     state.poll_install_messages(hwnd);
                 } else if wparam.0 == TOOL_DIALOG_TIMER_ID {
                     state.poll_tool_dialogs(hwnd);
+                } else if wparam.0 == PE_MAINTENANCE_ANIMATION_TIMER_ID {
+                    if let Some(dialog) = &mut state.pe_maintenance_dialog {
+                        dialog.animate();
+                    } else {
+                        let _ = KillTimer(hwnd, PE_MAINTENANCE_ANIMATION_TIMER_ID);
+                    }
                 } else if wparam.0 == CATALOGUE_TIMER_ID {
                     state.poll_catalogue_messages(hwnd);
                 } else if wparam.0 == HARDWARE_COPY_TIMER_ID {
@@ -12301,6 +15202,24 @@ unsafe extern "system" fn window_proc(
                 let header = &*(lparam.0 as *const NMHDR);
                 if header.code == LVN_ITEMCHANGED
                     && state
+                        .preinstall_dialog
+                        .as_ref()
+                        .is_some_and(|dialog| dialog.owns_category_list(header.hwndFrom))
+                {
+                    let change = &*(lparam.0 as *const NMLISTVIEW);
+                    if change.iItem >= 0
+                        && list_view_item_became_selected(
+                            change.uChanged.0,
+                            change.uOldState,
+                            change.uNewState,
+                        )
+                    {
+                        if let Some(dialog) = &mut state.preinstall_dialog {
+                            dialog.handle_category_changed(change.iItem as usize);
+                        }
+                    }
+                } else if header.code == LVN_ITEMCHANGED
+                    && state
                         .quick_partition_dialog
                         .as_ref()
                         .is_some_and(|dialog| dialog.owns_list(header.hwndFrom))
@@ -12332,6 +15251,22 @@ unsafe extern "system" fn window_proc(
                             state.partition_copy_generation,
                             request,
                         );
+                    }
+                } else if header.code == LVN_ITEMCHANGED
+                    && state
+                        .preinstall_dialog
+                        .as_ref()
+                        .is_some_and(|dialog| dialog.accepts_list_change(header.hwndFrom))
+                {
+                    let change = &*(lparam.0 as *const NMLISTVIEW);
+                    if list_view_state_image_changed(
+                        change.uChanged.0,
+                        change.uOldState,
+                        change.uNewState,
+                    ) {
+                        if let Some(dialog) = &mut state.preinstall_dialog {
+                            dialog.handle_list_changed();
+                        }
                     }
                 } else if header.code == LVN_ITEMCHANGED
                     && state
@@ -12386,6 +15321,24 @@ unsafe extern "system" fn window_proc(
                     && header.code == LVN_ITEMCHANGED
                 {
                     state.update_backup_primary_state();
+                } else if header.idFrom == ID_SOFTWARE_CATEGORIES as usize
+                    && header.code == LVN_ITEMCHANGED
+                {
+                    let change = &*(lparam.0 as *const NMLISTVIEW);
+                    if change.iItem >= 0
+                        && list_view_item_became_selected(
+                            change.uChanged.0,
+                            change.uOldState,
+                            change.uNewState,
+                        )
+                    {
+                        let _ = state.download_controller.apply_intent(
+                            ControllerIntent::SelectSoftwareCategory(change.iItem as usize),
+                        );
+                        if let Some(page) = &state.download_page {
+                            page.replace_rows(&state.download_controller.rows());
+                        }
+                    }
                 } else if header.idFrom == ID_RESOURCE_LIST as usize
                     && header.code == LVN_ITEMCHANGED
                 {
@@ -12406,15 +15359,24 @@ unsafe extern "system" fn window_proc(
             if let Some(state) = state {
                 let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
                 let handled = state
-                    .advanced_page
+                    .pe_maintenance_dialog
                     .as_ref()
-                    .is_some_and(|page| page.draw_item(item, state.control_palette()))
+                    .is_some_and(|dialog| dialog.draw_item(item, state.control_palette()))
+                    || state
+                        .advanced_page
+                        .as_ref()
+                        .is_some_and(|page| page.draw_item(item, state.control_palette()))
                     || state
                         .progress_page
                         .as_ref()
                         .is_some_and(|page| page.draw_item(item, state.control_palette()));
                 if handled {
                     return LRESULT(1);
+                } else if state
+                    .handles
+                    .is_some_and(|handles| item.hwndItem == handles.status)
+                {
+                    state.draw_footer_status(item);
                 } else if item.CtlType.0 == ODT_HEADER {
                     state.draw_list_header(item);
                 } else {
@@ -12484,7 +15446,7 @@ unsafe extern "system" fn window_proc(
                 });
                 let palette = state.control_palette();
                 let _ = SetTextColor(dc, palette.text);
-                let _ = SetBkColor(dc, state.palette.window);
+                let _ = SetBkColor(dc, state.control_palette().window);
                 // ScrollWindowEx moves the existing pixels and the child HWND in one transaction.
                 // Advanced-page STATIC labels must therefore erase with the page brush when they
                 // repaint; transparent text would blend over the copied glyphs and create a
@@ -12511,7 +15473,8 @@ unsafe extern "system" fn window_proc(
                 let dc = BeginPaint(hwnd, &mut paint);
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let _ = FillRect(dc, &rect, state.brushes.window);
+                let carrier = state.brushes.window;
+                let _ = FillRect(dc, &rect, carrier);
                 // Long tasks intentionally occupy the complete client area.  Painting the normal
                 // navigation rail underneath their transparent STATIC controls leaked the old
                 // navigation separator through as several disconnected vertical strokes.
@@ -12522,14 +15485,14 @@ unsafe extern "system" fn window_proc(
                         right: state.scale(NAV_WIDTH),
                         bottom: rect.bottom - state.scale(COMMAND_HEIGHT),
                     };
-                    let _ = FillRect(dc, &nav_rect, state.brushes.nav);
+                    let _ = FillRect(dc, &nav_rect, carrier);
                     let footer_rect = RECT {
                         left: 0,
                         top: rect.bottom - state.scale(COMMAND_HEIGHT),
                         right: rect.right,
                         bottom: rect.bottom,
                     };
-                    let _ = FillRect(dc, &footer_rect, state.brushes.window);
+                    let _ = FillRect(dc, &footer_rect, carrier);
                     draw_line(
                         dc,
                         state.scale(NAV_WIDTH),
@@ -12550,6 +15513,7 @@ unsafe extern "system" fn window_proc(
                     state.request_safe_close(hwnd);
                     return LRESULT(0);
                 }
+                state.synchronize_install_state(AdvancedStateBoundary::WindowClose);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
@@ -12572,6 +15536,7 @@ unsafe extern "system" fn window_proc(
             let _ = KillTimer(hwnd, DOWNLOAD_TIMER_ID);
             let _ = KillTimer(hwnd, INSTALL_TIMER_ID);
             let _ = KillTimer(hwnd, TOOL_DIALOG_TIMER_ID);
+            let _ = KillTimer(hwnd, PE_MAINTENANCE_ANIMATION_TIMER_ID);
             let _ = KillTimer(hwnd, CATALOGUE_TIMER_ID);
             let _ = KillTimer(hwnd, HARDWARE_COPY_TIMER_ID);
             let _ = KillTimer(hwnd, INSTALL_VOLUME_LAYOUT_TIMER_ID);
@@ -12585,6 +15550,47 @@ unsafe extern "system" fn window_proc(
 }
 
 impl NativeWindow {
+    unsafe fn draw_footer_status(&self, item: &DRAWITEMSTRUCT) {
+        let dc = item.hDC;
+        let _ = FillRect(dc, &item.rcItem, self.brushes.window);
+        let text = get_text(item.hwndItem);
+        if text.is_empty() {
+            return;
+        }
+        let mut wide = text.encode_utf16().collect::<Vec<_>>();
+        let old_font = SelectObject(dc, self.font);
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let color = self.control_palette().text;
+        let _ = SetTextColor(dc, color);
+        let mut measured = RECT {
+            left: item.rcItem.left,
+            top: 0,
+            right: item.rcItem.right,
+            bottom: 0,
+        };
+        let _ = DrawTextW(
+            dc,
+            &mut wide,
+            &mut measured,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        );
+        let layout = footer_status_layout(
+            self.scale(6),
+            self.scale(28),
+            measured.bottom.saturating_sub(measured.top),
+            item.rcItem.bottom.saturating_sub(item.rcItem.top),
+        );
+        let mut text_rect = RECT {
+            left: item.rcItem.left,
+            top: layout.y,
+            right: item.rcItem.right,
+            bottom: layout.y.saturating_add(layout.height),
+        };
+        let flags = DT_WORDBREAK | DT_NOPREFIX;
+        let _ = DrawTextW(dc, &mut wide, &mut text_rect, flags);
+        let _ = SelectObject(dc, old_font);
+    }
+
     unsafe fn draw_list_header(&self, item: &DRAWITEMSTRUCT) {
         self.draw_header_cell(item.hDC, item.hwndItem, item.itemID as usize, item.rcItem);
     }
@@ -13236,12 +16242,267 @@ unsafe fn draw_line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF
 
 #[cfg(test)]
 mod tests {
+    use super::super::tool_dialogs_mutating::MutatingToolKind;
     use super::{
-        easy_catalogue_needs_resolution, image_architecture_label,
-        should_apply_auto_discovered_image, HardwareCopyFeedback,
+        active_layout_surface, advanced_state_policy, classify_stable_target_probe,
+        dialog_response_matches, easy_catalogue_needs_resolution, image_architecture_label,
+        maintenance_pe_from_catalogue, pe_maintenance_status_message,
+        pending_partition_target_disk, reconcile_dual_boot_size_gib,
+        remote_image_capacity_requirement_changed, remote_metadata_requires_download_before_plan,
+        select_downloaded_installable_position, should_apply_auto_discovered_image,
+        should_replay_partition_refresh_error, whole_gib_for_capacity, ActiveLayoutSurface,
+        AdvancedStateBoundary, AdvancedStatePolicy, HardwareCopyFeedback, Page,
+        StableTargetProbeResult, WriteTaskGate, WriteTaskKind,
     };
+
+    #[test]
+    fn layout_selects_exactly_one_visible_surface() {
+        assert_eq!(
+            active_layout_surface(false, false, false, Page::About),
+            ActiveLayoutSurface::Standard(Page::About)
+        );
+        assert_eq!(
+            active_layout_surface(false, false, true, Page::Install),
+            ActiveLayoutSurface::Easy
+        );
+        assert_eq!(
+            active_layout_surface(false, true, true, Page::Download),
+            ActiveLayoutSurface::Advanced
+        );
+        assert_eq!(
+            active_layout_surface(true, true, true, Page::Tools),
+            ActiveLayoutSurface::Progress
+        );
+    }
+
+    #[cfg(feature = "non-elevated-tests")]
+    #[test]
+    fn running_progress_preview_is_nonterminal_and_non_cancellable() {
+        let preview = super::running_progress_preview_state();
+        assert_eq!(preview.overall.percent(), 46);
+        assert_eq!(preview.step.percent(), 58);
+        assert_eq!(preview.status, super::ProgressStatus::Running);
+        assert!(!preview.cancellable);
+    }
+
+    #[test]
+    fn pe_maintenance_progress_describes_every_visible_stage() {
+        use crate::core::pe::PeMaintenanceProgress;
+
+        for stage in [
+            PeMaintenanceProgress::LocatingPe,
+            PeMaintenanceProgress::SnapshottingPe,
+            PeMaintenanceProgress::CollectingBitLockerKeys,
+            PeMaintenanceProgress::CreatingBootEntry,
+            PeMaintenanceProgress::SchedulingRestart,
+            PeMaintenanceProgress::RestartScheduled,
+        ] {
+            assert!(!pe_maintenance_status_message(stage).trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn maintenance_entry_never_falls_back_to_an_arbitrary_pe_catalogue_item() {
+        let arbitrary = crate::download::config::OnlinePE {
+            download_url: "https://example.invalid/other.wim".to_owned(),
+            display_name: "Other PE".to_owned(),
+            filename: "Other_PE.wim".to_owned(),
+            md5: None,
+            sha256: None,
+        };
+        assert!(maintenance_pe_from_catalogue(std::slice::from_ref(&arbitrary)).is_none());
+
+        let official = crate::download::config::OnlinePE {
+            filename: "letrecovery_pe.WIM".to_owned(),
+            ..arbitrary
+        };
+        assert_eq!(
+            maintenance_pe_from_catalogue(std::slice::from_ref(&official))
+                .unwrap()
+                .filename,
+            official.filename
+        );
+    }
+
+    #[test]
+    fn dual_boot_capacity_rounds_only_the_integer_ui_value_up() {
+        let gib = lr_core::custom_install::GIB;
+        assert_eq!(whole_gib_for_capacity(31 * gib), 31);
+        assert_eq!(whole_gib_for_capacity(31 * gib + 1), 32);
+    }
+
+    #[test]
+    fn dual_boot_image_change_replaces_only_automatic_or_too_small_values() {
+        let gib = lr_core::custom_install::GIB;
+        assert_eq!(
+            reconcile_dual_boot_size_gib(Some(80), Some(80), 31 * gib + 1),
+            (32, Some(32))
+        );
+        assert_eq!(
+            reconcile_dual_boot_size_gib(Some(96), None, 31 * gib + 1),
+            (96, None)
+        );
+        assert_eq!(
+            reconcile_dual_boot_size_gib(Some(20), None, 31 * gib + 1),
+            (32, Some(32))
+        );
+        assert_eq!(
+            reconcile_dual_boot_size_gib(None, None, 31 * gib + 1),
+            (32, Some(32))
+        );
+        assert_eq!(
+            reconcile_dual_boot_size_gib(Some(80), Some(80), 20 * gib),
+            (20, Some(20))
+        );
+        assert_eq!(
+            reconcile_dual_boot_size_gib(Some(20), None, 20 * gib),
+            (20, None)
+        );
+    }
     use crate::download::config::{EasyModeConfig, EasyModeSystem};
     use std::collections::HashMap;
+
+    fn test_installable_image(index: u32) -> crate::core::dism::ImageInfo {
+        crate::core::dism::ImageInfo {
+            index,
+            name: format!("Windows image {index}"),
+            size_bytes: 1,
+            hard_link_bytes: 0,
+            installation_type: "Client".to_owned(),
+            major_version: Some(10),
+            minor_version: Some(0),
+            build: Some(22621),
+            architecture: Some(9),
+            image_type: lr_core::image_meta::WimImageType::StandardInstall,
+            verified_installable: true,
+        }
+    }
+
+    #[test]
+    fn range_fallback_selects_the_first_downloaded_installable_volume() {
+        assert!(remote_metadata_requires_download_before_plan(true));
+        assert!(!remote_metadata_requires_download_before_plan(false));
+        let volumes = vec![test_installable_image(3), test_installable_image(7)];
+        assert_eq!(
+            select_downloaded_installable_position(&volumes, None),
+            Some(0)
+        );
+        assert_eq!(
+            select_downloaded_installable_position(&volumes, Some(&test_installable_image(7))),
+            Some(1)
+        );
+        assert_eq!(select_downloaded_installable_position(&[], None), None);
+    }
+
+    #[test]
+    fn remote_custom_install_reconfirms_when_local_capacity_requirement_changes() {
+        let gib = lr_core::custom_install::GIB;
+        let mut expected = test_installable_image(3);
+        expected.size_bytes = 20 * gib;
+        expected.hard_link_bytes = 2 * gib;
+        let mut same_requirement = expected.clone();
+        same_requirement.size_bytes = 24 * gib;
+        same_requirement.hard_link_bytes = 6 * gib;
+        assert!(!remote_image_capacity_requirement_changed(
+            &expected,
+            &same_requirement
+        ));
+
+        let mut larger = expected.clone();
+        larger.size_bytes = 31 * gib + 1;
+        larger.hard_link_bytes = 0;
+        assert!(remote_image_capacity_requirement_changed(
+            &expected, &larger
+        ));
+    }
+
+    #[test]
+    fn custom_install_confirmation_translations_exist_with_matching_placeholders() {
+        let catalogues = [
+            include_str!("../../../assets/release/lang/en-US.json"),
+            include_str!("../../../assets/release/lang/de-DE.json"),
+            include_str!("../../../assets/release/lang/fr-FR.json"),
+            include_str!("../../../assets/release/lang/ja-JP.json"),
+            include_str!("../../../assets/release/lang/ko-KR.json"),
+        ];
+        let required = [
+            "全盘重装前最后确认",
+            "即将清空以下电脑内置硬盘：\r\n{}\r\n\r\n这些硬盘上现有的 Windows、分区和个人文件都会被删除，请先确认重要文件已经备份。\r\n\r\n新系统将安装到你选择的硬盘，程序会自动分配 Windows 分区和数据分区；其他内置硬盘会重新建立为数据盘。安装过程中请勿关机或拔出硬盘。",
+            "我已备份，开始全盘重装",
+            "创建双系统前最后确认",
+            "将在 {}: 分区末尾划出 {} GB 空间，新建一个 Windows 分区，并把新系统加入开机启动菜单。若没有其它空间足够的数据分区，程序会在同一次缩卷中额外建立一个数据分区，用于存放本次安装文件；其最低大小按实际文件总量加 2 GB 计算。\r\n\r\n原来的 Windows 和其他分区不会被格式化，但缩小分区和修改启动项仍有风险，请先备份重要文件。如果空间不足或磁盘布局不符合要求，程序会在正常 Windows 中停止，不会重启后才报错。",
+            "我已备份，开始创建双系统",
+            "下载完成，已按本地镜像的实际展开容量刷新安装计划；请确认后再次点击安装。",
+            "PE 环境准备完成",
+            "显示自动化配置导出（高级）",
+            "生成自动化",
+            "自动化配置已生成",
+            "无法生成自动化配置",
+            "请检查当前页面设置后重试：{}",
+        ];
+        for catalogue in catalogues {
+            let document: serde_json::Value =
+                serde_json::from_str(catalogue).expect("language catalogue must be valid JSON");
+            let translations = document["data"]
+                .as_object()
+                .expect("language catalogue must contain a data object");
+            for key in required {
+                let value = translations
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("missing custom-install translation: {key}"));
+                assert_eq!(
+                    key.matches("{}").count(),
+                    value.matches("{}").count(),
+                    "placeholder count differs for {key:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn advanced_state_boundaries_capture_before_refresh_and_persist_only_at_commits() {
+        assert_eq!(
+            advanced_state_policy(true, AdvancedStateBoundary::ContextRefresh),
+            AdvancedStatePolicy {
+                capture_install_controls: false,
+                capture_advanced_controls: true,
+                persist_preferences: false,
+            }
+        );
+        assert_eq!(
+            advanced_state_policy(true, AdvancedStateBoundary::StorageDefaultsRefresh),
+            AdvancedStatePolicy {
+                capture_install_controls: false,
+                capture_advanced_controls: true,
+                persist_preferences: false,
+            }
+        );
+        assert_eq!(
+            advanced_state_policy(true, AdvancedStateBoundary::PageExit),
+            AdvancedStatePolicy {
+                capture_install_controls: false,
+                capture_advanced_controls: true,
+                persist_preferences: true,
+            }
+        );
+        assert_eq!(
+            advanced_state_policy(false, AdvancedStateBoundary::InstallSnapshot),
+            AdvancedStatePolicy {
+                capture_install_controls: true,
+                capture_advanced_controls: false,
+                persist_preferences: true,
+            }
+        );
+        assert_eq!(
+            advanced_state_policy(true, AdvancedStateBoundary::WindowClose),
+            AdvancedStatePolicy {
+                capture_install_controls: true,
+                capture_advanced_controls: true,
+                persist_preferences: true,
+            }
+        );
+    }
 
     #[test]
     fn hardware_copy_feedback_expires_back_to_the_normal_caption() {
@@ -13288,5 +16549,160 @@ mod tests {
             )])],
         };
         assert!(easy_catalogue_needs_resolution(&config));
+    }
+
+    #[test]
+    fn reopened_dialogs_reject_old_generations_and_old_targets() {
+        assert!(dialog_response_matches(7, Some("D:"), 7, Some("d:")));
+        assert!(!dialog_response_matches(8, Some("D:"), 7, Some("D:")));
+        assert!(!dialog_response_matches(7, Some("E:"), 7, Some("D:")));
+        assert!(dialog_response_matches(7, None, 7, None));
+    }
+
+    #[test]
+    fn write_task_gate_allows_only_the_matching_task_to_finish() {
+        let mut gate = WriteTaskGate::default();
+        let first = gate
+            .try_begin(WriteTaskKind::Confirmed(MutatingToolKind::BatchFormat))
+            .expect("first task must start");
+        assert!(gate.try_begin(WriteTaskKind::BitLockerManage).is_none());
+        let stale = super::WriteTaskToken {
+            generation: first.generation.wrapping_add(1),
+            kind: first.kind,
+        };
+        assert!(!gate.finish(stale));
+        assert_eq!(gate.active(), Some(first));
+        assert!(gate.finish(first));
+        assert!(gate.try_begin(WriteTaskKind::BitLockerManage).is_some());
+    }
+
+    #[test]
+    fn quick_partition_message_target_rejects_cross_disk_operation_sets() {
+        use crate::core::disk::PartitionStyle;
+        use crate::core::native_quick_partition::DiskFingerprint;
+        use crate::core::native_quick_partition_dialog::{
+            PartitionManagementAction, PartitionManagementRequest, PendingPartitionOperation,
+        };
+
+        let operation = |disk_number| {
+            PendingPartitionOperation::Manage(PartitionManagementRequest {
+                disk: DiskFingerprint {
+                    disk_number,
+                    model: format!("disk-{disk_number}"),
+                    size_bytes: 64 * 1024 * 1024,
+                    partition_style: PartitionStyle::GPT,
+                    partitions: Vec::new(),
+                    layout_snapshot: None,
+                },
+                action: PartitionManagementAction::CreateNtfs {
+                    offset_bytes: 1024 * 1024,
+                    size_bytes: 32 * 1024 * 1024,
+                    drive_letter: 'T',
+                    initialize_style: None,
+                },
+            })
+        };
+        assert_eq!(pending_partition_target_disk(&[operation(3)]), Some(3));
+        assert_eq!(
+            pending_partition_target_disk(&[operation(3), operation(4)]),
+            None
+        );
+    }
+
+    #[test]
+    fn partition_refresh_error_replays_only_on_visible_install_chrome() {
+        assert!(should_replay_partition_refresh_error(
+            Page::Install,
+            false,
+            false,
+            Some("disk query failed")
+        ));
+        assert!(!should_replay_partition_refresh_error(
+            Page::Tools,
+            false,
+            false,
+            Some("disk query failed")
+        ));
+        assert!(!should_replay_partition_refresh_error(
+            Page::Install,
+            true,
+            false,
+            Some("disk query failed")
+        ));
+    }
+
+    #[test]
+    fn install_target_probe_distinguishes_changed_identity_from_query_failure() {
+        let actual = lr_core::windows_storage::StableVolumeIdentity {
+            extent: lr_core::windows_storage::VolumeIdentity {
+                disk_number: 2,
+                offset_bytes: 1_048_576,
+                extent_length_bytes: 500_000_000_000,
+            },
+            disk: lr_core::windows_storage::StableDiskIdentity::Gpt { disk_id: [1; 16] },
+            partition: lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                partition_id: [2; 16],
+            },
+            device_id_hash: Some([3; 32]),
+        };
+        let expected = super::StableTargetIdentity {
+            disk_number: 2,
+            partition_number: 9,
+            disk_size_bytes: 2_000_000_000_000,
+            partition_offset_bytes: 1_048_576,
+            partition_size_bytes: 500_000_000_000,
+            stable_volume: actual,
+        };
+        assert_eq!(
+            classify_stable_target_probe(expected, Ok(actual)),
+            StableTargetProbeResult::Match
+        );
+
+        for changed in [
+            lr_core::windows_storage::StableVolumeIdentity {
+                extent: lr_core::windows_storage::VolumeIdentity {
+                    disk_number: 3,
+                    ..actual.extent
+                },
+                ..actual
+            },
+            lr_core::windows_storage::StableVolumeIdentity {
+                extent: lr_core::windows_storage::VolumeIdentity {
+                    offset_bytes: actual.extent.offset_bytes + 4096,
+                    ..actual.extent
+                },
+                ..actual
+            },
+            lr_core::windows_storage::StableVolumeIdentity {
+                extent: lr_core::windows_storage::VolumeIdentity {
+                    extent_length_bytes: actual.extent.extent_length_bytes - 4096,
+                    ..actual.extent
+                },
+                ..actual
+            },
+            lr_core::windows_storage::StableVolumeIdentity {
+                disk: lr_core::windows_storage::StableDiskIdentity::Gpt { disk_id: [8; 16] },
+                ..actual
+            },
+            lr_core::windows_storage::StableVolumeIdentity {
+                partition: lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                    partition_id: [9; 16],
+                },
+                ..actual
+            },
+            lr_core::windows_storage::StableVolumeIdentity {
+                device_id_hash: Some([7; 32]),
+                ..actual
+            },
+        ] {
+            assert_eq!(
+                classify_stable_target_probe(expected, Ok(changed)),
+                StableTargetProbeResult::Changed(changed)
+            );
+        }
+        assert_eq!(
+            classify_stable_target_probe(expected, Err("open volume: access denied (5)".into())),
+            StableTargetProbeResult::Unavailable("open volume: access denied (5)".into())
+        );
     }
 }

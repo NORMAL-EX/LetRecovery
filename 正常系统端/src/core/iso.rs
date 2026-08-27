@@ -6,7 +6,7 @@ use crate::tr;
 #[cfg(windows)]
 use windows::{
     core::PCWSTR,
-    Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WIN32_ERROR},
+    Win32::Foundation::{CloseHandle, HANDLE, WIN32_ERROR},
     Win32::Storage::FileSystem::{
         CreateFileW, GetDriveTypeW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     },
@@ -17,7 +17,7 @@ use windows::{
         OPEN_VIRTUAL_DISK_VERSION_1, VIRTUAL_DISK_ACCESS_DETACH, VIRTUAL_DISK_ACCESS_READ,
         VIRTUAL_STORAGE_TYPE, VIRTUAL_STORAGE_TYPE_DEVICE_ISO,
     },
-    Win32::System::Ioctl::{IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_GET_DEVICE_NUMBER},
+    Win32::System::Ioctl::IOCTL_STORAGE_GET_DEVICE_NUMBER,
     Win32::System::IO::DeviceIoControl,
 };
 
@@ -70,6 +70,7 @@ impl IsoMounter {
             None,
         )?;
         let mut number = StorageDeviceNumber::default();
+        let mut bytes_returned = 0u32;
         let result = DeviceIoControl(
             handle,
             IOCTL_STORAGE_GET_DEVICE_NUMBER,
@@ -77,11 +78,14 @@ impl IsoMounter {
             0,
             Some((&mut number as *mut StorageDeviceNumber).cast()),
             std::mem::size_of::<StorageDeviceNumber>() as u32,
-            None,
+            Some(&mut bytes_returned),
             None,
         );
         let _ = CloseHandle(handle);
         result?;
+        if bytes_returned < std::mem::size_of::<StorageDeviceNumber>() as u32 {
+            anyhow::bail!("IOCTL_STORAGE_GET_DEVICE_NUMBER 返回数据不完整");
+        }
         Ok(number)
     }
 
@@ -279,65 +283,6 @@ impl IsoMounter {
         }
     }
 
-    /// 使用 IOCTL 弹出 CDROM 类型的驱动器
-    #[cfg(windows)]
-    pub fn eject_cdrom_drive(letter: char) -> Result<()> {
-        unsafe {
-            let device_path = format!("\\\\.\\{}:", letter);
-            let wide_path: Vec<u16> = device_path
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-
-            let handle = CreateFileW(
-                PCWSTR::from_raw(wide_path.as_ptr()),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                Default::default(),
-                None,
-            );
-
-            let handle = match handle {
-                Ok(h) => h,
-                Err(e) => anyhow::bail!("无法打开驱动器 {}: {:?}", letter, e),
-            };
-
-            if handle == INVALID_HANDLE_VALUE {
-                anyhow::bail!("无效的驱动器句柄: {}", letter);
-            }
-
-            let result = DeviceIoControl(
-                handle,
-                IOCTL_STORAGE_EJECT_MEDIA,
-                None,
-                0,
-                None,
-                0,
-                None,
-                None,
-            );
-
-            let _ = CloseHandle(handle);
-
-            if result.is_err() {
-                anyhow::bail!("弹出驱动器 {} 失败", letter);
-            }
-
-            log::info!("[ISO] 已弹出驱动器: {}:", letter);
-            Ok(())
-        }
-    }
-
-    /// 使用 Windows API 卸载所有挂载的 ISO
-    #[cfg(windows)]
-    pub fn unmount_all_iso() -> Result<()> {
-        anyhow::bail!(
-            "拒绝卸载所有光盘或 ISO：必须使用原始 ISO 路径卸载 LetRecovery 自己挂载的镜像"
-        )
-    }
-
     /// 挂载 ISO 并返回盘符 (如 "F:")
     pub fn mount_iso(iso_path: &str) -> Result<String> {
         log::info!("[ISO] ========== 挂载 ISO ==========");
@@ -385,30 +330,6 @@ impl IsoMounter {
         }
     }
 
-    /// 卸载 ISO
-    pub fn unmount() -> Result<()> {
-        anyhow::bail!("拒绝无所有权信息的 ISO 卸载：请按原始 ISO 路径卸载")
-    }
-
-    /// 判断盘符是否为 Windows 安装介质：
-    /// - Vista+/Win10：`\sources\install.wim|esd|swm`
-    /// - XP/2003：`\I386`（x86）或 `\AMD64`（x64）文本安装结构
-    pub fn is_windows_install_media(drive: &str) -> bool {
-        let d = drive.trim_end_matches('\\');
-        for f in ["install.wim", "install.esd", "install.swm"] {
-            if Path::new(&format!("{}\\sources\\{}", d, f)).exists() {
-                return true;
-            }
-        }
-        // XP/2003：有 i386/amd64 且含 setupldr.bin 即视为文本安装介质
-        for arch in ["I386", "AMD64"] {
-            if Path::new(&format!("{}\\{}\\setupldr.bin", d, arch)).exists() {
-                return true;
-            }
-        }
-        false
-    }
-
     /// 该盘符是否为 XP/2003 文本安装介质（无 \sources，有 \AMD64 或 \I386 的 setupldr.bin）。
     /// 返回该 arch 目录路径。
     ///
@@ -439,21 +360,6 @@ impl IsoMounter {
         None
     }
 
-    /// 查找已挂载的 ISO 驱动器盘符（后备方案，遍历 D-Z）
-    pub fn find_iso_drive() -> Option<String> {
-        // 遍历 D 到 Z 所有盘符
-        for letter in b'D'..=b'Z' {
-            let letter = letter as char;
-            let drive = format!("{}:", letter);
-            // Vista+ 或 XP/2003 安装介质都接受
-            if Self::is_windows_install_media(&drive) {
-                log::info!("[ISO] find_iso_drive 找到: {}", drive);
-                return Some(drive);
-            }
-        }
-        None
-    }
-
     /// 在挂载的 ISO 中查找系统镜像文件
     /// 如果传入 drive 参数，则只在该盘符下查找
     /// 否则遍历所有盘符
@@ -472,61 +378,6 @@ impl IsoMounter {
         }
 
         log::info!("[ISO] 在 {} 未找到安装镜像", drive);
-        None
-    }
-
-    /// 在挂载的 ISO 中查找系统镜像文件（遍历所有盘符）
-    pub fn find_install_image() -> Option<String> {
-        // 先查找动态挂载的盘符
-        if let Some(drive) = Self::find_iso_drive() {
-            return Self::find_install_image_in_drive(&drive);
-        }
-
-        log::info!("[ISO] 未找到安装镜像");
-        None
-    }
-
-    /// 检查 ISO 是否已挂载
-    pub fn is_mounted() -> bool {
-        Self::find_iso_drive().is_some()
-    }
-
-    /// 获取挂载的 ISO 的卷标
-    #[cfg(windows)]
-    pub fn get_volume_label() -> Option<String> {
-        use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
-
-        let drive = Self::find_iso_drive()?;
-        let path = format!("{}\\", drive);
-        let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-
-        let mut volume_name = [0u16; 261];
-
-        unsafe {
-            let result = GetVolumeInformationW(
-                PCWSTR::from_raw(wide_path.as_ptr()),
-                Some(&mut volume_name),
-                None,
-                None,
-                None,
-                None,
-            );
-
-            if result.is_ok() {
-                let label = String::from_utf16_lossy(&volume_name)
-                    .trim_end_matches('\0')
-                    .to_string();
-                if !label.is_empty() {
-                    return Some(label);
-                }
-            }
-        }
-
-        None
-    }
-
-    #[cfg(not(windows))]
-    pub fn get_volume_label() -> Option<String> {
         None
     }
 }

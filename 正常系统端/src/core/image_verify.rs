@@ -254,12 +254,6 @@ impl ProgressReporter {
             let _ = sender.send(VerifyProgress::new(mapped, status, current_item));
         }
     }
-
-    /// 发送简单进度更新
-    #[allow(dead_code)]
-    fn report_simple(&self, percentage: u8, status: impl Into<String>) {
-        self.report(percentage, status, "");
-    }
 }
 
 // ============================================================================
@@ -312,11 +306,6 @@ impl ImageVerifier {
     /// 检查是否已取消
     fn is_cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)
-    }
-
-    /// 获取当前进度
-    pub fn get_progress(&self) -> u8 {
-        self.progress.load(Ordering::SeqCst)
     }
 
     /// 校验镜像文件（主入口）
@@ -657,13 +646,18 @@ impl ImageVerifier {
 
         reporter.report(3, tr!("正在引入其余分卷..."), file_path);
 
-        // 用 glob 引入同目录其余分卷（如 dir/install*.swm）
-        let glob = Self::build_swm_glob(&swm_files[0]);
-        if let Err(e) = wim_handle.reference_resource_globs(&[&glob]) {
+        // Reference the strict ordered set explicitly; wildcard expansion could consume a
+        // sibling that was never included in this verification inventory.
+        let exact_resources = swm_files
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if let Err(e) = wim_handle.reference_resource_files_exact(&exact_resources) {
             return VerifyResult::corrupted(
                 file_path,
                 ImageType::Swm,
-                tr!("无法引入分卷（{}）: {}", glob, e),
+                tr!("无法引入精确分卷清单: {}", e),
             );
         }
 
@@ -748,57 +742,16 @@ impl ImageVerifier {
         result
     }
 
-    /// 由 SWM 主分卷路径构造引入其余分卷的 glob（dir/install.swm -> dir/install*.swm）
-    fn build_swm_glob(main_swm: &str) -> String {
-        let path = Path::new(main_swm);
-        let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let base = stem.trim_end_matches(|c: char| c.is_ascii_digit());
-        let base = if base.is_empty() { stem } else { base };
-        let pattern = format!("{}*.swm", base);
-        match dir {
-            Some(d) => d.join(pattern).to_string_lossy().into_owned(),
-            None => pattern,
-        }
-    }
-
     /// 查找 SWM 分卷文件
     fn find_swm_parts(main_swm: &str) -> Result<Vec<String>, String> {
-        let path = Path::new(main_swm);
-        let parent = path.parent().ok_or_else(|| tr!("无法获取文件目录"))?;
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| tr!("无法获取文件名"))?;
-
-        // 移除已有的数字后缀（如 install2 -> install）
-        let base_name = stem.trim_end_matches(|c: char| c.is_ascii_digit());
-
-        let mut parts = Vec::new();
-
-        // 添加主文件
-        if path.exists() {
-            parts.push(main_swm.to_string());
-        }
-
-        // 查找其他分卷
-        for i in 2..=999 {
-            let part_name = format!("{}{}.swm", base_name, i);
-            let part_path = parent.join(&part_name);
-
-            if part_path.exists() {
-                parts.push(part_path.to_string_lossy().to_string());
-            } else {
-                break;
-            }
-        }
-
-        if parts.is_empty() {
-            return Err(tr!("未找到任何分卷文件"));
-        }
-
-        parts.sort();
-        Ok(parts)
+        lr_core::install_source_lock::enumerate_install_image_set(Path::new(main_swm)).map(
+            |paths| {
+                paths
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect()
+            },
+        )
     }
 
     // ========================================================================
@@ -1118,6 +1071,38 @@ mod tests {
         assert!(ImageType::Swm.is_wim_family());
         assert!(!ImageType::Gho.is_wim_family());
         assert!(!ImageType::Iso.is_wim_family());
+    }
+
+    #[test]
+    fn swm_verification_inventory_is_ordered_and_excludes_noncanonical_extras() {
+        let directory = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-image-verify-exact-swm",
+        )
+        .unwrap();
+        for name in ["install.swm", "install2.swm", "install3.swm"] {
+            std::fs::write(directory.path().join(name), name.as_bytes()).unwrap();
+        }
+        let source = directory.path().join("install.swm");
+        let parts = ImageVerifier::find_swm_parts(&source.to_string_lossy()).unwrap();
+        assert!(parts[0].ends_with("install.swm"));
+        assert!(parts[1].ends_with("install2.swm"));
+        assert!(parts[2].ends_with("install3.swm"));
+
+        // This matched the retired engine glob, but is not a canonical ordinal and therefore is
+        // not admitted to the explicit resource-file vector.
+        std::fs::write(directory.path().join("install03.swm"), b"external").unwrap();
+        assert_eq!(
+            ImageVerifier::find_swm_parts(&source.to_string_lossy())
+                .unwrap()
+                .len(),
+            3
+        );
+
+        std::fs::remove_file(directory.path().join("install2.swm")).unwrap();
+        assert!(ImageVerifier::find_swm_parts(&source.to_string_lossy())
+            .unwrap_err()
+            .contains("missing SWM volume"));
     }
 
     #[test]

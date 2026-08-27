@@ -109,22 +109,9 @@ impl Ghost {
         }
     }
 
-    /// 使用自定义路径创建 Ghost 实例
-    pub fn with_path(ghost_path: &str) -> Self {
-        Self {
-            ghost_path: ghost_path.to_string(),
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
     /// 检查 Ghost 是否可用
     pub fn is_available(&self) -> bool {
         Path::new(&self.ghost_path).exists()
-    }
-
-    /// 获取 Ghost 可执行文件路径
-    pub fn get_ghost_path(&self) -> &str {
-        &self.ghost_path
     }
 
     /// 获取取消标志的克隆（用于外部控制取消）
@@ -499,116 +486,6 @@ impl Ghost {
         }
 
         lines
-    }
-
-    /// 创建 GHO 镜像（备份功能）
-    pub fn create_image(
-        &self,
-        disk_number: u32,
-        partition_number: u32,
-        gho_file: &str,
-        compression: u8,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        self.reset_cancel();
-
-        if !self.is_available() {
-            return Err(GhostError::ExecutableNotFound(self.ghost_path.clone()).into());
-        }
-
-        if disk_number == 0 || partition_number == 0 {
-            return Err(GhostError::InvalidPartition(tr!(
-                "无效的分区参数: 磁盘={}, 分区={}",
-                disk_number,
-                partition_number
-            ))
-            .into());
-        }
-
-        if let Some(parent) = Path::new(gho_file).parent() {
-            std::fs::create_dir_all(parent).context(tr!("无法创建输出目录"))?;
-        }
-
-        let source_partition = format!("{}:{}", disk_number, partition_number);
-
-        log::info!("[GHOST] ========================================");
-        log::info!("[GHOST] 开始创建 GHO 镜像");
-        log::info!(
-            "[GHOST] 源分区: {} (磁盘 {} 分区 {})",
-            source_partition,
-            disk_number,
-            partition_number
-        );
-        log::info!("[GHOST] 输出文件: {}", gho_file);
-        log::info!("[GHOST] 压缩级别: {}", compression);
-        log::info!("[GHOST] ========================================");
-
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.send(DismProgress {
-                percentage: 0,
-                status: tr!("正在准备备份..."),
-            });
-        }
-
-        let compression = compression.clamp(1, 9);
-
-        let clone_param = format!(
-            "-clone,mode=pdump,src={},dst={}",
-            source_partition, gho_file
-        );
-
-        let mut child = create_command(&self.ghost_path)
-            .args([
-                &clone_param,
-                "-sure",
-                "-fx",
-                "-batch",
-                &format!("-z{}", compression),
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context(tr!("无法启动 Ghost 进程"))?;
-
-        let result = self.monitor_ghost_process(&mut child, progress_tx, 0);
-
-        let _ = child.kill();
-        let _ = child.wait();
-
-        result
-    }
-
-    /// 从盘符创建 GHO 镜像（备份）：解析盘符 → 磁盘/分区号后调用 create_image。
-    /// 与 PE 端 `Ghost::create_image_from_letter` 等价，供桌面 Direct 备份按格式分发使用。
-    pub fn create_image_from_letter(
-        &self,
-        source_letter: &str,
-        gho_file: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        let letter = source_letter.trim_end_matches(['\\', '/']).to_uppercase();
-        let letter = if letter.ends_with(':') {
-            letter
-        } else {
-            format!("{}:", letter)
-        };
-
-        let partitions = crate::core::disk::DiskManager::get_partitions()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("获取分区列表失败: {}", e)))?;
-        let partition = partitions
-            .iter()
-            .find(|p| p.letter.eq_ignore_ascii_case(&letter))
-            .ok_or_else(|| anyhow::anyhow!("{}", tr!("找不到分区 {}", letter)))?;
-
-        let disk_number = partition.disk_number.ok_or_else(|| {
-            anyhow::anyhow!("{}", tr!("无法获取 {} 的磁盘号，请刷新分区列表", letter))
-        })?;
-        let partition_number = partition.partition_number.ok_or_else(|| {
-            anyhow::anyhow!("{}", tr!("无法获取 {} 的分区号，请刷新分区列表", letter))
-        })?;
-
-        // Ghost 磁盘号从 1 开始（create_image 内部直接把它当作 ghost src 的磁盘号）
-        self.create_image(disk_number + 1, partition_number, gho_file, 9, progress_tx)
     }
 }
 

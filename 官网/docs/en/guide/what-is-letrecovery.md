@@ -18,8 +18,8 @@ The unmodified official LetRecovery software remains free to obtain from [offici
 
 - **Multi-format installation** — WIM / ESD / SWM / GHO / ISO, automatic ISO mounting, and your pick of any edition inside the image; it also supports original [i386 text-mode setup for Windows XP / 2003](/guide/xp-install).
 - **Dual desktop & WinPE clients** — when reinstalling the *current* system drive from the desktop, it automatically writes the boot entry and reboots into WinPE; run it directly inside WinPE and it installs in place.
-- **Reinstall onto BitLocker-encrypted drives** — automatically unlocks or decrypts the BitLocker volume before deployment.
-- **Full / incremental backup** to WIM / ESD / SWM / GHO.
+- **BitLocker state is gated** — locked, converting, or unknown state stops the task. Reinstall via PE requires the target to be fully decrypted before handoff and never writes a recovery key into public configuration or injects an identity-unbound key bundle into PE.
+- **Transactional backup** — WIM / ESD supports create, full replacement, and index append, either directly or from the graphical client through an authenticated WinPE session. The SWM/GHO production backup path is currently disabled.
 - **Online download** of images, common software, and graphics drivers, with Aria2 multi-threaded acceleration.
 - **Easy Mode** — [one-click reinstall](/guide/easy-mode): just pick the system, pick the edition, and confirm.
 - **Complete Toolbox** — BitLocker management, password reset, image/hash verification, one-click partitioning, driver backup and restore, [Lossless C: Expansion](/guide/expand-c-drive), boot repair, and more.
@@ -31,7 +31,7 @@ LetRecovery has two frontends that share the same core (`lr-core`):
 | Component | Executable | Role |
 | --- | --- | --- |
 | **Desktop client** | `LetRecovery.exe` | The main interface. Runs both under normal Windows **and** in WinPE (PE is auto-detected). |
-| **PE client** | `LetRecoveryPE.exe` | A streamlined, unattended install/backup interface used by the "auto-reboot into WinPE" flow. |
+| **PE client** | `LetRecoveryPE.exe` | The authenticated native install/backup/expand progress interface used by the "auto-reboot into WinPE" flow; it exposes no public CLI. |
 
 When installing to a **non-system** partition (or when you are already in WinPE), it deploys **directly**; when installing from the desktop to the **running system drive**, LetRecovery first prepares the WinPE boot entry, reboots into it, and finishes inside PE — because a running system cannot overwrite itself.
 

@@ -103,24 +103,36 @@ impl PeCache {
         Some(pe_list)
     }
 
-    /// 检查是否有本地PE可用（已下载过）
-    pub fn has_downloaded_pe(filename: &str) -> bool {
-        let (exists, _) = crate::core::pe::PeManager::check_pe_exists(filename);
-        exists
+    pub(crate) fn load_strict() -> Result<Option<Vec<OnlinePE>>> {
+        let cache = crate::core::app_config::AppConfig::load_strict()?.pe_cache;
+        if cache.version != Self::CACHE_VERSION || cache.pe_list.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            cache.pe_list.iter().map(CachedPE::to_online_pe).collect(),
+        ))
     }
 }
 
 /// 在线软件信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnlineSoftware {
+    /// 服务端稳定标识；旧目录可以省略。
+    #[serde(default)]
+    pub id: String,
     /// 软件名称
     pub name: String,
     /// 软件描述
     pub description: String,
     /// 更新日期
+    #[serde(default)]
     pub update_date: String,
     /// 文件大小
+    #[serde(default)]
     pub file_size: String,
+    /// v4 目录提供的软件版本；仅用于显示。
+    #[serde(default)]
+    pub version: Option<String>,
     /// 图标URL（可选）
     #[serde(default)]
     pub icon_url: Option<String>,
@@ -134,6 +146,16 @@ pub struct OnlineSoftware {
     pub download_url_nt5: Option<String>,
     /// 文件名
     pub filename: String,
+    /// v4 目录提供的静默安装命令模板。`{installer}` 代表下载后的绝对路径。
+    #[serde(default)]
+    pub silent_command: Option<String>,
+    /// 安装程序是否要求管理员权限。
+    #[serde(default)]
+    pub requires_admin: bool,
+    /// 服务端将 VMware Tools 标记为安装高级选项中的独立项目。它不会出现在
+    /// 通用“预装应用”分类选择窗口中。
+    #[serde(default)]
+    pub vm_tools: bool,
     #[serde(default)]
     pub md5: Option<String>,
     #[serde(default)]
@@ -146,6 +168,24 @@ pub struct OnlineSoftware {
     pub md5_nt5: Option<String>,
     #[serde(default)]
     pub sha256_nt5: Option<String>,
+}
+
+/// v4 软件分类。在线下载页和预装应用选择器共用这一结构。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoftwareCategory {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub items: Vec<OnlineSoftware>,
+}
+
+/// v4 软件分类目录的内部序列化格式。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SoftwareCategoryList {
+    #[serde(default)]
+    pub categories: Vec<SoftwareCategory>,
 }
 
 /// 软件列表JSON格式
@@ -190,6 +230,8 @@ pub struct ConfigManager {
     pub systems: Vec<OnlineSystem>,
     pub pe_list: Vec<OnlinePE>,
     pub software_list: Vec<OnlineSoftware>,
+    /// v4 软件分类；旧平铺目录会映射为一个兼容分类。
+    pub software_categories: Vec<SoftwareCategory>,
     /// GPU驱动列表
     pub gpu_driver_list: Vec<OnlineGpuDriver>,
     /// 小白模式配置
@@ -197,59 +239,19 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    /// 从远程服务器加载配置
-    pub async fn load_from_remote(system_url: &str, pe_url: &str) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?;
-
-        // 下载系统列表
-        let systems = if let Ok(resp) = client.get(system_url).send().await {
-            if let Ok(text) = resp.text().await {
-                Self::parse_system_list(&text)
-            } else {
-                Vec::new()
-            }
+    /// Returns the single server-authorized VMware Tools entry. Duplicate flags are
+    /// treated as an invalid catalogue instead of silently selecting by response order.
+    pub fn vmware_tools_entry(&self) -> Option<&OnlineSoftware> {
+        let mut matches = self
+            .software_list
+            .iter()
+            .filter(|software| software.vm_tools);
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            log::warn!("v4 catalogue contains multiple vm_tools entries; option suppressed");
+            None
         } else {
-            Vec::new()
-        };
-
-        // 下载 PE 列表
-        let pe_list = if let Ok(resp) = client.get(pe_url).send().await {
-            if let Ok(text) = resp.text().await {
-                Self::parse_pe_list(&text)
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        Ok(Self {
-            systems,
-            pe_list,
-            software_list: Vec::new(),
-            gpu_driver_list: Vec::new(),
-            easy_mode_config: None,
-        })
-    }
-
-    /// 从远程配置内容加载
-    ///
-    /// # Arguments
-    /// * `dl_content` - 系统镜像列表内容
-    /// * `pe_content` - PE 列表内容
-    pub fn load_from_content(dl_content: Option<&str>, pe_content: Option<&str>) -> Self {
-        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
-
-        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
-
-        Self {
-            systems,
-            pe_list,
-            software_list: Vec::new(),
-            gpu_driver_list: Vec::new(),
-            easy_mode_config: None,
+            Some(first)
         }
     }
 
@@ -268,48 +270,18 @@ impl ConfigManager {
 
         let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
 
-        let software_list = soft_content
-            .map(Self::parse_software_list)
+        let software_categories = soft_content
+            .map(Self::parse_software_categories)
             .unwrap_or_default();
+        let software_list = flatten_software_categories(&software_categories);
 
         Self {
             systems,
             pe_list,
             software_list,
+            software_categories,
             gpu_driver_list: Vec::new(),
             easy_mode_config: None,
-        }
-    }
-
-    /// 从远程配置内容加载（完整版，包含所有配置）
-    ///
-    /// # Arguments
-    /// * `dl_content` - 系统镜像列表内容
-    /// * `pe_content` - PE 列表内容
-    /// * `soft_content` - 软件列表内容（JSON格式）
-    /// * `easy_content` - 小白模式配置内容（JSON格式）
-    pub fn load_from_content_full(
-        dl_content: Option<&str>,
-        pe_content: Option<&str>,
-        soft_content: Option<&str>,
-        easy_content: Option<&str>,
-    ) -> Self {
-        let systems = dl_content.map(Self::parse_system_list).unwrap_or_default();
-
-        let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
-
-        let software_list = soft_content
-            .map(Self::parse_software_list)
-            .unwrap_or_default();
-
-        let easy_mode_config = easy_content.and_then(EasyModeConfig::parse);
-
-        Self {
-            systems,
-            pe_list,
-            software_list,
-            gpu_driver_list: Vec::new(),
-            easy_mode_config,
         }
     }
 
@@ -332,9 +304,10 @@ impl ConfigManager {
 
         let pe_list = pe_content.map(Self::parse_pe_list).unwrap_or_default();
 
-        let software_list = soft_content
-            .map(Self::parse_software_list)
+        let software_categories = soft_content
+            .map(Self::parse_software_categories)
             .unwrap_or_default();
+        let software_list = flatten_software_categories(&software_categories);
 
         let easy_mode_config = easy_content.and_then(EasyModeConfig::parse);
 
@@ -346,6 +319,7 @@ impl ConfigManager {
             systems,
             pe_list,
             software_list,
+            software_categories,
             gpu_driver_list,
             easy_mode_config,
         }
@@ -446,10 +420,24 @@ impl ConfigManager {
 
     /// 解析软件列表（JSON格式）
     pub fn parse_software_list(content: &str) -> Vec<OnlineSoftware> {
+        flatten_software_categories(&Self::parse_software_categories(content))
+    }
+
+    /// 解析 v4 分类目录；旧平铺目录继续映射为单一“软件”分类。
+    pub fn parse_software_categories(content: &str) -> Vec<SoftwareCategory> {
+        if let Ok(list) = serde_json::from_str::<SoftwareCategoryList>(content) {
+            return list.categories;
+        }
         match serde_json::from_str::<SoftwareList>(content) {
-            Ok(list) => list.software,
+            Ok(list) if !list.software.is_empty() => vec![SoftwareCategory {
+                id: "legacy".into(),
+                name: "软件".into(),
+                description: String::new(),
+                items: list.software,
+            }],
+            Ok(_) => Vec::new(),
             Err(e) => {
-                log::warn!("解析软件列表失败: {}", e);
+                log::warn!("解析软件分类目录失败: {}", e);
                 Vec::new()
             }
         }
@@ -470,16 +458,13 @@ impl ConfigManager {
     pub fn is_empty(&self) -> bool {
         self.systems.is_empty() && self.pe_list.is_empty()
     }
+}
 
-    /// 检查软件列表是否为空
-    pub fn has_software(&self) -> bool {
-        !self.software_list.is_empty()
-    }
-
-    /// 检查GPU驱动列表是否为空
-    pub fn has_gpu_drivers(&self) -> bool {
-        !self.gpu_driver_list.is_empty()
-    }
+fn flatten_software_categories(categories: &[SoftwareCategory]) -> Vec<OnlineSoftware> {
+    categories
+        .iter()
+        .flat_map(|category| category.items.iter().cloned())
+        .collect()
 }
 
 /// 小白模式分卷信息

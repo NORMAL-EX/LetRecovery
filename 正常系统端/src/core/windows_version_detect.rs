@@ -3,6 +3,9 @@
 //! 提供对离线Windows分区的精确版本检测
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static VERSION_HIVE_ALIAS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Windows版本详细信息
 #[derive(Debug, Clone)]
@@ -165,8 +168,57 @@ pub fn get_windows_version_info(partition: &str) -> (String, String) {
     detect_windows_from_filesystem(&partition_letter)
 }
 
-/// 从离线注册表读取Windows版本信息
+fn partition_drive_letter(partition: &str) -> Option<char> {
+    let value = partition.trim();
+    let bytes = value.as_bytes();
+    if bytes.len() < 2
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || bytes[2..].iter().any(|byte| !matches!(byte, b'\\' | b'/'))
+    {
+        return None;
+    }
+    Some(char::from(bytes[0]).to_ascii_uppercase())
+}
+
+fn partition_is_current_windows(partition: &str, current_windows_drive: char) -> bool {
+    partition_drive_letter(partition)
+        .is_some_and(|letter| letter.eq_ignore_ascii_case(&current_windows_drive))
+}
+
+fn query_version_values(reg_path: &str) -> WindowsVersionInfo {
+    let query = |name: &str| lr_core::registry::OfflineRegistry::query_string(reg_path, name).ok();
+    WindowsVersionInfo {
+        product_name: query("ProductName").unwrap_or_else(|| "Windows".to_owned()),
+        display_version: query("DisplayVersion"),
+        current_build: query("CurrentBuild").or_else(|| query("CurrentBuildNumber")),
+        edition_id: query("EditionID"),
+    }
+}
+
+/// 从当前系统的在线注册表或其它分区的离线注册表读取 Windows 版本信息。
+///
+/// 当前 Windows 卷由共享的 `GetWindowsDirectoryW` 边界确定，不能写死为 `C:`。
+/// 如果该权威查询失败，为避免误把当前正在使用的 SOFTWARE 当作离线 hive 加载，
+/// 本层直接跳过注册表探测并交给文件版本回退。
 fn read_version_from_registry(partition: &str) -> Option<WindowsVersionInfo> {
+    let current_windows_drive = match lr_core::windows_storage::current_windows_drive_letter() {
+        Ok(letter) => letter,
+        Err(error) => {
+            log::warn!(
+                "[WindowsVersionDetect] 无法确定当前 Windows 卷，跳过注册表版本探测: {}",
+                error
+            );
+            return None;
+        }
+    };
+
+    if partition_is_current_windows(partition, current_windows_drive) {
+        return Some(query_version_values(
+            "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+        ));
+    }
+
     let software_hive = format!("{}\\Windows\\System32\\config\\SOFTWARE", partition);
 
     if !Path::new(&software_hive).exists() {
@@ -174,12 +226,9 @@ fn read_version_from_registry(partition: &str) -> Option<WindowsVersionInfo> {
     }
 
     // 生成唯一的临时注册表加载点名称
-    let partition_id = partition.trim_end_matches(':');
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let temp_key = format!("LR_VER_{}_{}", partition_id, timestamp % 10000);
+    let partition_id = partition_drive_letter(partition).unwrap_or('V');
+    let sequence = VERSION_HIVE_ALIAS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp_key = format!("LR_VER_{partition_id}_{}_{sequence}", std::process::id());
     let reg_path = format!("HKLM\\{}\\Microsoft\\Windows NT\\CurrentVersion", temp_key);
 
     if let Err(error) = lr_core::registry::OfflineRegistry::load_hive(&temp_key, &software_hive) {
@@ -191,13 +240,7 @@ fn read_version_from_registry(partition: &str) -> Option<WindowsVersionInfo> {
         return None;
     }
 
-    let query = |name: &str| lr_core::registry::OfflineRegistry::query_string(&reg_path, name).ok();
-    let result = WindowsVersionInfo {
-        product_name: query("ProductName").unwrap_or_else(|| "Windows".to_owned()),
-        display_version: query("DisplayVersion"),
-        current_build: query("CurrentBuild").or_else(|| query("CurrentBuildNumber")),
-        edition_id: query("EditionID"),
-    };
+    let result = query_version_values(&reg_path);
     if let Err(error) = lr_core::registry::OfflineRegistry::unload_hive(&temp_key) {
         log::warn!(
             "[WindowsVersionDetect] RegUnLoadKeyW failed for {}: {}",
@@ -388,4 +431,26 @@ pub fn get_windows_partition_infos(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{partition_drive_letter, partition_is_current_windows};
+
+    #[test]
+    fn current_windows_partition_uses_dynamic_drive_letter() {
+        assert!(partition_is_current_windows("D:", 'd'));
+        assert!(partition_is_current_windows(" d:\\\\ ", 'D'));
+        assert!(partition_is_current_windows("d:/", 'D'));
+        assert!(!partition_is_current_windows("C:", 'D'));
+    }
+
+    #[test]
+    fn partition_drive_parser_rejects_non_root_paths() {
+        assert_eq!(partition_drive_letter("E:"), Some('E'));
+        assert_eq!(partition_drive_letter("e:\\"), Some('E'));
+        assert_eq!(partition_drive_letter("E:\\Windows"), None);
+        assert_eq!(partition_drive_letter("\\\\?\\Volume{value}\\"), None);
+        assert_eq!(partition_drive_letter(""), None);
+    }
 }

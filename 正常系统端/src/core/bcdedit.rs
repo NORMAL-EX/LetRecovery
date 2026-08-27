@@ -42,6 +42,40 @@ fn require_pca_esp(esp: Option<(u32, u32, u64)>) -> Result<(u32, u32, u64)> {
     esp.ok_or_else(|| anyhow::anyhow!("{}", tr!("目标磁盘上没有 EFI 系统分区。")))
 }
 
+fn highest_free_mount_letter(assigned_mask: u32) -> Option<char> {
+    (3_u8..=25)
+        .rev()
+        .find(|index| assigned_mask & (1_u32 << index) == 0)
+        .map(|index| char::from(b'A' + index))
+}
+
+fn available_esp_mount_letter() -> Result<char> {
+    // GetLogicalDrives returning zero is an API failure, not evidence that every letter is used.
+    // Preserve that distinction so WinPE service/device failures are never misreported as normal
+    // drive-letter exhaustion. D-Z only mirrors the existing shared selection policy.
+    let assigned = lr_core::windows_storage::assigned_drive_letter_mask()
+        .map_err(|error| anyhow::anyhow!("{}", tr!("无法查询当前盘符分配状态: {}", error)))?;
+    highest_free_mount_letter(assigned)
+        .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))
+}
+
+pub(crate) fn finish_with_esp_cleanup<T>(
+    operation: Result<T>,
+    mount: Option<lr_core::boot_pca::TemporaryEspMountGuard>,
+) -> Result<T> {
+    let cleanup = mount
+        .map(lr_core::boot_pca::TemporaryEspMountGuard::close)
+        .unwrap_or(Ok(()));
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup)) => anyhow::bail!("temporary ESP cleanup failed: {cleanup}"),
+        (Err(operation), Ok(())) => Err(operation),
+        (Err(operation), Err(cleanup)) => Err(anyhow::anyhow!(
+            "{operation:#}; additionally temporary ESP cleanup failed: {cleanup}"
+        )),
+    }
+}
+
 pub struct BootManager {
     bcdedit_path: String,
     bcdboot_path: String,
@@ -60,33 +94,6 @@ impl BootManager {
             bcdedit_path: bcdedit_path.to_string_lossy().to_string(),
             bcdboot_path: bin_dir.join("bcdboot.exe").to_string_lossy().to_string(),
         }
-    }
-
-    /// 获取当前系统引导 GUID
-    pub fn get_current_boot_guid(&self) -> Result<String> {
-        let output = create_command(&self.bcdedit_path)
-            .args(["/enum"])
-            .output()?;
-
-        let stdout = gbk_to_utf8(&output.stdout);
-        let system_drive = format!(
-            "{}:",
-            lr_core::windows_storage::current_windows_drive_letter()?
-        );
-
-        let mut current_guid = String::new();
-        for line in stdout.lines() {
-            if line.starts_with("identifier") || line.contains("标识符") {
-                if let Some(guid) = line.split_whitespace().last() {
-                    current_guid = guid.to_string();
-                }
-            }
-            if line.contains("device") && line.contains(&system_drive) {
-                return Ok(current_guid);
-            }
-        }
-
-        anyhow::bail!("Could not find current boot GUID")
     }
 
     fn optional_esp_on_same_disk(
@@ -154,16 +161,20 @@ impl BootManager {
                 .map_err(anyhow::Error::msg);
         }
 
-        let mount_letter = lr_core::boot_pca::find_available_drive_letter()
-            .ok_or_else(|| anyhow::anyhow!("{}", tr!("没有空闲盘符可挂载 ESP")))?;
-        lr_core::windows_storage::assign_partition_drive_letter(
+        let mount_letter = available_esp_mount_letter()?;
+        let expected_layout = lr_core::windows_storage::disk_layout_snapshot(disk_num)?;
+        lr_core::windows_storage::assign_partition_drive_letter_checked(
             disk_num,
             esp_offset,
             mount_letter,
+            &expected_layout,
         )?;
-        let mount_guard =
-            lr_core::boot_pca::TemporaryEspMountGuard::new(&mount_letter.to_string(), expected)
-                .map_err(anyhow::Error::msg)?;
+        let mount_guard = lr_core::boot_pca::TemporaryEspMountGuard::new(
+            &mount_letter.to_string(),
+            expected,
+            expected_layout,
+        )
+        .map_err(anyhow::Error::msg)?;
 
         let mount_root = format!("{}:\\", mount_letter);
         for _ in 0..20 {
@@ -257,17 +268,6 @@ impl BootManager {
         }
     }
 
-    /// 查找并挂载 EFI 系统分区（旧方法，作为备选）
-    pub fn find_and_mount_esp(&self) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
-        let _mount_lock = ESP_MOUNT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        log::info!("[BOOT] 查找 EFI 系统分区...");
-
-        // 通过 IOCTL/VDS 枚举全部物理磁盘上的 ESP 并分配访问路径。
-        self.find_esp_with_windows_api()
-    }
-
     fn find_esp_with_windows_api(&self) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
         log::info!("[BOOT] 使用 WinAPI 查找 ESP");
         for disk in crate::core::quick_partition::get_physical_disks() {
@@ -296,42 +296,6 @@ impl BootManager {
         anyhow::bail!("{}", tr!("未找到 EFI 系统分区"))
     }
 
-    /// 设置默认引导项
-    pub fn set_default_boot(&self, guid: &str) -> Result<()> {
-        let output = create_command(&self.bcdedit_path)
-            .args(["/default", guid])
-            .output()?;
-
-        if !output.status.success() {
-            anyhow::bail!("Failed to set default boot entry");
-        }
-        Ok(())
-    }
-
-    /// 设置引导超时
-    pub fn set_timeout(&self, seconds: u32) -> Result<()> {
-        let output = create_command(&self.bcdedit_path)
-            .args(["/timeout", &seconds.to_string()])
-            .output()?;
-
-        if !output.status.success() {
-            anyhow::bail!("Failed to set boot timeout");
-        }
-        Ok(())
-    }
-
-    /// 删除引导项
-    pub fn delete_boot_entry(&self, guid: &str) -> Result<()> {
-        let output = create_command(&self.bcdedit_path)
-            .args(["/delete", guid, "/f"])
-            .output()?;
-
-        if !output.status.success() {
-            anyhow::bail!("Failed to delete boot entry");
-        }
-        Ok(())
-    }
-
     /// 修复指定分区的引导（简单版本）
     pub fn repair_boot(&self, windows_partition: &str) -> Result<()> {
         self.repair_boot_advanced(windows_partition, true, BootPcaMode::Auto)
@@ -349,7 +313,12 @@ impl BootManager {
     fn prepare_legacy_boot_partition(
         &self,
         windows_partition: &str,
-    ) -> Result<(String, usize, usize)> {
+    ) -> Result<(
+        String,
+        usize,
+        usize,
+        Option<lr_core::boot_pca::TemporaryEspMountGuard>,
+    )> {
         let wl_char = windows_partition
             .trim_end_matches('\\')
             .trim_end_matches(':')
@@ -390,14 +359,14 @@ impl BootManager {
         match active {
             // 独立的活动 System 分区（≠Windows 分区）：引导写到它，给它挂个盘符供 bcdboot /s。
             Some(ap) if ap != 0 && ap != win_part => {
-                let letter = self.letter_for_partition(&disks, disk_num, ap)?;
+                let (letter, mount) = self.letter_for_partition(&disks, disk_num, ap)?;
                 log::info!(
                     "[BOOT] Legacy 引导分区 = 活动 System 分区 磁盘{}:分区{} -> {}",
                     disk_num,
                     ap,
                     letter
                 );
-                Ok((letter, disk_num as usize, ap as usize))
+                Ok((letter, disk_num as usize, ap as usize, mount))
             }
             // 活动分区就是 Windows 分区，或本盘没有活动分区：用 Windows 分区自身作引导分区，
             // 稍后由调用方将其设为活动。Windows 分区已挂好盘符，直接用。
@@ -412,6 +381,7 @@ impl BootManager {
                     windows_partition.to_string(),
                     disk_num as usize,
                     win_part as usize,
+                    None,
                 ))
             }
         }
@@ -423,7 +393,7 @@ impl BootManager {
         disks: &[crate::core::quick_partition::PhysicalDisk],
         disk_num: u32,
         part: u32,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<lr_core::boot_pca::TemporaryEspMountGuard>)> {
         // 先看 IOCTL 扫描结果里这个分区有没有现成盘符。
         let existing = disks
             .iter()
@@ -433,7 +403,7 @@ impl BootManager {
         if let Some(c) = existing {
             let letter = format!("{}:", c.to_ascii_uppercase());
             if Path::new(&format!("{}\\", letter)).exists() {
-                return Ok(letter);
+                return Ok((letter, None));
             }
         }
         // 没有则通过 VDS 给它分配一个空闲盘符。
@@ -447,13 +417,30 @@ impl BootManager {
                     .iter()
                     .find(|partition| partition.partition_number == part)
             })
-            .map(|partition| partition.offset_bytes)
+            .map(|partition| (partition.offset_bytes, partition.size_bytes))
             .ok_or_else(|| anyhow::anyhow!("无法重新定位引导分区"))?;
-        lr_core::windows_storage::assign_partition_drive_letter(disk_num, offset, free)?;
+        let (offset, size) = offset;
+        let expected_layout = lr_core::windows_storage::disk_layout_snapshot(disk_num)?;
+        lr_core::windows_storage::assign_partition_drive_letter_checked(
+            disk_num,
+            offset,
+            free,
+            &expected_layout,
+        )?;
         let letter = format!("{}:", free);
+        let mount = lr_core::boot_pca::TemporaryEspMountGuard::new(
+            &letter,
+            lr_core::windows_storage::VolumeIdentity {
+                disk_number: disk_num,
+                offset_bytes: offset,
+                extent_length_bytes: size,
+            },
+            expected_layout,
+        )
+        .map_err(anyhow::Error::msg)?;
         for _ in 0..20 {
             if Path::new(&format!("{}\\", letter)).exists() {
-                return Ok(letter);
+                return Ok((letter, Some(mount)));
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -465,7 +452,7 @@ impl BootManager {
                 letter
             );
         }
-        Ok(letter)
+        Ok((letter, Some(mount)))
     }
 
     /// 把指定 磁盘:分区 设为活动分区（Legacy/MBR 引导必需，照搬 DSI 的 PART *a）。
@@ -479,7 +466,13 @@ impl BootManager {
                     .find(|partition| partition.partition_number == part_num as u32)
             })
             .ok_or_else(|| anyhow::anyhow!("无法重新定位要设为活动的分区"))?;
-        lr_core::windows_storage::set_mbr_active(disk_num as u32, partition.offset_bytes, true)?;
+        let expected_layout = lr_core::windows_storage::disk_layout_snapshot(disk_num as u32)?;
+        lr_core::windows_storage::set_mbr_active_checked(
+            disk_num as u32,
+            partition.offset_bytes,
+            true,
+            &expected_layout,
+        )?;
         log::info!(
             "[BOOT] 已通过 WinAPI 设活动分区 磁盘{}:分区{}",
             disk_num,
@@ -497,10 +490,12 @@ impl BootManager {
             .next()
             .ok_or_else(|| anyhow::anyhow!("引导分区盘符为空"))?;
         let identity = lr_core::windows_storage::volume_identity(letter)?;
-        lr_core::windows_storage::set_mbr_active(
+        let expected_layout = lr_core::windows_storage::disk_layout_snapshot(identity.disk_number)?;
+        lr_core::windows_storage::set_mbr_active_checked(
             identity.disk_number,
             identity.offset_bytes,
             true,
+            &expected_layout,
         )?;
         log::info!("[BOOT] 已通过 WinAPI 设活动分区 卷{}:", letter);
         Ok(())
@@ -538,178 +533,172 @@ impl BootManager {
         } else {
             None
         };
-        let existing_esp_hint = mounted_esp.as_ref().map(|mount| {
-            let esp_letter = mount.letter();
-            let esp_root = format!("{}\\", esp_letter.trim_end_matches('\\'));
-            let info = lr_core::boot_pca::inspect_esp_generation(Path::new(&esp_root));
-            if info.signature_valid {
-                info.generation
-            } else {
-                lr_core::boot_pca::PcaGeneration::Unknown
-            }
-        });
-
-        if use_uefi {
-            let esp_letter = mounted_esp
-                .as_ref()
-                .map(lr_core::boot_pca::TemporaryEspMountGuard::letter)
-                .expect("UEFI repair always mounts the target-disk ESP first");
-            let (version, family) =
-                lr_core::boot_pca::inspect_installed_windows_boot_family(windows_partition)
-                    .map_err(|error| {
-                        anyhow::anyhow!("{}", tr!("无法确认目标系统引导版本: {}", error))
-                    })?;
-            log::info!(
-                "[BOOT] 目标 Windows 版本: {}，引导族: {:?}",
-                version,
-                family
-            );
-            match family {
-                lr_core::boot_pca::InstalledWindowsBootFamily::LegacyUefi => {
-                    lr_core::boot_pca::repair_legacy_windows_uefi_boot(
-                        Path::new(&self.bcdboot_path),
-                        windows_partition,
-                        esp_letter,
-                    )
-                    .map_err(|error| {
-                        anyhow::anyhow!("{}", tr!("旧版 Windows UEFI 引导修复失败: {}", error))
-                    })?;
-                    log::info!("[BOOT] 旧版 Windows 标准 UEFI 引导修复成功");
+        let mut legacy_mount = None;
+        let operation = (|| -> Result<()> {
+            let existing_esp_hint = mounted_esp.as_ref().map(|mount| {
+                let esp_letter = mount.letter();
+                let esp_root = format!("{}\\", esp_letter.trim_end_matches('\\'));
+                let info = lr_core::boot_pca::inspect_esp_generation(Path::new(&esp_root));
+                if info.signature_valid {
+                    info.generation
+                } else {
+                    lr_core::boot_pca::PcaGeneration::Unknown
                 }
-                lr_core::boot_pca::InstalledWindowsBootFamily::ModernPca => {
-                    let firmware = lr_core::boot_pca::inspect_firmware_pca();
-                    log::info!("[BOOT PCA] 固件检测: {:?}", firmware);
-                    let decision = lr_core::boot_pca::repair_uefi_boot(
-                        Path::new(&self.bcdboot_path),
-                        windows_partition,
-                        esp_letter,
-                        pca_mode,
-                        firmware,
-                        existing_esp_hint,
-                    )
-                    .map_err(|error| anyhow::anyhow!("{}", tr!("UEFI 引导修复失败: {}", error)))?;
-                    log::info!(
-                        "[BOOT] UEFI 引导修复成功: {} ({})",
-                        decision.generation,
-                        decision.reason
+            });
+
+            if use_uefi {
+                let esp_letter = mounted_esp
+                    .as_ref()
+                    .map(lr_core::boot_pca::TemporaryEspMountGuard::letter)
+                    .expect("UEFI repair always mounts the target-disk ESP first");
+                let (version, family) =
+                    lr_core::boot_pca::inspect_installed_windows_boot_family(windows_partition)
+                        .map_err(|error| {
+                            anyhow::anyhow!("{}", tr!("无法确认目标系统引导版本: {}", error))
+                        })?;
+                log::info!(
+                    "[BOOT] 目标 Windows 版本: {}，引导族: {:?}",
+                    version,
+                    family
+                );
+                match family {
+                    lr_core::boot_pca::InstalledWindowsBootFamily::LegacyUefi => {
+                        lr_core::boot_pca::repair_legacy_windows_uefi_boot(
+                            Path::new(&self.bcdboot_path),
+                            windows_partition,
+                            esp_letter,
+                        )
+                        .map_err(|error| {
+                            anyhow::anyhow!("{}", tr!("旧版 Windows UEFI 引导修复失败: {}", error))
+                        })?;
+                        log::info!("[BOOT] 旧版 Windows 标准 UEFI 引导修复成功");
+                    }
+                    lr_core::boot_pca::InstalledWindowsBootFamily::ModernPca => {
+                        let firmware = lr_core::boot_pca::inspect_firmware_pca();
+                        log::info!("[BOOT PCA] 固件检测: {:?}", firmware);
+                        let decision = lr_core::boot_pca::repair_uefi_boot(
+                            Path::new(&self.bcdboot_path),
+                            windows_partition,
+                            esp_letter,
+                            pca_mode,
+                            firmware,
+                            existing_esp_hint,
+                        )
+                        .map_err(|error| {
+                            anyhow::anyhow!("{}", tr!("UEFI 引导修复失败: {}", error))
+                        })?;
+                        log::info!(
+                            "[BOOT] UEFI 引导修复成功: {} ({})",
+                            decision.generation,
+                            decision.reason
+                        );
+                    }
+                    lr_core::boot_pca::InstalledWindowsBootFamily::Nt5 => {
+                        anyhow::bail!("{}", tr!("NT5 系统必须使用 XP/2003 专用引导写入路径"));
+                    }
+                }
+            } else {
+                // Legacy/BIOS 模式——照搬 DSI：bootmgr/BCD 写到【活动的 System 分区】，而不是 Windows 分区。
+                // System+Windows 拆分布局时引导分区≠Windows 分区（之前直接拿 Windows 分区写引导，导致开机 0x7B）；
+                // 单分区布局时活动分区就是 Windows 分区，逻辑一致。
+                log::info!("[BOOT] Legacy 模式：写入 MBR 引导");
+
+                let (boot_letter, boot_disk, boot_part, mount) =
+                    self.prepare_legacy_boot_partition(windows_partition)?;
+                legacy_mount = mount;
+                log::info!(
+                    "[BOOT] Legacy 引导分区: {} (磁盘{}:分区{})",
+                    boot_letter,
+                    boot_disk,
+                    boot_part
+                );
+
+                // Bootsect 是后续承重步骤，先确认依赖存在，避免 BCDBoot 已改盘后才发现无法完成。
+                let bootsect_path = get_bin_dir().join("bootsect.exe");
+                if !bootsect_path.is_file() {
+                    anyhow::bail!(
+                        "{}",
+                        tr!(
+                            "Legacy 引导修复缺少 bootsect.exe：{}",
+                            bootsect_path.display()
+                        )
                     );
                 }
-                lr_core::boot_pca::InstalledWindowsBootFamily::Nt5 => {
-                    anyhow::bail!("{}", tr!("NT5 系统必须使用 XP/2003 专用引导写入路径"));
-                }
-            }
-        } else {
-            // Legacy/BIOS 模式——照搬 DSI：bootmgr/BCD 写到【活动的 System 分区】，而不是 Windows 分区。
-            // System+Windows 拆分布局时引导分区≠Windows 分区（之前直接拿 Windows 分区写引导，导致开机 0x7B）；
-            // 单分区布局时活动分区就是 Windows 分区，逻辑一致。
-            log::info!("[BOOT] Legacy 模式：写入 MBR 引导");
 
-            // 找引导（活动）分区并挂好盘符；找不到则回退用 Windows 分区自身（老行为，至少不更差）。
-            let (boot_letter, boot_disk, boot_part) =
-                match self.prepare_legacy_boot_partition(windows_partition) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        log::warn!(
-                            "[BOOT] 未找到引导/活动分区({})，回退用系统分区自身写引导",
-                            e
-                        );
-                        (windows_partition.to_string(), 0usize, 0usize)
-                    }
-                };
-            log::info!(
-                "[BOOT] Legacy 引导分区: {} (磁盘{}:分区{})",
-                boot_letter,
-                boot_disk,
-                boot_part
-            );
-
-            // Bootsect 是后续承重步骤，先确认依赖存在，避免 BCDBoot 已改盘后才发现无法完成。
-            let bootsect_path = get_bin_dir().join("bootsect.exe");
-            if !bootsect_path.is_file() {
-                anyhow::bail!(
-                    "{}",
-                    tr!(
-                        "Legacy 引导修复缺少 bootsect.exe：{}",
-                        bootsect_path.display()
-                    )
-                );
-            }
-
-            // 1) bcdboot W:\Windows /s <引导分区> /f BIOS /l zh-cn（/s 指定系统分区——关键差异）
-            let out = create_command(&self.bcdboot_path)
-                .args([
-                    windows_path.as_str(),
-                    "/s",
-                    boot_letter.as_str(),
-                    "/f",
-                    "BIOS",
-                    "/l",
-                    "zh-cn",
-                ])
-                .output()?;
-            log::info!(
-                "[BOOT] bcdboot /s {}: stdout={} stderr={}",
-                boot_letter,
-                gbk_to_utf8(&out.stdout),
-                gbk_to_utf8(&out.stderr)
-            );
-            if !out.status.success() {
-                // 回退1：不带 /s（让 bcdboot 自己挑活动分区）
-                let out2 = create_command(&self.bcdboot_path)
-                    .args([windows_path.as_str(), "/f", "BIOS", "/l", "zh-cn"])
+                // 1) bcdboot W:\Windows /s <引导分区> /f BIOS /l zh-cn（/s 指定系统分区——关键差异）
+                let out = create_command(&self.bcdboot_path)
+                    .args([
+                        windows_path.as_str(),
+                        "/s",
+                        boot_letter.as_str(),
+                        "/f",
+                        "BIOS",
+                        "/l",
+                        "zh-cn",
+                    ])
                     .output()?;
-                if !out2.status.success() {
-                    // 回退2：不带 /f
-                    let out3 = create_command(&self.bcdboot_path)
-                        .args([windows_path.as_str(), "/l", "zh-cn"])
+                log::info!(
+                    "[BOOT] bcdboot /s {}: stdout={} stderr={}",
+                    boot_letter,
+                    gbk_to_utf8(&out.stdout),
+                    gbk_to_utf8(&out.stderr)
+                );
+                if !out.status.success() {
+                    // Windows 7 compatibility: retry without /f, but never drop /s. Removing /s
+                    // would allow BCDBoot to choose a system partition on a different disk.
+                    let retry = create_command(&self.bcdboot_path)
+                        .args([
+                            windows_path.as_str(),
+                            "/s",
+                            boot_letter.as_str(),
+                            "/l",
+                            "zh-cn",
+                        ])
                         .output()?;
-                    if !out3.status.success() {
+                    if !retry.status.success() {
                         anyhow::bail!(
                             "{}",
-                            tr!("Legacy 引导修复失败: {}", gbk_to_utf8(&out3.stderr))
+                            tr!("Legacy 引导修复失败: {}", gbk_to_utf8(&retry.stderr))
                         );
                     }
                 }
+
+                // 2) bootsect /nt60 <引导分区> /force /mbr（写【引导分区】的引导扇区 + MBR 引导码）
+                let out = create_command(&bootsect_path)
+                    .args(["/nt60", boot_letter.as_str(), "/force", "/mbr"])
+                    .output()?;
+                let bootsect_stdout = gbk_to_utf8(&out.stdout);
+                let bootsect_stderr = gbk_to_utf8(&out.stderr);
+                log::info!(
+                    "[BOOT] bootsect /nt60 {} /force /mbr: stdout={} stderr={}",
+                    boot_letter,
+                    bootsect_stdout,
+                    bootsect_stderr
+                );
+                ensure_legacy_bootsect_success(
+                    out.status.success(),
+                    out.status.code(),
+                    &bootsect_stdout,
+                    &bootsect_stderr,
+                )?;
+
+                // 3) 把引导分区设为活动（DSI 的 PART *a）——Legacy/MBR 开机的承重步骤，两条路径都要做。
+                //    有磁盘:分区号就按号设；走了回退(boot_part==0、磁盘/分区号未知)则按引导盘符兜底设活动，
+                //    避免"clean 后新建分区从未设活动 → 写完引导文件磁盘仍无活动分区 → BIOS 找不到引导设备 0x7B"。
+                require_legacy_active_partition(if boot_part > 0 {
+                    self.set_partition_active(boot_disk, boot_part)
+                } else {
+                    self.set_partition_active_by_letter(&boot_letter)
+                })?;
+
+                log::info!("[BOOT] Legacy 引导修复成功");
             }
 
-            // 2) bootsect /nt60 <引导分区> /force /mbr（写【引导分区】的引导扇区 + MBR 引导码）
-            let out = create_command(&bootsect_path)
-                .args(["/nt60", boot_letter.as_str(), "/force", "/mbr"])
-                .output()?;
-            let bootsect_stdout = gbk_to_utf8(&out.stdout);
-            let bootsect_stderr = gbk_to_utf8(&out.stderr);
-            log::info!(
-                "[BOOT] bootsect /nt60 {} /force /mbr: stdout={} stderr={}",
-                boot_letter,
-                bootsect_stdout,
-                bootsect_stderr
-            );
-            ensure_legacy_bootsect_success(
-                out.status.success(),
-                out.status.code(),
-                &bootsect_stdout,
-                &bootsect_stderr,
-            )?;
-
-            // 3) 把引导分区设为活动（DSI 的 PART *a）——Legacy/MBR 开机的承重步骤，两条路径都要做。
-            //    有磁盘:分区号就按号设；走了回退(boot_part==0、磁盘/分区号未知)则按引导盘符兜底设活动，
-            //    避免"clean 后新建分区从未设活动 → 写完引导文件磁盘仍无活动分区 → BIOS 找不到引导设备 0x7B"。
-            require_legacy_active_partition(if boot_part > 0 {
-                self.set_partition_active(boot_disk, boot_part)
-            } else {
-                self.set_partition_active_by_letter(&boot_letter)
-            })?;
-
-            log::info!("[BOOT] Legacy 引导修复成功");
-        }
-
-        log::info!("[BOOT] ========== 引导修复完成 ==========");
-        Ok(())
-    }
-
-    /// 查找 EFI 分区
-    pub fn find_efi_partition(&self) -> Result<lr_core::boot_pca::TemporaryEspMountGuard> {
-        self.find_and_mount_esp()
+            log::info!("[BOOT] ========== 引导修复完成 ==========");
+            Ok(())
+        })();
+        let operation = finish_with_esp_cleanup(operation, mounted_esp);
+        finish_with_esp_cleanup(operation, legacy_mount)
     }
 
     /// 为已释放的 XP/2003 系统写入引导（ntldr/boot.ini + MBR，仅 Legacy）。
@@ -734,17 +723,20 @@ impl BootManager {
             .find_esp_on_same_disk(windows_partition)
             .map_err(|e| anyhow::anyhow!("{}", tr!("未找到 ESP，无法写 UEFI 引导: {}", e)))?;
         log::info!("[BOOT] 使用 ESP: {}", esp.letter());
-        match lr_core::xp::write_xp_uefi_gpt_boot(
-            windows_partition,
-            esp.letter(),
-            Path::new(&self.bcdedit_path),
-        ) {
-            Ok(out) => {
-                log::info!("[BOOT] XP UEFI 引导写入完成:\n{}", out);
-                Ok(())
+        let operation = (|| -> Result<()> {
+            match lr_core::xp::write_xp_uefi_gpt_boot(
+                windows_partition,
+                esp.letter(),
+                Path::new(&self.bcdedit_path),
+            ) {
+                Ok(out) => {
+                    log::info!("[BOOT] XP UEFI 引导写入完成:\n{}", out);
+                    Ok(())
+                }
+                Err(e) => anyhow::bail!("{}", tr!("XP UEFI 引导写入失败: {}", e)),
             }
-            Err(e) => anyhow::bail!("{}", tr!("XP UEFI 引导写入失败: {}", e)),
-        }
+        })();
+        finish_with_esp_cleanup(operation, Some(esp))
     }
 }
 
@@ -789,5 +781,15 @@ mod tests {
         assert!(error.contains("没有 EFI 系统分区"));
         assert!(!error.contains("无法解析"));
         assert!(!error.contains("无法挂载"));
+    }
+
+    #[test]
+    fn esp_mount_letter_prefers_highest_free_and_never_uses_abc() {
+        assert_eq!(highest_free_mount_letter(0), Some('Z'));
+        let z_and_y_used = (1_u32 << (b'Z' - b'A')) | (1_u32 << (b'Y' - b'A'));
+        assert_eq!(highest_free_mount_letter(z_and_y_used), Some('X'));
+        let all_d_through_z = (3_u8..=25).fold(0_u32, |mask, index| mask | (1_u32 << index));
+        assert_eq!(highest_free_mount_letter(all_d_through_z), None);
+        assert_eq!(highest_free_mount_letter(all_d_through_z | 0b111), None);
     }
 }

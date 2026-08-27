@@ -8,9 +8,9 @@ body:
       value: |
         请准备好 **问题描述、复现步骤、日志和截图**。软件版本、源系统、目标镜像、固件、Secure Boot、BitLocker、磁盘结构、所用 PE 以及实体机/虚拟机线索会由新版日志自动记录，不需要手工抄写。
 
-        - 正常系统端日志：`{程序目录}\log\LetRecovery.<日期>.log`
-        - PE 端日志：PE 程序同目录的 `LetRecoveryPE.log`
-        - 如果问题发生在 PE 阶段，请同时上传正常系统端日志和 PE 端日志。
+        - ViaPE 安装完成后优先上传合并日志：`<新系统盘>\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`。它已经包含正常系统端和 PE 端日志，不需要重复上传两份原始日志。
+        - 如果格式化或首次写入后安装失败，到 `<数据分区>\LetRecovery_Data\LetRecovery\Logs\LetRecovery-install-<SessionId>.log` 查找合并日志。
+        - 只有合并日志不存在时，才上传“关于 → 打开日志目录”中的 `<LetRecovery.exe 所在目录>\log\LetRecovery.<日期>.log` 和能够取得的 `<LetRecoveryPE.exe 所在目录>\LetRecoveryPE.log`（正式发布包默认在 `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`）。
 
         ⚠️ 没有日志通常无法定位；如确实无法取得，请在日志栏说明原因。
         🔒 上传前请检查并遮盖 BitLocker 恢复密钥、序列号、账号和其他敏感信息。
@@ -63,7 +63,7 @@ body:
       label: 日志文件（必须）
       description: |
         把日志文件直接拖到这里上传，不要只说“没有日志”。
-        正常系统端问题上传 `LetRecovery.<日期>.log`；PE 阶段问题同时上传正常系统端日志和 `LetRecoveryPE.log`。
+        ViaPE 安装问题优先上传 `<新系统盘>\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`；若安装在格式化或首次写入后失败，则到 `<数据分区>\LetRecovery_Data\LetRecovery\Logs\LetRecovery-install-<SessionId>.log` 查找。只有没有合并日志时，才分别上传正常端与 PE 端原始日志。
         如果日志确实无法取得，请写明具体原因和已经尝试过的查找位置。
       placeholder: "将日志文件拖到这里，或说明无法取得日志的具体原因。"
     validations:

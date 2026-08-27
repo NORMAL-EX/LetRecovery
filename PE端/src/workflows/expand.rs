@@ -2,40 +2,47 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use crate::app::WorkerMessage;
-use crate::core::bcdedit::BootManager;
-use crate::core::config::{ConfigFileManager, OperationType};
+use crate::core::config::AuthenticatedOperationConfig;
 use crate::tr;
 use crate::utils::reboot_pe;
 
 /// Execute the non-destructive system-partition expansion workflow.
-pub(crate) fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
+pub(crate) fn execute_expand_workflow(
+    tx: Sender<WorkerMessage>,
+    authenticated_handoff: crate::core::config::AuthenticatedOperationGuard,
+) {
     log::info!("========== 开始PE扩容流程 ==========");
-
-    let data_partition = match ConfigFileManager::find_data_partition_for(OperationType::Expand) {
-        Some(partition) => partition,
-        None => {
-            let _ = tx.send(WorkerMessage::Failed(tr!("未找到扩容配置文件")));
-            return;
-        }
-    };
-    let config = match ConfigFileManager::read_expand_config(&data_partition) {
-        Ok(config) => config,
+    let authenticated_task = match authenticated_handoff.into_task() {
+        Ok(task) => task,
         Err(error) => {
-            let _ = tx.send(WorkerMessage::Failed(tr!("读取扩容配置失败: {}", error)));
+            let _ = tx.send(WorkerMessage::Failed(tr!("扩容任务认证失效: {}", error)));
             return;
         }
     };
-
-    // PE drive letters are not stable, so prefer the marker over the letter
-    // recorded by the desktop endpoint.
-    let target_partition = ConfigFileManager::find_expand_marker_partition()
-        .unwrap_or_else(|| config.target_partition.clone());
-    let letter = target_partition
-        .trim_end_matches(':')
+    let config = match authenticated_task.config() {
+        AuthenticatedOperationConfig::Expand(config) => config.clone(),
+        _ => {
+            let _ = tx.send(WorkerMessage::Failed(tr!("认证任务不是扩容操作")));
+            return;
+        }
+    };
+    let data_partition = authenticated_task
+        .data_volume_root()
+        .to_string_lossy()
+        .into_owned();
+    let expected_target = authenticated_task.data_volume_identity();
+    let Some(letter) = authenticated_task
+        .data_partition()
         .chars()
         .next()
-        .unwrap_or('C');
-
+        .filter(char::is_ascii_alphabetic)
+        .map(|letter| letter.to_ascii_uppercase())
+    else {
+        let _ = tx.send(WorkerMessage::Failed(
+            "authenticated expansion target has no valid drive letter".to_owned(),
+        ));
+        return;
+    };
     let _ = tx.send(WorkerMessage::SetStatus(tr!(
         "正在无损扩大分区 {}: （目标 {} MB，0=最大）...",
         letter,
@@ -49,9 +56,15 @@ pub(crate) fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
     );
 
     let expand_result = if config.borrow_from_left {
-        crate::core::expand_move::expand_from_left_donor(letter, &config, &data_partition)
+        crate::core::expand_move::expand_from_left_donor(
+            letter,
+            &config,
+            &data_partition,
+            expected_target,
+            false,
+        )
     } else {
-        crate::core::expand_move::expand_c_drive(letter, &config, &data_partition)
+        crate::core::expand_move::expand_c_drive(letter, &config, &data_partition, expected_target)
     };
     match expand_result {
         Ok(message) => {
@@ -70,9 +83,23 @@ pub(crate) fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
     }
 
     let _ = tx.send(WorkerMessage::SetStatus(tr!("正在清理临时文件...")));
-    if let Err(error) = cleanup_after_expand(&target_partition, &data_partition) {
+    if let Err(error) = authenticated_task.verify_unchanged() {
         let _ = tx.send(WorkerMessage::Failed(tr!(
-            "扩容已完成，但删除 PE 引导项失败: {}",
+            "扩容已经完成，但认证任务在清理前发生变化: {}",
+            error
+        )));
+        return;
+    }
+    if let Err(error) = crate::cleanup_persistent_pe_boot_payload(authenticated_task.guard()) {
+        let _ = tx.send(WorkerMessage::Failed(tr!(
+            "扩容已经完成，但清理本次 PE 启动项失败: {}",
+            error
+        )));
+        return;
+    }
+    if let Err(error) = authenticated_task.cleanup_public_control_files() {
+        let _ = tx.send(WorkerMessage::Failed(tr!(
+            "扩容已完成，但删除认证会话文件失败: {}",
             error
         )));
         return;
@@ -85,12 +112,4 @@ pub(crate) fn execute_expand_workflow(tx: Sender<WorkerMessage>) {
     log::info!("即将重启...");
     std::thread::sleep(Duration::from_secs(3));
     reboot_pe();
-}
-
-fn cleanup_after_expand(target_partition: &str, data_partition: &str) -> anyhow::Result<()> {
-    BootManager::new().delete_current_boot_entry()?;
-    ConfigFileManager::cleanup_partition_markers(target_partition);
-    ConfigFileManager::cleanup_data_dir(data_partition);
-    ConfigFileManager::cleanup_pe_dir(data_partition);
-    Ok(())
 }

@@ -13,41 +13,43 @@ The **System Backup** page captures a partition into an image file.
 | --- | --- | --- |
 | **WIM** | Standard format with good compatibility (recommended). | LZX |
 | **ESD** | Higher compression ratio, smaller files. | LZMS (solid) |
-| **SWM** | Split storage (captured as WIM first, then split), easier to transfer. | LZX, split by size |
-| **GHO** | Ghost format (requires the Ghost engine). | Ghost's own |
+| **SWM** | Not enabled on the current production backup path. | — |
+| **GHO** | Not enabled on the current production backup path. | — |
 
-When you choose **SWM**, you must enter a **split size** (in MB, valid range **512–8192**).
+Only **WIM / ESD** currently have the complete stable-volume rebind, same-volume private staging, completed-image verification, and atomic publication chain. SWM/GHO fail closed instead of falling back to legacy drive-letter or non-transactional writes.
 
 ## Steps
 
 1. Select the **source partition** to back up.
 2. Choose a **format** and a **save location**.
 3. Enter a **name** (required) and a **description** (optional).
-4. Tick **incremental backup** if needed (see below).
+4. For an existing target, choose whether to **append an index** or untick the option for a **full replacement** (see below).
 5. Click **Start Backup**.
 
 ::: tip Name is required
 The "Start Backup" button only becomes available once the source partition, save location, and name are all filled in; the description can be left empty.
 :::
 
-## Incremental Backup
+## Create, Replace, and Append
 
-"Incremental backup (append to an existing image)" is a checkbox option that behaves as follows:
+WIM/ESD has three explicit output policies:
 
-- When you use **Browse…** to select an **existing** image file, this option is **ticked automatically**; you can also tick it manually.
-- In incremental mode, LetRecovery **appends a new image index (INDEX)** to the existing image file, rather than rewriting the whole file or adding a new "split".
-- Appending is only valid for **WIM / ESD**; SWM and GHO are always captured fresh each time.
+- A missing target means **create**. If another program claims that name before capture, the task stops.
+- When **Browse…** selects an existing WIM/ESD, “Incremental backup (append to an existing image)” is ticked automatically. Leave it ticked to **append a new image index** inside a private copy.
+- Untick it for an existing target to request a **full replacement**. LetRecovery builds and verifies a complete new image instead of truncating the old file in place.
 
-::: tip Incremental ≠ split
-A "split" is the concept of SWM dividing one image into multiple parts; "incremental" stores an additional version (index) inside the same WIM/ESD.
-Don't confuse the two.
+::: tip Existing images are never modified in place
+Replace and append both begin from an old-file handle that denies write/delete sharing and build in same-volume private staging. Publication occurs only after complete verification, through a durable journal and handle CAS. Failure preserves the old target; crash recovery converges from live file identities and hashes rather than trusting path names alone.
 :::
 
 ## Backing Up the Running System
 
-The **current system partition** can't be reliably backed up in place while it's in use, so LetRecovery does it **via WinPE**:
-it first prepares the PE boot, writes this backup's name/format/incremental and other options into a config file, and after rebooting into WinPE, the PE client reads that config and then captures the image. Backing up a **non-system** partition (or running inside PE) proceeds directly.
+The **current system partition** cannot be reliably backed up in place while it is in use, so the graphical client handles it **via WinPE**. The normal-Windows client creates an authenticated private PE session; after reboot, the native PE progress interface consumes the same WIM/ESD create, replace, or append intent. A non-system partition can be backed up directly.
+
+The public normal-Windows CLI also supports WIM/ESD create, replace, and append, but only for `auto|direct` tasks that do not require PE and with `auto_reboot=false`. A system-volume task requiring PE, explicit `via_pe`, or automatic reboot fails closed during planning. PE exposes no public CLI.
+
+After enabling **Show automation export (advanced)** on the About page, **Generate Automation** at the far left of the Backup command bar writes the current source, destination, name, format, and append/replace intent to `cli\backup.json` and `cli\run-backup.cmd`; it does not start a backup. The public CLI currently supports WIM/ESD only, so SWM/GHO selections produce an explicit export error instead of being silently changed.
 
 ::: tip Automatic verification
-Before capturing/deploying, the PE client verifies image integrity, so a corrupted image fails early and you avoid redoing the whole job.
+Both execution modes verify the completed image before atomic publication. A verification or publication failure is never presented as a successful backup or published as a partial image.
 :::

@@ -1787,7 +1787,7 @@ index cbf20c0f..cbc37917 100644
  static int
  verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
  		     const void *chunk, size_t size, void *_ctx)
-@@ -73,6 +102,254 @@ verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
+@@ -73,6 +102,274 @@ verify_continue_blob(const struct blob_descriptor *blob, u64 offset,
  	return 0;
  }
  
@@ -1945,6 +1945,11 @@ index cbf20c0f..cbc37917 100644
 +	unsigned num_started = 0;
 +	size_t i = 0;
 +	int ret = WIMLIB_ERR_NOMEM;
++	u64 initial_completed_streams =
++		progress_ctx->progress->verify_streams.completed_streams;
++	u64 initial_completed_bytes =
++		progress_ctx->progress->verify_streams.completed_bytes;
++	u64 initial_next_progress = progress_ctx->next_progress;
 +	bool lock_initialized = false;
 +	bool condvar_initialized = false;
 +
@@ -2036,6 +2041,21 @@ index cbf20c0f..cbc37917 100644
 +	FREE(ctx.results);
 +	FREE(ctx.completed_blobs);
 +	FREE(ctx.blobs);
++	/*
++	 * Parallel verification is only an accelerator.  Its memory ceiling covers
++	 * chunk buffers, not every thread stack, codec allocation, or blob-index
++	 * array.  If one of those allocations fails in a constrained WinPE, discard
++	 * partial progress and let the caller retry the unchanged upstream serial
++	 * verifier rather than rejecting a valid WIM.
++	 */
++	if (ret == WIMLIB_ERR_NOMEM) {
++		progress_ctx->progress->verify_streams.completed_streams =
++			initial_completed_streams;
++		progress_ctx->progress->verify_streams.completed_bytes =
++			initial_completed_bytes;
++		progress_ctx->next_progress = initial_next_progress;
++		return -1;
++	}
 +	return ret;
 +}
 +

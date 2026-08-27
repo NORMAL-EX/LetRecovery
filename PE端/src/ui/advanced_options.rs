@@ -5,9 +5,6 @@ use crate::utils::path;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
-/// 脚本目录名称（统一路径，与正常系统端保持一致）
-const SCRIPTS_DIR: &str = "LetRecovery_Scripts";
-
 struct OfflineHiveCleanup(Vec<&'static str>);
 
 impl OfflineHiveCleanup {
@@ -63,31 +60,63 @@ fn with_offline_hives_unloaded<T>(
     }
 }
 
-/// 注入数据分区上 `user_drivers/<版本>` 的用户驱动（重装当前系统盘的 ViaPE 路径）。
-/// 由正常端 start_pe_install_thread 把 `bin/drivers/<版本>` 复制到
-/// `{data_dir}\user_drivers\<版本>`。win7/8/10/11 走 DISM 离线注入；
-/// XP 由本文件的 XP 注入处理。目录不存在或无驱动则静默跳过、不打断安装。
-pub fn inject_user_drivers_from_data(target_partition: &str, data_dir: &str) -> anyhow::Result<()> {
+/// 注入 typed task 已认证的 `user_drivers/<版本>` INF。调用方传入的是 LRHM3 中的
+/// exact file set；这里不得重新递归扫描公开数据目录，否则同目录迟到文件会绕过清单。
+pub fn inject_user_drivers_from_authenticated_paths(
+    target_partition: &str,
+    authenticated_paths: &[std::path::PathBuf],
+) -> anyhow::Result<()> {
     let version = match detect_user_driver_version(target_partition) {
         Some(v) => v,
         None => return Ok(()),
     };
-    let dir = format!("{}\\user_drivers\\{}", data_dir, version);
-    if !Path::new(&dir).exists() {
+    let inf_files = authenticated_paths
+        .iter()
+        .filter(|path| user_driver_path_matches_version(path, version))
+        .filter(|path| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("inf"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if inf_files.is_empty() {
+        log::info!("[USER DRV] authenticated user_drivers/{version} has no INF; skipping");
         return Ok(());
     }
     log::info!(
-        "[USER DRV] 注入 user_drivers/{} 到 {} ...",
+        "[USER DRV] 注入 authenticated user_drivers/{} 到 {} ...",
         version,
         target_partition
     );
-    lr_core::driver_trust::ensure_pe_driver_signing_trust()
-        .context("初始化 PE 用户驱动签名信任链失败")?;
     let dism = Dism::new();
     let image_path = format!("{}\\", target_partition);
-    dism.add_drivers_offline(&image_path, &dir)?;
-    log::info!("[USER DRV] user_drivers/{} 注入成功", version);
+    let failures =
+        dism.add_preserved_driver_inf_files_offline_with_progress(&image_path, &inf_files, None)?;
+    let summary = lr_core::bounded_failure_summary::summarize_failures(&failures, 3);
+    if summary.is_empty() {
+        log::info!("[USER DRV] user_drivers/{} 注入成功", version);
+    } else {
+        log::warn!("[USER DRV] 部分非启动存储用户驱动未导入，安装继续: {summary}");
+    }
     Ok(())
+}
+
+fn user_driver_path_matches_version(path: &Path, version: &str) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components.windows(2).any(|pair| {
+        pair[0].eq_ignore_ascii_case("user_drivers") && pair[1].eq_ignore_ascii_case(version)
+    })
+}
+
+/// NT5 is an authenticated property of the selected source, never an inference from the applied
+/// directory shape. Stripped Vista+ images and some GHO captures legitimately omit
+/// `Windows\Boot`; treating that absence as XP would run the incompatible NT5 driver injector.
+const fn authenticated_nt5_target(is_xp: bool, is_xp_i386: bool) -> bool {
+    is_xp || is_xp_i386
 }
 
 /// 按目标系统 `\Windows\System32\ntdll.dll` 版本识别用户驱动文件夹名。
@@ -104,6 +133,30 @@ fn detect_user_driver_version(target_partition: &str) -> Option<&'static str> {
         (10, _) => Some(if build >= 22000 { "win11" } else { "win10" }),
         _ => None,
     }
+}
+
+fn disable_win7_processor_power_services(hive_name: &str) -> anyhow::Result<Vec<String>> {
+    let mut updated = Vec::new();
+    for control_set in 1..=4 {
+        for service in ["intelppm", "amdppm", "Processor"] {
+            let key = format!(
+                "HKLM\\{}\\ControlSet{:03}\\Services\\{}",
+                hive_name, control_set, service
+            );
+            if !OfflineRegistry::key_exists(&key)? {
+                continue;
+            }
+            OfflineRegistry::set_dword(&key, "Start", 4)?;
+            if OfflineRegistry::query_dword(&key, "Start")? != 4 {
+                anyhow::bail!("processor power-service readback mismatch for {key}");
+            }
+            updated.push(format!("ControlSet{control_set:03}/{service}"));
+        }
+    }
+    if updated.is_empty() {
+        anyhow::bail!("no supported processor power service exists in the loaded SYSTEM hive");
+    }
+    Ok(updated)
 }
 
 /// 应用高级选项到目标系统
@@ -137,6 +190,24 @@ pub fn apply_advanced_options(
         log::warn!("[ADVANCED] DEFAULT hive 加载失败，部分用户级设置可能无法应用");
     }
 
+    if detect_user_driver_version(target_partition) == Some("win11") {
+        match lr_core::windows11_shell::apply_offline_defaults("pc-soft") {
+            Ok(report) => log::info!(
+                "[ADVANCED_WIN11_SHELL] status=completed force_effect_mode={}",
+                report.force_effect_mode
+            ),
+            Err(error) => log::warn!(
+                "[ADVANCED_WIN11_SHELL] status=warning detail={error:#}; installation continues"
+            ),
+        }
+        if config.remove_uwp_apps {
+            log::warn!(
+                "[ADVANCED_WIN11_START] status=not_supported detail={}; AppX package removal continues independently",
+                lr_core::windows11_shell::START_PIN_CLEANUP_UNSUPPORTED_REASON
+            );
+        }
+    }
+
     if detect_user_driver_version(target_partition) == Some("win7") {
         let control_sets = OfflineRegistry::disable_crash_auto_reboot_for_loaded_system("pc-sys")?;
         log::info!(
@@ -145,21 +216,16 @@ pub fn apply_advanced_options(
         );
     }
 
-    // 创建脚本目录（用于存放自定义脚本）
-    let scripts_dir = format!("{}\\{}", target_partition, SCRIPTS_DIR);
-    std::fs::create_dir_all(&scripts_dir)?;
-    log::info!("[ADVANCED] 脚本目录: {}", scripts_dir);
-
     // ============ 系统优化选项 ============
 
     // 1. 移除快捷方式小箭头
     if config.remove_shortcut_arrow {
         log::info!("[ADVANCED] 移除快捷方式小箭头");
-        let _ = OfflineRegistry::set_string(
+        OfflineRegistry::set_string(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Icons",
             "29",
             "%systemroot%\\system32\\imageres.dll,197",
-        );
+        )?;
     }
 
     // 2. Win11恢复经典右键菜单
@@ -168,53 +234,80 @@ pub fn apply_advanced_options(
         // 在 DEFAULT hive 中设置（影响所有新用户）
         if default_loaded {
             // 创建空的 InprocServer32 键，这会禁用新式右键菜单
-            let _ = OfflineRegistry::create_key(
+            OfflineRegistry::create_key(
                 "HKLM\\pc-default\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32"
-            );
+            )?;
             // 设置默认值为空字符串
-            let _ = OfflineRegistry::set_string(
+            OfflineRegistry::set_string(
                 "HKLM\\pc-default\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
                 "",
                 "",
-            );
+            )?;
+        } else {
+            anyhow::bail!("the default-user registry hive is unavailable");
         }
         // 同时在 SOFTWARE 中设置（系统级）
-        let _ = OfflineRegistry::create_key(
+        OfflineRegistry::create_key(
             "HKLM\\pc-soft\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
-        );
-        let _ = OfflineRegistry::set_string(
+        )?;
+        OfflineRegistry::set_string(
             "HKLM\\pc-soft\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
             "",
             "",
-        );
+        )?;
     }
 
     // 3. OOBE绕过强制联网
     if config.bypass_nro {
         log::info!("[ADVANCED] 设置OOBE绕过联网");
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\OOBE",
             "BypassNRO",
             1,
-        );
+        )?;
     }
 
-    // 4. 禁用Windows自动更新
+    // 4. 按目标系统家族移除 Windows Update 活动组件。
     if config.disable_windows_update {
-        log::info!("[ADVANCED] 通过策略禁用Windows自动更新");
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
-            "NoAutoUpdate",
-            1,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU",
-            "AUOptions",
-            1,
-        );
+        log::info!("[ADVANCED_UPDATE] action=remove_active_components status=started");
+        match lr_core::offline_windows_update_removal::remove_offline_windows_update(
+            target_partition,
+            "pc-soft",
+            "pc-sys",
+        ) {
+            Ok(report) => {
+                let status = if report.warnings.is_empty() {
+                    "completed"
+                } else {
+                    "warning"
+                };
+                log::info!(
+                    "[ADVANCED_UPDATE] action=remove_active_components status={} profile={} build={} removed_paths={} removed_services={} removed_task_trees={} removed_task_records={} removed_registry_keys={} deleted_ubpm_values={} settings_visibility={:?} warning_count={}",
+                    status,
+                    report.profile,
+                    report.target_build,
+                    report.removed_paths,
+                    report.removed_services,
+                    report.removed_task_trees,
+                    report.removed_task_records,
+                    report.removed_registry_keys,
+                    report.deleted_ubpm_values,
+                    report.settings_page_visibility,
+                    report.warnings.len()
+                );
+                for warning in &report.warnings {
+                    log::warn!("[ADVANCED_UPDATE] detail={warning}");
+                }
+            }
+            Err(error) => log::warn!(
+                "[ADVANCED_UPDATE] action=remove_active_components status=warning detail={error:#}; installation continues"
+            ),
+        }
     }
 
-    // 5. 仅深度移除 Microsoft Defender Antivirus 引擎，保留安全中心等组件
+    // 5. Windows Security UI is distinct from the preserved Security Health/Firewall services.
+    // Remove the Defender Antivirus engine and exactly target the Windows Security UI AppX;
+    // preserve SecurityHealthService, wscsvc, mpssvc, and firewall services.
     if config.disable_windows_defender {
         match lr_core::defender_removal::remove_offline_defender_engine(
             target_partition,
@@ -230,73 +323,53 @@ pub fn apply_advanced_options(
                 report.deleted_task_records,
                 report.deleted_engine_software_key
             ),
-            Err(error) => {
-                let _ = OfflineRegistry::unload_hive("pc-soft");
-                let _ = OfflineRegistry::unload_hive("pc-sys");
-                if default_loaded {
-                    let _ = OfflineRegistry::unload_hive("pc-default");
-                }
-                return Err(error);
-            }
+            Err(error) => log::warn!(
+                "[ADVANCED_DEFENDER] status=warning detail={error:#}; optional Defender removal was not completed; installation continues"
+            ),
         }
     }
 
-    // 6. 禁用系统保留空间
+    // 6. 系统保留空间只允许通过 Win10 2004+ 的在线 DISM 接口修改。
+    // 内置 unattend 会在 specialize/SYSTEM 阶段执行并回读；这里不再写 ReserveManager
+    // 的内部离线注册表值。
     if config.disable_reserved_storage {
-        log::info!("[ADVANCED] 禁用系统保留空间");
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\ReserveManager",
-            "ShippedWithReserves",
-            0,
-        );
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\ReserveManager",
-            "PassedPolicy",
-            0,
+        log::info!(
+            "[ADVANCED_RESERVED_STORAGE] phase=offline status=deferred reason=online_dism_only"
         );
     }
 
     // 7. 禁用UAC
     if config.disable_uac {
         log::info!("[ADVANCED] 禁用UAC");
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
             "EnableLUA",
             0,
-        );
-        let _ = OfflineRegistry::set_dword(
+        )?;
+        OfflineRegistry::set_dword(
             "HKLM\\pc-soft\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
             "ConsentPromptBehaviorAdmin",
             0,
-        );
+        )?;
     }
 
     // 8. 禁用自动设备加密 (BitLocker)
     if config.disable_device_encryption {
         log::info!("[ADVANCED] 禁用自动设备加密");
         // 禁用 BitLocker 自动加密
-        let _ = OfflineRegistry::set_dword(
+        OfflineRegistry::set_dword(
             "HKLM\\pc-sys\\ControlSet001\\Control\\BitLocker",
             "PreventDeviceEncryption",
             1,
-        );
+        )?;
         // 禁用 MBAM (Microsoft BitLocker Administration and Monitoring)
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-soft\\Policies\\Microsoft\\FVE", "OSRecovery", 0);
+        OfflineRegistry::set_dword("HKLM\\pc-soft\\Policies\\Microsoft\\FVE", "OSRecovery", 0)?;
         // 禁用 BitLocker 服务
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\BDESVC", "Start", 4);
+        OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\BDESVC", "Start", 4)?;
     }
 
-    // 9. 删除预装UWP应用 - 生成PowerShell脚本
-    if config.remove_uwp_apps {
-        log::info!("[ADVANCED] 配置删除预装UWP应用");
-        // 创建首次登录脚本来删除UWP应用
-        let remove_uwp_script = generate_remove_uwp_script();
-        let uwp_script_path = format!("{}\\remove_uwp.ps1", scripts_dir);
-        std::fs::write(&uwp_script_path, &remove_uwp_script)?;
-        log::info!("[ADVANCED] UWP删除脚本已写入: {}", uwp_script_path);
-    }
+    // 9. Curated AppX servicing is deferred until every externally loaded offline hive has
+    // been unloaded. DISM must not service an image while LetRecovery still owns hive handles.
 
     // 10. 导入磁盘控制器驱动（Win10/Win11 x64）
     if config.import_storage_controller_drivers {
@@ -382,13 +455,6 @@ pub fn apply_advanced_options(
         }
     }
 
-    // 11. 自定义用户名 - 写入标记文件供无人值守使用
-    if !config.custom_username.is_empty() {
-        log::info!("[ADVANCED] 设置自定义用户名: {}", config.custom_username);
-        let username_file = format!("{}\\username.txt", scripts_dir);
-        std::fs::write(&username_file, &config.custom_username)?;
-    }
-
     // ============ Win7 专用选项 ============
 
     // 12. Win7 注入 USB3 驱动
@@ -442,40 +508,11 @@ pub fn apply_advanced_options(
     // Windows 7 时按用户选择禁用历史处理器电源服务。
     if config.win7_fix_acpi_bsod && detect_user_driver_version(target_partition) == Some("win7") {
         log::info!("[ADVANCED] Win7: 尝试禁用旧式处理器电源驱动以提高启动兼容性");
-
-        // 禁用 intelppm 服务 (Intel 电源管理)
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\intelppm",
-            "Start",
-            4, // 4 = Disabled
+        let updated = disable_win7_processor_power_services("pc-sys")?;
+        log::info!(
+            "[ADVANCED] Win7 旧式处理器电源驱动兼容设置完成: {:?}",
+            updated
         );
-
-        // 禁用 amdppm 服务 (AMD 电源管理)
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet001\\Services\\amdppm", "Start", 4);
-
-        // 禁用 Processor 服务
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet001\\Services\\Processor",
-            "Start",
-            4,
-        );
-
-        // 同时设置 ControlSet002 (如果存在)
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\intelppm",
-            "Start",
-            4,
-        );
-        let _ =
-            OfflineRegistry::set_dword("HKLM\\pc-sys\\ControlSet002\\Services\\amdppm", "Start", 4);
-        let _ = OfflineRegistry::set_dword(
-            "HKLM\\pc-sys\\ControlSet002\\Services\\Processor",
-            "Start",
-            4,
-        );
-
-        log::info!("[ADVANCED] Win7 旧式处理器电源驱动兼容设置完成");
     } else if config.win7_fix_acpi_bsod {
         log::warn!("[ADVANCED] 已选择旧式处理器电源驱动兼容尝试，但目标不是 Windows 7，安全跳过");
     }
@@ -659,10 +696,9 @@ pub fn apply_advanced_options(
     // 配置单元(pc-sys)登记 boot-start 服务 + 写 CriticalDeviceDatabase」。
     // AHCI 始终注入；NVMe/USB3 按勾选。因为直接写已加载的 pc-sys（Win32 注册表 API），
     // 不需要 Win7 那套 DISM 前的卸载/重载。
-    // XP 判定：配置标记 或 释放后系统缺少 \Windows\Boot（仅 Vista+ 才有），与引导步骤一致，
-    // 使 CLI 安装（config.is_xp 可能为 false）也能触发注入。
-    let xp_target = config.is_xp
-        || !std::path::Path::new(&format!("{}\\Windows\\Boot", target_partition)).exists();
+    // XP/2003 只能来自正常端已经验证并写入受认证配置的源类型。不得再因精简镜像或 GHO
+    // 缺少 `Windows\Boot` 猜测 NT5；引导阶段与这里必须消费同一份配置事实。
+    let xp_target = authenticated_nt5_target(config.is_xp, config.is_xp_i386);
     if xp_target {
         // 驱动根目录：优先 exe\drivers\xp（与 Win7 PE 注入同源），回退 bin\drivers\xp
         let mut xp_dir = path::get_exe_dir().join("drivers").join("xp");
@@ -700,6 +736,19 @@ pub fn apply_advanced_options(
     log::info!("[ADVANCED] 卸载离线注册表...");
     std::thread::sleep(std::time::Duration::from_millis(500));
     hive_cleanup.unload_all()?;
+
+    // Curated provisioned-AppX servicing, like SecHealthUI servicing below, must run only
+    // after the offline hive unload has completed successfully. The required online hook later
+    // performs exact all-user removal and fresh final verification; it is the authoritative gate.
+    if config.remove_uwp_apps {
+        apply_curated_appx_cleanup(target_partition);
+    }
+
+    // SecHealthUI servicing must run without mounted offline hives. The required online hook later
+    // fails setup unless exact provisioning and all-user registration both read back as absent.
+    if config.disable_windows_defender {
+        apply_remove_sec_health_ui(target_partition);
+    }
 
     log::info!("[ADVANCED] 高级选项应用完成");
     Ok(())
@@ -773,69 +822,93 @@ fn is_supported_win7_nvme_file_version(
         && version.revision >= minimum_revision
 }
 
-/// 生成删除预装UWP应用的PowerShell脚本
-fn generate_remove_uwp_script() -> String {
-    r#"# LetRecovery - 删除预装UWP应用脚本
-# 此脚本会删除大部分预装的UWP应用，保留必要的系统组件
-
-$AppsToRemove = @(
-    "Microsoft.3DBuilder"
-    "Microsoft.BingFinance"
-    "Microsoft.BingNews"
-    "Microsoft.BingSports"
-    "Microsoft.BingWeather"
-    "Microsoft.Getstarted"
-    "Microsoft.MicrosoftOfficeHub"
-    "Microsoft.MicrosoftSolitaireCollection"
-    "Microsoft.Office.OneNote"
-    "Microsoft.People"
-    "Microsoft.SkypeApp"
-    "Microsoft.Windows.Photos"
-    "Microsoft.WindowsAlarms"
-    "Microsoft.WindowsCamera"
-    "Microsoft.WindowsFeedbackHub"
-    "Microsoft.WindowsMaps"
-    "Microsoft.WindowsSoundRecorder"
-    "Microsoft.Xbox.TCUI"
-    "Microsoft.XboxApp"
-    "Microsoft.XboxGameOverlay"
-    "Microsoft.XboxGamingOverlay"
-    "Microsoft.XboxIdentityProvider"
-    "Microsoft.XboxSpeechToTextOverlay"
-    "Microsoft.YourPhone"
-    "Microsoft.ZuneMusic"
-    "Microsoft.ZuneVideo"
-    "Microsoft.GetHelp"
-    "Microsoft.Messaging"
-    "Microsoft.Print3D"
-    "Microsoft.MixedReality.Portal"
-    "Microsoft.OneConnect"
-    "Microsoft.Wallet"
-    "Microsoft.WindowsCommunicationsApps"
-    "Microsoft.BingTranslator"
-    "Microsoft.DesktopAppInstaller"
-    "Microsoft.Advertising.Xaml"
-    "Microsoft.549981C3F5F10"
-    "Clipchamp.Clipchamp"
-    "Disney.37853FC22B2CE"
-    "MicrosoftCorporationII.QuickAssist"
-    "MicrosoftTeams"
-    "SpotifyAB.SpotifyMusic"
-)
-
-foreach ($App in $AppsToRemove) {
-    Write-Host "正在删除: $App"
-    Get-AppxPackage -Name $App -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-    Get-AppxProvisionedPackage -Online | Where-Object {$_.PackageName -like "*$App*"} | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+fn apply_curated_appx_cleanup(target_partition: &str) {
+    log::warn!(
+        "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=scope_warning provisioning=covered existing_registered_users=not_covered gho_or_existing_profile_full_removal=not_claimed future_reprovisioning=not_blocked"
+    );
+    log::info!(
+        "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=started target={:?}",
+        target_partition
+    );
+    match lr_core::offline_appx::remove_curated_preinstalled_appx(target_partition) {
+        Ok(report) => {
+            for item in &report.items {
+                match item.status {
+                    lr_core::offline_appx::CuratedAppxStatus::Warning => log::warn!(
+                        "[ADVANCED_APPX] action=remove_curated_preinstalled_appx item={} package={:?} status={} reason={:?}",
+                        item.id,
+                        item.package_full_name,
+                        item.status.as_str(),
+                        item.reason
+                    ),
+                    _ => log::info!(
+                        "[ADVANCED_APPX] action=remove_curated_preinstalled_appx item={} package={:?} status={} reason={:?}",
+                        item.id,
+                        item.package_full_name,
+                        item.status.as_str(),
+                        item.reason
+                    ),
+                }
+            }
+            if report.warnings == 0 {
+                log::info!(
+                    "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=completed removed={} not_present={} warnings=0",
+                    report.removed,
+                    report.not_present
+                );
+            } else {
+                log::warn!(
+                    "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=completed_with_warnings removed={} not_present={} warnings={}",
+                    report.removed,
+                    report.not_present,
+                    report.warnings
+                );
+            }
+        }
+        Err(error) => log::warn!(
+            "[ADVANCED_APPX] action=remove_curated_preinstalled_appx status=warning reason={:?}",
+            error.to_string()
+        ),
+    }
 }
 
-Write-Host "UWP应用清理完成"
-"#.to_string()
-}
-
-/// 获取脚本目录名称
-pub fn get_scripts_dir_name() -> &'static str {
-    SCRIPTS_DIR
+fn apply_remove_sec_health_ui(target_partition: &str) {
+    match lr_core::sec_health_ui::remove_offline_provisioning(target_partition) {
+        Ok(report) => {
+            for item in &report.items {
+                let message = format!(
+                    "[ADVANCED_SEC_HEALTH_UI] phase=offline_provisioning item={} package={:?} status={} reason={:?}",
+                    item.id,
+                    item.package_full_name,
+                    item.status.as_str(),
+                    item.reason
+                );
+                if item.status == lr_core::offline_appx::CuratedAppxStatus::Warning {
+                    log::warn!("{}", message);
+                } else {
+                    log::info!("{}", message);
+                }
+            }
+            if report.warnings == 0 {
+                log::info!(
+                    "[ADVANCED_SEC_HEALTH_UI] phase=offline_provisioning status=completed removed={} not_present={} warnings=0",
+                    report.removed,
+                    report.not_present
+                );
+            } else {
+                log::warn!(
+                    "[ADVANCED_SEC_HEALTH_UI] phase=offline_provisioning status=completed_with_warnings removed={} not_present={} warnings={}",
+                    report.removed,
+                    report.not_present,
+                    report.warnings
+                );
+            }
+        }
+        Err(error) => log::warn!(
+            "[ADVANCED_SEC_HEALTH_UI] phase=offline_provisioning status=warning reason={:?}",
+            error.to_string()
+        ),
+    }
 }
 
 /// 应用 UefiSeven 补丁到目标系统（PE环境版本）
@@ -859,33 +932,39 @@ pub fn apply_uefiseven_patch(uefiseven_dir: &Path, target_partition: &str) -> an
     let esp_letter = esp_mount.letter();
 
     log::info!("[UEFISEVEN] EFI 分区: {}", esp_letter);
+    let operation = (|| -> anyhow::Result<()> {
+        // Microsoft Boot 目录
+        let ms_boot_dir = PathBuf::from(format!("{}\\EFI\\Microsoft\\Boot", esp_letter));
+        let machine = lr_core::windows_hardware::collect_machine_identity();
+        log::info!("[UEFISEVEN] machine environment: {:?}", machine.environment);
+        for diagnostic in &machine.diagnostics {
+            log::debug!("[UEFISEVEN] hardware probe: {diagnostic}");
+        }
+        if !lr_core::windows_hardware::should_install_uefiseven(machine.environment) {
+            lr_core::boot_pca::restore_native_windows7_uefi_entries(&ms_boot_dir).map_err(
+                |error| anyhow::anyhow!("恢复 VMware 原生 Windows EFI 引导失败: {error}"),
+            )?;
+            log::info!("[UEFISEVEN] confirmed VMware guest; native Microsoft EFI entries restored");
+            return Ok(());
+        }
 
-    // Microsoft Boot 目录
-    let ms_boot_dir = PathBuf::from(format!("{}\\EFI\\Microsoft\\Boot", esp_letter));
-    let machine = lr_core::windows_hardware::collect_machine_identity();
-    log::info!("[UEFISEVEN] machine environment: {:?}", machine.environment);
-    for diagnostic in &machine.diagnostics {
-        log::debug!("[UEFISEVEN] hardware probe: {diagnostic}");
-    }
-    if !lr_core::windows_hardware::should_install_uefiseven(machine.environment) {
-        lr_core::boot_pca::restore_native_windows7_uefi_entries(&ms_boot_dir)
-            .map_err(|error| anyhow::anyhow!("恢复 VMware 原生 Windows EFI 引导失败: {error}"))?;
-        log::info!("[UEFISEVEN] confirmed VMware guest; native Microsoft EFI entries restored");
-        return Ok(());
-    }
+        lr_core::boot_pca::install_uefiseven_package(uefiseven_dir, &ms_boot_dir)
+            .map_err(|error| anyhow::anyhow!("部署 UefiSeven 失败: {error}"))?;
 
-    lr_core::boot_pca::install_uefiseven_package(uefiseven_dir, &ms_boot_dir)
-        .map_err(|error| anyhow::anyhow!("部署 UefiSeven 失败: {error}"))?;
+        log::info!("[UEFISEVEN] UefiSeven 补丁应用成功");
+        log::info!("[UEFISEVEN] 启动流程: UEFI -> UefiSeven -> bootmgfw.original.efi -> Windows 7");
 
-    log::info!("[UEFISEVEN] UefiSeven 补丁应用成功");
-    log::info!("[UEFISEVEN] 启动流程: UEFI -> UefiSeven -> bootmgfw.original.efi -> Windows 7");
-
-    Ok(())
+        Ok(())
+    })();
+    crate::core::bcdedit::finish_with_esp_cleanup(operation, Some(esp_mount))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_supported_win7_nvme_file_version;
+    use super::{
+        authenticated_nt5_target, is_supported_win7_nvme_file_version,
+        user_driver_path_matches_version,
+    };
     use lr_core::windows_file_version::FileVersion;
 
     #[test]
@@ -923,5 +1002,28 @@ mod tests {
             },
             18_615,
         ));
+    }
+
+    #[test]
+    fn user_driver_filter_uses_only_the_authenticated_version_subtree() {
+        assert!(user_driver_path_matches_version(
+            std::path::Path::new(r"R:\LetRecovery_Data\user_drivers\win11\net.inf"),
+            "win11"
+        ));
+        assert!(!user_driver_path_matches_version(
+            std::path::Path::new(r"R:\LetRecovery_Data\user_drivers\win10\net.inf"),
+            "win11"
+        ));
+        assert!(!user_driver_path_matches_version(
+            std::path::Path::new(r"R:\other\win11\net.inf"),
+            "win11"
+        ));
+    }
+
+    #[test]
+    fn nt5_driver_injection_uses_only_authenticated_source_flags() {
+        assert!(authenticated_nt5_target(true, false));
+        assert!(authenticated_nt5_target(false, true));
+        assert!(!authenticated_nt5_target(false, false));
     }
 }

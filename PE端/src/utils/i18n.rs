@@ -52,27 +52,12 @@ pub struct LanguageFile {
     pub data: HashMap<String, String>,
 }
 
-/// 可用语言信息
-#[derive(Debug, Clone)]
-pub struct LanguageInfo {
-    /// 语言代码（如 "en-US"，来自文件名）
-    #[allow(dead_code, reason = "kept in the shared language metadata model")]
-    pub code: String,
-    /// 语言显示名称
-    pub display_name: String,
-    /// 翻译作者
-    #[allow(dead_code, reason = "kept in the shared language metadata model")]
-    pub author: String,
-}
-
 /// 全局翻译管理器
 struct I18nManager {
     /// 当前语言代码
     current_language: String,
     /// 当前翻译表
     translations: HashMap<String, String>,
-    /// 可用语言列表缓存
-    available_languages: Vec<LanguageInfo>,
 }
 
 impl I18nManager {
@@ -80,7 +65,6 @@ impl I18nManager {
         Self {
             current_language: String::from("zh-CN"),
             translations: HashMap::new(),
-            available_languages: Vec::new(),
         }
     }
 }
@@ -108,9 +92,6 @@ pub fn get_lang_dir() -> PathBuf {
 pub fn init(language_code: &str) {
     let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
     let mut guard = manager.write();
-
-    // 刷新可用语言列表
-    guard.available_languages = scan_available_languages();
 
     // 加载指定语言
     load_language_internal(&mut guard, language_code);
@@ -257,36 +238,6 @@ fn merge_embedded_fallback(language_code: &str, external: &mut LanguageFile) {
     external.data = merged;
 }
 
-fn upsert_language_info(languages: &mut Vec<LanguageInfo>, language: LanguageInfo) {
-    if let Some(existing) = languages
-        .iter_mut()
-        .find(|existing| existing.code.eq_ignore_ascii_case(&language.code))
-    {
-        *existing = language;
-    } else {
-        languages.push(language);
-    }
-}
-
-/// 切换语言
-///
-/// # Arguments
-/// * `language_code` - 目标语言代码
-#[allow(dead_code, reason = "retained for custom PE language selectors")]
-pub fn switch_language(language_code: &str) {
-    let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
-    let mut guard = manager.write();
-    load_language_internal(&mut guard, language_code);
-}
-
-/// 获取当前语言代码
-#[allow(dead_code, reason = "retained for custom PE language selectors")]
-pub fn current_language() -> String {
-    let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
-    let guard = manager.read();
-    guard.current_language.clone()
-}
-
 /// 翻译字符串
 ///
 /// 如果当前语言有对应翻译，返回翻译后的字符串；
@@ -323,121 +274,6 @@ fn translate_internal(manager: &I18nManager, text: &str) -> String {
     }
 
     text.to_string()
-}
-
-/// 扫描可用语言
-///
-/// 扫描 lang 目录下的所有有效语言文件
-pub fn scan_available_languages() -> Vec<LanguageInfo> {
-    let mut languages = Vec::new();
-
-    // 始终添加简体中文作为内置语言
-    languages.push(LanguageInfo {
-        code: String::from("zh-CN"),
-        display_name: String::from("简体中文 - 中华人民共和国"),
-        author: String::from("内置"),
-    });
-    languages.push(LanguageInfo {
-        code: String::from("zh-TW"),
-        display_name: String::from("繁體中文 - 中國台灣"),
-        author: String::from("LetRecovery / Windows NLS"),
-    });
-    languages.push(LanguageInfo {
-        code: DPRK_EASTER_EGG_LANGUAGE.to_string(),
-        display_name: String::from("조선말 - 조선민주주의인민공화국"),
-        author: String::from("LetRecovery Easter Egg"),
-    });
-
-    for (code, _) in EMBEDDED_LANGUAGE_CATALOGS {
-        if let Some(language) = embedded_language(code) {
-            languages.push(LanguageInfo {
-                code: code.to_string(),
-                display_name: language.language,
-                author: language.author,
-            });
-        }
-    }
-
-    let lang_dir = get_lang_dir();
-    if !lang_dir.exists() {
-        languages[2..].sort_by(|a, b| a.display_name.cmp(&b.display_name));
-        return languages;
-    }
-
-    // 读取目录中的所有json文件
-    let entries = match std::fs::read_dir(&lang_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            log::warn!("无法读取语言目录: {} - {}", lang_dir.display(), e);
-            languages[2..].sort_by(|a, b| a.display_name.cmp(&b.display_name));
-            return languages;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-
-        // 只处理json文件
-        if path.extension().map(|e| e != "json").unwrap_or(true) {
-            continue;
-        }
-
-        // 从文件名提取语言代码
-        let code = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(c) => c.to_string(),
-            None => continue,
-        };
-
-        // 两种中文都已作为内置语言添加；同名文件只作为运行时词汇覆盖。
-        if code.eq_ignore_ascii_case("zh-CN") || code.eq_ignore_ascii_case("zh-TW") {
-            continue;
-        }
-
-        // 尝试读取并解析语言文件
-        match std::fs::read_to_string(&path) {
-            Ok(content) => match serde_json::from_str::<LanguageFile>(&content) {
-                Ok(lang_data) => {
-                    upsert_language_info(
-                        &mut languages,
-                        LanguageInfo {
-                            code,
-                            display_name: lang_data.language,
-                            author: lang_data.author,
-                        },
-                    );
-                }
-                Err(e) => {
-                    log::debug!("解析语言文件失败: {} - {}", path.display(), e);
-                }
-            },
-            Err(e) => {
-                log::debug!("读取语言文件失败: {} - {}", path.display(), e);
-            }
-        }
-    }
-
-    // 按显示名称排序（内置简体、繁体中文保持在前两位）
-    languages[2..].sort_by(|a, b| a.display_name.cmp(&b.display_name));
-
-    languages
-}
-
-/// 获取可用语言列表
-///
-/// 返回缓存的语言列表，如果需要刷新请调用 `refresh_available_languages()`
-#[allow(dead_code, reason = "retained for custom PE language selectors")]
-pub fn get_available_languages() -> Vec<LanguageInfo> {
-    let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
-    let guard = manager.read();
-    guard.available_languages.clone()
-}
-
-/// 刷新可用语言列表
-#[allow(dead_code, reason = "retained for custom PE language selectors")]
-pub fn refresh_available_languages() {
-    let manager = I18N_MANAGER.get_or_init(|| RwLock::new(I18nManager::new()));
-    let mut guard = manager.write();
-    guard.available_languages = scan_available_languages();
 }
 
 /// 翻译并按顺序填充参数。
@@ -526,7 +362,10 @@ mod tests {
     #[test]
     fn test_default_language() {
         init("");
-        assert_eq!(current_language(), "zh-CN");
+        let manager = I18N_MANAGER
+            .get()
+            .expect("i18n manager must be initialized");
+        assert_eq!(manager.read().current_language, "zh-CN");
     }
 
     #[test]
@@ -535,10 +374,6 @@ mod tests {
             lr_core::traditional_chinese::to_traditional_chinese("系统安装与网络设置"),
             "系統安裝與網路設定"
         );
-        let languages = scan_available_languages();
-        assert!(languages.iter().any(|language| {
-            language.code == "zh-TW" && language.display_name == "繁體中文 - 中國台灣"
-        }));
     }
 
     #[test]
@@ -553,9 +388,6 @@ mod tests {
             translate_internal(&manager, "任意未收录文案"),
             DPRK_EASTER_EGG_SLOGAN
         );
-        assert!(scan_available_languages()
-            .iter()
-            .any(|language| language.code == DPRK_EASTER_EGG_LANGUAGE));
     }
 
     #[test]
@@ -639,16 +471,6 @@ mod tests {
                     "{code} changed placeholders for key {key}"
                 );
             }
-        }
-
-        let languages = scan_available_languages();
-        for (code, _) in EMBEDDED_LANGUAGE_CATALOGS {
-            assert!(
-                languages
-                    .iter()
-                    .any(|language| language.code.eq_ignore_ascii_case(code)),
-                "{code} must be listed without external WIM language files"
-            );
         }
     }
 

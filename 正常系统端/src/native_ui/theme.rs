@@ -34,6 +34,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_NCHITTEST,
     WM_NCPAINT, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTEXT, WM_SIZE,
     WM_THEMECHANGED, WS_BORDER, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_LAYERED,
+    WS_EX_TRANSPARENT,
 };
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
@@ -223,6 +224,20 @@ pub unsafe fn apply_control_theme(control: HWND, palette: Palette, kind: NativeC
     let is_edit = is_edit_class(&class_name);
     let is_combo = is_combo_class(&class_name);
     let control_style = GetWindowLongPtrW(control, GWL_STYLE);
+    let transparent_carrier_control = is_auto_checkbox(&class_name, control_style)
+        || is_auto_radio_button(&class_name, control_style);
+    if transparent_carrier_control {
+        let ex_style = GetWindowLongPtrW(control, GWL_EXSTYLE);
+        let transparent = WS_EX_TRANSPARENT.0 as isize;
+        let desired = if palette.window.0 == 0 {
+            ex_style | transparent
+        } else {
+            ex_style & !transparent
+        };
+        if desired != ex_style {
+            let _ = SetWindowLongPtrW(control, GWL_EXSTYLE, desired);
+        }
+    }
     if is_auto_checkbox(&class_name, control_style) {
         // Inno's themed checkbox state table is the Windows BUTTON theme: BP_CHECKBOX/CBS_*.
         // Keep USER32's state machine, keyboard handling, accessibility and BN_CLICKED semantics,
@@ -1039,52 +1054,45 @@ unsafe fn paint_embedded_windows11_checkbox(
     checked: bool,
 ) {
     let mut paint = PAINTSTRUCT::default();
-    let dc = BeginPaint(hwnd, &mut paint);
+    let target_dc = BeginPaint(hwnd, &mut paint);
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
+    let dc = target_dc;
     fill(dc, &client, palette.window);
     let dpi = GetDpiForWindow(hwnd).max(96);
     let width = (client.right - client.left).max(0);
     let height = (client.bottom - client.top).max(0);
-    if width == 0 || height == 0 {
-        let _ = EndPaint(hwnd, &paint);
-        return;
-    }
+    if width > 0 && height > 0 {
+        if let Some(geometry) = check_box_geometry(width, height, dpi) {
+            let (glyph_rect, caption_rect) = (geometry.glyph, geometry.text);
+            draw_embedded_button_glyph(
+                dc,
+                glyph_rect,
+                embedded_button_glyph(palette.dark, dpi, state, checked),
+                palette.window,
+            );
 
-    let Some(geometry) = check_box_geometry(width, height, dpi) else {
-        let _ = EndPaint(hwnd, &paint);
-        return;
-    };
-    let (glyph_rect, caption_rect) = (geometry.glyph, geometry.text);
-    draw_embedded_button_glyph(
-        dc,
-        glyph_rect,
-        embedded_button_glyph(palette.dark, dpi, state, checked),
-        palette.window,
-    );
-
-    let text_length = GetWindowTextLengthW(hwnd).max(0) as usize;
-    if text_length > 0 && caption_rect.right > caption_rect.left {
-        let mut text = vec![0u16; text_length + 1];
-        let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
-        text.truncate(copied);
-        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
-        let old_font = (font.0 != 0)
-            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
-        let mut text_rect = caption_rect;
-        draw_native_text(
-            dc,
-            &text,
-            &mut text_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
-            if state.disabled {
-                palette.text_disabled
-            } else {
-                palette.text
-            },
-        );
-        if let Some(old_font) = old_font {
-            let _ = SelectObject(dc, old_font);
+            let text_length = GetWindowTextLengthW(hwnd).max(0) as usize;
+            if text_length > 0 && caption_rect.right > caption_rect.left {
+                let mut text = vec![0u16; text_length + 1];
+                let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
+                text.truncate(copied);
+                let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+                let old_font = (font.0 != 0).then(|| {
+                    SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _))
+                });
+                let mut text_rect = caption_rect;
+                let flags = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
+                let color = if state.disabled {
+                    palette.text_disabled
+                } else {
+                    palette.text
+                };
+                draw_native_text(dc, &text, &mut text_rect, flags, color);
+                if let Some(old_font) = old_font {
+                    let _ = SelectObject(dc, old_font);
+                }
+            }
         }
     }
     let _ = EndPaint(hwnd, &paint);
@@ -1364,41 +1372,37 @@ unsafe extern "system" fn radio_button_subclass(
 
 unsafe fn paint_radio_button(hwnd: HWND, palette: Palette, state: ControlState, checked: bool) {
     let mut paint = PAINTSTRUCT::default();
-    let dc = BeginPaint(hwnd, &mut paint);
+    let target_dc = BeginPaint(hwnd, &mut paint);
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
+    let dc = target_dc;
     fill(dc, &client, palette.window);
     let dpi = GetDpiForWindow(hwnd).max(96);
     let width = (client.right - client.left).max(0);
     let height = (client.bottom - client.top).max(0);
-    let Some(geometry) = radio_geometry(width, height, dpi) else {
-        let _ = EndPaint(hwnd, &paint);
-        return;
-    };
-    draw_radio_glyph(dc, geometry.glyph, palette, state, checked);
+    if let Some(geometry) = radio_geometry(width, height, dpi) {
+        draw_radio_glyph(dc, geometry.glyph, palette, state, checked);
 
-    let text_length = GetWindowTextLengthW(hwnd).max(0) as usize;
-    if text_length > 0 && geometry.text.right > geometry.text.left {
-        let mut text = vec![0u16; text_length + 1];
-        let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
-        text.truncate(copied);
-        let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
-        let old_font = (font.0 != 0)
-            .then(|| SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _)));
-        let mut text_rect = geometry.text;
-        draw_native_text(
-            dc,
-            &text,
-            &mut text_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
-            if state.disabled {
+        let text_length = GetWindowTextLengthW(hwnd).max(0) as usize;
+        if text_length > 0 && geometry.text.right > geometry.text.left {
+            let mut text = vec![0u16; text_length + 1];
+            let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
+            text.truncate(copied);
+            let font = SendMessageW(hwnd, WM_GETFONT, WPARAM(0), LPARAM(0));
+            let old_font = (font.0 != 0).then(|| {
+                SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _))
+            });
+            let mut text_rect = geometry.text;
+            let flags = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
+            let color = if state.disabled {
                 palette.text_disabled
             } else {
                 palette.text
-            },
-        );
-        if let Some(old_font) = old_font {
-            let _ = SelectObject(dc, old_font);
+            };
+            draw_native_text(dc, &text, &mut text_rect, flags, color);
+            if let Some(old_font) = old_font {
+                let _ = SelectObject(dc, old_font);
+            }
         }
     }
     let _ = EndPaint(hwnd, &paint);
@@ -1548,6 +1552,14 @@ unsafe fn paint_list_view_frame(frame: HWND, palette: Palette) {
         paint_rounded_control_frame(frame, palette);
         return;
     };
+    let style = GetWindowLongPtrW(list, GWL_STYLE);
+    if is_category_list_view(style) {
+        // Category selection is an inset client-area surface. It must never become the
+        // interior colour of the sibling frame: when WS_VSCROLL is present, the upper-right
+        // frame corner meets the scrollbar rather than the selected item.
+        paint_rounded_control_frame(frame, palette);
+        return;
+    }
     let header = HWND(SendMessageW(list, 0x101f, WPARAM(0), LPARAM(0)).0 as *mut _);
     if header.is_invalid() || !IsWindowVisible(header).as_bool() {
         paint_rounded_control_frame(frame, palette);
@@ -1692,6 +1704,9 @@ unsafe extern "system" fn list_view_subclass(
                 fill(dc, &client, palette_from_reference(reference_data).edit);
                 let _ = EndPaint(hwnd, &paint);
                 repaint_list_view_header_now(hwnd);
+                if let Some(frame) = list_view_frame(hwnd) {
+                    paint_list_view_frame(frame, palette_from_reference(reference_data));
+                }
                 return LRESULT(0);
             }
             let result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -1708,6 +1723,12 @@ unsafe extern "system" fn list_view_subclass(
             // Checkbox glyphs only; the separate hollow sibling owns the fixed rounded frame, so
             // scrolling this report never copies the frame into its rows.
             paint_list_view_checkboxes(hwnd, palette_from_reference(reference_data));
+            if let Some(frame) = list_view_frame(hwnd) {
+                // Publish the boundary after comctl32 and NM_CUSTOMDRAW have finished.  This keeps
+                // the frame's corner interior in sync with the current selected edge without an
+                // invalidate loop or a one-frame dark flash during category changes.
+                paint_list_view_frame(frame, palette_from_reference(reference_data));
+            }
             result
         }
         WM_ENABLE | WM_SETFOCUS | WM_KILLFOCUS | WM_SIZE | WM_THEMECHANGED => {
@@ -2655,17 +2676,12 @@ unsafe fn draw_combo_selected_text(hwnd: HWND, dc: HDC, mut text_rect: RECT, pal
     } else {
         DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX
     };
-    draw_native_text(
-        dc,
-        &text,
-        &mut text_rect,
-        flags,
-        if IsWindowEnabled(hwnd).as_bool() {
-            palette.text
-        } else {
-            palette.text_disabled
-        },
-    );
+    let color = if IsWindowEnabled(hwnd).as_bool() {
+        palette.text
+    } else {
+        palette.text_disabled
+    };
+    draw_native_text(dc, &text, &mut text_rect, flags, color);
     if let Some(old_font) = old_font {
         let _ = SelectObject(dc, old_font);
     }
@@ -3174,6 +3190,7 @@ unsafe fn paint_list_view_row(
     if GetClientRect(list, &mut client).is_err() {
         return false;
     }
+    let raw_row = row;
     row.left = row.left.max(client.left);
     row.top = row.top.max(client.top);
     row.right = row.right.min(client.right);
@@ -3183,7 +3200,25 @@ unsafe fn paint_list_view_row(
     }
 
     let (text_color, selection_fill) = list_view_row_colors(palette, selected);
-    fill(draw.nmcd.hdc, &row, selection_fill);
+    let dpi = GetDpiForWindow(list).max(96);
+    let style = GetWindowLongPtrW(list, GWL_STYLE);
+    let category_selection = selected
+        .then(|| category_selection_corners(style, raw_row, client))
+        .flatten()
+        .map(|corners| {
+            let geometry = category_selection_geometry(row, corners, dpi);
+            paint_category_selection_region(
+                draw.nmcd.hdc,
+                geometry,
+                row,
+                selection_fill,
+                palette.edit,
+            );
+            geometry
+        });
+    if category_selection.is_none() {
+        fill(draw.nmcd.hdc, &row, selection_fill);
+    }
 
     let font = SendMessageW(list, WM_GETFONT, WPARAM(0), LPARAM(0));
     let old_font = (font.0 != 0).then(|| {
@@ -3203,7 +3238,6 @@ unsafe fn paint_list_view_row(
             .0
             .max(1) as i32
     };
-    let dpi = GetDpiForWindow(list).max(96);
     let inset = scale(7, dpi);
     let state_image = SendMessageW(
         list,
@@ -3273,7 +3307,296 @@ unsafe fn paint_list_view_row(
     if let Some(old_font) = old_font {
         let _ = SelectObject(draw.nmcd.hdc, old_font);
     }
+    if let Some(geometry) = category_selection {
+        // Opaque ClearType text renders on a solid selected surface. Restore only the non-text
+        // edge bands afterwards; the left band ends exactly where the first glyph begins.
+        restore_category_selection_edges(draw.nmcd.hdc, geometry, selection_fill, palette.edit);
+    }
     true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CategorySelectionCorners {
+    All,
+    Top,
+    Square,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CategorySelectionGeometry {
+    row: RECT,
+    fill: RECT,
+    corners: CategorySelectionCorners,
+    radius: i32,
+}
+
+fn category_selection_geometry(
+    row: RECT,
+    corners: CategorySelectionCorners,
+    dpi: u32,
+) -> CategorySelectionGeometry {
+    let gap = scale(2, dpi).max(1);
+    // The selection is inset from the same rounded control frame, so its arc must be the
+    // concentric inner arc: outer frame radius minus the physical inset. Reusing the frame
+    // geometry keeps the two curves parallel at every DPI instead of merely choosing a similar
+    // looking independent radius.
+    let outer_radius = rounded_control_frame_geometry(
+        (row.right - row.left).max(0),
+        (row.bottom - row.top).max(scale(23, dpi)),
+        dpi,
+    )
+    .map_or(scale(5, dpi).max(2), |geometry| geometry.radius);
+    let radius = outer_radius
+        .saturating_sub(gap)
+        .max(1)
+        .min((row.bottom - row.top).max(0) / 2);
+    let mut selected = RECT {
+        left: (row.left + gap).min(row.right),
+        top: row.top,
+        right: (row.right - gap).max(row.left),
+        bottom: row.bottom,
+    };
+    if matches!(
+        corners,
+        CategorySelectionCorners::Top | CategorySelectionCorners::All
+    ) {
+        selected.top = (selected.top + gap).min(selected.bottom);
+    }
+    if matches!(
+        corners,
+        CategorySelectionCorners::Bottom | CategorySelectionCorners::All
+    ) {
+        selected.bottom = (selected.bottom - gap).max(selected.top);
+    }
+    CategorySelectionGeometry {
+        row,
+        fill: selected,
+        corners,
+        radius,
+    }
+}
+
+unsafe fn restore_category_selection_edges(
+    dc: HDC,
+    geometry: CategorySelectionGeometry,
+    selected: COLORREF,
+    background: COLORREF,
+) {
+    let left_edge = RECT {
+        right: (geometry.fill.left + geometry.radius).min(geometry.row.right),
+        ..geometry.row
+    };
+    let right_edge = RECT {
+        left: (geometry.fill.right - geometry.radius).max(geometry.row.left),
+        ..geometry.row
+    };
+    paint_category_selection_region(dc, geometry, left_edge, selected, background);
+    paint_category_selection_region(dc, geometry, right_edge, selected, background);
+
+    if geometry.fill.top > geometry.row.top {
+        paint_category_selection_region(
+            dc,
+            geometry,
+            RECT {
+                bottom: geometry.fill.top,
+                ..geometry.row
+            },
+            selected,
+            background,
+        );
+    }
+    if geometry.fill.bottom < geometry.row.bottom {
+        paint_category_selection_region(
+            dc,
+            geometry,
+            RECT {
+                top: geometry.fill.bottom,
+                ..geometry.row
+            },
+            selected,
+            background,
+        );
+    }
+}
+
+unsafe fn paint_category_selection_region(
+    dc: HDC,
+    geometry: CategorySelectionGeometry,
+    region: RECT,
+    selected: COLORREF,
+    background: COLORREF,
+) {
+    let region = RECT {
+        left: region.left.max(geometry.row.left),
+        top: region.top.max(geometry.row.top),
+        right: region.right.min(geometry.row.right),
+        bottom: region.bottom.min(geometry.row.bottom),
+    };
+    let width = (region.right - region.left).max(0);
+    let height = (region.bottom - region.top).max(0);
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height {
+        for x in 0..width {
+            let coverage =
+                category_selection_pixel_coverage(region.left + x, region.top + y, geometry);
+            let color = blend_category_selection(background, selected, coverage, 64);
+            let offset = (y as usize * width as usize + x as usize) * 4;
+            pixels[offset] = ((color.0 >> 16) & 0xff) as u8;
+            pixels[offset + 1] = ((color.0 >> 8) & 0xff) as u8;
+            pixels[offset + 2] = (color.0 & 0xff) as u8;
+            pixels[offset + 3] = 255;
+        }
+    }
+    let bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let _ = SetDIBitsToDevice(
+        dc,
+        region.left,
+        region.top,
+        width as u32,
+        height as u32,
+        0,
+        0,
+        0,
+        height as u32,
+        pixels.as_ptr().cast(),
+        &bitmap_info,
+        DIB_RGB_COLORS,
+    );
+}
+
+fn category_selection_pixel_coverage(
+    pixel_x: i32,
+    pixel_y: i32,
+    geometry: CategorySelectionGeometry,
+) -> u32 {
+    const SAMPLES: i32 = 8;
+    let mut inside = 0u32;
+    for sample_y in 0..SAMPLES {
+        for sample_x in 0..SAMPLES {
+            let x = pixel_x as f64 + (sample_x as f64 + 0.5) / SAMPLES as f64;
+            let y = pixel_y as f64 + (sample_y as f64 + 0.5) / SAMPLES as f64;
+            if category_selection_contains_sample(x, y, geometry) {
+                inside += 1;
+            }
+        }
+    }
+    inside
+}
+
+fn category_selection_contains_sample(x: f64, y: f64, geometry: CategorySelectionGeometry) -> bool {
+    let fill = geometry.fill;
+    if x < fill.left as f64
+        || x >= fill.right as f64
+        || y < fill.top as f64
+        || y >= fill.bottom as f64
+    {
+        return false;
+    }
+    let radius = geometry
+        .radius
+        .min((fill.right - fill.left).max(0) / 2)
+        .min((fill.bottom - fill.top).max(0) / 2) as f64;
+    if radius <= 0.0 {
+        return true;
+    }
+    let rounds_top = matches!(
+        geometry.corners,
+        CategorySelectionCorners::Top | CategorySelectionCorners::All
+    );
+    let rounds_bottom = matches!(
+        geometry.corners,
+        CategorySelectionCorners::Bottom | CategorySelectionCorners::All
+    );
+    let left_center = fill.left as f64 + radius;
+    let right_center = fill.right as f64 - radius;
+    let top_center = fill.top as f64 + radius;
+    let bottom_center = fill.bottom as f64 - radius;
+
+    if rounds_top && y < top_center {
+        if x < left_center {
+            return (x - left_center).powi(2) + (y - top_center).powi(2) <= radius.powi(2);
+        }
+        if x >= right_center {
+            return (x - right_center).powi(2) + (y - top_center).powi(2) <= radius.powi(2);
+        }
+    }
+    if rounds_bottom && y >= bottom_center {
+        if x < left_center {
+            return (x - left_center).powi(2) + (y - bottom_center).powi(2) <= radius.powi(2);
+        }
+        if x >= right_center {
+            return (x - right_center).powi(2) + (y - bottom_center).powi(2) <= radius.powi(2);
+        }
+    }
+    true
+}
+
+fn blend_category_selection(
+    background: COLORREF,
+    foreground: COLORREF,
+    foreground_weight: u32,
+    total_weight: u32,
+) -> COLORREF {
+    let blend_channel = |shift: u32| {
+        let background = (background.0 >> shift) & 0xff;
+        let foreground = (foreground.0 >> shift) & 0xff;
+        ((background * (total_weight - foreground_weight)
+            + foreground * foreground_weight
+            + total_weight / 2)
+            / total_weight) as u8
+    };
+    rgb(blend_channel(0), blend_channel(8), blend_channel(16))
+}
+
+fn category_selection_corners(
+    style: isize,
+    row: RECT,
+    client: RECT,
+) -> Option<CategorySelectionCorners> {
+    if !is_category_list_view(style)
+        || row.right <= client.left
+        || row.left >= client.right
+        || row.bottom <= client.top
+        || row.top >= client.bottom
+    {
+        return None;
+    }
+
+    // GetClientRect uses an exclusive bottom-right coordinate.  A category highlight receives a
+    // rounded side only when its visible bounds actually reach that client edge.  In particular,
+    // the final data item is not a bottom-edge item when blank ListView body remains below it.
+    let touches_top = row.top <= client.top;
+    let touches_bottom = row.bottom >= client.bottom;
+    Some(match (touches_top, touches_bottom) {
+        (true, true) => CategorySelectionCorners::All,
+        (true, false) => CategorySelectionCorners::Top,
+        (false, true) => CategorySelectionCorners::Bottom,
+        (false, false) => CategorySelectionCorners::Square,
+    })
+}
+
+const fn is_category_list_view(style: isize) -> bool {
+    // Documented ListView styles: LVS_SINGLESEL=0x0004 and LVS_NOCOLUMNHEADER=0x4000.
+    const LVS_SINGLESEL_STYLE: isize = 0x0004;
+    const LVS_NOCOLUMNHEADER_STYLE: isize = 0x4000;
+    let category_styles = LVS_SINGLESEL_STYLE | LVS_NOCOLUMNHEADER_STYLE;
+    style & category_styles == category_styles
 }
 
 fn list_view_row_colors(palette: Palette, selected: bool) -> (COLORREF, COLORREF) {
@@ -4125,6 +4448,85 @@ mod tests {
         assert_eq!(
             list_view_row_colors(Palette::DARK, true),
             (selected.text, selected.fill)
+        );
+    }
+
+    #[test]
+    fn category_selection_corners_follow_the_visible_client_edges() {
+        const LVS_SINGLESEL_STYLE: isize = 0x0004;
+        const LVS_NOCOLUMNHEADER_STYLE: isize = 0x4000;
+        const CATEGORY_STYLES: isize = LVS_SINGLESEL_STYLE | LVS_NOCOLUMNHEADER_STYLE;
+        let client = RECT {
+            left: 0,
+            top: 0,
+            right: 280,
+            bottom: 300,
+        };
+
+        assert_eq!(
+            category_selection_corners(
+                CATEGORY_STYLES,
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 280,
+                    bottom: 24,
+                },
+                client,
+            ),
+            Some(CategorySelectionCorners::Top)
+        );
+        assert_eq!(
+            category_selection_corners(
+                CATEGORY_STYLES,
+                RECT {
+                    left: 0,
+                    top: 24,
+                    right: 280,
+                    bottom: 48,
+                },
+                client,
+            ),
+            Some(CategorySelectionCorners::Square)
+        );
+        assert_eq!(
+            category_selection_corners(
+                CATEGORY_STYLES,
+                RECT {
+                    left: 0,
+                    top: 276,
+                    right: 280,
+                    bottom: 300,
+                },
+                client,
+            ),
+            Some(CategorySelectionCorners::Bottom)
+        );
+        assert_eq!(
+            category_selection_corners(CATEGORY_STYLES, client, client),
+            Some(CategorySelectionCorners::All)
+        );
+
+        assert_eq!(
+            category_selection_corners(LVS_NOCOLUMNHEADER_STYLE, client, client),
+            None
+        );
+        assert_eq!(
+            category_selection_corners(LVS_SINGLESEL_STYLE, client, client),
+            None
+        );
+        assert_eq!(
+            category_selection_corners(
+                CATEGORY_STYLES,
+                RECT {
+                    left: 0,
+                    top: 300,
+                    right: 280,
+                    bottom: 324,
+                },
+                client,
+            ),
+            None
         );
     }
 

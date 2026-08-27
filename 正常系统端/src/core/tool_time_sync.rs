@@ -342,17 +342,3 @@ pub fn sync_time_to_beijing() -> TimeSyncResult {
         new_time: None,
     }
 }
-
-/// 检查是否有网络连接
-pub fn check_network_for_ntp() -> bool {
-    for server in NTP_SERVERS.iter().take(2) {
-        let addr = format!("{}:123", server);
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-            socket.set_read_timeout(Some(Duration::from_secs(2))).ok();
-            if socket.connect(&addr).is_ok() {
-                return true;
-            }
-        }
-    }
-    false
-}

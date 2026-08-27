@@ -20,7 +20,7 @@
 //!   加载为 `pc-sys`），本模块只在已加载的 hive 键上写，避免「同一 hive 文件二次加载」冲突。
 //! - 驱动文件运行时从 `bin\drivers\xp\{ahci,nvme,usb3}\` 读取（调用方传入该根目录）。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::command::new_command;
 use crate::encoding::gbk_to_utf8;
@@ -453,11 +453,4 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// 解析 `bin\drivers\xp` 根目录（相对某个 exe/bin 目录）。
-///
-/// 供两端复用：`base_bin_dir` 传 `get_exe_dir()\bin` 或等价目录。
-pub fn xp_drivers_dir(base_bin_dir: &Path) -> PathBuf {
-    base_bin_dir.join("drivers").join("xp")
 }

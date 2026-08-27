@@ -12,8 +12,9 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-    EndPaint, FillRect, InvalidateRect, SelectObject, SetBkColor, SetBkMode, SetTextColor, HBRUSH,
-    HDC, HFONT, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    EndPaint, FillRect, InvalidateRect, RedrawWindow, SelectObject, SetBkColor, SetBkMode,
+    SetTextColor, HBRUSH, HDC, HFONT, PAINTSTRUCT, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW,
+    SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
@@ -28,17 +29,19 @@ use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawMenuBar, EnableMenuItem,
     GetClientRect, GetMessageW, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
-    LoadCursorW, MessageBoxW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-    ShowWindow, TranslateMessage, BN_CLICKED, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    GWLP_USERDATA, HMENU, IDC_ARROW, MB_ICONWARNING, MB_OK, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED,
-    MF_GRAYED, MINMAXINFO, MSG, PM_REMOVE, SC_CLOSE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SIZE, WM_TIMER,
-    WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_DLGMODALFRAME, WS_MAXIMIZEBOX,
+    LoadCursorW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, BN_CLICKED, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    GWLP_USERDATA, HMENU, IDC_ARROW, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED, MF_GRAYED, MINMAXINFO,
+    MSG, PM_REMOVE, SC_CLOSE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_DLGMODALFRAME, WS_MAXIMIZEBOX,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
+#[cfg(not(feature = "ci-automation"))]
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_ICONWARNING, MB_OK};
 
 #[cfg(any(test, feature = "non-elevated-tests"))]
 use crate::app::{WorkerMessage, MAX_WORKER_MESSAGES_PER_POLL};
@@ -70,8 +73,10 @@ const ID_BACK: u16 = 2002;
 const ID_DETAILS: u16 = 2003;
 const MIN_WIDTH: i32 = 440;
 const MIN_HEIGHT: i32 = 430;
+const BACKUP_MIN_HEIGHT: i32 = 350;
 const PREFERRED_WIDTH: i32 = 480;
 const PREFERRED_HEIGHT: i32 = 440;
+const BACKUP_PREFERRED_HEIGHT: i32 = 360;
 const SS_CENTER_STYLE: u32 = 0x0000_0001;
 const SS_RIGHT_STYLE: u32 = 0x0000_0002;
 const SS_CENTERIMAGE_STYLE: u32 = 0x0000_0200;
@@ -182,6 +187,20 @@ fn progress_window_style() -> WINDOW_STYLE {
     )
 }
 
+fn preferred_progress_height(operation_type: OperationType) -> i32 {
+    match operation_type {
+        OperationType::Backup => BACKUP_PREFERRED_HEIGHT,
+        OperationType::Install | OperationType::Expand => PREFERRED_HEIGHT,
+    }
+}
+
+fn minimum_progress_height(operation_type: OperationType) -> i32 {
+    match operation_type {
+        OperationType::Backup => BACKUP_MIN_HEIGHT,
+        OperationType::Install | OperationType::Expand => MIN_HEIGHT,
+    }
+}
+
 #[derive(Debug)]
 pub struct ProgressRunError {
     source: windows::core::Error,
@@ -235,6 +254,7 @@ struct ProgressPresentation {
     overall_progress: u8,
     status: String,
     completion_warning: Option<String>,
+    error: Option<String>,
     terminal: ProgressTerminal,
     rows: Vec<ProgressStepRow>,
 }
@@ -282,6 +302,7 @@ impl ProgressPresentation {
             overall_progress: state.overall_progress,
             status,
             completion_warning: state.completion_warning.clone(),
+            error: state.error_message.clone(),
             terminal,
             rows,
         }
@@ -340,6 +361,7 @@ fn step_status(index: usize, current: usize, progress: u8, failed: bool) -> Step
 
 struct NativeProgressWindow {
     operation_type: OperationType,
+    authenticated_handoff: Option<crate::core::config::AuthenticatedOperationGuard>,
     start_worker: bool,
     #[cfg(feature = "non-elevated-tests")]
     preview_state: PreviewState,
@@ -349,6 +371,7 @@ struct NativeProgressWindow {
     presentation: ProgressPresentation,
     worker_finished: bool,
     completion_warning_shown: bool,
+    failure_log_prompt_shown: bool,
     theme: ThemeContext,
     brushes: ThemeBrushes,
     body_font: HFONT,
@@ -376,6 +399,7 @@ struct NativeProgressWindow {
 impl NativeProgressWindow {
     unsafe fn new(
         operation_type: OperationType,
+        authenticated_handoff: Option<crate::core::config::AuthenticatedOperationGuard>,
         dpi: u32,
         advanced_options: Option<AdvancedOptionsSummary>,
         start_worker: bool,
@@ -388,6 +412,7 @@ impl NativeProgressWindow {
         let theme = ThemeContext::detect(dpi);
         Self {
             operation_type,
+            authenticated_handoff,
             start_worker,
             #[cfg(feature = "non-elevated-tests")]
             preview_state,
@@ -397,6 +422,7 @@ impl NativeProgressWindow {
             presentation,
             worker_finished: false,
             completion_warning_shown: false,
+            failure_log_prompt_shown: false,
             theme,
             brushes: ThemeBrushes::new(theme.palette),
             body_font: create_ui_font(dpi, 10),
@@ -473,7 +499,14 @@ impl NativeProgressWindow {
                 self.animation_ticker.take();
                 return Err(windows::core::Error::from_win32());
             }
-            let mut session = WorkflowSession::new_for_operation(Some(self.operation_type));
+            let authenticated_handoff = self
+                .authenticated_handoff
+                .take()
+                .expect("production PE progress must own one authenticated handoff guard");
+            let mut session = WorkflowSession::new_for_operation(
+                Some(self.operation_type),
+                authenticated_handoff,
+            );
             session.start_worker();
             self.state.workflow = Some(session);
         }
@@ -581,6 +614,74 @@ impl NativeProgressWindow {
         {
             self.render_detail_page();
         }
+        if should_show_failure_log_prompt(
+            self.presentation.terminal,
+            self.worker_finished,
+            self.failure_log_prompt_shown,
+        ) {
+            self.failure_log_prompt_shown = true;
+            #[cfg(feature = "ci-automation")]
+            crate::finalize_ci_failure(
+                self.presentation
+                    .error
+                    .as_deref()
+                    .unwrap_or("PE workflow reported a terminal failure without an error message"),
+            );
+            #[cfg(not(feature = "ci-automation"))]
+            self.show_failure_log_prompt(hwnd);
+        }
+    }
+
+    #[cfg(not(feature = "ci-automation"))]
+    unsafe fn show_failure_log_prompt(&self, hwnd: HWND) {
+        let Some(log_path) = crate::prepare_failure_log_for_ui() else {
+            #[cfg(not(feature = "ci-automation"))]
+            let title = wide(crate::tr!("操作出错"));
+            let message = wide(crate::tr!(
+                "操作已停止，但错误日志无法发布。请保留当前界面并将此情况告知开发者。"
+            ));
+            let _ = MessageBoxW(
+                hwnd,
+                PCWSTR(message.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONERROR,
+            );
+            return;
+        };
+        let content = crate::tr!(
+            "操作已停止。正常端与 PE 端日志已经合并。请将下面的文件提供给开发者，以便定位并解决问题。\r\n\r\n日志文件：{}",
+            log_path.display()
+        );
+        match lr_core::windows_diagnostics::show_error_log_prompt(
+            hwnd,
+            &crate::tr!("操作出错"),
+            &crate::tr!("LetRecovery 遇到错误"),
+            &content,
+            &crate::tr!("打开文件"),
+        ) {
+            Ok(true) => {
+                if let Err(error) =
+                    lr_core::windows_diagnostics::reveal_file_in_explorer(log_path.clone())
+                {
+                    log::error!(
+                        "[DIAGNOSTIC UI] 无法启动合并日志定位线程 {}: {error}",
+                        log_path.display()
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::error!("[DIAGNOSTIC UI] 无法显示 PE 错误日志弹窗: {error}");
+                let title = wide(crate::tr!("操作出错"));
+                let content = wide(&content);
+                let _ = MessageBoxW(
+                    hwnd,
+                    PCWSTR(content.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
+        }
     }
 
     unsafe fn apply_presentation(&mut self, hwnd: HWND, next: ProgressPresentation) {
@@ -623,14 +724,19 @@ impl NativeProgressWindow {
         self.presentation = next;
         if let Some(warning) = completion_warning_to_show {
             self.completion_warning_shown = true;
-            let warning = wide(&warning);
-            let title = wide(crate::tr!("安装已完成，需要修改固件设置"));
-            let _ = MessageBoxW(
-                hwnd,
-                PCWSTR(warning.as_ptr()),
-                PCWSTR(title.as_ptr()),
-                MB_OK | MB_ICONWARNING,
-            );
+            #[cfg(feature = "ci-automation")]
+            log::warn!("[CI AUTOMATION] terminal success warning: {warning}");
+            #[cfg(not(feature = "ci-automation"))]
+            {
+                let warning = wide(&warning);
+                let title = wide(crate::tr!("安装已完成，但有警告"));
+                let _ = MessageBoxW(
+                    hwnd,
+                    PCWSTR(warning.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_OK | MB_ICONWARNING,
+                );
+            }
         }
         if rows_changed {
             if self.refresh_spinner_rect() {
@@ -642,6 +748,19 @@ impl NativeProgressWindow {
             // UpdateWindow calls here used to stall the UI thread during rapid DISM transitions.
             for label in &self.row_labels {
                 let _ = InvalidateRect(*label, None, true);
+            }
+        }
+        if terminal_changed && self.presentation.terminal == ProgressTerminal::Completed {
+            // Terminal transitions are infrequent and must publish the final Completed color before
+            // the modal warning is shown. A queued STATIC repaint can otherwise remain behind the
+            // modal loop even though its sibling status icon has already turned green.
+            for label in &self.row_labels {
+                let _ = RedrawWindow(
+                    *label,
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+                );
             }
         }
         if terminal_changed {
@@ -953,6 +1072,14 @@ impl NativeProgressWindow {
     }
 }
 
+fn should_show_failure_log_prompt(
+    terminal: ProgressTerminal,
+    worker_finished: bool,
+    prompt_shown: bool,
+) -> bool {
+    worker_finished && terminal == ProgressTerminal::Failed && !prompt_shown
+}
+
 impl Drop for NativeProgressWindow {
     fn drop(&mut self) {
         unsafe {
@@ -963,22 +1090,31 @@ impl Drop for NativeProgressWindow {
     }
 }
 
-pub fn run(operation_type: OperationType) -> Result<(), ProgressRunError> {
-    run_internal(operation_type, true, PreviewState::Running)
+pub fn run(
+    operation_type: OperationType,
+    authenticated_handoff: crate::core::config::AuthenticatedOperationGuard,
+) -> Result<(), ProgressRunError> {
+    run_internal(
+        operation_type,
+        Some(authenticated_handoff),
+        true,
+        PreviewState::Running,
+    )
 }
 
 #[cfg(feature = "non-elevated-tests")]
 pub fn run_preview(operation_type: OperationType) -> Result<(), ProgressRunError> {
-    run_internal(operation_type, false, PreviewState::Running)
+    run_internal(operation_type, None, false, PreviewState::Running)
 }
 
 #[cfg(feature = "non-elevated-tests")]
 pub fn run_failed_preview(operation_type: OperationType) -> Result<(), ProgressRunError> {
-    run_internal(operation_type, false, PreviewState::Failed)
+    run_internal(operation_type, None, false, PreviewState::Failed)
 }
 
 fn run_internal(
     operation_type: OperationType,
+    authenticated_handoff: Option<crate::core::config::AuthenticatedOperationGuard>,
     start_worker: bool,
     preview_state: PreviewState,
 ) -> Result<(), ProgressRunError> {
@@ -1004,19 +1140,19 @@ fn run_internal(
             log::debug!("PE 原生进度窗口类已经注册或注册返回错误");
         }
         let dpi = GetDpiForSystem().max(96);
+        // The summary is parsed only from the exact WIM-authenticated bytes; public INI files are
+        // never scanned or consulted by the progress shell.
         let advanced_options = if operation_type == OperationType::Install {
-            match ConfigFileManager::find_install_task() {
-                Ok((_, _, config)) => Some(AdvancedOptionsSummary::from_install_config(&config)),
-                Err(error) => {
-                    log::warn!("无法预读 PE 安装高级选项摘要，工作线程仍按原流程读取配置: {error}");
-                    None
-                }
-            }
+            authenticated_handoff
+                .as_ref()
+                .and_then(|guard| ConfigFileManager::install_config_from_guard(guard).ok())
+                .map(|config| AdvancedOptionsSummary::from_install_config(&config))
         } else {
             None
         };
         let mut window = Box::new(NativeProgressWindow::new(
             operation_type,
+            authenticated_handoff,
             dpi,
             advanced_options,
             start_worker,
@@ -1024,8 +1160,9 @@ fn run_internal(
         ));
         let screen_width = GetSystemMetrics(SM_CXSCREEN).max(1);
         let screen_height = GetSystemMetrics(SM_CYSCREEN).max(1);
+        let preferred_height = preferred_progress_height(operation_type);
         let width = scaled(PREFERRED_WIDTH, dpi).min(screen_width);
-        let height = scaled(PREFERRED_HEIGHT, dpi).min(screen_height);
+        let height = scaled(preferred_height, dpi).min(screen_height);
         let title = wide(crate::tr!("LetRecovery PE"));
         let hwnd = match CreateWindowExW(
             WS_EX_DLGMODALFRAME,
@@ -1052,7 +1189,7 @@ fn run_internal(
         if actual_dpi != dpi {
             window.refresh_dpi(hwnd, actual_dpi);
         }
-        fit_window_to_work_area(hwnd, PREFERRED_WIDTH, PREFERRED_HEIGHT, actual_dpi);
+        fit_window_to_work_area(hwnd, PREFERRED_WIDTH, preferred_height, actual_dpi);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let mut message = MSG::default();
         loop {
@@ -1111,20 +1248,20 @@ fn seed_running_preview(
             let _ = sender.send(WorkerMessage::SetInstallStep(InstallStep::FormatPartition));
             let _ = sender.send(WorkerMessage::SetProgress(100));
             let _ = sender.send(WorkerMessage::SetInstallStep(InstallStep::ApplyImage));
-            let _ = sender.send(WorkerMessage::SetProgress(5));
+            let _ = sender.send(WorkerMessage::SetProgress(58));
         }
         OperationType::Backup => {
             let _ = sender.send(WorkerMessage::SetBackupStep(BackupStep::ReadConfig));
             let _ = sender.send(WorkerMessage::SetProgress(100));
             let _ = sender.send(WorkerMessage::SetBackupStep(BackupStep::CaptureImage));
-            let _ = sender.send(WorkerMessage::SetProgress(5));
+            let _ = sender.send(WorkerMessage::SetProgress(58));
         }
         OperationType::Expand => {
-            let _ = sender.send(WorkerMessage::SetProgress(5));
+            let _ = sender.send(WorkerMessage::SetProgress(58));
         }
     }
     for index in 0..MAX_WORKER_MESSAGES_PER_POLL {
-        let _ = sender.send(WorkerMessage::SetProgress(5));
+        let _ = sender.send(WorkerMessage::SetProgress(58));
         let _ = sender.send(WorkerMessage::SetStatus(format!(
             "UI message-flood preview {index}"
         )));
@@ -1462,7 +1599,10 @@ unsafe extern "system" fn window_proc(
                 let work_width = (work.right - work.left).max(1);
                 let work_height = (work.bottom - work.top).max(1);
                 (*minmax).ptMinTrackSize.x = scaled(MIN_WIDTH, dpi).min(work_width);
-                (*minmax).ptMinTrackSize.y = scaled(MIN_HEIGHT, dpi).min(work_height);
+                let minimum_height = window.as_ref().map_or(MIN_HEIGHT, |window| {
+                    minimum_progress_height(window.operation_type)
+                });
+                (*minmax).ptMinTrackSize.y = scaled(minimum_height, dpi).min(work_height);
             }
             LRESULT(0)
         }
@@ -1631,6 +1771,18 @@ mod tests {
     fn default_progress_window_is_compact_and_row_text_is_vertically_centered() {
         assert_eq!((PREFERRED_WIDTH, PREFERRED_HEIGHT), (480, 440));
         assert_eq!((MIN_WIDTH, MIN_HEIGHT), (440, 430));
+        assert_eq!(
+            preferred_progress_height(OperationType::Backup),
+            BACKUP_PREFERRED_HEIGHT
+        );
+        assert_eq!(
+            minimum_progress_height(OperationType::Backup),
+            BACKUP_MIN_HEIGHT
+        );
+        assert_eq!(
+            preferred_progress_height(OperationType::Install),
+            PREFERRED_HEIGHT
+        );
         assert_eq!(SS_RIGHT_STYLE, 0x0000_0002);
         assert_eq!(SS_CENTERIMAGE_STYLE, 0x0000_0200);
         assert_eq!(progress_window_style().0 & WS_MAXIMIZEBOX.0, 0);
@@ -1664,6 +1816,35 @@ mod tests {
         assert_eq!(view.rows[5].status, StepStatus::Failed);
         assert_eq!(view.rows[4].status, StepStatus::Completed);
         assert_eq!(view.rows[6].status, StepStatus::Pending);
+    }
+
+    #[test]
+    fn failure_log_prompt_waits_for_finalization_and_never_treats_warnings_as_errors() {
+        assert!(!should_show_failure_log_prompt(
+            ProgressTerminal::Failed,
+            false,
+            false
+        ));
+        assert!(should_show_failure_log_prompt(
+            ProgressTerminal::Failed,
+            true,
+            false
+        ));
+        assert!(!should_show_failure_log_prompt(
+            ProgressTerminal::Failed,
+            true,
+            true
+        ));
+        assert!(!should_show_failure_log_prompt(
+            ProgressTerminal::Completed,
+            true,
+            false
+        ));
+        assert!(!should_show_failure_log_prompt(
+            ProgressTerminal::Running,
+            true,
+            false
+        ));
     }
 
     #[test]
@@ -1741,6 +1922,8 @@ mod tests {
             view.rows[InstallStep::ApplyImage.index()].status,
             StepStatus::InProgress
         );
+        assert_eq!(view.step_progress, 58);
+        assert!(view.overall_progress > 0 && view.overall_progress < 100);
         assert_eq!(view.terminal, ProgressTerminal::Running);
     }
 }

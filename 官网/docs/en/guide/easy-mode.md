@@ -28,8 +28,8 @@ The image can be one you already have locally, or you can grab it via [Online Do
 Easy Mode automatically applies a set of settings that suit most people, saving you from ticking each one in [Advanced Options](/guide/advanced-options):
 
 - **Bypass the OOBE online requirement** (BypassNRO)
-- **Remove preinstalled UWP apps**
-- Import the uniquely matched locked **disk-controller driver** when the target supports it; when reinstalling an existing Windows system, automatically back up and import its current drivers
+- Remove the [fixed exact AppX list](/guide/advanced-options) while preserving new Outlook and OneDrive; on Windows 11, Start recommendations and preinstalled content delivery are suppressed before the default user is created
+- Import the uniquely matched locked **disk-controller driver** when the target supports it; when reinstalling an existing Windows system, back up current third-party drivers and attempt to restore them. Individual optional non-boot packages may be logged and skipped, while boot-storage coverage must still verify successfully
 - Set the system drive's **volume label to `OS`**
 - Take the **username** from the currently logged-in account
 - Enable **unattended** setup, format the target drive, **repair boot**, and **reboot automatically** when finished
@@ -43,4 +43,4 @@ flow: it first prepares the WinPE boot environment and reboots into it, then for
 
 ## Want Finer Control?
 
-When you need custom partitions, want to keep specific drivers, supply your own `unattend.xml`, or do more registry tweaks, turn off Easy Mode and switch to the standard [System Installation](/guide/system-install) + [Advanced Options](/guide/advanced-options).
+When you need custom partitions, want to keep specific drivers, supply your own `unattend.xml`, or do more registry tweaks, turn off Easy Mode and switch to the standard [System Installation](/guide/system-install) + [Advanced Options](/guide/advanced-options). The current authenticated install-via-PE path does not accept a custom answer file or Administrator password; those combinations fail closed before disk writes.

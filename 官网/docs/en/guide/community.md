@@ -27,7 +27,7 @@ The GitHub bug form asks only for information the application does not already r
 
 1. What happened and the stage involved (normal-system client / PE client / after first boot).
 2. Steps that reproduce the problem.
-3. Complete logs for the affected stage and a full screenshot of the error. For a PE-stage issue, upload both the normal-system log and `LetRecoveryPE.log`.
+3. Complete logs for the affected stage and a full screenshot of the error. After a ViaPE installation, the normal-system and PE logs are merged into `<new-system drive>\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`; upload this file first. If installation fails after formatting or the first target write, look under `<data drive>\LetRecovery_Data\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`. Only when no combined log exists should you separately upload the normal-system log from **About → Open log directory** and `<directory containing LetRecoveryPE.exe>\LetRecoveryPE.log`.
 
 Current logs automatically record the software version, source and target systems, UEFI/Legacy, Secure Boot, BitLocker, disk layout, the PE used, and physical/virtual-machine clues, so **you do not need to transcribe them manually**. If logs genuinely cannot be obtained, explain why and where you already looked.
 

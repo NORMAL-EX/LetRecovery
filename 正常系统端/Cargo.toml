@@ -12,8 +12,12 @@ description = "Windows系统一键重装工具"
 # Explicit opt-in for distributable test builds. Production builds omit this feature, which
 # keeps `build_info::DEV` false and removes all test-build labels from the UI.
 dev-build = []
-# Test harnesses must not trigger a UAC prompt. build.rs rejects this feature
-# for release builds so production binaries always require elevation.
+# Explicit disposable-VM fault harness. Production and distributable dev builds omit this feature;
+# only the install-matrix CLI artifact recognizes a session-shaped LETRECOVERY_CI_FAULT value.
+ci-automation = []
+# Test harnesses must never enter a destructive or self-elevation path. build.rs rejects this
+# feature for release builds. The executable manifest is always asInvoker; only the audited,
+# argument-free production GUI route may request elevation.
 non-elevated-tests = []
 
 [dependencies]
@@ -120,6 +124,7 @@ thiserror = "1"
 chrono = "0.4"
 dirs = "6"
 walkdir = "2"
+zeroize = "1"
 rfd = "0.15"
 single-instance = "0.3"
 clipboard-win = "5.4"

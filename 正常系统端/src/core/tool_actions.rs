@@ -6,27 +6,6 @@ use crate::tr;
 use crate::utils::path::{get_bin_dir, get_tools_dir};
 use std::process::Command;
 
-/// 启动指定工具
-pub fn launch_tool(tool_name: &str) -> Result<(), String> {
-    let tools_dir = get_tools_dir();
-    let tool_path = tools_dir.join(tool_name);
-
-    if tool_path.exists() {
-        let result = if tool_name.to_lowercase().ends_with(".cpl") {
-            Command::new("control.exe").arg(&tool_path).spawn()
-        } else {
-            Command::new(&tool_path).spawn()
-        };
-
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => Err(tr!("启动失败: {} - {}", tool_name, e)),
-        }
-    } else {
-        Err(tr!("工具不存在: {}", format!("{:?}", tool_path)))
-    }
-}
-
 /// 启动Ghost工具
 pub fn launch_ghost() -> Result<(), String> {
     let bin_dir = get_bin_dir();
@@ -69,17 +48,6 @@ pub fn repair_boot(target_partition: &str) -> Result<(), String> {
 pub fn export_drivers(export_dir: &str) -> Result<(), String> {
     let dism = crate::core::dism::Dism::new();
     dism.export_drivers(export_dir)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-/// 从指定分区导出驱动
-pub fn export_drivers_from_partition(
-    source_partition: &str,
-    export_dir: &str,
-) -> Result<(), String> {
-    let dism = crate::core::dism::Dism::new();
-    dism.export_drivers_from_system(source_partition, export_dir)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }

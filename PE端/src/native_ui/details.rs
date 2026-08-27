@@ -57,11 +57,11 @@ impl AdvancedOptionsSummary {
                 enabled_text(config.bypass_nro),
             ),
             row(
-                crate::tr!("禁用 Windows Update"),
+                crate::tr!("移除 Windows Update"),
                 enabled_text(config.disable_windows_update),
             ),
             row(
-                crate::tr!("深度移除 Defender 杀毒引擎"),
+                crate::tr!("移除 Defender 与 Windows 安全中心"),
                 enabled_text(config.disable_windows_defender),
             ),
             row(
@@ -77,7 +77,7 @@ impl AdvancedOptionsSummary {
                 enabled_text(config.disable_device_encryption),
             ),
             row(
-                crate::tr!("移除预装 UWP 应用"),
+                crate::tr!("移除指定预装应用"),
                 enabled_text(config.remove_uwp_apps),
             ),
             row(

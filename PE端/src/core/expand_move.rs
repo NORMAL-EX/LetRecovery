@@ -15,7 +15,8 @@
 //!
 //! ## 安全防呆（任一不满足直接安全失败，不触碰磁盘）
 //! - N 必须是 C 之后**紧邻**的、有盘符的**基础数据分区**(非 ESP/MSR/恢复/系统)；
-//! - C/N 的偏移、长度、adj、delta、shift 均须 1 MiB 对齐（绝大多数真实分区如此）；
+//! - 原始 I/O 的 offset/length/shift 必须满足当前物理磁盘报告的真实逻辑扇区约束；
+//!   扇区查询失败或字段矛盾时停止，不能用固定 1 MiB/4 KiB/512 B 猜测；
 //! - 搬移前锁定并卸载 N 卷；搬移采用倒序重叠安全拷贝；
 //! - 重建分区表项交给 VDS（避免手改 GPT CRC / MBR 出错）；
 //! - 全程写 journal 便于诊断；移动数据期间断电会损坏 N（与所有分区工具同理，需提示勿断电）。
@@ -24,14 +25,17 @@
 
 #![cfg(windows)]
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::core::{HRESULT, PCWSTR};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, GetVolumeInformationW, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
     IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, PARTITION_STYLE_GPT,
@@ -44,10 +48,127 @@ use crate::tr;
 
 const MIB: u64 = 1024 * 1024;
 const GENERIC_RW: u32 = 0x8000_0000 | 0x4000_0000; // GENERIC_READ | GENERIC_WRITE
-const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x0056_0000;
 const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
 const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
 const COPY_CHUNK: u64 = 4 * MIB;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawMoveDirection {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RawMoveIoPlan {
+    physical_sector_bytes: usize,
+    chunk_bytes: usize,
+}
+
+/// Validate only constraints required by the current physical device and the signed Win32 file
+/// pointer. `1 MiB` is a layout preference, never a raw-I/O legality rule.
+fn plan_raw_move_io(
+    geometry: lr_core::windows_storage::DiskSectorGeometry,
+    disk_size_bytes: u64,
+    src: u64,
+    len: u64,
+    delta: u64,
+    direction: RawMoveDirection,
+) -> Result<RawMoveIoPlan> {
+    let logical = u64::from(geometry.logical_sector_bytes);
+    let physical = u64::from(geometry.physical_sector_bytes);
+    if logical == 0
+        || physical < logical
+        || !physical.is_multiple_of(logical)
+        || u64::from(geometry.sector_alignment_offset_bytes) >= physical
+        || !u64::from(geometry.sector_alignment_offset_bytes).is_multiple_of(logical)
+    {
+        bail!("physical disk reported invalid sector geometry");
+    }
+    if len == 0 || delta == 0 {
+        bail!("raw move length and delta must be non-zero");
+    }
+    for (name, value) in [("source offset", src), ("length", len), ("delta", delta)] {
+        if !value.is_multiple_of(logical) {
+            bail!(
+                "raw move {name} {value} is not aligned to the current logical sector size {logical}"
+            );
+        }
+    }
+    let source_end = src
+        .checked_add(len)
+        .ok_or_else(|| anyhow!("raw move source range overflows"))?;
+    let destination_start = match direction {
+        RawMoveDirection::Left => src
+            .checked_sub(delta)
+            .ok_or_else(|| anyhow!("raw move destination starts before disk zero"))?,
+        RawMoveDirection::Right => src
+            .checked_add(delta)
+            .ok_or_else(|| anyhow!("raw move destination offset overflows"))?,
+    };
+    let destination_end = destination_start
+        .checked_add(len)
+        .ok_or_else(|| anyhow!("raw move destination range overflows"))?;
+    if source_end > disk_size_bytes || destination_end > disk_size_bytes {
+        bail!("raw move source or destination is outside the current disk capacity");
+    }
+    if source_end > i64::MAX as u64 || destination_end > i64::MAX as u64 {
+        bail!("raw move range exceeds SetFilePointerEx signed range");
+    }
+
+    let preferred_chunk = COPY_CHUNK.max(logical);
+    let chunk = preferred_chunk - preferred_chunk % logical;
+    let chunk_bytes = usize::try_from(chunk)
+        .map_err(|_| anyhow!("raw move chunk does not fit this process address space"))?;
+    let physical_sector_bytes = usize::try_from(physical)
+        .map_err(|_| anyhow!("physical sector size does not fit this process address space"))?;
+    let allocation_bytes = chunk_bytes
+        .checked_add(physical_sector_bytes.saturating_sub(1))
+        .ok_or_else(|| anyhow!("aligned raw-I/O buffer size overflows"))?;
+    if allocation_bytes > isize::MAX as usize || chunk_bytes > u32::MAX as usize {
+        bail!("raw-I/O buffer size exceeds Win32 or Rust slice limits");
+    }
+    Ok(RawMoveIoPlan {
+        physical_sector_bytes,
+        chunk_bytes,
+    })
+}
+
+struct AlignedIoBuffer {
+    allocation: Vec<u8>,
+    start: usize,
+    len: usize,
+}
+
+impl AlignedIoBuffer {
+    fn new(len: usize, alignment: usize) -> Result<Self> {
+        if len == 0 || alignment == 0 {
+            bail!("aligned raw-I/O buffer requires non-zero size and alignment");
+        }
+        let allocation_len = len
+            .checked_add(alignment - 1)
+            .ok_or_else(|| anyhow!("aligned raw-I/O allocation size overflows"))?;
+        let mut allocation = Vec::new();
+        allocation
+            .try_reserve_exact(allocation_len)
+            .map_err(|error| anyhow!("allocate raw-I/O buffer failed: {error}"))?;
+        allocation.resize(allocation_len, 0);
+        let address = allocation.as_ptr() as usize;
+        let start = (alignment - address % alignment) % alignment;
+        debug_assert_eq!((address + start) % alignment, 0);
+        Ok(Self {
+            allocation,
+            start,
+            len,
+        })
+    }
+
+    fn as_mut_slice(&mut self, len: usize) -> Result<&mut [u8]> {
+        if len > self.len {
+            bail!("raw-I/O request exceeds aligned buffer capacity");
+        }
+        Ok(&mut self.allocation[self.start..self.start + len])
+    }
+}
 
 /// GPT 分区类型 GUID（小端字节序，与 PARTITION_INFORMATION_GPT 一致）。
 const BASIC_DATA_GUID: [u8; 16] = [
@@ -71,6 +192,36 @@ struct DriveLayoutInfoExHeader {
     partition_count: u32,
 }
 
+fn is_variable_buffer_error(error: &windows::core::Error) -> bool {
+    error.code() == HRESULT::from_win32(ERROR_MORE_DATA.0)
+        || error.code() == HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0)
+}
+
+unsafe fn query_drive_layout(handle: HANDLE) -> Option<(Vec<u64>, u32)> {
+    let mut capacity = 4096usize;
+    loop {
+        if capacity > 4 * 1024 * 1024 {
+            return None;
+        }
+        let mut buffer = vec![0u64; capacity.div_ceil(std::mem::size_of::<u64>())];
+        let mut returned = 0u32;
+        match DeviceIoControl(
+            handle,
+            IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+            None,
+            0,
+            Some(buffer.as_mut_ptr().cast()),
+            (buffer.len() * std::mem::size_of::<u64>()) as u32,
+            Some(&mut returned),
+            None,
+        ) {
+            Ok(()) => return Some((buffer, returned)),
+            Err(error) if is_variable_buffer_error(&error) => capacity = capacity.checked_mul(2)?,
+            Err(_) => return None,
+        }
+    }
+}
+
 /// 单个分区的关键几何信息。
 #[derive(Debug, Clone)]
 struct PartEntry {
@@ -85,59 +236,11 @@ struct PartEntry {
 
 /// 读取卷所在物理磁盘号与起始偏移、长度（字节）。
 unsafe fn volume_disk_and_offset(letter: char) -> Option<(u32, u64, u64)> {
-    let path = format!("\\\\.\\{}:", letter);
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let handle = CreateFileW(
-        PCWSTR::from_raw(wide.as_ptr()),
-        0,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        None,
-        OPEN_EXISTING,
-        Default::default(),
-        None,
-    )
-    .ok()?;
-    if handle == INVALID_HANDLE_VALUE {
-        return None;
-    }
-
-    #[repr(C)]
-    struct DiskExtent {
-        disk_number: u32,
-        starting_offset: i64,
-        extent_length: i64,
-    }
-    #[repr(C)]
-    struct VolumeDiskExtents {
-        number_of_disk_extents: u32,
-        extents: [DiskExtent; 1],
-    }
-
-    let mut buffer = [0u8; 256];
-    let mut returned: u32 = 0;
-    let res = DeviceIoControl(
-        handle,
-        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-        None,
-        0,
-        Some(buffer.as_mut_ptr() as *mut _),
-        buffer.len() as u32,
-        Some(&mut returned),
-        None,
-    );
-    let _ = CloseHandle(handle);
-    if res.is_err() {
-        return None;
-    }
-    let ext = &*(buffer.as_ptr() as *const VolumeDiskExtents);
-    if ext.number_of_disk_extents != 1 {
-        // 跨多个磁盘范围（跨盘卷）不支持移动
-        return None;
-    }
+    let identity = lr_core::windows_storage::volume_identity(letter).ok()?;
     Some((
-        ext.extents[0].disk_number,
-        ext.extents[0].starting_offset as u64,
-        ext.extents[0].extent_length as u64,
+        identity.disk_number,
+        identity.offset_bytes,
+        identity.extent_length_bytes,
     ))
 }
 
@@ -177,24 +280,15 @@ unsafe fn read_disk_layout(disk_number: u32) -> Option<(PartitionStyle, u64, Vec
     }
     let disk_size = geometry.disk_size as u64;
 
-    let mut buffer = vec![0u8; 65536];
-    let mut returned: u32 = 0;
-    let layout_ok = DeviceIoControl(
-        handle,
-        IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
-        None,
-        0,
-        Some(buffer.as_mut_ptr() as *mut _),
-        buffer.len() as u32,
-        Some(&mut returned),
-        None,
-    );
+    let layout = query_drive_layout(handle);
     let _ = CloseHandle(handle);
-    if layout_ok.is_err() || returned < std::mem::size_of::<DriveLayoutInfoExHeader>() as u32 {
+    let (buffer, returned) = layout?;
+    if returned < std::mem::size_of::<DriveLayoutInfoExHeader>() as u32 {
         return None;
     }
 
-    let header = &*(buffer.as_ptr() as *const DriveLayoutInfoExHeader);
+    let buffer = std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned as usize);
+    let header = std::ptr::read_unaligned(buffer.as_ptr().cast::<DriveLayoutInfoExHeader>());
     let style = if header.partition_style == PARTITION_STYLE_MBR.0 as u32 {
         PartitionStyle::MBR
     } else if header.partition_style == PARTITION_STYLE_GPT.0 as u32 {
@@ -313,7 +407,23 @@ unsafe fn lock_dismount_volume(letter: char) -> Result<HANDLE> {
 }
 
 /// 在物理磁盘上把 [src, src+len) 整块向右搬移 delta 字节（重叠安全：倒序拷贝）。
-unsafe fn raw_move_right(disk_number: u32, src: u64, len: u64, delta: u64) -> Result<()> {
+unsafe fn raw_move_right(
+    disk_number: u32,
+    src: u64,
+    len: u64,
+    delta: u64,
+    expected_layout: &lr_core::windows_storage::DiskLayoutSnapshot,
+) -> Result<()> {
+    let geometry = lr_core::windows_storage::physical_disk_sector_geometry(disk_number)
+        .map_err(|error| anyhow!("{}", tr!("查询物理磁盘真实扇区约束失败：{}", error)))?;
+    let io_plan = plan_raw_move_io(
+        geometry,
+        expected_layout.disk_size_bytes,
+        src,
+        len,
+        delta,
+        RawMoveDirection::Right,
+    )?;
     let path = format!("\\\\.\\PhysicalDrive{}", disk_number);
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let handle = CreateFileW(
@@ -322,7 +432,7 @@ unsafe fn raw_move_right(disk_number: u32, src: u64, len: u64, delta: u64) -> Re
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         None,
         OPEN_EXISTING,
-        Default::default(),
+        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
         None,
     )
     .map_err(|e| anyhow!("{}", tr!("打开物理磁盘 {} 失败: {}", disk_number, e)))?;
@@ -331,20 +441,28 @@ unsafe fn raw_move_right(disk_number: u32, src: u64, len: u64, delta: u64) -> Re
     }
 
     let result = (|| -> Result<()> {
-        let mut buf = vec![0u8; COPY_CHUNK as usize];
+        lr_core::windows_storage::verify_disk_layout_snapshot_from_physical_handle(
+            handle,
+            expected_layout,
+        )
+        .map_err(|error| anyhow!("{}", tr!("物理磁盘在原始搬移写入前已变化：{}", error)))?;
+        let mut buffer = AlignedIoBuffer::new(io_plan.chunk_bytes, io_plan.physical_sector_bytes)?;
         let mut pos = len; // 已处理到区域内的字节位置（从尾部往头部）
         while pos > 0 {
-            let this = COPY_CHUNK.min(pos);
+            let this = (io_plan.chunk_bytes as u64).min(pos);
             let rel = pos - this;
-            let read_at = (src + rel) as i64;
-            let write_at = (src + delta + rel) as i64;
+            let read_at = i64::try_from(src + rel)
+                .map_err(|_| anyhow!("raw read offset exceeds SetFilePointerEx range"))?;
+            let write_at = i64::try_from(src + delta + rel)
+                .map_err(|_| anyhow!("raw write offset exceeds SetFilePointerEx range"))?;
+            let io_buffer = buffer.as_mut_slice(this as usize)?;
 
             // 读
             seek(handle, read_at)?;
-            read_exact(handle, &mut buf[..this as usize])?;
+            read_exact(handle, io_buffer)?;
             // 写
             seek(handle, write_at)?;
-            write_exact(handle, &buf[..this as usize])?;
+            write_exact(handle, io_buffer)?;
 
             pos -= this;
         }
@@ -361,10 +479,26 @@ unsafe fn raw_move_right(disk_number: u32, src: u64, len: u64, delta: u64) -> Re
 /// 在物理磁盘上把 `[src, src+len)` 整块向左搬移 `delta` 字节。
 ///
 /// 目标区间起点低于源区间，重叠时必须从低地址向高地址正序复制。
-unsafe fn raw_move_left(disk_number: u32, src: u64, len: u64, delta: u64) -> Result<()> {
+unsafe fn raw_move_left(
+    disk_number: u32,
+    src: u64,
+    len: u64,
+    delta: u64,
+    expected_layout: &lr_core::windows_storage::DiskLayoutSnapshot,
+) -> Result<()> {
     if delta == 0 || src < delta {
         bail!("{}", tr!("向左搬移参数无效"));
     }
+    let geometry = lr_core::windows_storage::physical_disk_sector_geometry(disk_number)
+        .map_err(|error| anyhow!("{}", tr!("查询物理磁盘真实扇区约束失败：{}", error)))?;
+    let io_plan = plan_raw_move_io(
+        geometry,
+        expected_layout.disk_size_bytes,
+        src,
+        len,
+        delta,
+        RawMoveDirection::Left,
+    )?;
     let path = format!("\\\\.\\PhysicalDrive{}", disk_number);
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let handle = CreateFileW(
@@ -373,7 +507,7 @@ unsafe fn raw_move_left(disk_number: u32, src: u64, len: u64, delta: u64) -> Res
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         None,
         OPEN_EXISTING,
-        Default::default(),
+        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
         None,
     )
     .map_err(|e| anyhow!("{}", tr!("打开物理磁盘 {} 失败: {}", disk_number, e)))?;
@@ -382,14 +516,24 @@ unsafe fn raw_move_left(disk_number: u32, src: u64, len: u64, delta: u64) -> Res
     }
 
     let result = (|| -> Result<()> {
-        let mut buffer = vec![0u8; COPY_CHUNK as usize];
+        lr_core::windows_storage::verify_disk_layout_snapshot_from_physical_handle(
+            handle,
+            expected_layout,
+        )
+        .map_err(|error| anyhow!("{}", tr!("物理磁盘在原始搬移写入前已变化：{}", error)))?;
+        let mut buffer = AlignedIoBuffer::new(io_plan.chunk_bytes, io_plan.physical_sector_bytes)?;
         let mut position = 0_u64;
         while position < len {
-            let this = COPY_CHUNK.min(len - position);
-            seek(handle, (src + position) as i64)?;
-            read_exact(handle, &mut buffer[..this as usize])?;
-            seek(handle, (src - delta + position) as i64)?;
-            write_exact(handle, &buffer[..this as usize])?;
+            let this = (io_plan.chunk_bytes as u64).min(len - position);
+            let read_at = i64::try_from(src + position)
+                .map_err(|_| anyhow!("raw read offset exceeds SetFilePointerEx range"))?;
+            let write_at = i64::try_from(src - delta + position)
+                .map_err(|_| anyhow!("raw write offset exceeds SetFilePointerEx range"))?;
+            let io_buffer = buffer.as_mut_slice(this as usize)?;
+            seek(handle, read_at)?;
+            read_exact(handle, io_buffer)?;
+            seek(handle, write_at)?;
+            write_exact(handle, io_buffer)?;
             position += this;
         }
         windows::Win32::Storage::FileSystem::FlushFileBuffers(handle)
@@ -406,35 +550,37 @@ unsafe fn seek(handle: HANDLE, offset: i64) -> Result<()> {
 }
 
 unsafe fn read_exact(handle: HANDLE, buf: &mut [u8]) -> Result<()> {
-    let mut done = 0usize;
-    while done < buf.len() {
-        let mut read: u32 = 0;
-        ReadFile(handle, Some(&mut buf[done..]), Some(&mut read), None)
-            .map_err(|e| anyhow!("{}", tr!("读盘失败: {}", e)))?;
-        if read == 0 {
-            bail!("{}", tr!("读盘返回 0 字节（已读 {}/{}）", done, buf.len()));
-        }
-        done += read as usize;
+    let mut read: u32 = 0;
+    ReadFile(handle, Some(buf), Some(&mut read), None)
+        .map_err(|e| anyhow!("{}", tr!("读盘失败: {}", e)))?;
+    if read as usize != buf.len() {
+        bail!(
+            "{}",
+            tr!(
+                "读盘返回短读取（期望 {} 字节，实际 {} 字节）",
+                buf.len(),
+                read
+            )
+        );
     }
     Ok(())
 }
 
 unsafe fn write_exact(handle: HANDLE, buf: &[u8]) -> Result<()> {
-    let mut done = 0usize;
-    while done < buf.len() {
-        let mut written: u32 = 0;
-        WriteFile(handle, Some(&buf[done..]), Some(&mut written), None)
-            .map_err(|e| anyhow!("{}", tr!("写盘失败: {}", e)))?;
-        if written == 0 {
-            bail!("{}", tr!("写盘返回 0 字节（已写 {}/{}）", done, buf.len()));
-        }
-        done += written as usize;
+    let mut written: u32 = 0;
+    WriteFile(handle, Some(buf), Some(&mut written), None)
+        .map_err(|e| anyhow!("{}", tr!("写盘失败: {}", e)))?;
+    if written as usize != buf.len() {
+        bail!(
+            "{}",
+            tr!(
+                "写盘返回短写入（期望 {} 字节，实际 {} 字节，磁盘可能处于部分写入状态）",
+                buf.len(),
+                written
+            )
+        );
     }
     Ok(())
-}
-
-fn aligned(v: u64) -> bool {
-    v.is_multiple_of(MIB)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -470,22 +616,6 @@ fn plan_left_transfer(
     }
     let donor_length_after_shrink = donor_length - donor_shrink_by;
     let target_new_offset = target_offset - delta;
-    for value in [
-        donor_offset,
-        donor_length,
-        target_offset,
-        target_length,
-        requested_target_length,
-        delta,
-        gap_before_target,
-        donor_shrink_by,
-        donor_length_after_shrink,
-        target_new_offset,
-    ] {
-        if !aligned(value) {
-            bail!("left-side transfer geometry is not 1 MiB aligned");
-        }
-    }
     let donor_new_end = donor_offset
         .checked_add(donor_length_after_shrink)
         .ok_or_else(|| anyhow!("shrunken donor geometry overflow"))?;
@@ -626,6 +756,173 @@ fn plan_right_donor_shrink(
     Ok(exact_shrink)
 }
 
+fn observed_stable_shrink_bytes(
+    before: lr_core::windows_storage::StableVolumeIdentity,
+    current: lr_core::windows_storage::StableVolumeIdentity,
+) -> Result<Option<u64>> {
+    if lr_core::windows_storage::same_stable_volume_identity(before, current) {
+        return Ok(None);
+    }
+    if !lr_core::windows_storage::same_stable_partition_identity(before, current) {
+        bail!("current drive letter no longer names the authenticated pre-shrink partition");
+    }
+    if current.extent.disk_number != before.extent.disk_number
+        || current.extent.offset_bytes != before.extent.offset_bytes
+    {
+        bail!("current partition no longer starts at the authenticated pre-shrink extent");
+    }
+    let reclaimed = before
+        .extent
+        .extent_length_bytes
+        .checked_sub(current.extent.extent_length_bytes)
+        .ok_or_else(|| anyhow!("current partition grew instead of forming a recoverable shrink"))?;
+    if reclaimed == 0 {
+        return Ok(None);
+    }
+    Ok(Some(reclaimed))
+}
+
+/// Once VDS accepted an asynchronous shrink, a Wait/Refresh/readback error does not prove that the
+/// volume remained unchanged. Recovery is allowed only from a fresh authoritative read of the same
+/// stable partition and uses the actually observed tail reduction, never the requested byte count.
+fn recover_observed_shrink(
+    letter: char,
+    before: lr_core::windows_storage::StableVolumeIdentity,
+) -> String {
+    let current = match lr_core::windows_storage::stable_volume_identity(letter) {
+        Ok(current) => current,
+        Err(error) => {
+            return format!("authoritative re-read failed; no blind extension attempted: {error}")
+        }
+    };
+    let reclaimed = match observed_stable_shrink_bytes(before, current) {
+        Ok(None) => return "authoritative readback shows no extent change; no recovery needed".to_owned(),
+        Ok(Some(reclaimed)) => reclaimed,
+        Err(error) => {
+            return format!(
+                "current object is not a provable tail shrink of the authenticated partition; no blind extension attempted: {error:#}"
+            )
+        }
+    };
+    match lr_core::windows_storage::extend_volume_stable_checked(letter, current, reclaimed) {
+        Ok(()) => match lr_core::windows_storage::stable_volume_identity(letter) {
+            Ok(restored)
+                if lr_core::windows_storage::same_stable_volume_identity(restored, before) =>
+            {
+                format!("restored the authoritative observed shrink of {reclaimed} bytes")
+            }
+            Ok(restored) => format!(
+                "extension returned success but final authoritative extent differs from the original: {:?}",
+                restored.extent
+            ),
+            Err(error) => format!("extension returned success but final readback failed: {error}"),
+        },
+        Err(error) => format!(
+            "observed an actual shrink of {reclaimed} bytes but safe extension recovery failed: {error}"
+        ),
+    }
+}
+
+fn shrink_with_observed_recovery(
+    letter: char,
+    before: lr_core::windows_storage::StableVolumeIdentity,
+    desired_bytes: u64,
+    minimum_bytes: u64,
+) -> Result<u64> {
+    match lr_core::windows_storage::shrink_volume_stable_checked(
+        letter,
+        before,
+        desired_bytes,
+        minimum_bytes,
+    ) {
+        Ok(reclaimed) => Ok(reclaimed),
+        Err(error) => {
+            let recovery = recover_observed_shrink(letter, before);
+            bail!("VDS shrink failed or ended in an uncertain state: {error}; recovery result: {recovery}")
+        }
+    }
+}
+
+fn pre_move_error_with_shrink_recovery(
+    letter: char,
+    before: Option<lr_core::windows_storage::StableVolumeIdentity>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match before {
+        Some(before) => anyhow!(
+            "{}; no raw write had started, shrink recovery result: {}",
+            error,
+            recover_observed_shrink(letter, before)
+        ),
+        None => error,
+    }
+}
+
+fn recreated_partition_matches_raw_range(
+    created: lr_core::windows_storage::CreatedPartition,
+    raw_offset_bytes: u64,
+    raw_length_bytes: u64,
+) -> bool {
+    created.offset_bytes == raw_offset_bytes && created.size_bytes == raw_length_bytes
+}
+
+/// Raw bytes were moved to one exact range, so a provider-adjusted partition entry cannot be
+/// accepted even if it overlaps or contains that range: changing the file-system start/end would
+/// expose the wrong sectors. Cleanup is authorized only by the returned actual extent plus a fresh
+/// canonical snapshot; requested geometry is never used to guess which entry to delete.
+fn reject_and_cleanup_mismatched_recreate(
+    disk_number: u32,
+    created: lr_core::windows_storage::CreatedPartition,
+    raw_offset_bytes: u64,
+    raw_length_bytes: u64,
+    data_partition: &str,
+) -> Result<()> {
+    if recreated_partition_matches_raw_range(created, raw_offset_bytes, raw_length_bytes) {
+        return Ok(());
+    }
+    journal(
+        data_partition,
+        &format!(
+            "RECREATE MISMATCH raw_off={} raw_len={} actual_off={} actual_len={}",
+            raw_offset_bytes, raw_length_bytes, created.offset_bytes, created.size_bytes
+        ),
+    );
+    let current_layout = lr_core::windows_storage::disk_layout_snapshot(disk_number).map_err(
+        |error| {
+            anyhow!(
+                "raw data remains at exact range [{}+{}], but provider created mismatched partition entry [{}+{}] and canonical cleanup snapshot failed; preserve partial state: {}",
+                raw_offset_bytes,
+                raw_length_bytes,
+                created.offset_bytes,
+                created.size_bytes,
+                error
+            )
+        },
+    )?;
+    match lr_core::windows_storage::delete_partition_checked(
+        disk_number,
+        created.offset_bytes,
+        true,
+        &current_layout,
+    ) {
+        Ok(()) => bail!(
+            "provider created mismatched partition entry [{}+{}]; it was removed using its actual canonical extent. Raw data remains at exact range [{}+{}] without a partition entry; preserve journal and repair manually",
+            created.offset_bytes,
+            created.size_bytes,
+            raw_offset_bytes,
+            raw_length_bytes
+        ),
+        Err(error) => bail!(
+            "provider created mismatched partition entry [{}+{}] for raw data at [{}+{}], and checked cleanup of that actual entry failed; preserve partial state: {}",
+            created.offset_bytes,
+            created.size_bytes,
+            raw_offset_bytes,
+            raw_length_bytes,
+            error
+        ),
+    }
+}
+
 /// 编排：把分区 `letter` 无损扩大到配置指定大小（0=尽量并入相邻未分配空间）。
 ///
 /// 优先 Case 1（WinAPI extend 并入相邻未分配空间）；不足时尝试 Case 2（移动紧邻的基础数据分区）。
@@ -634,12 +931,17 @@ pub fn expand_c_drive(
     letter: char,
     config: &crate::core::config::ExpandConfig,
     data_partition: &str,
+    expected_target: lr_core::windows_storage::VolumeIdentity,
 ) -> Result<String> {
     let target_size_mb = config.target_size_mb;
     // 0=尽量扩到相邻未分配空间最大 → 直接 Case 1。
     if target_size_mb == 0 {
-        return DiskManager::expand_partition_lossless(letter, 0).map_err(|e| anyhow!(e));
+        return DiskManager::expand_partition_lossless_checked(letter, 0, expected_target)
+            .map_err(|e| anyhow!(e));
     }
+
+    DiskManager::verify_partition_volume_identity(&format!("{}:", letter), expected_target)
+        .context("authenticated expand target changed before layout planning")?;
 
     let (disk, c_off, c_len) = unsafe { volume_disk_and_offset(letter) }
         .ok_or_else(|| anyhow!("{}", tr!("无法定位分区 {}: 所在磁盘/偏移", letter)))?;
@@ -672,8 +974,18 @@ pub fn expand_c_drive(
 
     // 相邻未分配空间已够 → Case 1。
     if config.donor_target_size_mb == 0 && delta <= adj_unalloc {
-        return DiskManager::expand_partition_lossless(letter, target_size_mb)
-            .map_err(|e| anyhow!(e));
+        return DiskManager::expand_partition_lossless_checked(
+            letter,
+            target_size_mb,
+            expected_target,
+        )
+        .map_err(|e| anyhow!(e));
+    }
+
+    if config.donor_target_size_mb != 0 || delta > adj_unalloc {
+        bail!(
+            "partition-moving expansion is disabled until the authenticated canonical target and donor layout can remain pinned through every raw-write stage"
+        );
     }
 
     // 否则需要移动后方分区（Case 2）。
@@ -755,29 +1067,18 @@ pub fn expand_c_drive(
         donor_target_bytes,
     )?;
 
-    // 对齐校验（绝大多数真实分区 1 MiB 对齐；不对齐则拒绝以保证 WinAPI offset/size 精确）。
-    for (name, v) in [
-        ("C 偏移", c_off),
-        ("C 长度", c_len),
-        ("N 偏移", n.offset),
-        ("N 长度", n.length),
-        ("相邻未分配", adj_unalloc),
-        ("delta", delta),
-        ("shift", shift),
-        ("shrink", shrink_by),
-        ("N 尾部空闲", free_after_n),
-    ] {
-        if !aligned(v) {
-            bail!(
-                "{}",
-                tr!(
-                    "几何未按 1 MiB 对齐（{}={} 字节），为保证精确重建拒绝移动",
-                    name,
-                    v
-                )
-            );
-        }
-    }
+    // 在仍可逆的 shrink 之前，先按设备实际逻辑扇区验证原始搬移几何。provider 后续可能
+    // 按文件系统 cluster 合法取整 shrink；首次原始写入前还会用实际回读长度再次验证。
+    let sector_geometry = lr_core::windows_storage::physical_disk_sector_geometry(disk)
+        .map_err(|error| anyhow!("{}", tr!("查询物理磁盘真实扇区约束失败：{}", error)))?;
+    plan_raw_move_io(
+        sector_geometry,
+        disk_size,
+        n.offset,
+        n.length,
+        shift,
+        RawMoveDirection::Right,
+    )?;
 
     journal(
         data_partition,
@@ -798,46 +1099,71 @@ pub fn expand_c_drive(
 
     // ===== Step A：必要时 shrink N 文件系统 =====
     let mut n_len_now = n.length;
+    let mut shrink_before = None;
     if shrink_by > 0 {
         journal(
             data_partition,
             &format!("SHRINK {}: by {} MiB", n_letter, shrink_by / MIB),
         );
-        let reclaimed = lr_core::windows_storage::shrink_volume(n_letter, shrink_by, shrink_by)
-            .map_err(|error| {
-                anyhow!(
-                    "{}",
-                    tr!("收缩后方分区 {}: 失败，未做任何移动：{}", n_letter, error)
-                )
-            })?;
-        if reclaimed != shrink_by {
-            bail!(
-                "收缩后方分区返回了非预期字节数：期望 {}，实际 {}",
-                shrink_by,
-                reclaimed
-            );
+        let expected_extent = lr_core::windows_storage::VolumeIdentity {
+            disk_number: disk,
+            offset_bytes: n.offset,
+            extent_length_bytes: n.length,
+        };
+        let expected = lr_core::windows_storage::stable_volume_identity(n_letter)?;
+        if !lr_core::windows_storage::same_volume_identity(expected.extent, expected_extent) {
+            bail!("donor partition stable identity changed before shrink");
         }
-        // 重新读取布局，确认 N 偏移未变、长度已减小且仍 1 MiB 对齐。
+        shrink_before = Some(expected);
+        let reclaimed = shrink_with_observed_recovery(n_letter, expected, shrink_by, shrink_by)
+            .map_err(|error| anyhow!("{}", tr!("收缩后方分区 {}: 失败：{}", n_letter, error)))?;
+        log::debug!(
+            "VDS shrink requested {} bytes and authoritative readback proved {} bytes",
+            shrink_by,
+            reclaimed
+        );
+        // 重新读取布局，确认同一分区的实际新范围；不能要求 provider 与请求逐字节相等。
         let (_s2, _ds2, parts2) = unsafe { read_disk_layout(disk) }
-            .ok_or_else(|| anyhow!("{}", tr!("shrink 后重读磁盘布局失败")))?;
+            .ok_or_else(|| anyhow!("{}", tr!("shrink 后重读磁盘布局失败")))
+            .map_err(|error| pre_move_error_with_shrink_recovery(n_letter, shrink_before, error))?;
         let n2 = parts2
             .iter()
             .find(|p| p.number == n.number && p.offset == n.offset)
-            .ok_or_else(|| anyhow!("{}", tr!("shrink 后未找到原分区，已中止（未移动数据）")))?;
-        if !aligned(n2.length) {
-            bail!(
-                "{}",
-                tr!("shrink 后分区长度非 1 MiB 对齐，已中止（未移动数据）")
-            );
-        }
+            .ok_or_else(|| anyhow!("{}", tr!("shrink 后未找到原分区，已中止（未移动数据）")))
+            .map_err(|error| pre_move_error_with_shrink_recovery(n_letter, shrink_before, error))?;
         n_len_now = n2.length;
         // 再次确认右移后能放下：n.offset+shift+n_len_now <= after_n
-        if n.offset + shift + n_len_now > after_n {
-            bail!("{}", tr!("shrink 后空间仍不足，已中止（未移动数据）"));
+        let relocated_end = n
+            .offset
+            .checked_add(shift)
+            .and_then(|value| value.checked_add(n_len_now));
+        if relocated_end.is_none_or(|end| end > after_n) {
+            return Err(pre_move_error_with_shrink_recovery(
+                n_letter,
+                shrink_before,
+                anyhow!("{}", tr!("shrink 后空间仍不足，已中止（未移动数据）")),
+            ));
         }
     }
 
     // ===== Step B：锁定/卸载 N，倒序重叠安全搬移 =====
+    let move_identity =
+        lr_core::windows_storage::stable_volume_identity(n_letter).map_err(|error| {
+            pre_move_error_with_shrink_recovery(n_letter, shrink_before, anyhow!(error))
+        })?;
+    if move_identity.extent.disk_number != disk
+        || move_identity.extent.offset_bytes != n.offset
+        || move_identity.extent.extent_length_bytes != n_len_now
+    {
+        return Err(pre_move_error_with_shrink_recovery(
+            n_letter,
+            shrink_before,
+            anyhow!("donor stable identity changed before raw move"),
+        ));
+    }
+    let move_layout = lr_core::windows_storage::disk_layout_snapshot(disk).map_err(|error| {
+        pre_move_error_with_shrink_recovery(n_letter, shrink_before, anyhow!(error))
+    })?;
     journal(
         data_partition,
         &format!(
@@ -845,8 +1171,9 @@ pub fn expand_c_drive(
             n.offset, n_len_now, shift
         ),
     );
-    let vol_handle = unsafe { lock_dismount_volume(n_letter) }?;
-    let move_res = unsafe { raw_move_right(disk, n.offset, n_len_now, shift) };
+    let vol_handle = unsafe { lock_dismount_volume(n_letter) }
+        .map_err(|error| pre_move_error_with_shrink_recovery(n_letter, shrink_before, error))?;
+    let move_res = unsafe { raw_move_right(disk, n.offset, n_len_now, shift, &move_layout) };
     unsafe {
         let _ = CloseHandle(vol_handle);
     }
@@ -872,7 +1199,8 @@ pub fn expand_c_drive(
             new_off, n_len_now, n_letter
         ),
     );
-    lr_core::windows_storage::delete_partition(disk, n.offset, true).map_err(|error| {
+    lr_core::windows_storage::delete_partition_checked(disk, n.offset, true, &move_layout)
+        .map_err(|error| {
         anyhow!(
             "{}",
             tr!(
@@ -882,8 +1210,9 @@ pub fn expand_c_drive(
                 error
             )
         )
-    })?;
-    let created = lr_core::windows_storage::create_partition(
+        })?;
+    let recreate_layout = lr_core::windows_storage::disk_layout_snapshot(disk)?;
+    let created = lr_core::windows_storage::create_partition_checked(
         &lr_core::windows_storage::CreatePartitionRequest {
             disk_number: disk,
             offset_bytes: new_off,
@@ -895,6 +1224,7 @@ pub fn expand_c_drive(
             active: style == PartitionStyle::MBR && n.mbr_active,
             preserve_gpt_metadata: n.gpt_metadata.clone(),
         },
+        &recreate_layout,
     )
     .map_err(|error| {
         anyhow!(
@@ -907,21 +1237,21 @@ pub fn expand_c_drive(
             )
         )
     })?;
-    if created.offset_bytes != new_off || created.size_bytes != n_len_now {
-        bail!("VDS 重建分区返回了非预期的偏移或大小");
-    }
+    reject_and_cleanup_mismatched_recreate(disk, created, new_off, n_len_now, data_partition)?;
 
     // ===== Step D：把 C extend 到目标 =====
     journal(data_partition, "EXTEND C");
-    let msg = DiskManager::expand_partition_lossless(letter, target_size_mb).map_err(|e| {
-        anyhow!(
-            "{}",
-            tr!(
+    let msg =
+        DiskManager::expand_partition_lossless_checked(letter, target_size_mb, expected_target)
+            .map_err(|e| {
+                anyhow!(
+                    "{}",
+                    tr!(
                 "分区已成功移动，但最后扩展 C 失败：{}（可重试一键扩容，此时已是相邻未分配空间）",
                 e
             )
-        )
-    })?;
+                )
+            })?;
     journal(data_partition, "DONE");
     Ok(tr!("已移动后方分区 {} 并{}", n_letter, msg))
 }
@@ -934,7 +1264,14 @@ pub fn expand_from_left_donor(
     letter: char,
     config: &crate::core::config::ExpandConfig,
     data_partition: &str,
+    expected_target: lr_core::windows_storage::VolumeIdentity,
+    authenticated_control_handles_released: bool,
 ) -> Result<String> {
+    if !authenticated_control_handles_released {
+        bail!(
+            "left-side expansion is disabled because authenticated control handles are still open on the target volume"
+        );
+    }
     let target_size_mb = config.target_size_mb;
     if target_size_mb == 0 {
         bail!("{}", tr!("从左侧转移空间必须指定明确的目标大小"));
@@ -994,6 +1331,18 @@ pub fn expand_from_left_donor(
         requested_target_length,
     )
     .map_err(|error| anyhow!("{}", tr!("无法规划从左侧转移空间: {}", error)))?;
+    // Reject unsupported raw-I/O geometry while the volume layout is still untouched. Legal
+    // sector-aligned but non-MiB geometry is accepted.
+    let sector_geometry = lr_core::windows_storage::physical_disk_sector_geometry(disk)
+        .map_err(|error| anyhow!("{}", tr!("查询物理磁盘真实扇区约束失败：{}", error)))?;
+    plan_raw_move_io(
+        sector_geometry,
+        disk_size,
+        target.offset,
+        target.length,
+        plan.delta,
+        RawMoveDirection::Left,
+    )?;
 
     journal(
         data_partition,
@@ -1015,36 +1364,35 @@ pub fn expand_from_left_donor(
         ),
     );
 
+    let mut shrink_before = None;
     if plan.donor_shrink_by > 0 {
-        let reclaimed = lr_core::windows_storage::shrink_volume(
+        let expected_extent = lr_core::windows_storage::VolumeIdentity {
+            disk_number: disk,
+            offset_bytes: donor.offset,
+            extent_length_bytes: donor.length,
+        };
+        let expected = lr_core::windows_storage::stable_volume_identity(donor_letter)?;
+        if !lr_core::windows_storage::same_volume_identity(expected.extent, expected_extent) {
+            bail!("donor partition stable identity changed before shrink");
+        }
+        shrink_before = Some(expected);
+        let reclaimed = shrink_with_observed_recovery(
             donor_letter,
+            expected,
             plan.donor_shrink_by,
             plan.donor_shrink_by,
         )
-        .map_err(|error| {
-            anyhow!(
-                "{}",
-                tr!(
-                    "收缩左侧分区 {}: 失败，尚未移动目标分区数据：{}",
-                    donor_letter,
-                    error
-                )
-            )
-        })?;
-        if reclaimed != plan.donor_shrink_by {
-            bail!(
-                "{}",
-                tr!(
-                    "收缩左侧分区返回的空间不精确（期望 {} 字节，实际 {} 字节），尚未移动目标数据",
-                    plan.donor_shrink_by,
-                    reclaimed
-                )
-            );
-        }
+        .map_err(|error| anyhow!("{}", tr!("收缩左侧分区 {}: 失败：{}", donor_letter, error)))?;
+        log::debug!(
+            "left donor shrink requested {} bytes and authoritative readback proved {} bytes",
+            plan.donor_shrink_by,
+            reclaimed
+        );
     }
 
     let (_style_after_shrink, _size_after_shrink, fresh_parts) = unsafe { read_disk_layout(disk) }
-        .ok_or_else(|| anyhow!("{}", tr!("收缩后重读磁盘布局失败")))?;
+        .ok_or_else(|| anyhow!("{}", tr!("收缩后重读磁盘布局失败")))
+        .map_err(|error| pre_move_error_with_shrink_recovery(donor_letter, shrink_before, error))?;
     let fresh_donor = fresh_parts
         .iter()
         .find(|partition| partition.number == donor.number && partition.offset == donor.offset)
@@ -1053,7 +1401,8 @@ pub fn expand_from_left_donor(
                 "{}",
                 tr!("收缩后未找到原左侧分区，已中止（未移动目标数据）")
             )
-        })?;
+        })
+        .map_err(|error| pre_move_error_with_shrink_recovery(donor_letter, shrink_before, error))?;
     let fresh_target = fresh_parts
         .iter()
         .find(|partition| {
@@ -1066,17 +1415,22 @@ pub fn expand_from_left_donor(
                 "{}",
                 tr!("收缩后目标分区布局已变化，已中止（未移动目标数据）")
             )
-        })?;
-    if fresh_donor.length != plan.donor_length_after_shrink
+        })
+        .map_err(|error| pre_move_error_with_shrink_recovery(donor_letter, shrink_before, error))?;
+    if fresh_donor.length > plan.donor_length_after_shrink
         || fresh_donor
             .offset
             .checked_add(fresh_donor.length)
             .is_none_or(|end| end > plan.target_new_offset)
     {
-        bail!(
-            "{}",
-            tr!("收缩后左侧空间与计划不一致，已中止（未移动目标数据）")
-        );
+        return Err(pre_move_error_with_shrink_recovery(
+            donor_letter,
+            shrink_before,
+            anyhow!(
+                "{}",
+                tr!("收缩后左侧空间与计划不一致，已中止（未移动目标数据）")
+            ),
+        ));
     }
 
     journal(
@@ -1086,9 +1440,34 @@ pub fn expand_from_left_donor(
             fresh_target.offset, fresh_target.length, plan.delta
         ),
     );
-    let target_handle = unsafe { lock_dismount_volume(letter) }?;
-    let move_result =
-        unsafe { raw_move_left(disk, fresh_target.offset, fresh_target.length, plan.delta) };
+    let move_identity =
+        lr_core::windows_storage::stable_volume_identity(letter).map_err(|error| {
+            pre_move_error_with_shrink_recovery(donor_letter, shrink_before, anyhow!(error))
+        })?;
+    if move_identity.extent.disk_number != disk
+        || move_identity.extent.offset_bytes != fresh_target.offset
+        || move_identity.extent.extent_length_bytes != fresh_target.length
+    {
+        return Err(pre_move_error_with_shrink_recovery(
+            donor_letter,
+            shrink_before,
+            anyhow!("target stable identity changed before raw move"),
+        ));
+    }
+    let move_layout = lr_core::windows_storage::disk_layout_snapshot(disk).map_err(|error| {
+        pre_move_error_with_shrink_recovery(donor_letter, shrink_before, anyhow!(error))
+    })?;
+    let target_handle = unsafe { lock_dismount_volume(letter) }
+        .map_err(|error| pre_move_error_with_shrink_recovery(donor_letter, shrink_before, error))?;
+    let move_result = unsafe {
+        raw_move_left(
+            disk,
+            fresh_target.offset,
+            fresh_target.length,
+            plan.delta,
+            &move_layout,
+        )
+    };
     unsafe {
         let _ = CloseHandle(target_handle);
     }
@@ -1105,19 +1484,24 @@ pub fn expand_from_left_donor(
     })?;
     journal(data_partition, "MOVE-LEFT done");
 
-    lr_core::windows_storage::delete_partition(disk, fresh_target.offset, true).map_err(
-        |error| {
-            anyhow!(
-                "{}",
-                tr!(
-                    "目标数据已左移到 offset={}，但删除旧分区表项失败；请按 journal 修复：{}",
-                    plan.target_new_offset,
-                    error
-                )
+    lr_core::windows_storage::delete_partition_checked(
+        disk,
+        fresh_target.offset,
+        true,
+        &move_layout,
+    )
+    .map_err(|error| {
+        anyhow!(
+            "{}",
+            tr!(
+                "目标数据已左移到 offset={}，但删除旧分区表项失败；请按 journal 修复：{}",
+                plan.target_new_offset,
+                error
             )
-        },
-    )?;
-    let created = lr_core::windows_storage::create_partition(
+        )
+    })?;
+    let recreate_layout = lr_core::windows_storage::disk_layout_snapshot(disk)?;
+    let created = lr_core::windows_storage::create_partition_checked(
         &lr_core::windows_storage::CreatePartitionRequest {
             disk_number: disk,
             offset_bytes: plan.target_new_offset,
@@ -1129,6 +1513,7 @@ pub fn expand_from_left_donor(
             active: style == PartitionStyle::MBR && fresh_target.mbr_active,
             preserve_gpt_metadata: fresh_target.gpt_metadata.clone(),
         },
+        &recreate_layout,
     )
     .map_err(|error| {
         anyhow!(
@@ -1140,22 +1525,26 @@ pub fn expand_from_left_donor(
             )
         )
     })?;
-    if created.offset_bytes != plan.target_new_offset || created.size_bytes != fresh_target.length {
-        bail!("{}", tr!("重建目标分区返回了非预期的偏移或大小"));
-    }
-
-    let message = DiskManager::expand_partition_lossless(letter, target_size_mb).map_err(
-        |error| {
-            anyhow!(
-                "{}",
-                tr!(
-                    "目标分区已成功左移，但最后扩展 {}: 失败；当前表项和数据仍可访问，可重试扩展：{}",
-                    letter,
-                    error
-                )
-            )
-        },
+    reject_and_cleanup_mismatched_recreate(
+        disk,
+        created,
+        plan.target_new_offset,
+        fresh_target.length,
+        data_partition,
     )?;
+
+    let message =
+        DiskManager::expand_partition_lossless_checked(letter, target_size_mb, expected_target)
+            .map_err(|error| {
+                anyhow!(
+                    "{}",
+                    tr!(
+                "目标分区已成功左移，但最后扩展 {}: 失败；当前表项和数据仍可访问，可重试扩展：{}",
+                letter,
+                error
+            )
+                )
+            })?;
     journal(data_partition, "DONE-LEFT");
     Ok(tr!("已从左侧分区 {}: 转移空间并{}", donor_letter, message))
 }
@@ -1178,6 +1567,7 @@ mod tests {
 
     fn expected_left_config() -> crate::core::config::ExpandConfig {
         crate::core::config::ExpandConfig {
+            session_id: "0123456789abcdef0123456789abcdef".to_owned(),
             expected_disk_number: 2,
             expected_disk_size_bytes: 1_000 * MIB,
             expected_partition_number: 4,
@@ -1187,6 +1577,32 @@ mod tests {
             expected_donor_offset_bytes: MIB,
             expected_donor_size_bytes: 400 * MIB,
             ..Default::default()
+        }
+    }
+
+    fn sector_geometry(
+        logical: u32,
+        physical: u32,
+    ) -> lr_core::windows_storage::DiskSectorGeometry {
+        lr_core::windows_storage::DiskSectorGeometry {
+            logical_sector_bytes: logical,
+            physical_sector_bytes: physical,
+            sector_alignment_offset_bytes: 0,
+        }
+    }
+
+    fn stable_extent(offset: u64, length: u64) -> lr_core::windows_storage::StableVolumeIdentity {
+        lr_core::windows_storage::StableVolumeIdentity {
+            extent: lr_core::windows_storage::VolumeIdentity {
+                disk_number: 2,
+                offset_bytes: offset,
+                extent_length_bytes: length,
+            },
+            disk: lr_core::windows_storage::StableDiskIdentity::Gpt { disk_id: [7; 16] },
+            partition: lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                partition_id: [9; 16],
+            },
+            device_id_hash: Some([11; 32]),
         }
     }
 
@@ -1248,9 +1664,144 @@ mod tests {
     }
 
     #[test]
-    fn left_transfer_rejects_overlap_and_unaligned_geometry() {
+    fn left_transfer_rejects_overlap_but_accepts_legal_non_mib_geometry() {
         assert!(plan_left_transfer(MIB, 100 * MIB, 90 * MIB, 80 * MIB, 100 * MIB).is_err());
-        assert!(plan_left_transfer(MIB, 100 * MIB, 101 * MIB + 1, 80 * MIB, 100 * MIB).is_err());
+        let sector = 4096;
+        let donor_offset = MIB + sector;
+        let donor_length = 100 * MIB + sector;
+        let target_offset = donor_offset + donor_length;
+        let target_length = 80 * MIB + sector;
+        let requested = target_length + 20 * MIB;
+        let plan = plan_left_transfer(
+            donor_offset,
+            donor_length,
+            target_offset,
+            target_length,
+            requested,
+        )
+        .expect("sector-aligned non-MiB layout must not be rejected");
+        assert_eq!(plan.delta, 20 * MIB);
+        assert_ne!(donor_offset % MIB, 0);
+    }
+
+    #[test]
+    fn raw_io_accepts_non_mib_512e_and_4kn_geometry() {
+        let plan = plan_raw_move_io(
+            sector_geometry(512, 4096),
+            2 * 1024 * MIB,
+            MIB + 512,
+            100 * MIB + 512,
+            8 * MIB + 512,
+            RawMoveDirection::Right,
+        )
+        .expect("legal 512e geometry");
+        assert_eq!(plan.physical_sector_bytes, 4096);
+
+        plan_raw_move_io(
+            sector_geometry(4096, 4096),
+            2 * 1024 * MIB,
+            64 * MIB + 4096,
+            100 * MIB + 4096,
+            8 * MIB + 4096,
+            RawMoveDirection::Left,
+        )
+        .expect("legal 4Kn geometry");
+    }
+
+    #[test]
+    fn raw_io_rejects_only_real_device_constraint_and_range_violations() {
+        assert!(plan_raw_move_io(
+            sector_geometry(4096, 4096),
+            1024 * MIB,
+            MIB + 1,
+            100 * MIB,
+            8 * MIB,
+            RawMoveDirection::Right,
+        )
+        .is_err());
+        assert!(plan_raw_move_io(
+            sector_geometry(512, 4096),
+            128 * MIB,
+            120 * MIB,
+            16 * MIB,
+            8 * MIB,
+            RawMoveDirection::Right,
+        )
+        .is_err());
+        assert!(plan_raw_move_io(
+            lr_core::windows_storage::DiskSectorGeometry {
+                logical_sector_bytes: 4096,
+                physical_sector_bytes: 4096,
+                sector_alignment_offset_bytes: 512,
+            },
+            1024 * MIB,
+            MIB,
+            100 * MIB,
+            8 * MIB,
+            RawMoveDirection::Right,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn raw_io_buffer_address_is_physically_aligned() {
+        let mut buffer = AlignedIoBuffer::new(64 * 1024, 4096).unwrap();
+        let slice = buffer.as_mut_slice(4096).unwrap();
+        assert_eq!((slice.as_ptr() as usize) % 4096, 0);
+    }
+
+    #[test]
+    fn shrink_recovery_observation_uses_actual_tail_change_only() {
+        let before = stable_extent(MIB + 512, 100 * MIB + 512);
+        assert_eq!(observed_stable_shrink_bytes(before, before).unwrap(), None);
+        let shrunk = lr_core::windows_storage::StableVolumeIdentity {
+            extent: lr_core::windows_storage::VolumeIdentity {
+                extent_length_bytes: before.extent.extent_length_bytes - (8 * MIB + 4096),
+                ..before.extent
+            },
+            ..before
+        };
+        assert_eq!(
+            observed_stable_shrink_bytes(before, shrunk).unwrap(),
+            Some(8 * MIB + 4096)
+        );
+        let rebound = lr_core::windows_storage::StableVolumeIdentity {
+            partition: lr_core::windows_storage::StablePartitionIdentity::Gpt {
+                partition_id: [3; 16],
+            },
+            ..shrunk
+        };
+        assert!(observed_stable_shrink_bytes(before, rebound).is_err());
+        let grown = lr_core::windows_storage::StableVolumeIdentity {
+            extent: lr_core::windows_storage::VolumeIdentity {
+                extent_length_bytes: before.extent.extent_length_bytes + 4096,
+                ..before.extent
+            },
+            ..before
+        };
+        assert!(observed_stable_shrink_bytes(before, grown).is_err());
+    }
+
+    #[test]
+    fn recreated_partition_must_exactly_match_raw_file_system_range() {
+        let raw_offset = MIB + 4096;
+        let raw_length = 100 * MIB + 4096;
+        assert!(recreated_partition_matches_raw_range(
+            lr_core::windows_storage::CreatedPartition {
+                offset_bytes: raw_offset,
+                size_bytes: raw_length,
+            },
+            raw_offset,
+            raw_length,
+        ));
+        assert!(!recreated_partition_matches_raw_range(
+            lr_core::windows_storage::CreatedPartition {
+                offset_bytes: raw_offset - 4096,
+                size_bytes: raw_length + 8192,
+            },
+            raw_offset,
+            raw_length,
+        ));
     }
 
     #[test]

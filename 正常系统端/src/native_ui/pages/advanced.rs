@@ -23,8 +23,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, GetCursorPos, GetParent, GetPropW, GetScrollBarInfo, GetScrollInfo,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, MoveWindow, PostMessageW, RemovePropW,
-    ScrollWindowEx, SendMessageW, SetPropW, ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, PostMessageW, RemovePropW, ScrollWindowEx,
+    SendMessageW, SetPropW, ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX,
     BS_AUTORADIOBUTTON, BS_OWNERDRAW, ES_AUTOHSCROLL, ES_PASSWORD, HMENU, HTCLIENT, OBJID_VSCROLL,
     SB_BOTTOM, SB_ENDSCROLL, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION,
     SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLBARINFO, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE,
@@ -37,8 +37,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::super::controls::{
-    alpha_blend_premultiplied_bgra, center_single_line_edit_in_row, child, wide, InnoMetrics,
+    alpha_blend_premultiplied_bgra, center_single_line_edit_in_row, child,
+    move_layout_window as MoveWindow, wide, InnoMetrics,
 };
+use super::super::layout::measure_text;
 use super::super::scrollbar_compositor;
 use super::super::theme::{apply_control_theme, NativeControlKind, Palette};
 use crate::core::ui_state::{
@@ -465,6 +467,31 @@ struct AdvancedGrid {
     gap: i32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CenteredButtonLayout {
+    x: i32,
+    width: i32,
+}
+
+fn centered_button_layout(
+    column_x: i32,
+    column_width: i32,
+    measured_text_width: i32,
+    horizontal_padding: i32,
+    minimum_width: i32,
+) -> CenteredButtonLayout {
+    let column_width = column_width.max(0);
+    let width = measured_text_width
+        .max(0)
+        .saturating_add(horizontal_padding.max(0))
+        .max(minimum_width.max(0))
+        .min(column_width);
+    CenteredButtonLayout {
+        x: column_x + column_width.saturating_sub(width) / 2,
+        width,
+    }
+}
+
 impl AdvancedGrid {
     fn calculate(width: i32, dpi: u32) -> Self {
         let scale = |value: i32| ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32;
@@ -538,6 +565,8 @@ pub struct AdvancedPageContext {
     pub unattended_enabled: bool,
     pub builtin_administrator_available: bool,
     pub wifi_available: bool,
+    pub preinstall_catalogue_available: bool,
+    pub vmware_tools_available: bool,
     pub target_capabilities: AdvancedOptionCapabilities,
 }
 
@@ -547,6 +576,8 @@ impl Default for AdvancedPageContext {
             unattended_enabled: true,
             builtin_administrator_available: true,
             wifi_available: false,
+            preinstall_catalogue_available: false,
+            vmware_tools_available: false,
             target_capabilities: AdvancedOptionCapabilities::unknown(),
         }
     }
@@ -584,6 +615,7 @@ pub enum AdvancedBrowseTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdvancedPageIntent {
     Browse(AdvancedBrowseTarget),
+    SelectPreinstalledSoftware,
 }
 
 fn browse_intent_for_id(
@@ -599,7 +631,11 @@ fn browse_intent_for_id(
 #[derive(Clone)]
 pub struct AdvancedPageHandles {
     pub system_header: HWND,
+    pub preserve_personal_files: HWND,
     pub system_checks: [HWND; 10],
+    pub preinstalled_software_button: HWND,
+    preinstalled_software_button_id: u16,
+    pub vmware_tools: HWND,
     pub scripts_header: HWND,
     deploy_script: CheckEdit,
     first_login_script: CheckEdit,
@@ -640,6 +676,8 @@ pub struct AdvancedPage {
     target_scroll_offset: Cell<i32>,
     wheel_distance_remainder: Cell<i32>,
     content_height: Cell<i32>,
+    selected_preinstall_count: Cell<usize>,
+    preinstall_selection_automatic: Cell<bool>,
 }
 
 impl AdvancedPage {
@@ -703,18 +741,34 @@ impl AdvancedPage {
         };
 
         let system_header = label(parent, &crate::tr!("系统设置"), next_id())?;
+        let preserve_personal_files = checkbox(
+            parent,
+            &crate::tr!("保留个人文件重装（桌面、文档、下载、图片、音乐、视频）"),
+            next_id(),
+        )?;
         let system_checks = [
             checkbox(parent, &crate::tr!("移除快捷方式箭头"), next_id())?,
             checkbox(parent, &crate::tr!("恢复经典右键菜单"), next_id())?,
             checkbox(parent, &crate::tr!("跳过 Windows 11 联网要求"), next_id())?,
-            checkbox(parent, &crate::tr!("禁用 Windows Update"), next_id())?,
-            checkbox(parent, &crate::tr!("深度移除 Defender 杀毒引擎"), next_id())?,
+            checkbox(parent, &crate::tr!("移除 Windows Update"), next_id())?,
+            checkbox(
+                parent,
+                &crate::tr!("移除 Defender 与 Windows 安全中心"),
+                next_id(),
+            )?,
             checkbox(parent, &crate::tr!("禁用保留存储"), next_id())?,
             checkbox(parent, &crate::tr!("禁用用户账户控制 (UAC)"), next_id())?,
             checkbox(parent, &crate::tr!("禁用设备自动加密"), next_id())?,
-            checkbox(parent, &crate::tr!("移除预装 UWP 应用"), next_id())?,
+            checkbox(parent, &crate::tr!("移除指定预装应用"), next_id())?,
             checkbox(parent, &crate::tr!("迁移当前 Wi-Fi 配置"), next_id())?,
         ];
+        let preinstalled_software_button_id = next_id();
+        let preinstalled_software_button = action_button(
+            parent,
+            &crate::tr!("选择预装应用..."),
+            preinstalled_software_button_id,
+        )?;
+        let vmware_tools = checkbox(parent, &crate::tr!("安装 VMware Tools"), next_id())?;
 
         let scripts_header = label(parent, &crate::tr!("部署脚本"), next_id())?;
         let deploy_script = check_edit(
@@ -834,7 +888,11 @@ impl AdvancedPage {
         let page = Self {
             handles: AdvancedPageHandles {
                 system_header,
+                preserve_personal_files,
                 system_checks,
+                preinstalled_software_button,
+                preinstalled_software_button_id,
+                vmware_tools,
                 scripts_header,
                 deploy_script,
                 first_login_script,
@@ -872,6 +930,8 @@ impl AdvancedPage {
             target_scroll_offset: Cell::new(0),
             wheel_distance_remainder: Cell::new(0),
             content_height: Cell::new(0),
+            selected_preinstall_count: Cell::new(initial.preinstalled_software.len()),
+            preinstall_selection_automatic: Cell::new(false),
         };
         page.apply(initial);
         page.apply_context();
@@ -887,20 +947,29 @@ impl AdvancedPage {
     pub unsafe fn relocalize(&self) {
         let h = &self.handles;
         set_text(h.system_header, &crate::tr!("系统设置"));
+        set_text(
+            h.preserve_personal_files,
+            &crate::tr!("保留个人文件重装（桌面、文档、下载、图片、音乐、视频）"),
+        );
         for (control, label) in h.system_checks.into_iter().zip([
             crate::tr!("移除快捷方式箭头"),
             crate::tr!("恢复经典右键菜单"),
             crate::tr!("跳过 Windows 11 联网要求"),
-            crate::tr!("禁用 Windows Update"),
-            crate::tr!("深度移除 Defender 杀毒引擎"),
+            crate::tr!("移除 Windows Update"),
+            crate::tr!("移除 Defender 与 Windows 安全中心"),
             crate::tr!("禁用保留存储"),
             crate::tr!("禁用用户账户控制 (UAC)"),
             crate::tr!("禁用设备自动加密"),
-            crate::tr!("移除预装 UWP 应用"),
+            crate::tr!("移除指定预装应用"),
             crate::tr!("迁移当前 Wi-Fi 配置"),
         ]) {
             set_text(control, &label);
         }
+        self.set_preinstalled_software_selection(
+            self.selected_preinstall_count.get(),
+            self.preinstall_selection_automatic.get(),
+        );
+        set_text(h.vmware_tools, &crate::tr!("安装 VMware Tools"));
 
         set_text(h.scripts_header, &crate::tr!("部署脚本"));
         relocalize_check_edit(h.deploy_script, &crate::tr!("部署过程中运行脚本"));
@@ -947,6 +1016,9 @@ impl AdvancedPage {
 
     /// Converts a forwarded `WM_COMMAND` control id into a side-effect-free browse intent.
     pub fn intent_for_command(&self, control_id: u16) -> Option<AdvancedPageIntent> {
+        if control_id == self.handles.preinstalled_software_button_id {
+            return Some(AdvancedPageIntent::SelectPreinstalledSoftware);
+        }
         browse_intent_for_id(
             control_id,
             self.check_edits()
@@ -975,8 +1047,34 @@ impl AdvancedPage {
         set_text(self.handles.system_checks[9], &caption);
     }
 
+    pub unsafe fn set_preinstalled_software_count(&self, selected: usize) {
+        self.set_preinstalled_software_selection(selected, false);
+    }
+
+    pub unsafe fn set_preinstalled_software_selection(&self, selected: usize, automatic: bool) {
+        self.selected_preinstall_count.set(selected);
+        self.preinstall_selection_automatic
+            .set(automatic && selected > 0);
+        let caption = if selected == 0 {
+            crate::tr!("选择预装应用...")
+        } else if automatic {
+            crate::tr!("选择预装应用（已自动选 {} 项）", selected)
+        } else {
+            crate::tr!("选择预装应用（已选 {} 项）", selected)
+        };
+        set_text(self.handles.preinstalled_software_button, &caption);
+        if self.width.get() > 0 {
+            let content_height =
+                self.layout_content(self.width.get(), self.dpi.get(), -self.scroll_offset.get());
+            self.content_height.set(content_height);
+            self.update_scrollbar();
+            let _ = InvalidateRect(self.viewport, None, true);
+        }
+    }
+
     pub unsafe fn apply(&self, data: &AdvancedOptionsData) {
         let h = &self.handles;
+        set_checked(h.preserve_personal_files, data.preserve_personal_files);
         for (control, checked) in h.system_checks.into_iter().zip([
             data.remove_shortcut_arrow,
             data.restore_classic_context_menu,
@@ -991,6 +1089,8 @@ impl AdvancedPage {
         ]) {
             set_checked(control, checked);
         }
+        set_checked(h.vmware_tools, data.install_vmware_tools);
+        self.set_preinstalled_software_count(data.preinstalled_software.len());
         apply_check_edit(
             h.deploy_script,
             data.run_script_during_deploy,
@@ -1057,14 +1157,19 @@ impl AdvancedPage {
         data
     }
 
-    /// Updates persistent fields while preserving runtime-only Wi-Fi material and the XP
-    /// one-shot marker already held by the controller.
+    /// Updates the current install-session fields while preserving runtime-only Wi-Fi material
+    /// and the XP one-shot marker already held by the controller. The personal-file option is
+    /// intentionally session-only even though the remaining compatible fields may be persisted.
     pub unsafe fn read_into(&self, data: &mut AdvancedOptionsData) {
         let h = &self.handles;
+        data.preserve_personal_files = is_checked(h.preserve_personal_files);
         data.update_supported_system_options(
             self.context.target_capabilities,
             h.system_checks.map(|control| is_checked(control)),
         );
+        data.install_vmware_tools = self.context.vmware_tools_available
+            && self.context.unattended_enabled
+            && is_checked(h.vmware_tools);
         (data.run_script_during_deploy, data.deploy_script_path) =
             read_required_pair(h.deploy_script);
         (data.run_script_first_login, data.first_login_script_path) =
@@ -1129,6 +1234,7 @@ impl AdvancedPage {
             self.target_scroll_offset.set(self.scroll_offset.get());
             self.layout_content(width, dpi, -self.scroll_offset.get());
             self.update_scrollbar();
+            let _ = InvalidateRect(self.viewport, None, true);
         }
     }
 
@@ -1269,7 +1375,7 @@ impl AdvancedPage {
     pub unsafe fn layout(&self, left: i32, top: i32, width: i32, height: i32, dpi: u32) {
         let width = width.max(0);
         let height = height.max(0);
-        let _ = MoveWindow(self.viewport, left, top, width, height, true);
+        let _ = MoveWindow(self.viewport, left, top, width, height, false);
         update_viewport_region(self.viewport, width, height, dpi);
         if let Some(geometry) = AdvancedViewportGeometry::calculate(width, height, dpi) {
             let _ = MoveWindow(
@@ -1278,7 +1384,7 @@ impl AdvancedPage {
                 top,
                 (width - geometry.scrollbar_left).max(0),
                 height,
-                true,
+                false,
             );
         }
         self.width.set(width);
@@ -1320,6 +1426,13 @@ impl AdvancedPage {
             grid.column_width,
             dpi,
         );
+        layout_check(
+            h.preserve_personal_files,
+            x,
+            &mut bottoms[column],
+            grid.column_width,
+            dpi,
+        );
         for (index, check) in h.system_checks.into_iter().enumerate() {
             if self
                 .context
@@ -1329,6 +1442,24 @@ impl AdvancedPage {
             {
                 layout_check(check, x, &mut bottoms[column], grid.column_width, dpi);
             }
+        }
+        if self.context.preinstall_catalogue_available && self.context.unattended_enabled {
+            self.layout_preinstalled_software_button(
+                h.preinstalled_software_button,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+        }
+        if self.context.vmware_tools_available && self.context.unattended_enabled {
+            layout_check(
+                h.vmware_tools,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
         }
         bottoms[column] += section_gap;
 
@@ -1478,6 +1609,23 @@ impl AdvancedPage {
             layout_check(h.xp_nvme, x, &mut bottoms[column], grid.column_width, dpi);
         }
         bottoms.into_iter().max().unwrap_or(origin_y) - origin_y + s(8)
+    }
+
+    unsafe fn layout_preinstalled_software_button(
+        &self,
+        control: HWND,
+        column_x: i32,
+        y: &mut i32,
+        column_width: i32,
+        dpi: u32,
+    ) {
+        let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
+        let font = SendMessageW(control, WM_GETFONT, WPARAM(0), LPARAM(0));
+        let font = HFONT(font.0 as *mut c_void);
+        let measured_width = measure_text(self.viewport, font, &read_text(control), None).width;
+        let layout = centered_button_layout(column_x, column_width, measured_width, s(28), s(96));
+        let _ = MoveWindow(control, layout.x, *y, layout.width, s(24), false);
+        *y += s(24);
     }
 
     pub fn viewport(&self) -> HWND {
@@ -1646,6 +1794,7 @@ impl AdvancedPage {
             // Fail visibly and deterministically if a reduced WinPE USER32 rejects
             // ScrollWindowEx; the slower full layout remains a safe compatibility fallback.
             self.layout_content(self.width.get(), self.dpi.get(), -offset);
+            let _ = InvalidateRect(self.viewport, None, true);
         } else {
             // These disabled-capable STATIC labels can repaint independently after USER32 has
             // copied their previous pixels. Repaint them with the advanced page's opaque
@@ -1702,6 +1851,21 @@ impl AdvancedPage {
             for control in [h.system_checks[2], h.system_checks[8], h.system_checks[9]] {
                 set_checked(control, false);
             }
+        }
+        let preinstall_visible = unattended && self.context.preinstall_catalogue_available;
+        let _ = ShowWindow(
+            h.preinstalled_software_button,
+            if preinstall_visible { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = EnableWindow(h.preinstalled_software_button, preinstall_visible);
+        let vmware_visible = unattended && self.context.vmware_tools_available;
+        let _ = ShowWindow(
+            h.vmware_tools,
+            if vmware_visible { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = EnableWindow(h.vmware_tools, vmware_visible);
+        if !vmware_visible {
+            set_checked(h.vmware_tools, false);
         }
         let builtin_available = unattended && self.context.builtin_administrator_available;
         let _ = EnableWindow(h.builtin_administrator, builtin_available);
@@ -1781,6 +1945,7 @@ impl AdvancedPage {
     fn checkbox_controls(&self) -> Vec<HWND> {
         let h = &self.handles;
         let mut controls = h.system_checks.to_vec();
+        controls.push(h.preserve_personal_files);
         controls.extend(self.check_edits().into_iter().map(|pair| pair.check));
         controls.extend([
             h.storage_drivers,
@@ -1791,6 +1956,7 @@ impl AdvancedPage {
             h.windows_7_uefi,
             h.xp_usb3,
             h.xp_nvme,
+            h.vmware_tools,
         ]);
         controls
     }
@@ -1827,6 +1993,7 @@ impl AdvancedPage {
                 .filter_map(|pair| pair.browse.map(|browse| browse.button)),
         );
         controls.extend([
+            self.handles.preinstalled_software_button,
             self.handles.builtin_administrator_name_label,
             self.handles.builtin_administrator_name,
             self.handles.builtin_administrator_password_label,
@@ -2759,6 +2926,16 @@ unsafe fn checkbox(parent: HWND, text: &str, id: u16) -> windows::core::Result<H
     )
 }
 
+unsafe fn action_button(parent: HWND, text: &str, id: u16) -> windows::core::Result<HWND> {
+    child(
+        parent,
+        w!("BUTTON"),
+        text,
+        BS_OWNERDRAW | WS_TABSTOP.0 as i32,
+        id,
+    )
+}
+
 unsafe fn radio_button(
     parent: HWND,
     text: &str,
@@ -2920,7 +3097,7 @@ unsafe fn relocalize_check_edit(pair: CheckEdit, label: &str) {
 
 unsafe fn layout_heading(control: HWND, x: i32, y: &mut i32, width: i32, dpi: u32) {
     let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
-    let _ = MoveWindow(control, x, *y, width, s(22), true);
+    let _ = MoveWindow(control, x, *y, width, s(22), false);
     *y += s(27);
 }
 
@@ -2928,19 +3105,19 @@ unsafe fn layout_check(control: HWND, x: i32, y: &mut i32, width: i32, dpi: u32)
     let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
     // Match the 24 px checkbox HWND used by the main install page. The shared 13 px glyph is then
     // centred against the same client height instead of looking vertically tighter on this page.
-    let _ = MoveWindow(control, x, *y, width, s(24), true);
+    let _ = MoveWindow(control, x, *y, width, s(24), false);
     *y += s(24);
 }
 
 unsafe fn layout_pair(pair: CheckEdit, x: i32, y: &mut i32, width: i32, dpi: u32) {
     let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
     let field_height = InnoMetrics::for_dpi(dpi).field_height;
-    let _ = MoveWindow(pair.check, x, *y, width, s(24), true);
+    let _ = MoveWindow(pair.check, x, *y, width, s(24), false);
     *y += s(24);
     let browse_width = pair.browse.map_or(0, |_| s(76));
     let browse_gap = pair.browse.map_or(0, |_| s(6));
     let edit_width = (width - s(20) - browse_width - browse_gap).max(0);
-    let _ = MoveWindow(pair.edit, x + s(20), *y, edit_width, field_height, true);
+    let _ = MoveWindow(pair.edit, x + s(20), *y, edit_width, field_height, false);
     if let Some(browse) = pair.browse {
         let _ = MoveWindow(
             browse.button,
@@ -2948,7 +3125,7 @@ unsafe fn layout_pair(pair: CheckEdit, x: i32, y: &mut i32, width: i32, dpi: u32
             *y,
             browse_width,
             field_height,
-            true,
+            false,
         );
     }
     *y += s(30);
@@ -2957,7 +3134,7 @@ unsafe fn layout_pair(pair: CheckEdit, x: i32, y: &mut i32, width: i32, dpi: u32
 unsafe fn layout_labeled_edit(label: HWND, edit: HWND, x: i32, y: &mut i32, width: i32, dpi: u32) {
     let s = |value: i32| ((value as i64 * dpi.max(1) as i64 + 48) / 96) as i32;
     let field_height = InnoMetrics::for_dpi(dpi).field_height;
-    let _ = MoveWindow(label, x + s(20), *y, (width - s(20)).max(0), s(24), true);
+    let _ = MoveWindow(label, x + s(20), *y, (width - s(20)).max(0), s(24), false);
     *y += s(24);
     let _ = MoveWindow(
         edit,
@@ -2965,7 +3142,7 @@ unsafe fn layout_labeled_edit(label: HWND, edit: HWND, x: i32, y: &mut i32, widt
         *y,
         (width - s(20)).max(0),
         field_height,
-        true,
+        false,
     );
     *y += s(30);
 }
@@ -2983,6 +3160,22 @@ mod tests {
         assert_eq!(
             context.target_capabilities,
             AdvancedOptionCapabilities::unknown()
+        );
+    }
+
+    #[test]
+    fn preinstall_button_is_centred_and_expands_only_for_its_caption() {
+        assert_eq!(
+            centered_button_layout(100, 400, 62, 28, 96),
+            CenteredButtonLayout { x: 252, width: 96 }
+        );
+        assert_eq!(
+            centered_button_layout(100, 400, 142, 28, 96),
+            CenteredButtonLayout { x: 215, width: 170 }
+        );
+        assert_eq!(
+            centered_button_layout(100, 120, 240, 28, 96),
+            CenteredButtonLayout { x: 100, width: 120 }
         );
     }
 

@@ -12,15 +12,15 @@ use lr_core::download_integrity::{
     select_expected_hash, validate_download_filename, validate_download_url, DownloadFilenameError,
     DownloadUrlError, IntegrityConfigError, IntegrityRequirement,
 };
+use lr_core::software_install::SelectedSoftwarePackage;
 
-use crate::download::config::{ConfigManager, OnlineGpuDriver, OnlineSoftware, OnlineSystem};
+use crate::download::config::{ConfigManager, OnlineSoftware, OnlineSystem, SoftwareCategory};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ResourceCategory {
     #[default]
     SystemImage,
     Software,
-    GpuDriver,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,7 +50,11 @@ pub enum DownloadAction {
 pub enum DownloadCompletion {
     None,
     OpenSystemImage(PathBuf),
-    RunDownloadedFile(PathBuf),
+    RunDownloadedInstaller {
+        path: PathBuf,
+        silent_command: Option<String>,
+        requires_admin: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +103,7 @@ pub struct ResourceRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControllerIntent {
     SelectCategory(ResourceCategory),
+    SelectSoftwareCategory(usize),
     SelectResource(usize),
     RefreshCatalogue,
 }
@@ -118,6 +123,7 @@ pub enum DownloadPlanError {
     InvalidUrl(DownloadUrlError),
     InvalidFilename(DownloadFilenameError),
     InvalidIntegrity(IntegrityConfigError),
+    InvalidSilentCommand(String),
 }
 
 impl fmt::Display for DownloadPlanError {
@@ -130,6 +136,9 @@ impl fmt::Display for DownloadPlanError {
             Self::InvalidUrl(error) => write!(f, "{error}"),
             Self::InvalidFilename(error) => write!(f, "{error}"),
             Self::InvalidIntegrity(error) => write!(f, "{error}"),
+            Self::InvalidSilentCommand(error) => {
+                write!(f, "invalid silent install command: {error}")
+            }
         }
     }
 }
@@ -147,10 +156,10 @@ pub struct NativeDownloadController {
     category: ResourceCategory,
     selected_system: Option<usize>,
     selected_software: Option<usize>,
-    selected_gpu_driver: Option<usize>,
+    selected_software_category: usize,
     systems: Vec<OnlineSystem>,
-    software: Vec<OnlineSoftware>,
-    gpu_drivers: Vec<OnlineGpuDriver>,
+    software_categories: Vec<SoftwareCategory>,
+    vmware_tools: Option<OnlineSoftware>,
 }
 
 impl NativeDownloadController {
@@ -188,17 +197,75 @@ impl NativeDownloadController {
 
     fn replace_catalogue_inner(&mut self, config: &ConfigManager, trusted_remote: bool) {
         self.systems.clone_from(&config.systems);
-        self.software.clone_from(&config.software_list);
-        self.gpu_drivers.clone_from(&config.gpu_driver_list);
+        self.software_categories =
+            if config.software_categories.is_empty() && !config.software_list.is_empty() {
+                vec![SoftwareCategory {
+                    id: "legacy".into(),
+                    name: "软件".into(),
+                    description: String::new(),
+                    items: config.software_list.clone(),
+                }]
+            } else {
+                config.software_categories.clone()
+            };
         self.trusted_remote_legacy_http = trusted_remote;
+        self.vmware_tools = config.vmware_tools_entry().cloned();
         self.clamp_selections();
         self.state = CatalogueState::Ready;
+    }
+
+    /// Returns the ordinary preinstallation catalogue. VMware Tools is intentionally excluded:
+    /// it has its own environment-gated checkbox on the advanced-options page.
+    pub fn preinstall_software_categories(&self) -> Vec<SoftwareCategory> {
+        if !matches!(self.state, CatalogueState::Ready) {
+            return Vec::new();
+        }
+        self.software_categories
+            .iter()
+            .filter_map(|category| {
+                let items = category
+                    .items
+                    .iter()
+                    .filter(|software| !software.vm_tools && software.silent_command.is_some())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!items.is_empty()).then(|| SoftwareCategory {
+                    id: category.id.clone(),
+                    name: category.name.clone(),
+                    description: category.description.clone(),
+                    items,
+                })
+            })
+            .collect()
+    }
+
+    pub fn vmware_tools_entry(&self) -> Option<&OnlineSoftware> {
+        matches!(self.state, CatalogueState::Ready)
+            .then_some(self.vmware_tools.as_ref())
+            .flatten()
+    }
+
+    pub fn selected_package(software: &OnlineSoftware) -> Option<SelectedSoftwarePackage> {
+        let silent_command = software.silent_command.clone()?;
+        Some(SelectedSoftwarePackage {
+            id: software.id.clone(),
+            name: software.name.clone(),
+            download_url: software.download_url.clone(),
+            filename: software.filename.clone(),
+            silent_command,
+            requires_admin: software.requires_admin,
+        })
     }
 
     pub fn apply_intent(&mut self, intent: ControllerIntent) -> ControllerEffect {
         match intent {
             ControllerIntent::SelectCategory(category) => {
                 self.category = category;
+                ControllerEffect::SelectionChanged
+            }
+            ControllerIntent::SelectSoftwareCategory(index) => {
+                self.selected_software_category = index;
+                self.selected_software = None;
                 ControllerEffect::SelectionChanged
             }
             ControllerIntent::SelectResource(index) => {
@@ -216,8 +283,25 @@ impl NativeDownloadController {
         match self.category {
             ResourceCategory::SystemImage => self.selected_system,
             ResourceCategory::Software => self.selected_software,
-            ResourceCategory::GpuDriver => self.selected_gpu_driver,
         }
+    }
+
+    pub fn software_category_names(&self) -> Vec<String> {
+        self.software_categories
+            .iter()
+            .map(|category| category.name.clone())
+            .collect()
+    }
+
+    pub const fn selected_software_category(&self) -> usize {
+        self.selected_software_category
+    }
+
+    fn active_software(&self) -> &[OnlineSoftware] {
+        self.software_categories
+            .get(self.selected_software_category)
+            .map(|category| category.items.as_slice())
+            .unwrap_or_default()
     }
 
     pub fn rows(&self) -> Vec<ResourceRow> {
@@ -232,21 +316,12 @@ impl NativeDownloadController {
                 })
                 .collect(),
             ResourceCategory::Software => self
-                .software
+                .active_software()
                 .iter()
                 .map(|software| ResourceRow {
                     name: software.name.clone(),
-                    resource_type: "Software".into(),
-                    size: software.file_size.clone(),
-                })
-                .collect(),
-            ResourceCategory::GpuDriver => self
-                .gpu_drivers
-                .iter()
-                .map(|driver| ResourceRow {
-                    name: driver.name.clone(),
-                    resource_type: "GPU driver".into(),
-                    size: driver.file_size.clone(),
+                    resource_type: software.version.clone().unwrap_or_default(),
+                    size: String::new(),
                 })
                 .collect(),
         }
@@ -298,7 +373,7 @@ impl NativeDownloadController {
             }
             ResourceCategory::Software => {
                 let software = self
-                    .software
+                    .active_software()
                     .get(index)
                     .ok_or(DownloadPlanError::SelectionOutOfRange)?;
                 let source = select_software_source(software, architecture);
@@ -315,23 +390,6 @@ impl NativeDownloadController {
                     source.md5.map(str::to_owned),
                 )
             }
-            ResourceCategory::GpuDriver => {
-                let driver = self
-                    .gpu_drivers
-                    .get(index)
-                    .ok_or(DownloadPlanError::SelectionOutOfRange)?;
-                let validated = validate_download_url(&driver.download_url, allow_catalogue_http)
-                    .map_err(DownloadPlanError::InvalidUrl)?;
-                validate_download_filename(&driver.filename)
-                    .map_err(DownloadPlanError::InvalidFilename)?;
-                (
-                    validated.into_string(),
-                    driver.filename.clone(),
-                    CompletionKind::Executable,
-                    driver.sha256.clone(),
-                    driver.md5.clone(),
-                )
-            }
         };
 
         // Hashes remain optional for compatibility with the current public catalogue.  When the
@@ -346,7 +404,22 @@ impl NativeDownloadController {
                 DownloadCompletion::OpenSystemImage(downloaded_path)
             }
             (DownloadAction::InstallAfterDownload, CompletionKind::Executable) => {
-                DownloadCompletion::RunDownloadedFile(downloaded_path)
+                let software = self
+                    .active_software()
+                    .get(index)
+                    .ok_or(DownloadPlanError::SelectionOutOfRange)?;
+                if let Some(template) = software.silent_command.as_deref() {
+                    lr_core::software_install::parse_silent_install_template(
+                        template,
+                        &downloaded_path,
+                    )
+                    .map_err(|error| DownloadPlanError::InvalidSilentCommand(error.to_string()))?;
+                }
+                DownloadCompletion::RunDownloadedInstaller {
+                    path: downloaded_path,
+                    silent_command: software.silent_command.clone(),
+                    requires_admin: software.requires_admin,
+                }
             }
         };
 
@@ -364,7 +437,6 @@ impl NativeDownloadController {
         match self.category {
             ResourceCategory::SystemImage => &mut self.selected_system,
             ResourceCategory::Software => &mut self.selected_software,
-            ResourceCategory::GpuDriver => &mut self.selected_gpu_driver,
         }
     }
 
@@ -375,17 +447,15 @@ impl NativeDownloadController {
         {
             self.selected_system = None;
         }
-        if self
-            .selected_software
-            .is_some_and(|i| i >= self.software.len())
-        {
+        if self.selected_software_category >= self.software_categories.len() {
+            self.selected_software_category = 0;
             self.selected_software = None;
         }
         if self
-            .selected_gpu_driver
-            .is_some_and(|i| i >= self.gpu_drivers.len())
+            .selected_software
+            .is_some_and(|i| i >= self.active_software().len())
         {
-            self.selected_gpu_driver = None;
+            self.selected_software = None;
         }
     }
 }
@@ -475,6 +545,7 @@ mod tests {
                 sha256: None,
             }],
             software_list: vec![OnlineSoftware {
+                id: "tool".into(),
                 name: "Tool".into(),
                 description: String::new(),
                 update_date: String::new(),
@@ -490,17 +561,10 @@ mod tests {
                 sha256_x86: None,
                 md5_nt5: None,
                 sha256_nt5: None,
-            }],
-            gpu_driver_list: vec![OnlineGpuDriver {
-                name: "GPU".into(),
-                description: String::new(),
-                update_date: String::new(),
-                file_size: "2 MB".into(),
-                icon_url: None,
-                download_url: "https://example.com/gpu.exe".into(),
-                filename: "gpu.exe".into(),
-                md5: None,
-                sha256: None,
+                version: Some("1.0".into()),
+                silent_command: Some("{installer} /S".into()),
+                requires_admin: true,
+                vm_tools: false,
             }],
             ..Default::default()
         }
@@ -687,7 +751,11 @@ mod tests {
         assert_eq!(plan.url, "http://pan.yyej.com/f/example/legacy-tool.exe");
         assert_eq!(
             plan.completion,
-            DownloadCompletion::RunDownloadedFile(PathBuf::from(r"D:\Downloads\tool.exe"))
+            DownloadCompletion::RunDownloadedInstaller {
+                path: PathBuf::from(r"D:\Downloads\tool.exe"),
+                silent_command: Some("{installer} /S".into()),
+                requires_admin: true,
+            }
         );
     }
 

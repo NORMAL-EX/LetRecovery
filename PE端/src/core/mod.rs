@@ -1,6 +1,7 @@
 pub mod account_fix;
 pub mod bcdedit;
 pub mod config;
+pub mod custom_install;
 pub mod disk;
 pub mod dism;
 pub mod dism_exe;

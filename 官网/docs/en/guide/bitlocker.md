@@ -5,24 +5,23 @@ description: How LetRecovery reinstalls a system disk encrypted with BitLocker.
 
 # BitLocker Reinstall
 
-Reinstalling a system disk protected by **BitLocker** usually fails under WinPE—the encrypted volume is locked, so it can neither be read nor formatted. LetRecovery handles this automatically.
+Reinstalling a system disk protected by **BitLocker** can fail under WinPE because an encrypted volume may lock again after reboot. Install and backup handoffs never place recovery passwords in public configuration. The default-off PE maintenance entry uses a separate authenticated private payload which install and backup tasks cannot consume.
 
 ## How it decides
 
-When you start an installation on an encrypted system disk, LetRecovery determines whether it can obtain the **target disk's recovery key** (the 48-digit numeric recovery password):
+The current production boundary requires an install-via-PE target to reach **NotEncrypted** before handoff:
 
-- **It can → key pass-through.** The recovery key is packed into the WinPE boot image (written to `\LR_BitLockerKeys.txt` inside `boot.wim`). After rebooting into WinPE, it is used to **unlock** the disk, which is then formatted and deployed. This path is fast—no lengthy decryption required.
-- **It can't → fall back to full decryption.** If the target disk has only a TPM protector and no numeric recovery password (so no key can be passed through), LetRecovery **fully decrypts** the BitLocker volume from within the running system before rebooting.
+- When the target is unlocked and can be safely decrypted, the normal-Windows client starts and waits for **full decryption** before creating the handoff.
+- A locked target, encryption/decryption in progress, unknown state, or a volume still encrypted at handoff fails closed. LetRecovery does not continue by scanning drive letters or placing a recovery key in public configuration.
+- ViaPE backup likewise requires both source and destination to be positively NotEncrypted; it neither reads nor persists a recovery key.
 
-Either way, the result is the same: WinPE can access the disk, and the freshly installed system is **no longer encrypted** (re-enable BitLocker yourself after installation if you need it).
+When `pe_maintenance_entry_enabled` is enabled in `config.json`, the normal-Windows Toolbox shows **Enter PE maintenance environment**. The normal client makes a best-effort attempt to collect only currently exportable 48-digit recovery passwords, strictly normalizes and deduplicates the bounded set, and places it in this session's private LRPE4 boot artifact. Public config and manifest bytes contain only its length and SHA-256. After authenticating that exact task, PE tries `unlock` against currently locked, lettered volumes. A missing password, mismatched password, or status-query failure never prevents access to the maintenance desktop.
 
-::: details How the PE client uses the passed-through keys
-The PE client reads `X:\LR_BitLockerKeys.txt` and tries each key against every drive letter one by one (each key carries its own checksum, so a mismatch is rejected—there's no need to map keys to volumes individually). Under the hood it calls `fveapi.dll` first, falling back to the `manage-bde` command line if that fails.
-:::
+This maintenance path never calls `manage-bde -off`, removes or suspends protectors, or starts full-volume decryption. The password set carries no drive letter, label, capacity, disk number, or cross-boot fingerprint; malformed content, stale-session files, and unauthenticated payloads are rejected. The NotEncrypted boundary for installation and ViaPE backup remains unchanged. A freshly installed system does not inherit the old volume's BitLocker state; enable BitLocker again after installation if needed.
 
 ## Unlock ≠ decrypt
 
-On the pass-through path, WinPE merely **unlocks** the volume (supplying the key so the file system becomes readable)—at this point it is still a full BitLocker volume. The subsequent **format** wipes the BitLocker metadata along with the old data, so the new system ends up unencrypted.
+**Unlocking** only makes the encrypted volume readable for the current boot session; it may lock again after reboot. **Decrypting** removes BitLocker encryption from the volume. Because these are different states, the current ViaPE production path never treats “unlocked in the online OS” as cross-reboot authorization.
 
 ## Managing BitLocker manually
 

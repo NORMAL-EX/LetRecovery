@@ -66,6 +66,8 @@ function New-ReleaseTemplate {
         # AppConfig no longer serializes this legacy field, but release packages keep an explicit
         # false value so old program versions can never interpret the package as Advanced Mode.
         enable_advanced_options = $false
+        automation_export_enabled = $false
+        pe_maintenance_entry_enabled = $false
         allow_insecure_http_downloads = $false
         download_threads = 16
         install_prefs = [pscustomobject][ordered]@{
@@ -88,7 +90,7 @@ function New-ReleaseTemplate {
                 disable_uac = $false
                 disable_device_encryption = $true
                 remove_uwp_apps = $false
-                migrate_wifi = $false
+                migrate_wifi = $true
                 run_script_during_deploy = $false
                 deploy_script_path = ""
                 run_script_first_login = $false
@@ -125,7 +127,7 @@ function New-ReleaseTemplate {
 function Assert-ReleaseTemplate {
     param([Parameter(Mandatory = $true)]$Template)
 
-    foreach ($name in @("easy_mode_enabled", "easy_mode_tip_dismissed", "easy_mode_settings_tip_dismissed", "enable_advanced_options")) {
+    foreach ($name in @("easy_mode_enabled", "easy_mode_tip_dismissed", "easy_mode_settings_tip_dismissed", "enable_advanced_options", "automation_export_enabled", "pe_maintenance_entry_enabled")) {
         $property = $Template.PSObject.Properties[$name]
         if ($null -eq $property -or $property.Value -ne $false) {
             throw "Release template must explicitly set $name to false"

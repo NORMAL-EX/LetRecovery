@@ -1,4 +1,3 @@
-pub mod cmd;
 pub mod command;
 pub mod encoding;
 pub mod i18n;

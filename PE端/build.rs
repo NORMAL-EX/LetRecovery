@@ -4,6 +4,8 @@ fn main() {
     // Without these inputs Cargo may reuse an older BUILD_VERSION while compiling changed code.
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=../lr-core/src");
+    println!("cargo:rerun-if-changed=../lr-core/Cargo.toml");
 
     // 注：libwim-15.dll 已内置于共享库 lr-core，运行时自动释放到 exe 目录，
     // 这里不再需要从 vendor 复制。
@@ -17,6 +19,7 @@ fn main() {
     #[cfg(windows)]
     {
         let non_elevated_tests = std::env::var_os("CARGO_FEATURE_NON_ELEVATED_TESTS").is_some();
+        let ci_automation = std::env::var_os("CARGO_FEATURE_CI_AUTOMATION").is_some();
         if non_elevated_tests && std::env::var("PROFILE").as_deref() == Ok("release") {
             panic!("non-elevated-tests must never be enabled for release builds");
         }
@@ -30,7 +33,14 @@ fn main() {
 
         // 设置程序信息
         res.set("ProductName", "LetRecovery PE");
-        res.set("FileDescription", "LetRecovery PE安装助手");
+        res.set(
+            "FileDescription",
+            if ci_automation {
+                "LetRecovery PE CI自动化测试版"
+            } else {
+                "LetRecovery PE安装助手"
+            },
+        );
         res.set("LegalCopyright", "Copyright © 2026 NORMAL-EX");
         res.set("ProductVersion", &numeric_version);
         res.set("FileVersion", &numeric_version);
@@ -43,15 +53,18 @@ fn main() {
         res.set_version_info(winres::VersionInfo::FILEVERSION, ver_u64);
         res.set_version_info(winres::VersionInfo::PRODUCTVERSION, ver_u64);
 
-        // 正式程序请求管理员权限；纯测试特性使用 asInvoker，避免测试 EXE
-        // 在无交互 CI/本地终端中因 UAC 清单而无法启动。
+        // WinPE already launches this executable with its administrative token. Keep the image
+        // binary asInvoker so the exact same signed/staged executable can also serve as the
+        // first-logon account helper: privileged routes are launched by the HighestAvailable
+        // interactive-token task, while the visible console and Explorer routes must inherit the
+        // ordinary user's token without producing a UAC prompt.
         let manifest = r#"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
         <security>
             <requestedPrivileges>
-                <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+                <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
             </requestedPrivileges>
         </security>
     </trustInfo>
@@ -78,12 +91,8 @@ fn main() {
     </dependency>
 </assembly>
 "#;
-        let manifest = if non_elevated_tests {
-            manifest.replace("requireAdministrator", "asInvoker")
-        } else {
-            manifest.to_string()
-        };
-        res.set_manifest(&manifest);
+        let _ = non_elevated_tests;
+        res.set_manifest(manifest);
 
         res.compile()
             .expect("failed to compile required Windows resources and elevation manifest");

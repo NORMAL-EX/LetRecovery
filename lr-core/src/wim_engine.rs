@@ -8,6 +8,7 @@
 //!   `apply_image` / `capture_image`。当选择 wimgapi 时优先用 wimgapi；若 wimgapi
 //!   **加载/初始化失败**或**操作失败**，自动回退到 libwim，保证功能始终可用。
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -20,6 +21,34 @@ pub const WIM_OPERATION_CANCELLED: &str = "WIM operation cancelled";
 
 fn cancellation_requested(cancel: Option<&Arc<AtomicBool>>) -> bool {
     cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+}
+
+fn capture_with_safe_fallback<P, F, C>(
+    existed_before: bool,
+    primary: P,
+    cleanup_new_output: C,
+    fallback: F,
+) -> Result<(), String>
+where
+    P: FnOnce() -> Result<(), String>,
+    F: FnOnce() -> Result<(), String>,
+    C: FnOnce(),
+{
+    match primary() {
+        Ok(()) => Ok(()),
+        Err(error) if existed_before => Err(format!(
+            "wimgapi capture failed while appending to an existing staged image; the staged file may be partially modified, so libwim fallback is disabled and the staged session must be discarded: {error}"
+        )),
+        Err(error) => {
+            log::warn!("wimgapi capture failed before fallback: {error}");
+            cleanup_new_output();
+            fallback().map_err(|fallback_error| {
+                format!(
+                    "wimgapi capture failed: {error}; libwim fallback failed: {fallback_error}"
+                )
+            })
+        }
+    }
 }
 
 /// 镜像引擎
@@ -149,6 +178,18 @@ impl WimEngineManager {
         if cancellation_requested(cancel.as_ref()) {
             return Err(WIM_OPERATION_CANCELLED.to_owned());
         }
+        if image_file.to_ascii_lowercase().ends_with(".swm") {
+            if self.active == WimEngine::Wimgapi {
+                log::info!("SWM apply uses libwim because exact resource-file binding is required");
+            }
+            return self.libwim.apply_image_cancellable(
+                image_file,
+                target_dir,
+                index,
+                progress_tx,
+                cancel,
+            );
+        }
         if self.active == WimEngine::Wimgapi {
             if let Some(w) = &self.wimgapi {
                 match w.apply_image_cancellable(
@@ -178,6 +219,31 @@ impl WimEngineManager {
             .apply_image_cancellable(image_file, target_dir, index, progress_tx, cancel)
     }
 
+    /// Apply an authenticated SWM set by referencing only the exact ordered paths supplied by
+    /// the caller. WIMGAPI has no exact-resource-list adapter in this crate, so split WIM apply
+    /// deliberately stays on libwim rather than allowing either engine to rediscover siblings.
+    pub fn apply_image_with_exact_swm_resources(
+        &self,
+        image_file: &str,
+        exact_resource_files: &[PathBuf],
+        target_dir: &str,
+        index: u32,
+        progress_tx: Option<Sender<WimProgress>>,
+    ) -> Result<(), String> {
+        if self.active == WimEngine::Wimgapi {
+            log::info!(
+                "authenticated SWM apply uses libwim because exact resource binding is required"
+            );
+        }
+        self.libwim.apply_image_with_exact_swm_resources(
+            image_file,
+            exact_resource_files,
+            target_dir,
+            index,
+            progress_tx,
+        )
+    }
+
     /// 捕获/备份镜像；wimgapi 失败时回退 libwim（回退前清理 wimgapi 产生的半成品文件）。
     pub fn capture_image(
         &self,
@@ -192,23 +258,42 @@ impl WimEngineManager {
 
         if self.active == WimEngine::Wimgapi {
             if let Some(w) = &self.wimgapi {
-                match w.capture_image(
-                    source_dir,
-                    image_file,
-                    name,
-                    description,
-                    compression,
-                    progress_tx.clone(),
-                ) {
-                    Ok(()) => return Ok(()),
-                    Err(e) => {
-                        log::warn!("wimgapi 捕获镜像失败，回退 libwim：{}", e);
-                        // 清理 wimgapi 失败时可能留下的半成品，避免 libwim 误当作追加。
-                        if !existed_before && std::path::Path::new(image_file).exists() {
+                let primary_progress = progress_tx.clone();
+                let fallback_progress = progress_tx;
+                let result = capture_with_safe_fallback(
+                    existed_before,
+                    || {
+                        w.capture_image(
+                            source_dir,
+                            image_file,
+                            name,
+                            description,
+                            compression,
+                            primary_progress,
+                        )
+                    },
+                    || {
+                        // Create/replace did not have a staged file before WIMGAPI. Remove its
+                        // private partial output before handing the empty slot to libwim.
+                        if std::path::Path::new(image_file).exists() {
                             let _ = std::fs::remove_file(image_file);
                         }
-                    }
+                    },
+                    || {
+                        self.libwim.capture_image(
+                            source_dir,
+                            image_file,
+                            name,
+                            description,
+                            compression,
+                            fallback_progress,
+                        )
+                    },
+                );
+                if let Err(error) = &result {
+                    log::warn!("wimgapi capture failed safely: {error}");
                 }
+                return result;
             }
         }
         self.libwim.capture_image(
@@ -232,5 +317,51 @@ mod tests {
         assert!(!cancellation_requested(Some(&cancel)));
         cancel.store(true, Ordering::SeqCst);
         assert!(cancellation_requested(Some(&cancel)));
+    }
+
+    #[test]
+    fn existing_staged_capture_error_never_invokes_fallback() {
+        use std::sync::atomic::AtomicUsize;
+
+        let fallback_calls = AtomicUsize::new(0);
+        let cleanup_calls = AtomicUsize::new(0);
+        let result = capture_with_safe_fallback(
+            true,
+            || Err("metadata write failed after capture completed".to_owned()),
+            || {
+                cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            },
+            || {
+                fallback_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        assert!(result.unwrap_err().contains("fallback is disabled"));
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn new_staged_capture_error_cleans_then_falls_back_once() {
+        use std::sync::atomic::AtomicUsize;
+
+        let fallback_calls = AtomicUsize::new(0);
+        let cleanup_calls = AtomicUsize::new(0);
+        capture_with_safe_fallback(
+            false,
+            || Err("capture failed".to_owned()),
+            || {
+                cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            },
+            || {
+                fallback_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
     }
 }

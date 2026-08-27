@@ -9,6 +9,7 @@
 
 use std::ffi::{c_void, OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 
@@ -21,8 +22,68 @@ use walkdir::WalkDir;
 use windows::{
     core::GUID,
     Win32::Foundation::{GetLastError, BOOL, HWND},
-    Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOEXW},
+    Win32::System::SystemInformation::{
+        GetSystemWindowsDirectoryW, GetVersionExW, OSVERSIONINFOEXW,
+    },
 };
+
+fn windows_directory() -> Result<PathBuf> {
+    let mut buffer = vec![0_u16; 32_768];
+    let length = unsafe { GetSystemWindowsDirectoryW(Some(&mut buffer)) } as usize;
+    if length == 0 {
+        bail!("GetSystemWindowsDirectoryW failed: {}", get_last_error());
+    }
+    if length >= buffer.len() {
+        bail!("GetSystemWindowsDirectoryW returned an oversized path: {length}");
+    }
+    buffer.truncate(length);
+    Ok(PathBuf::from(OsString::from_wide(&buffer)))
+}
+
+fn is_published_oem_inf_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > 7
+        && bytes[..3].eq_ignore_ascii_case(b"oem")
+        && bytes[3..bytes.len() - 4].iter().all(u8::is_ascii_digit)
+        && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".inf")
+}
+
+fn require_plain_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label}: {}", path.display()))?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT_VALUE != 0 {
+        bail!("{label} is not an ordinary directory: {}", path.display());
+    }
+    Ok(())
+}
+
+pub fn measure_plain_tree_logical_bytes(root: &Path) -> Result<u64> {
+    require_plain_directory(root, "driver package root")?;
+    let mut total = 0_u64;
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry =
+            entry.with_context(|| format!("enumerate driver package: {}", root.display()))?;
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .with_context(|| format!("inspect driver package entry: {}", entry.path().display()))?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT_VALUE != 0 {
+            bail!(
+                "driver package contains a reparse point: {}",
+                entry.path().display()
+            );
+        }
+        if metadata.is_file() {
+            total = total
+                .checked_add(metadata.len())
+                .context("driver package logical size overflow")?;
+        } else if !metadata.is_dir() {
+            bail!(
+                "driver package contains a special entry: {}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(total)
+}
 
 // ============================================================================
 // 常量定义
@@ -42,6 +103,13 @@ const ERROR_NO_MORE_ITEMS: u32 = 259;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_INVALID_DATA: u32 = 13;
 const ERROR_NOT_FOUND: u32 = 1168;
+// `CM_Get_DevNode_Status` is available since Windows 2000. Its final `ulFlags` parameter is
+// reserved and must be zero. The returned status is a bitset from cfg.h; `pulProblemNumber` is
+// meaningful only when `DN_HAS_PROBLEM` is set. Keep these SDK values beside the dynamic ABI so
+// Win7/WinPE builds do not acquire a newer import-table requirement.
+const CR_SUCCESS: u32 = 0;
+const DN_STARTED: u32 = 0x0000_0008;
+const DN_HAS_PROBLEM: u32 = 0x0000_0400;
 // `DiInstallDriverW` accepts zero or DIIRFLAG_FORCE_INF. These are not the similarly named
 // INSTALLFLAG_* values used by older NewDev APIs.
 const DIIRFLAG_FORCE_INF: u32 = 0x0000_0002;
@@ -128,6 +196,13 @@ type FnSetupDiGetDevicePropertyW = unsafe extern "system" fn(
 ) -> BOOL;
 
 type FnSetupDiDestroyDeviceInfoList = unsafe extern "system" fn(dev_info: HDevInfo) -> BOOL;
+
+type FnCMGetDevNodeStatus = unsafe extern "system" fn(
+    status: *mut u32,
+    problem_number: *mut u32,
+    dev_inst: u32,
+    flags: u32,
+) -> u32;
 
 struct DeviceInfoSet {
     handle: HDevInfo,
@@ -270,7 +345,36 @@ pub struct DriverInfo {
     pub is_oem: bool,
 }
 
+/// Current PnP state for one device returned by the same present-device SetupAPI enumeration as
+/// its hardware IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentDeviceState {
+    pub hardware_ids: Vec<String>,
+    /// Configuration Manager return value for this exact devnode. `CR_SUCCESS` is zero.
+    pub status_query_cr: u32,
+    pub devnode_status: u32,
+    pub problem_number: Option<u32>,
+}
+
+impl PresentDeviceState {
+    /// A failed runtime driver command is harmless only when the exact matched controller is
+    /// already started and Configuration Manager reports no problem for that devnode.
+    pub fn is_started_without_problem(&self) -> bool {
+        self.status_query_cr == CR_SUCCESS
+            && self.devnode_status & DN_STARTED != 0
+            && self.devnode_status & DN_HAS_PROBLEM == 0
+            && self.problem_number.is_none()
+    }
+}
+
 pub const STORAGE_DRIVER_REQUIREMENTS_FILE: &str = "LetRecovery-storage-drivers.json";
+const FILE_ATTRIBUTE_REPARSE_POINT_VALUE: u32 = 0x0000_0400;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DriverExportEstimate {
+    pub package_count: usize,
+    pub bytes: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageDriverRequirement {
@@ -292,6 +396,7 @@ struct StorageDriverRequirementsManifest {
 /// SetupAPI 封装结构
 struct SetupApi {
     _lib: Library,
+    _cfgmgr32: Library,
     get_class_devs: FnSetupDiGetClassDevsW,
     enum_device_info: FnSetupDiEnumDeviceInfo,
     get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW,
@@ -299,11 +404,13 @@ struct SetupApi {
     destroy_device_info_list: FnSetupDiDestroyDeviceInfoList,
     copy_oem_inf: FnSetupCopyOEMInfW,
     get_inf_driver_store_location: Option<FnSetupGetInfDriverStoreLocationW>,
+    get_devnode_status: FnCMGetDevNodeStatus,
 }
 
 impl SetupApi {
     fn new() -> Result<Self> {
         let lib = unsafe { Library::new("setupapi.dll") }.context("无法加载 setupapi.dll")?;
+        let cfgmgr32 = unsafe { Library::new("cfgmgr32.dll") }.context("无法加载 cfgmgr32.dll")?;
 
         unsafe {
             let get_class_devs: FnSetupDiGetClassDevsW = *lib.get(b"SetupDiGetClassDevsW")?;
@@ -324,9 +431,12 @@ impl SetupApi {
                 .get::<FnSetupGetInfDriverStoreLocationW>(b"SetupGetInfDriverStoreLocationW")
                 .ok()
                 .map(|f| *f);
+            let get_devnode_status: FnCMGetDevNodeStatus =
+                *cfgmgr32.get(b"CM_Get_DevNode_Status")?;
 
             Ok(Self {
                 _lib: lib,
+                _cfgmgr32: cfgmgr32,
                 get_class_devs,
                 enum_device_info,
                 get_device_registry_property,
@@ -334,6 +444,7 @@ impl SetupApi {
                 destroy_device_info_list,
                 copy_oem_inf,
                 get_inf_driver_store_location,
+                get_devnode_status,
             })
         }
     }
@@ -563,8 +674,8 @@ impl SetupApi {
 
     /// Enumerates hardware IDs for every present device, including devices that do not yet have
     /// an INF bound in the running Windows or WinPE environment.
-    fn enumerate_present_hardware_ids(&self) -> Result<Vec<String>> {
-        let mut hardware_ids = Vec::new();
+    fn enumerate_present_devices(&self) -> Result<Vec<PresentDeviceState>> {
+        let mut devices = Vec::new();
         let dev_info = unsafe {
             (self.get_class_devs)(
                 null_mut(),
@@ -593,16 +704,70 @@ impl SetupApi {
                 bail!("SetupDiEnumDeviceInfo failed at index {index}: {error}");
             }
 
-            for hardware_id in
-                self.get_device_property_strings(dev_info, &dev_info_data, SPDRP_HARDWAREID)?
-            {
-                if !hardware_id.trim().is_empty() {
-                    hardware_ids.push(hardware_id);
-                }
-            }
+            let hardware_ids = self
+                .get_device_property_strings(dev_info, &dev_info_data, SPDRP_HARDWAREID)?
+                .into_iter()
+                .filter(|hardware_id| !hardware_id.trim().is_empty())
+                .collect::<Vec<_>>();
+            let mut status = 0u32;
+            let mut problem_number = 0u32;
+            let config_ret = unsafe {
+                (self.get_devnode_status)(
+                    &mut status,
+                    &mut problem_number,
+                    dev_info_data.dev_inst,
+                    0,
+                )
+            };
+            devices.push(PresentDeviceState {
+                hardware_ids,
+                status_query_cr: config_ret,
+                devnode_status: if config_ret == CR_SUCCESS { status } else { 0 },
+                problem_number: (config_ret == CR_SUCCESS && status & DN_HAS_PROBLEM != 0)
+                    .then_some(problem_number),
+            });
             index += 1;
         }
 
+        drop(dev_info_set);
+        Ok(devices)
+    }
+
+    fn enumerate_present_hardware_ids(&self) -> Result<Vec<String>> {
+        let mut hardware_ids = Vec::new();
+        let dev_info = unsafe {
+            (self.get_class_devs)(
+                null_mut(),
+                null_mut(),
+                HWND::default(),
+                DIGCF_PRESENT | DIGCF_ALLCLASSES,
+            )
+        };
+        if dev_info.is_null() || dev_info == (-1isize as *mut c_void) {
+            bail!("SetupDiGetClassDevsW 失败: {}", get_last_error());
+        }
+        let dev_info_set = DeviceInfoSet {
+            handle: dev_info,
+            destroy: self.destroy_device_info_list,
+        };
+        let mut index = 0u32;
+        loop {
+            let mut dev_info_data = SpDevInfoData::default();
+            let result = unsafe { (self.enum_device_info)(dev_info, index, &mut dev_info_data) };
+            if result.0 == 0 {
+                let error = get_last_error();
+                if error == ERROR_NO_MORE_ITEMS {
+                    break;
+                }
+                bail!("SetupDiEnumDeviceInfo failed at index {index}: {error}");
+            }
+            hardware_ids.extend(
+                self.get_device_property_strings(dev_info, &dev_info_data, SPDRP_HARDWAREID)?
+                    .into_iter()
+                    .filter(|hardware_id| !hardware_id.trim().is_empty()),
+            );
+            index += 1;
+        }
         drop(dev_info_set);
         Ok(hardware_ids)
     }
@@ -762,10 +927,107 @@ impl DriverManager {
         self.setup_api.enumerate_present_hardware_ids()
     }
 
+    pub fn enumerate_present_devices(&self) -> Result<Vec<PresentDeviceState>> {
+        self.setup_api.enumerate_present_devices()
+    }
+
     /// 枚举第三方 (OEM) 驱动
     pub fn enumerate_oem_drivers(&self) -> Result<Vec<DriverInfo>> {
         let all_drivers = self.setup_api.enumerate_drivers()?;
         Ok(all_drivers.into_iter().filter(|d| d.is_oem).collect())
+    }
+
+    /// Measures the exact logical files that DISM `/Online /Export-Driver` will export without
+    /// copying them to a temporary directory.
+    ///
+    /// Windows publishes third-party packages as `oemN.inf` under `%Windows%\INF`.
+    /// `SetupGetInfDriverStoreLocationW` resolves each published INF to its existing Driver Store
+    /// package, whose complete ordinary-file tree is counted once. The exact storage-controller
+    /// manifest appended by LetRecovery is included as well.
+    pub fn estimate_online_oem_driver_export(&self) -> Result<DriverExportEstimate> {
+        let windows = windows_directory()?;
+        let inf_directory = windows.join("INF");
+        require_plain_directory(&inf_directory, "Windows INF directory")?;
+
+        let mut package_roots = std::collections::BTreeMap::<String, PathBuf>::new();
+        let mut published_inf_count = 0_usize;
+        for entry in std::fs::read_dir(&inf_directory).with_context(|| {
+            format!(
+                "enumerate published driver INFs: {}",
+                inf_directory.display()
+            )
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "read published driver INF entry: {}",
+                    inf_directory.display()
+                )
+            })?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !is_published_oem_inf_name(name) {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(entry.path()).with_context(|| {
+                format!("inspect published driver INF: {}", entry.path().display())
+            })?;
+            if !metadata.is_file()
+                || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT_VALUE != 0
+            {
+                bail!(
+                    "published OEM INF is not an ordinary file: {}",
+                    entry.path().display()
+                );
+            }
+            published_inf_count = published_inf_count
+                .checked_add(1)
+                .context("published OEM INF count overflow")?;
+            let driver_store_inf = self.setup_api.get_driver_store_path(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SetupGetInfDriverStoreLocationW could not resolve published INF {name}"
+                )
+            })?;
+            let package_root = driver_store_inf.parent().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "resolved driver-store INF has no package directory: {}",
+                    driver_store_inf.display()
+                )
+            })?;
+            require_plain_directory(package_root, "Driver Store package")?;
+            let canonical = std::fs::canonicalize(package_root).with_context(|| {
+                format!(
+                    "canonicalize Driver Store package: {}",
+                    package_root.display()
+                )
+            })?;
+            package_roots
+                .entry(canonical.to_string_lossy().to_ascii_lowercase())
+                .or_insert(canonical);
+        }
+
+        let mut bytes = 0_u64;
+        for package_root in package_roots.values() {
+            bytes = bytes
+                .checked_add(measure_plain_tree_logical_bytes(package_root)?)
+                .context("OEM driver export size overflow")?;
+        }
+        let requirements = self.present_oem_storage_requirements()?;
+        bytes = bytes
+            .checked_add(storage_driver_requirements_manifest_bytes(&requirements)?.len() as u64)
+            .context("OEM driver export manifest size overflow")?;
+
+        log::info!(
+            "[DriverManager] exact export estimate: published_infs={}, package_directories={}, bytes={}",
+            published_inf_count,
+            package_roots.len(),
+            bytes
+        );
+        Ok(DriverExportEstimate {
+            package_count: package_roots.len(),
+            bytes,
+        })
     }
 
     /// Returns every currently bound third-party boot-storage package that must survive a
@@ -952,8 +1214,7 @@ impl DriverManager {
     /// 尝试复制 INF 关联的文件（通过解析 INF 文件）
     fn try_copy_associated_files(&self, inf_path: &Path, dest_dir: &Path) -> Result<()> {
         let inf_content = std::fs::read_to_string(inf_path)?;
-        let windows_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
-        let system32_drivers = PathBuf::from(&windows_dir).join("System32").join("drivers");
+        let system32_drivers = windows_directory()?.join("System32").join("drivers");
 
         // 简单解析 INF 文件查找 .sys 文件
         for line in inf_content.lines() {
@@ -1055,6 +1316,12 @@ impl DriverManager {
             let entry = entry.with_context(|| {
                 format!("failed to enumerate driver directory: {}", dir.display())
             })?;
+            if entry.file_type().is_symlink() {
+                bail!(
+                    "driver source contains a reparse entry: {}",
+                    entry.path().display()
+                );
+            }
             let path = entry.path();
             if entry.file_type().is_file() {
                 if let Some(ext) = path.extension() {
@@ -1148,46 +1415,11 @@ impl DriverManager {
                 String::from_utf8_lossy(normal_outcome.stdout()).trim(),
                 String::from_utf8_lossy(normal_outcome.stderr()).trim()
             );
-            if !crate::driver_package_trust::is_known_dism_signature_false_negative(&normal_error) {
-                bail!(
-                    "DISM rejected driver package {}: {}",
-                    inf.display(),
-                    normal_error
-                );
-            }
-
-            let verified =
-                crate::driver_package_trust::verify_driver_package(inf).with_context(|| {
-                    format!(
-                        "driver package is not independently trusted: {}",
-                        inf.display()
-                    )
-                })?;
-            verified.revalidate()?;
-            log::warn!(
-                "[DriverManager] signature false-negative fallback for {} (signer: {})",
+            bail!(
+                "standard DISM rejected driver package {}: {}",
                 inf.display(),
-                verified.signer()
+                normal_error
             );
-            let fallback_request = crate::command::CommandRequest::new("dism.exe")
-                .arg(format!("/Image:{}", offline_root.display()))
-                .arg("/Add-Driver")
-                .arg(format!("/Driver:{}", inf.display()))
-                .arg("/ForceUnsigned");
-            let fallback_outcome = crate::command::execute_request(
-                &crate::command::SystemCommandExecutor,
-                &fallback_request,
-            )
-            .with_context(|| format!("failed to start verified fallback for {}", inf.display()))?;
-            if !fallback_outcome.succeeded() {
-                bail!(
-                    "verified driver fallback failed for {} (exit {:?}): stdout={} stderr={}",
-                    inf.display(),
-                    fallback_outcome.exit_code(),
-                    String::from_utf8_lossy(fallback_outcome.stdout()).trim(),
-                    String::from_utf8_lossy(fallback_outcome.stderr()).trim()
-                );
-            }
         }
 
         Ok((inf_files.len(), 0))
@@ -1389,10 +1621,32 @@ pub fn list_present_hardware_ids() -> Result<Vec<String>> {
     manager.enumerate_present_hardware_ids()
 }
 
+/// Enumerates present devices together with authoritative Configuration Manager devnode state.
+pub fn list_present_devices() -> Result<Vec<PresentDeviceState>> {
+    let manager = DriverManager::new()?;
+    manager.enumerate_present_devices()
+}
+
 /// Enumerates third-party packages currently bound to boot-storage controller classes.
 pub fn list_present_oem_storage_driver_requirements() -> Result<Vec<StorageDriverRequirement>> {
     let manager = DriverManager::new()?;
     manager.present_oem_storage_requirements()
+}
+
+/// Measures the online third-party driver export directly from existing Driver Store files.
+pub fn estimate_online_oem_driver_export() -> Result<DriverExportEstimate> {
+    DriverManager::new()?.estimate_online_oem_driver_export()
+}
+
+fn storage_driver_requirements_manifest_bytes(
+    requirements: &[StorageDriverRequirement],
+) -> Result<Vec<u8>> {
+    validate_requirement_values(requirements)?;
+    serde_json::to_vec_pretty(&StorageDriverRequirementsManifest {
+        version: 1,
+        requirements: requirements.to_vec(),
+    })
+    .context("serialize storage driver requirements manifest")
 }
 
 /// Verifies an exported tree and atomically records the exact storage coverage PE must preserve.
@@ -1401,12 +1655,7 @@ pub fn write_storage_driver_requirements(
     requirements: &[StorageDriverRequirement],
 ) -> Result<()> {
     validate_storage_driver_requirements(exported_root, requirements)?;
-    validate_requirement_values(requirements)?;
-    let manifest = StorageDriverRequirementsManifest {
-        version: 1,
-        requirements: requirements.to_vec(),
-    };
-    let bytes = serde_json::to_vec_pretty(&manifest)?;
+    let bytes = storage_driver_requirements_manifest_bytes(requirements)?;
     let destination = exported_root.join(STORAGE_DRIVER_REQUIREMENTS_FILE);
     let temporary = crate::scoped_temp_file::ScopedTempFile::create_in(
         exported_root,
@@ -1600,6 +1849,36 @@ fn is_boot_storage_driver(driver: &DriverInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn published_oem_inf_name_is_strict_and_case_insensitive() {
+        for valid in ["oem0.inf", "OEM42.INF", "OeM123.inf"] {
+            assert!(is_published_oem_inf_name(valid), "{valid}");
+        }
+        for invalid in [
+            "oem.inf",
+            "oem-1.inf",
+            "oem1.inf.bak",
+            "xoem1.inf",
+            "oem1.pnf",
+            "oem１.inf",
+        ] {
+            assert!(!is_published_oem_inf_name(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn plain_tree_measurement_counts_file_bytes_once() {
+        let temporary = TestDirectory::new("measure-tree");
+        let nested = temporary.0.join("package").join("subdir");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(temporary.0.join("package").join("oem.inf"), b"12345").unwrap();
+        std::fs::write(nested.join("driver.sys"), b"1234567").unwrap();
+        assert_eq!(
+            measure_plain_tree_logical_bytes(&temporary.0.join("package")).unwrap(),
+            12
+        );
+    }
 
     struct TestDirectory(PathBuf);
 

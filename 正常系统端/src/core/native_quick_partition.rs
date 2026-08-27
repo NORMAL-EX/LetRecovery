@@ -47,6 +47,8 @@ pub struct DiskFingerprint {
     pub size_bytes: u64,
     pub partition_style: PartitionStyle,
     pub partitions: Vec<DiskPartitionFingerprint>,
+    /// Provider-independent physical layout captured through the shared IOCTL boundary.
+    pub layout_snapshot: Option<lr_core::windows_storage::DiskLayoutSnapshot>,
 }
 
 impl From<&PhysicalDisk> for DiskFingerprint {
@@ -63,6 +65,7 @@ impl From<&PhysicalDisk> for DiskFingerprint {
             size_bytes: disk.size_bytes,
             partition_style: disk.partition_style,
             partitions,
+            layout_snapshot: lr_core::windows_storage::disk_layout_snapshot(disk.disk_number).ok(),
         }
     }
 }
@@ -207,6 +210,7 @@ pub trait QuickPartitionRunner {
         disk_number: u32,
         style: PartitionStyle,
         layouts: &[PartitionLayout],
+        expected_layout: Option<&lr_core::windows_storage::DiskLayoutSnapshot>,
     ) -> Result<QuickPartitionResult, String>;
 }
 
@@ -222,6 +226,11 @@ pub(crate) fn execute_with_backends(
         .enumerate()
         .map_err(QuickPartitionError::Inventory)?;
     let disk = verify_current_disk(request, &disks)?;
+    if request.disk.layout_snapshot.is_none() {
+        return Err(QuickPartitionError::Inventory(
+            "canonical physical-disk identity is unavailable; refresh and retry".into(),
+        ));
+    }
     let (safe, reason) = super::quick_partition::can_safely_partition(disk);
     if !safe {
         return Err(QuickPartitionError::UnsafeDisk(reason));
@@ -231,6 +240,7 @@ pub(crate) fn execute_with_backends(
             request.disk.disk_number,
             request.partition_style,
             &request.layouts,
+            request.disk.layout_snapshot.as_ref(),
         )
         .map_err(QuickPartitionError::Execution)
 }
@@ -258,11 +268,16 @@ pub fn execute(
                 disk_number: u32,
                 style: PartitionStyle,
                 layouts: &[PartitionLayout],
+                expected_layout: Option<&lr_core::windows_storage::DiskLayoutSnapshot>,
             ) -> Result<QuickPartitionResult, String> {
+                let expected_layout = expected_layout.ok_or_else(|| {
+                    "canonical physical-disk identity is unavailable; refresh and retry".to_owned()
+                })?;
                 Ok(super::quick_partition::execute_quick_partition_validated(
                     disk_number,
                     style,
                     layouts,
+                    expected_layout,
                 ))
             }
         }
@@ -440,6 +455,28 @@ mod tests {
     }
 
     #[test]
+    fn canonical_ioctl_layout_is_part_of_the_disk_fingerprint() {
+        let mut expected = DiskFingerprint::from(&disk());
+        expected.layout_snapshot = Some(lr_core::windows_storage::DiskLayoutSnapshot {
+            disk_size_bytes: expected.size_bytes,
+            disk: lr_core::windows_storage::StableDiskIdentity::Gpt { disk_id: [1; 16] },
+            device_id_hash: Some([2; 32]),
+            partitions: vec![lr_core::windows_storage::DiskLayoutPartitionSnapshot {
+                offset_bytes: 1_048_576,
+                size_bytes: 1024 * 1024 * 1024,
+                token: lr_core::windows_storage::DiskLayoutPartitionToken::Gpt {
+                    partition_type: [3; 16],
+                    partition_id: [4; 16],
+                    attributes: 0,
+                },
+            }],
+        });
+        let mut changed = expected.clone();
+        changed.layout_snapshot.as_mut().unwrap().partitions[0].size_bytes += 4096;
+        assert_ne!(expected, changed);
+    }
+
+    #[test]
     fn layout_editor_round_trips_size_letter_label_file_system_and_esp() {
         let layouts = vec![
             PartitionLayout {
@@ -507,6 +544,7 @@ mod tests {
                 _disk_number: u32,
                 _style: PartitionStyle,
                 _layouts: &[PartitionLayout],
+                _expected_layout: Option<&lr_core::windows_storage::DiskLayoutSnapshot>,
             ) -> Result<QuickPartitionResult, String> {
                 self.0 += 1;
                 panic!("runner must not be called for a changed disk")

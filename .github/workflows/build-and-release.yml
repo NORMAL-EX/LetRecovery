@@ -61,26 +61,11 @@ jobs:
           cargo test -p letrecovery-pe --locked --features non-elevated-tests
           cargo test -p LetRecovery --locked --features non-elevated-tests
 
-      - name: Build system-side exe (LetRecovery.exe)
-        shell: bash
-        env:
-          # The Win7 target changes the minimum loader ABI; the resulting single executable still
-          # runs on Windows 8/8.1/10/11 and dynamically prefers their newer APIs.
-          RUSTC_BOOTSTRAP: "1"
-          # Keep the universal CRT inside the executable. An ordinary dynamic MSVC build imports
-          # api-ms-win-crt-* loader modules that are absent on an unserviced Windows 7 SP1 host.
-          RUSTFLAGS: "-C target-feature=+crt-static"
-        run: |
-          set -euo pipefail
-          cargo build -p LetRecovery --release --locked \
-            --target x86_64-win7-windows-msvc \
-            -Z build-std=std,panic_abort
-
-      - name: Verify Windows 7 import boundary
+      - name: Build and verify system-side exe (LetRecovery.exe)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          & .\.github\scripts\verify-win7-imports.ps1
+          & .\.github\scripts\build-win7-normal.ps1
 
       - name: Build PE-side exe (LetRecoveryPE.exe)
         shell: bash
@@ -121,9 +106,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 底包里可能混入 Ghost 运行时垃圾（崩溃转储 *.dmp / 错误日志 GHOSTERR.TXT、ghstwarn.txt），
+          # 底包里可能混入旧运行日志、Ghost 崩溃转储或编辑器临时文件；这些都是运行时
+          # 诊断材料，绝不能随新的测试包或正式 release 继续分发。
           # 与源码仓库 .gitignore 同一套规则删掉，别让它们随正式 release 发出去。
           find pkg -type f \( \
+            -iname '*.log' -o \
             -iname '*.dmp' -o \
             -iname 'GHOSTERR.TXT' -o \
             -iname 'ghstwarn.txt' -o \
@@ -131,8 +118,12 @@ jobs:
             -iname 'Thumbs.db' -o \
             -iname '.DS_Store' -o \
             -iname '*.swp' \
-          \) -print -delete || true
-          echo "运行时垃圾清理完成。"
+          \) -print -delete
+          if find pkg -type f -iname '*.log' -print -quit | grep -q .; then
+            echo "发布目录仍含运行日志，拒绝打包" >&2
+            exit 1
+          fi
+          echo "运行时垃圾清理并回读验证完成。"
 
       - name: Validate bundled PCA2023 offline assets
         shell: pwsh
@@ -293,6 +284,32 @@ jobs:
           }
           Write-Host "Synchronized normal-side easter egg audio: $destination ($sourceHash)"
 
+      - name: Synchronize Microsoft Offline Registry runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = "assets\release\bin\offreg.dll"
+          $destination = "pkg\bin\offreg.dll"
+          $expectedLength = 125424
+          $expectedHash = "BAEE13B111020107A3CCFE4BEC5FDD2CE6863991066201CA110E02B2DDD495E0"
+          $sourceInfo = Get-Item -LiteralPath $source
+          $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+          $sourceSignature = Get-AuthenticodeSignature -LiteralPath $source
+          if ($sourceInfo.Length -ne $expectedLength -or $sourceHash -ne $expectedHash) {
+            throw "Microsoft Offline Registry runtime does not match its release lock"
+          }
+          if ([string]$sourceSignature.Status -ne "Valid" -or
+              $sourceSignature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
+            throw "Microsoft Offline Registry runtime signature is invalid"
+          }
+          & ".github\scripts\verify-win7-imports.ps1" -Executable $source
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+          if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $expectedHash) {
+            throw "Microsoft Offline Registry runtime changed while copying to pkg"
+          }
+          Write-Host "Synchronized Microsoft Offline Registry runtime: $destination ($expectedHash)"
+
       - name: Replace system-side exe
         shell: bash
         run: |
@@ -321,6 +338,15 @@ jobs:
           Write-Host "Using PE-side exe: $peExe"
           Copy-Item -Force $peExe $dst
           Write-Host "Replaced: $dst"
+          $offregSource = "assets\release\bin\offreg.dll"
+          $offregDestination = Join-Path $mount "Program Files\LetRecoveryPE\offreg.dll"
+          Copy-Item -LiteralPath $offregSource -Destination $offregDestination -Force
+          if ((Get-Item -LiteralPath $offregDestination).Length -ne 125424 -or
+              (Get-FileHash -LiteralPath $offregDestination -Algorithm SHA256).Hash -ne
+                "BAEE13B111020107A3CCFE4BEC5FDD2CE6863991066201CA110E02B2DDD495E0") {
+            throw "Injected Microsoft Offline Registry runtime does not match its release lock"
+          }
+          Write-Host "Injected Microsoft Offline Registry runtime: $offregDestination"
           # The PE client is native Win32-only. Remove the legacy Mesa shim from the base WIM so
           # release artifacts do not retain an unused OpenGL runtime after replacing the old EXE.
           $legacyOpenGl = Join-Path $mount "Program Files\LetRecoveryPE\opengl32.dll"
@@ -406,6 +432,18 @@ jobs:
             throw "Failed to create the default WinPE temporary directory: $defaultTemp"
           }
           Write-Host "Ensured default WinPE temporary directory: $defaultTemp"
+          # Runtime logs from the base/maintenance image belong to an earlier machine and must
+          # never be distributed. `*.log` intentionally does not match registry transaction files
+          # such as SYSTEM.LOG1/SYSTEM.LOG2.
+          $staleLogs = @(Get-ChildItem -LiteralPath $mount -Recurse -Force -File -Filter "*.log")
+          foreach ($staleLog in $staleLogs) {
+            Remove-Item -LiteralPath $staleLog.FullName -Force
+          }
+          $remainingLogs = @(Get-ChildItem -LiteralPath $mount -Recurse -Force -File -Filter "*.log")
+          if ($remainingLogs.Count -ne 0) {
+            throw "WinPE image still contains stale runtime logs: $($remainingLogs.FullName -join ', ')"
+          }
+          Write-Host "Removed and rechecked $($staleLogs.Count) stale runtime log(s) from WinPE"
           dism /Unmount-Image /MountDir:"$mount" /Commit
           if ($LASTEXITCODE -ne 0) { throw "DISM unmount/commit failed" }
 
@@ -460,6 +498,10 @@ jobs:
               -Root $windows7Audit `
               -LockFile "docs\WINDOWS7_DRIVERS.lock.json" `
               -VerifySignatures
+            $wimLogs = @(Get-ChildItem -LiteralPath $mount -Recurse -Force -File -Filter "*.log")
+            if ($wimLogs.Count -ne 0) {
+              throw "Final WinPE image contains stale runtime logs: $($wimLogs.FullName -join ', ')"
+            }
             $uefiSevenRoot = Join-Path $mount "Program Files\LetRecoveryPE\bin\uefiseven"
             foreach ($lockedFile in @(
               @{ Name = "bootx64.efi"; Size = 96896; Sha256 = "0A44A256CDA725C22F1DAADCF093FC4660B7214E6437968A4C8E119AED02A947" },
@@ -471,6 +513,12 @@ jobs:
               if ($lockedInfo.Length -ne $lockedFile.Size -or $lockedHash -ne $lockedFile.Sha256) {
                 throw "Final WIM UefiSeven resource does not match its lock: $lockedPath"
               }
+            }
+            $offreg = Join-Path $mount "Program Files\LetRecoveryPE\offreg.dll"
+            if ((Get-Item -LiteralPath $offreg).Length -ne 125424 -or
+                (Get-FileHash -LiteralPath $offreg -Algorithm SHA256).Hash -ne
+                  "BAEE13B111020107A3CCFE4BEC5FDD2CE6863991066201CA110E02B2DDD495E0") {
+              throw "Final WIM Microsoft Offline Registry runtime does not match its release lock"
             }
           } finally {
             if ($mounted) {
@@ -792,6 +840,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          & .\.github\scripts\assert-release-tree-clean.ps1 -Root .\pkg
           Remove-Item -LiteralPath .\LetRecovery.7z -Force -ErrorAction SilentlyContinue
           Push-Location .\pkg
           try {

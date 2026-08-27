@@ -27,7 +27,7 @@ GitHub Bug 表单只要求你提供软件尚未自动记录的内容：
 
 1. 问题现象和出问题的阶段（正常系统端 / PE 端 / 进入新系统后）。
 2. 可以稳定复现的操作步骤。
-3. 对应阶段的完整日志与完整报错截图；PE 阶段问题请同时上传正常系统端日志和 `LetRecoveryPE.log`。
+3. 对应阶段的完整日志与完整报错截图。ViaPE 安装完成后，正常端与 PE 端会合并为 `<新系统盘>\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`，请优先上传它；格式化或首次写入后失败时，到 `<数据分区>\LetRecovery_Data\LetRecovery\Logs\LetRecovery-install-<SessionId>.log` 查找。只有合并日志不存在时，才分别上传“**关于 → 打开日志目录**”中的正常端日志和 `<LetRecoveryPE.exe 所在目录>\LetRecoveryPE.log`。
 
 软件版本、源/目标系统、UEFI/Legacy、Secure Boot、BitLocker、磁盘结构、所用 PE 和实体机/虚拟机线索会由新版日志自动记录，**不需要再手工抄写**。如果确实无法取得日志，请在表单中说明原因和已经查找的位置。
 

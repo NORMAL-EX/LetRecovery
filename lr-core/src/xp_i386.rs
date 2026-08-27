@@ -108,19 +108,17 @@ pub fn validate_i386_source(dir: &Path) -> Result<&'static str, String> {
     Ok(architecture)
 }
 
-/// 从 i386 源目录做硬盘文本安装准备。成功后重启即进入 XP 文本安装。
-///
-/// - `i386_src`：i386 目录（如挂载 ISO 的 `G:\I386`，或已复制到数据分区的副本）。
-/// - `win_partition`：目标系统盘（如 `"C:"`），需已格式化且为目标磁盘的主分区。
-/// - `bin_dir`：程序 bin 目录（取 `bootsect.exe`；可选 `bin\xp\productkey.txt` 提供产品密钥实现全自动）。
-/// - `custom_sif`：用户自定义的 winnt.sif 应答文件路径；`Some` 且存在时直接用它（原样写入，
-///   规整为 CRLF），否则用内置生成的应答（按是否有产品密钥决定 DefaultHide/FullUnattended）。
-pub fn install_from_i386(
-    i386_src: &Path,
+/// Apply an XP/2003 directory source from the exact open-handle manifest acquired before the
+/// first target write. Source files are read only through those handles; the apply phase never
+/// re-walks or reopens the untrusted source pathname.
+pub fn install_from_i386_locked(
+    locked: &crate::install_source_lock::LockedInstallTree,
     win_partition: &str,
     bin_dir: &Path,
     custom_sif: Option<&Path>,
 ) -> Result<String, String> {
+    locked.verify_unchanged()?;
+    let i386_src = locked.selected_path();
     validate_i386_source(i386_src)?;
     let win = win_partition.trim_end_matches('\\'); // "C:"
     let mut log = String::new();
@@ -190,7 +188,8 @@ pub fn install_from_i386(
     log.push_str(&format!("复制 {src_sub_name} 源到 {ls_src} ...\n"));
     create_dir_all_retry(&ls_src).map_err(|e| format!("创建 {ls_src} 失败: {e}"))?;
     // 单个文件出错时继续复制其余文件，再用下方核心文件复核决定是否允许继续。
-    let copy_report = crate::windows_file_copy::copy_tree(i386_src, Path::new(&ls_src), true)
+    let copy_report = locked
+        .copy_tree(i386_src, Path::new(&ls_src), true)
         .map_err(|error| format!("CopyFileExW 复制本地源失败: {error}"))?;
     log.push_str(&format!(
         "已通过 CopyFileExW 复制 {} 个本地源文件\n",
@@ -222,7 +221,7 @@ pub fn install_from_i386(
             if sib_i386.exists() {
                 let d = format!("{win}\\$WIN_NT$.~LS\\I386");
                 let _ = create_dir_all_retry(&d);
-                match crate::windows_file_copy::copy_tree(&sib_i386, Path::new(&d), true) {
+                match locked.copy_tree(&sib_i386, Path::new(&d), true) {
                     Ok(report) if report.errors.is_empty() => log.push_str(
                         "已并拷同级 \\I386（32 位 WoW64 组件）→ $WIN_NT$.~LS\\I386\n",
                     ),
@@ -255,7 +254,8 @@ pub fn install_from_i386(
     let sys32_src = i386_src.join("SYSTEM32");
     if sys32_src.exists() {
         let d = format!("{bt}\\SYSTEM32");
-        let report = crate::windows_file_copy::copy_tree(&sys32_src, Path::new(&d), true)
+        let report = locked
+            .copy_tree(&sys32_src, Path::new(&d), true)
             .map_err(|error| format!("拷 SYSTEM32 → $WIN_NT$.~BT 失败: {error}"))?;
         if report.errors.is_empty() {
             log.push_str("已通过 CopyFileExW 复制 <源>\\SYSTEM32 → $WIN_NT$.~BT\\SYSTEM32\n");
@@ -274,8 +274,8 @@ pub fn install_from_i386(
     for name in nt5_bootfiles() {
         let s = i386_src.join(name);
         if s.exists() {
-            match std::fs::copy(&s, format!("{bt}\\{name}")) {
-                Ok(_) => bt_copied += 1,
+            match locked.copy_file(&s, Path::new(&format!("{bt}\\{name}"))) {
+                Ok(()) => bt_copied += 1,
                 Err(e) => log.push_str(&format!("警告: 拷 {name} → $WIN_NT$.~BT 失败: {e}\n")),
             }
         } else {
@@ -291,14 +291,15 @@ pub fn install_from_i386(
     //    biosinfo.inf / bootfont.bin 若源里有也一并复制（setupldr 需要 biosinfo；bootfont 为蓝底本地化字库）。
     // 用 copy_force/write_force：先清目标 +r+s+h 再写——之前装过 XP / 修过引导的盘上，根目录
     //    NTLDR/NTDETECT.COM/TXTSETUP.SIF 常带 只读+系统+隐藏，直接 std::fs::copy 会 os error 5（拒绝访问）。
-    copy_force(&setupldr, &format!("{win}\\NTLDR")).map_err(|e| format!("写 NTLDR 失败: {e}"))?;
-    copy_force(&ntdetect, &format!("{win}\\NTDETECT.COM"))
+    copy_force_locked(locked, &setupldr, &format!("{win}\\NTLDR"))
+        .map_err(|e| format!("写 NTLDR 失败: {e}"))?;
+    copy_force_locked(locked, &ntdetect, &format!("{win}\\NTDETECT.COM"))
         .map_err(|e| format!("写 NTDETECT.COM 失败: {e}"))?;
     log.push_str("已写入 NTLDR(setupldr) / NTDETECT.COM\n");
     for opt in ["biosinfo.inf", "bootfont.bin"] {
         let s = i386_src.join(opt);
         if s.exists() {
-            match copy_force(&s, &format!("{win}\\{opt}")) {
+            match copy_force_locked(locked, &s, &format!("{win}\\{opt}")) {
                 Ok(_) => log.push_str(&format!("已复制 {opt}\n")),
                 Err(e) => log.push_str(&format!("复制 {opt} 失败（忽略）: {e}\n")),
             }
@@ -308,7 +309,9 @@ pub fn install_from_i386(
     // 3) txtsetup.sif：照搬 DSI——不改 SetupSourcePath（靠 MsDosInitiated=1 + $WIN_NT$.~BT 约定，
     //    setupldr/setupdd 自会用 $WIN_NT$.~BT 作引导路径、$WIN_NT$.~LS 作源）。仅做文本期驱动集成，
     //    再写入 $WIN_NT$.~BT\TXTSETUP.SIF（setupldr 实际读这份）与根目录各一份。
-    let raw = std::fs::read(&txtsetup).map_err(|e| format!("读 txtsetup.sif 失败: {e}"))?;
+    let raw = locked
+        .read_file(&txtsetup)
+        .map_err(|e| format!("读 txtsetup.sif 失败: {e}"))?;
 
     // 文本期存储驱动集成（按架构）：驱动 .sys 同时拷进源($WIN_NT$.~LS\<arch>)与引导($WIN_NT$.~BT)。
     let xp_drv = bin_dir.join("drivers").join("xp");
@@ -454,10 +457,14 @@ pub fn install_from_i386(
     log.push_str(&gbk_to_utf8(&out.stdout));
     log.push_str(&gbk_to_utf8(&out.stderr));
     if !out.status.success() {
-        // bootsect 偶有非 0 但实际已写成功，故不直接判错；但要醒目提示以便对照实机现象。
-        log.push_str(
-            "⚠ 警告: bootsect 返回非 0——引导扇区可能未写成功，若重启进不去文本安装请重做此步\n",
-        );
+        let code = out
+            .status
+            .code()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "terminated without an exit code".to_string());
+        return Err(format!(
+            "bootsect /nt52 failed ({code}); the NT5 boot code was not confirmed.\n{log}"
+        ));
     }
     log.push_str("已用 bootsect /nt52 写引导码\n");
 
@@ -494,10 +501,14 @@ fn clear_file_attrs(path: &str) {
     let _ = path;
 }
 
-/// 先清属性再复制（应对目标带 +r+s+h）。
-fn copy_force(src: &Path, dst: &str) -> std::io::Result<u64> {
+/// 先清属性，再从安装前已锁定的源句柄复制（应对目标带 +r+s+h）。
+fn copy_force_locked(
+    locked: &crate::install_source_lock::LockedInstallTree,
+    src: &Path,
+    dst: &str,
+) -> Result<(), String> {
     clear_file_attrs(dst);
-    std::fs::copy(src, dst)
+    locked.copy_file(src, Path::new(dst))
 }
 
 /// 先清属性再写（应对目标带 +r+s+h）。
@@ -608,10 +619,17 @@ fn set_volume_active(letter: &str) -> Result<String, String> {
         .ok_or_else(|| "目标卷盘符为空".to_string())?;
     let identity = crate::windows_storage::volume_identity(drive_letter)
         .map_err(|error| format!("无法解析 {drive_letter}: 的物理分区身份: {error}"))?;
-    crate::windows_storage::set_mbr_active(identity.disk_number, identity.offset_bytes, true)
-        .map_err(|error| {
-            format!("无法把 {drive_letter}: 设为活动分区（目标必须是 MBR 基础分区）: {error}")
-        })?;
+    let expected_layout = crate::windows_storage::disk_layout_snapshot(identity.disk_number)
+        .map_err(|error| format!("无法确认 {drive_letter}: 所在磁盘的稳定布局: {error}"))?;
+    crate::windows_storage::set_mbr_active_checked(
+        identity.disk_number,
+        identity.offset_bytes,
+        true,
+        &expected_layout,
+    )
+    .map_err(|error| {
+        format!("无法把 {drive_letter}: 设为活动分区（目标必须是 MBR 基础分区）: {error}")
+    })?;
     Ok(format!(
         "已把磁盘 {} 偏移 {} 的分区设为活动",
         identity.disk_number, identity.offset_bytes

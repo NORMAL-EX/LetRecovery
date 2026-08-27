@@ -17,7 +17,8 @@ pub use retry::{
     run_with_retry, RetryDecision, RetryPolicy, RetrySafety, RetrySleeper, ThreadSleeper,
 };
 pub use support::{
-    SupportAttachment, SupportBundle, SupportBundleBuilder, SupportOperationSummary,
+    redact_log_text, SupportAttachment, SupportBundle, SupportBundleBuilder,
+    SupportOperationSummary,
 };
 
 /// Current Unix time in milliseconds, saturating if the system clock is before

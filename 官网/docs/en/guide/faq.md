@@ -35,7 +35,7 @@ Running the desktop client requires Windows 7–11 (64-bit, one universal build)
 
 ## Is BitLocker supported?
 
-Yes—before reinstalling, it automatically unlocks (key pass-through) or decrypts an encrypted system drive. See [Reinstalling on a BitLocker-Encrypted Drive](/guide/bitlocker).
+It is handled through a strict gate, not legacy key pass-through. The current reinstall-via-PE path requires the target to be fully decrypted to NotEncrypted before handoff; locked, converting, unknown, or still-encrypted state fails closed. See [Reinstalling on a BitLocker-Encrypted Drive](/guide/bitlocker).
 
 ## Is there a simpler "one-click reinstall"?
 
@@ -44,10 +44,12 @@ Yes, try [Easy Mode](/guide/easy-mode): pick the system, pick the edition, confi
 
 ## Installation failed—where are the logs?
 
-- Desktop: `<program directory>\log\LetRecovery.<date>.log`
-- PE: `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`
+- **After a successful ViaPE installation (preferred attachment)**: the normal-system and PE logs are merged into one file at `<new-system drive>\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`.
+- **If installation fails after formatting or the first target write**: the app attempts to place the same combined log at `<data drive>\LetRecovery_Data\LetRecovery\Logs\LetRecovery-install-<SessionId>.log`.
+- **If failure occurs before handoff, no combined log was produced, or you are diagnosing another normal-system issue**: use **About → Open log directory**. The file is `<directory containing LetRecovery.exe>\log\LetRecovery.<date>.log`; this is under the extracted directory for the portable build or the installation directory for an installed build.
+- **When the raw PE runtime log is needed**: it is `<directory containing LetRecoveryPE.exe>\LetRecoveryPE.log`; the official package defaults to `X:\Program Files\LetRecoveryPE\LetRecoveryPE.log`.
 
-If you're reinstalling C:, run LetRecovery from **another drive** so the log isn't wiped by formatting.
+For a ViaPE installation issue, upload the combined log first; you do not need to upload the two raw logs separately. If the combined log does not exist, upload whichever raw logs are available and state the failure stage.
 When [reporting an issue](https://github.com/NORMAL-EX/LetRecovery/issues), please attach the log.
 
 ## Deployment reports "invalid compressed data" / error code 2

@@ -56,6 +56,11 @@ impl StorageDriverDialogState {
         self.message = crate::tr!("正在检测Windows分区...");
     }
 
+    pub fn begin_preparing(&mut self) {
+        self.loading = true;
+        self.message = crate::tr!("正在复核目标系统和存储控制器驱动...");
+    }
+
     pub fn apply_targets(&mut self, result: Result<Vec<StorageDriverTarget>, String>) {
         self.loading = false;
         match result {
@@ -292,6 +297,12 @@ impl NativeStorageDriverDialog {
         self.fit_and_layout();
     }
 
+    pub unsafe fn set_preparing(&mut self) {
+        self.state.begin_preparing();
+        self.render_state();
+        self.fit_and_layout();
+    }
+
     pub unsafe fn show_modeless(&mut self) {
         self.fit_and_layout();
         self.shell.show_modeless();
@@ -489,6 +500,17 @@ mod tests {
                 target: "E:".into()
             })
         );
+    }
+
+    #[test]
+    fn preparing_freezes_controls_without_losing_target_binding() {
+        let mut state = StorageDriverDialogState::default();
+        state.apply_targets(Ok(targets()));
+        state.select(Some("E:"));
+        state.begin_preparing();
+        assert!(state.loading);
+        assert_eq!(state.selected_target(), Some("E:"));
+        assert_eq!(state.targets.len(), 2);
     }
 
     #[test]

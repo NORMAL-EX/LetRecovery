@@ -1,28 +1,49 @@
-//! 离线登录修复
+//! Offline image account-state inspection.
 //!
-//! 解决"还原镜像后进系统需要密码/出现『其他用户』"的问题。
+//! Windows documents `ImageState` as the supported way to distinguish a deployable image from an
+//! installation whose specialize and oobeSystem passes have already completed. SAM inventory is
+//! only supporting evidence: stock images already contain well-known built-in RIDs and may contain
+//! setup-owned identities such as `defaultuser0` at RID 1000 or above. A documented OOBE-resealed
+//! state is deployable only after SAM inventory succeeds and confirms there is no user-owned local
+//! account. A SAM read failure is indeterminate and disables all account/unattended mutations.
 //!
-//! 背景：写入 `unattend.xml` 只对会经过 Windows Setup/OOBE 的镜像（已 sysprep 的
-//! 安装镜像）生效；对"整盘备份/未 sysprep 的镜像"，OOBE 阶段根本不会运行，
-//! 于是 unattend 里创建空密码账户与自动登录的设置全部失效，登录界面退化为
-//! "其他用户"（需手动输入用户名+密码）。
-//!
-//! 这里分两层兜底：
-//! 1) 零风险策略层（Win32 注册表 hive load/unload，不动 SAM 二进制）：
-//!    - SYSTEM：`Control\Lsa\LimitBlankPasswordUse = 0`，允许空密码账户用于
-//!      自动登录/非控制台登录（默认被限制为 1）。
-//!    - SOFTWARE：在已知目标用户名时配置 Winlogon 自动登录（空密码）。
-//! 2) 非空密码清除层（仅在已知用户名时触发）：离线把目标账户在 SAM 中的 NT/LM
-//!    hash 长度清零（等效空密码）并启用账户——该逻辑已收纳到共享库
-//!    `lr_core::sam::clear_account_password`（含强制备份、成功后删除备份等安全措施）。
-//!    该兜底只用于完整备份/未 sysprep 镜像；处于 reseal-to-OOBE 状态的安装镜像
-//!    必须完全交给 unattend 创建账户，不能提前写 Winlogon 自动登录状态。
+//! This module is deliberately read-only. Restoring a captured installation must preserve its
+//! account database byte-for-byte; the install workflow must never clear passwords or enable
+//! accounts merely to make an unattended file appear to work.
 
 use anyhow::Result;
-use std::path::Path;
 
 use crate::core::registry::OfflineRegistry;
-use crate::tr;
+
+const FIRST_NON_BUILTIN_LOCAL_RID: u32 = 1000;
+const BUILTIN_ADMINISTRATOR_RID: u32 = 500;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfflineImageAccountMode {
+    /// Windows Setup is explicitly resealed to OOBE and no ordinary local account exists.
+    FreshDeployable,
+    /// A completed/captured installation or an image containing an ordinary local account.
+    PreserveExistingAccounts,
+    /// Evidence was incomplete or contradictory. Installation may continue, but account and
+    /// unattended mutations must remain disabled.
+    Indeterminate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfflineImageAccountInspection {
+    pub mode: OfflineImageAccountMode,
+    pub image_state: Option<String>,
+    pub local_account_count: usize,
+    pub ordinary_local_account_count: usize,
+    pub builtin_administrator_name: Option<String>,
+    pub diagnostic: String,
+}
+
+impl OfflineImageAccountInspection {
+    pub fn allows_new_install_unattended(&self) -> bool {
+        self.mode == OfflineImageAccountMode::FreshDeployable
+    }
+}
 
 fn with_loaded_hive<T>(name: &str, path: &str, action: impl FnOnce() -> Result<T>) -> Result<T> {
     OfflineRegistry::load_hive(name, path)?;
@@ -39,155 +60,263 @@ fn with_loaded_hive<T>(name: &str, path: &str, action: impl FnOnce() -> Result<T
     }
 }
 
-/// 离线 SYSTEM 配置单元在目标系统中的相对路径
-fn system_hive_path(target_partition: &str) -> String {
-    format!("{}\\Windows\\System32\\config\\SYSTEM", target_partition)
-}
-
-/// 离线 SOFTWARE 配置单元在目标系统中的相对路径
-fn software_hive_path(target_partition: &str) -> String {
-    format!("{}\\Windows\\System32\\config\\SOFTWARE", target_partition)
-}
-
-fn image_state_needs_legacy_login_fallback(image_state: &str) -> bool {
-    image_state
-        .trim()
-        .eq_ignore_ascii_case("IMAGE_STATE_COMPLETE")
-}
-
-fn should_apply_legacy_login_fallback(target_partition: &str, force: bool) -> Result<bool> {
-    if force {
-        return Ok(true);
-    }
-
-    let software_hive = software_hive_path(target_partition);
-    if !Path::new(&software_hive).exists() {
-        anyhow::bail!("{}", tr!("目标 SOFTWARE 配置单元不存在: {}", software_hive));
-    }
+fn read_offline_image_state(target_partition: &str) -> Result<String> {
+    let software_hive = format!("{}\\Windows\\System32\\config\\SOFTWARE", target_partition);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let hive_name = format!("LR_STATE_{}_{}", std::process::id(), nonce);
-    let query_result = with_loaded_hive(&hive_name, &software_hive, || {
-        let state_key = format!(
-            "HKLM\\{}\\Microsoft\\Windows\\CurrentVersion\\Setup\\State",
-            hive_name
-        );
-        OfflineRegistry::query_string(&state_key, "ImageState")
+    with_loaded_hive(&hive_name, &software_hive, || {
+        OfflineRegistry::query_string(
+            &format!(
+                "HKLM\\{}\\Microsoft\\Windows\\CurrentVersion\\Setup\\State",
+                hive_name
+            ),
+            "ImageState",
+        )
+    })
+}
+
+fn parse_rid(rid: &str) -> Option<u32> {
+    (rid.len() == 8)
+        .then(|| u32::from_str_radix(rid, 16).ok())
+        .flatten()
+}
+
+fn is_user_owned_local_account(account: &lr_core::sam::SamAccount) -> bool {
+    parse_rid(&account.rid).is_some_and(|rid| rid >= FIRST_NON_BUILTIN_LOCAL_RID)
+        && !lr_core::unattend_account::is_windows_owned_local_account_name(&account.username)
+}
+
+fn is_resealed_to_oobe(image_state: &str) -> bool {
+    matches!(
+        image_state.trim().to_ascii_uppercase().as_str(),
+        "IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE" | "IMAGE_STATE_SPECIALIZE_RESEAL_TO_OOBE"
+    )
+}
+
+fn is_complete_installation(image_state: &str) -> bool {
+    image_state
+        .trim()
+        .eq_ignore_ascii_case("IMAGE_STATE_COMPLETE")
+}
+
+fn classify_evidence(
+    image_state: Result<String>,
+    accounts: Result<Vec<lr_core::sam::SamAccount>>,
+    source_is_capture: bool,
+) -> OfflineImageAccountInspection {
+    let state_error = image_state.as_ref().err().map(ToString::to_string);
+    let account_error = accounts.as_ref().err().map(ToString::to_string);
+    let state = image_state.ok();
+    let accounts = accounts.ok();
+    let local_account_count = accounts.as_ref().map_or(0, Vec::len);
+    let ordinary_local_account_count = accounts.as_ref().map_or(0, |items| {
+        items
+            .iter()
+            .filter(|account| is_user_owned_local_account(account))
+            .count()
+    });
+    let builtin_administrator_name = accounts.as_ref().and_then(|items| {
+        items
+            .iter()
+            .find(|account| parse_rid(&account.rid) == Some(BUILTIN_ADMINISTRATOR_RID))
+            .map(|account| account.username.clone())
     });
 
-    match query_result {
-        Ok(image_state) => {
-            let apply = image_state_needs_legacy_login_fallback(&image_state);
-            log::info!(
-                "[LOGIN] 目标镜像 ImageState={}，离线登录兜底={}",
-                image_state,
-                apply
-            );
-            Ok(apply)
+    let (mode, diagnostic) = if source_is_capture {
+        (
+            OfflineImageAccountMode::PreserveExistingAccounts,
+            "the selected source format is a captured/restored installation".to_string(),
+        )
+    } else if ordinary_local_account_count != 0 {
+        (
+            OfflineImageAccountMode::PreserveExistingAccounts,
+            format!("SAM contains {ordinary_local_account_count} user-owned local account(s)"),
+        )
+    } else if state.as_deref().is_some_and(is_resealed_to_oobe) && accounts.is_some() {
+        (
+            OfflineImageAccountMode::FreshDeployable,
+            "ImageState is resealed to OOBE and verified SAM inventory contains no user-owned local account"
+                .to_string(),
+        )
+    } else if state.as_deref().is_some_and(is_complete_installation) {
+        (
+            OfflineImageAccountMode::PreserveExistingAccounts,
+            "ImageState is IMAGE_STATE_COMPLETE".to_string(),
+        )
+    } else {
+        let mut evidence = Vec::new();
+        if let Some(state) = &state {
+            evidence.push(format!("unsupported ImageState={state}"));
         }
-        Err(error) => {
-            log::warn!(
-                "[LOGIN] 无法确认目标镜像 ImageState，安全跳过离线自动登录兜底: {}",
-                error
-            );
-            Ok(false)
+        if let Some(error) = state_error {
+            evidence.push(format!("ImageState unavailable: {error}"));
         }
+        if let Some(error) = account_error {
+            evidence.push(format!("SAM inventory unavailable: {error}"));
+        }
+        if evidence.is_empty() {
+            evidence.push("offline account evidence is incomplete".to_string());
+        }
+        (OfflineImageAccountMode::Indeterminate, evidence.join("; "))
+    };
+
+    OfflineImageAccountInspection {
+        mode,
+        image_state: state,
+        local_account_count,
+        ordinary_local_account_count,
+        builtin_administrator_name,
+        diagnostic,
     }
 }
 
-/// 应用离线登录兜底设置。
-///
-/// - `target_partition`：目标系统盘，形如 `"C:"`。
-/// - `username`：期望自动登录的用户名；为空时仅放开空密码策略，不配置自动登录
-///   （避免对未知账户强行设置自动登录导致登录失败循环）。
-///
-/// `force_legacy_fallback` 仅供 GHO、XP/2003 等明确不会进入现代 OOBE 的路径使用。
-/// 任一步失败都不会中断安装，调用方按需记录日志即可。
-pub fn ensure_offline_login(
+/// Inspect the applied offline Windows instance without modifying SOFTWARE, SYSTEM, or SAM.
+pub fn inspect_offline_image_accounts(
     target_partition: &str,
-    username: &str,
-    force_legacy_fallback: bool,
-) -> Result<()> {
-    if !should_apply_legacy_login_fallback(target_partition, force_legacy_fallback)? {
-        log::info!("[LOGIN] 安装镜像将进入 OOBE，跳过离线 Winlogon/SAM 登录兜底");
-        return Ok(());
-    }
-
-    let system_hive = system_hive_path(target_partition);
-    let software_hive = software_hive_path(target_partition);
-
-    if !Path::new(&system_hive).exists() {
-        anyhow::bail!("{}", tr!("目标 SYSTEM 配置单元不存在: {}", system_hive));
-    }
-
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let system_name = format!("LR_SYS_{}_{}", std::process::id(), nonce);
-    with_loaded_hive(&system_name, &system_hive, || {
-        let select = format!("HKLM\\{}\\Select", system_name);
-        let control_set = OfflineRegistry::query_dword(&select, "Current")
-            .or_else(|_| OfflineRegistry::query_dword(&select, "Default"))?;
-        if !(1..=999).contains(&control_set) {
-            anyhow::bail!("offline SYSTEM Select contains invalid control set {control_set}");
-        }
-        let lsa = format!(
-            "HKLM\\{}\\ControlSet{:03}\\Control\\Lsa",
-            system_name, control_set
-        );
-        OfflineRegistry::set_dword(&lsa, "LimitBlankPasswordUse", 0)
-    })?;
-
-    // 2) SOFTWARE：仅在已知用户名时配置空密码自动登录
-    if !username.is_empty() {
-        if Path::new(&software_hive).exists() {
-            let software_name = format!("LR_SOFT_{}_{}", std::process::id(), nonce);
-            with_loaded_hive(&software_name, &software_hive, || {
-                let winlogon = format!(
-                    "HKLM\\{}\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
-                    software_name
-                );
-                OfflineRegistry::create_key(&winlogon)?;
-                OfflineRegistry::set_string(&winlogon, "AutoAdminLogon", "1")?;
-                OfflineRegistry::set_string(&winlogon, "DefaultUserName", username)?;
-                OfflineRegistry::set_string(&winlogon, "DefaultPassword", "")?;
-                OfflineRegistry::set_dword(&winlogon, "AutoLogonCount", 1)
-            })?;
-        } else {
-            log::warn!(
-                "目标 SOFTWARE 配置单元不存在，跳过自动登录配置: {}",
-                software_hive
-            );
-        }
-
-        // 3) 离线清除该账户的非空密码（备份镜像里账户带密码时，让用户能空密码登录）。
-        //    sysprep 镜像里该账户尚不存在 → 无匹配 → 安全空操作。复用共享库实现。
-        if lr_core::sam::clear_account_password(target_partition, username)? {
-            log::info!("[LOGIN] 已离线清除账户 [{}] 的密码", username);
-        }
-    }
-
-    Ok(())
+    source_is_capture: bool,
+) -> OfflineImageAccountInspection {
+    classify_evidence(
+        read_offline_image_state(target_partition),
+        lr_core::sam::list_accounts(target_partition),
+        source_is_capture,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::image_state_needs_legacy_login_fallback;
+    use super::*;
+
+    fn account(rid: &str, username: &str) -> lr_core::sam::SamAccount {
+        lr_core::sam::SamAccount {
+            username: username.to_string(),
+            rid: rid.to_string(),
+            disabled: false,
+        }
+    }
 
     #[test]
-    fn only_complete_images_use_legacy_login_fallback() {
-        assert!(image_state_needs_legacy_login_fallback(
-            "IMAGE_STATE_COMPLETE"
-        ));
-        assert!(!image_state_needs_legacy_login_fallback(
-            "IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE"
-        ));
-        assert!(!image_state_needs_legacy_login_fallback(
-            "IMAGE_STATE_SPECIALIZE_RESEAL_TO_OOBE"
-        ));
-        assert!(!image_state_needs_legacy_login_fallback("UNKNOWN"));
+    fn stock_builtin_accounts_do_not_turn_a_resealed_image_into_a_backup() {
+        let inspection = classify_evidence(
+            Ok("IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE".to_string()),
+            Ok(vec![
+                account("000001F4", "Administrator"),
+                account("000001F5", "Guest"),
+                account("000001F7", "DefaultAccount"),
+                account("000003E8", "defaultuser0"),
+            ]),
+            false,
+        );
+        assert_eq!(inspection.mode, OfflineImageAccountMode::FreshDeployable);
+        assert_eq!(
+            inspection.builtin_administrator_name.as_deref(),
+            Some("Administrator")
+        );
+        assert_eq!(inspection.ordinary_local_account_count, 0);
+    }
+
+    #[test]
+    fn microsoft_oobe_resealed_state_requires_successful_sam_inventory() {
+        // Exact ImageState observed in Microsoft's 28000.2113 zh-CN Client Pro ISO supplied for
+        // this regression. Microsoft documents this state as generalized and ready to continue to
+        // OOBE. The image-state evidence is valid, but this policy still requires a successful SAM
+        // inventory before enabling account and unattended mutations.
+        let inspection = classify_evidence(
+            Ok("IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE".to_string()),
+            Err(anyhow::anyhow!("offline SAM inventory unavailable")),
+            false,
+        );
+        assert_eq!(inspection.mode, OfflineImageAccountMode::Indeterminate);
+        assert!(inspection.diagnostic.contains("SAM inventory unavailable"));
+    }
+
+    #[test]
+    fn genuine_user_account_overrides_oobe_resealed_state() {
+        let inspection = classify_evidence(
+            Ok("IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE".to_string()),
+            Ok(vec![account("000003E8", "ExistingUser")]),
+            false,
+        );
+        assert_eq!(
+            inspection.mode,
+            OfflineImageAccountMode::PreserveExistingAccounts
+        );
+        assert_eq!(inspection.ordinary_local_account_count, 1);
+    }
+
+    #[test]
+    fn rid_and_windows_owned_name_jointly_distinguish_system_and_user_accounts() {
+        for system in [
+            account("000001F4", "LocalizedAdministrator"),
+            account("000001F5", "LocalizedGuest"),
+            account("000003E8", "defaultuser0"),
+            account("000003E9", "WDAGUtilityAccount"),
+            account("000003EA", "DWM-12"),
+            account("000003EB", "UMFD-0"),
+        ] {
+            assert!(!is_user_owned_local_account(&system), "{}", system.username);
+        }
+        assert!(is_user_owned_local_account(&account(
+            "000003E8",
+            "ActualUser"
+        )));
+        assert!(is_user_owned_local_account(&account(
+            "000003E8",
+            "Administrator"
+        )));
+        assert!(is_user_owned_local_account(&account("000003E9", "NONE")));
+    }
+
+    #[test]
+    fn complete_image_preserves_accounts_even_when_sam_inventory_is_unavailable() {
+        let inspection = classify_evidence(
+            Ok("IMAGE_STATE_COMPLETE".to_string()),
+            Err(anyhow::anyhow!("locked SAM")),
+            false,
+        );
+        assert_eq!(
+            inspection.mode,
+            OfflineImageAccountMode::PreserveExistingAccounts
+        );
+    }
+
+    #[test]
+    fn ordinary_local_account_preserves_accounts_even_if_setup_state_is_unavailable() {
+        let inspection = classify_evidence(
+            Err(anyhow::anyhow!("missing state")),
+            Ok(vec![account("000003E8", "ExistingUser")]),
+            false,
+        );
+        assert_eq!(
+            inspection.mode,
+            OfflineImageAccountMode::PreserveExistingAccounts
+        );
+        assert_eq!(inspection.ordinary_local_account_count, 1);
+    }
+
+    #[test]
+    fn incomplete_or_conflicting_evidence_disables_unattended_without_claiming_backup() {
+        let inspection = classify_evidence(
+            Ok("IMAGE_STATE_UNDEPLOYABLE".to_string()),
+            Ok(vec![account("000001F4", "Administrator")]),
+            false,
+        );
+        assert_eq!(inspection.mode, OfflineImageAccountMode::Indeterminate);
+        assert!(!inspection.allows_new_install_unattended());
+    }
+
+    #[test]
+    fn captured_source_format_always_preserves_the_existing_account_database() {
+        let inspection = classify_evidence(
+            Ok("IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE".to_string()),
+            Ok(vec![]),
+            true,
+        );
+        assert_eq!(
+            inspection.mode,
+            OfflineImageAccountMode::PreserveExistingAccounts
+        );
     }
 }

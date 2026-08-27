@@ -8,6 +8,15 @@ pub fn gbk_to_utf8(bytes: &[u8]) -> String {
     cow.into_owned()
 }
 
+/// Decodes output from Windows inbox console tools. Recent tools may emit UTF-8 while localized
+/// legacy tools normally inherit the system OEM/ANSI code page; preserve valid UTF-8 and use GBK
+/// only when the byte stream is not UTF-8.
+pub fn decode_windows_console_output(bytes: &[u8]) -> String {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .unwrap_or_else(|_| gbk_to_utf8(bytes))
+}
+
 /// 将 UTF-8 字符串转换为 GBK 编码的字节
 pub fn utf8_to_gbk(s: &str) -> Vec<u8> {
     let (cow, _, _) = GBK.encode(s);
@@ -29,6 +38,18 @@ mod tests {
         // “你好” 的 GBK 编码 = C4 E3 BA C3
         assert_eq!(gbk_to_utf8(&[0xC4, 0xE3, 0xBA, 0xC3]), "你好");
         assert_eq!(utf8_to_gbk("你好"), vec![0xC4, 0xE3, 0xBA, 0xC3]);
+    }
+
+    #[test]
+    fn console_output_keeps_utf8_and_falls_back_to_gbk() {
+        assert_eq!(
+            decode_windows_console_output("驱动已加载".as_bytes()),
+            "驱动已加载"
+        );
+        assert_eq!(
+            decode_windows_console_output(&utf8_to_gbk("没有为设备选择驱动程序")),
+            "没有为设备选择驱动程序"
+        );
     }
 
     #[test]

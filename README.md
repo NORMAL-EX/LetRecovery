@@ -113,7 +113,7 @@ LetRecovery/
 
 ### 前置条件
 
-- Rust 1.88 或更高版本（CI 使用 1.88.0）
+- Rust 1.88.0 与该工具链的 `rust-src` 组件（正常端 Win7 构建与 CI 固定使用该版本）
 - Visual Studio Build Tools 2022，并安装“使用 C++ 的桌面开发”和 Windows 10/11 SDK
 - Node.js 22 与 npm（仅构建官网时需要）
 - 完整发布打包还需要 7-Zip 与 Windows DISM/ADK 环境
@@ -125,8 +125,12 @@ LetRecovery/
 git clone https://github.com/NORMAL-EX/LetRecovery.git
 cd LetRecovery
 
-# 在 workspace 根目录按锁文件构建两端
-cargo build --workspace --release --locked
+# 正常系统端必须使用 Win7 目标重编译标准库，并在构建后检查导入表
+rustup toolchain install 1.88.0 --component rust-src
+powershell -ExecutionPolicy Bypass -File .github/scripts/build-win7-normal.ps1
+
+# PE 端仅运行在现代 WinPE，继续使用普通 Windows MSVC 目标单独构建
+cargo +1.88.0 build -p letrecovery-pe --release --locked --target x86_64-pc-windows-msvc
 
 # 构建官网
 cd 官网
@@ -135,6 +139,8 @@ npm run lint
 npm run type-check
 npm run build
 ```
+
+> 不要用 `cargo build --workspace --release` 生成要在 Windows 7 上运行的正常端程序。该命令会使用宿主机的 `x86_64-pc-windows-msvc` 标准库，可能静态导入 Windows 8+ API。本地与 Release 必须统一通过 `build-win7-normal.ps1` 生成并验证 `target/x86_64-win7-windows-msvc/release/LetRecovery.exe`。
 
 提交前应运行：
 

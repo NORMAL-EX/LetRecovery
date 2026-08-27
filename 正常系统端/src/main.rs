@@ -24,7 +24,408 @@ pub struct PreloadedConfig {
     pub pca_firmware_receiver: Mutex<Option<Receiver<lr_core::boot_pca::FirmwarePcaInfo>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupRoute {
+    Gui,
+    PublicCli,
+    InternalCompatibilityCli,
+    InternalNativeHelper,
+    RejectedLegacyCli,
+    UnsupportedArguments,
+}
+
+fn classify_startup_route(args: &[String]) -> StartupRoute {
+    let Some(first) = args.get(1).map(String::as_str) else {
+        return StartupRoute::Gui;
+    };
+    #[cfg(feature = "non-elevated-tests")]
+    if first == "--ui-personal-restore-progress-preview" && args.len() == 2 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    #[cfg(feature = "non-elevated-tests")]
+    if matches!(
+        first,
+        "--ui-preview"
+            | "--ui-error-preview"
+            | "--ui-progress-preview"
+            | "--ui-pe-maintenance-preview"
+            | "--ui-about-preview"
+    ) {
+        return StartupRoute::Gui;
+    }
+    if matches!(
+        first,
+        "help" | "--help" | "-h" | "install" | "backup" | "config" | "inspect" | "update" | "tool"
+    ) || first.eq_ignore_ascii_case("--install")
+        || first.eq_ignore_ascii_case("/INSTALL")
+    {
+        return StartupRoute::PublicCli;
+    }
+    if is_restore_windows_update_arg(first) && args.len() == 2 {
+        return StartupRoute::InternalCompatibilityCli;
+    }
+    if first == "--internal-prepare-local-rid" && args.len() == 4 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-store-builtin-administrator-secret" && args.len() == 2 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if matches!(
+        first,
+        "--internal-begin-builtin-administrator-transition"
+            | "--internal-finish-builtin-administrator-transition"
+            | "--internal-retire-builtin-administrator-transition"
+    ) && args.len() == 4
+    {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-begin-builtin-administrator-transition-with-personal-restore"
+        && args.len() == 5
+    {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-delete-temporary-oobe-account" && args.len() == 3 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-cleanup-disabled-defaultuser0" && args.len() == 2 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-restore-personal-files" && args.len() == 3 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-restore-personal-files-at-shell" && args.len() == 3 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-personal-restore-progress-shell" && args.len() == 3 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if matches!(
+        first,
+        "--internal-activate-personal-restore-shell-gate"
+            | "--internal-begin-personal-restore-second-logon"
+            | "--internal-restore-personal-files-before-shell"
+            | "--internal-rearm-personal-restore-before-shell"
+    ) && args.len() == 3
+    {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-restore-personal-files-after-shell" && args.len() == 4 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if first == "--internal-register-personal-files-at-shell" && args.len() == 4 {
+        return StartupRoute::InternalNativeHelper;
+    }
+    if (first.eq_ignore_ascii_case("/PEINSTALL")
+        || first.eq_ignore_ascii_case("--pe-install")
+        || first.eq_ignore_ascii_case("/PEBACKUP")
+        || first.eq_ignore_ascii_case("--pe-backup"))
+        && args.len() == 2
+    {
+        return StartupRoute::RejectedLegacyCli;
+    }
+    StartupRoute::UnsupportedArguments
+}
+
+const fn should_request_gui_elevation(
+    route: StartupRoute,
+    already_admin: bool,
+    non_elevated_test_build: bool,
+) -> bool {
+    matches!(route, StartupRoute::Gui) && !already_admin && !non_elevated_test_build
+}
+
 fn main() -> anyhow::Result<()> {
+    // Route arguments before loading configuration, initializing logging, or entering any GUI
+    // elevation path. CLI and internal compatibility routes never self-elevate.
+    let args: Vec<String> = std::env::args().collect();
+    let startup_route = classify_startup_route(&args);
+    if startup_route == StartupRoute::InternalNativeHelper {
+        let required_specialize_account_prepare = matches!(
+            args.get(1).map(String::as_str),
+            Some("--internal-prepare-local-rid")
+                | Some("--internal-store-builtin-administrator-secret")
+        );
+        #[cfg(feature = "non-elevated-tests")]
+        let personal_restore_progress_preview =
+            args.get(1).map(String::as_str) == Some("--ui-personal-restore-progress-preview");
+        #[cfg(not(feature = "non-elevated-tests"))]
+        let personal_restore_progress_preview = false;
+        let result = if personal_restore_progress_preview {
+            lr_core::first_logon::run_personal_restore_progress_preview()
+        } else if args.get(1).map(String::as_str)
+            == Some("--internal-store-builtin-administrator-secret")
+        {
+            lr_core::first_logon::protect_staged_builtin_administrator_secret()
+        } else if args.get(1).map(String::as_str)
+            == Some("--internal-personal-restore-progress-shell")
+        {
+            match args.get(2) {
+                Some(session_id) => {
+                    lr_core::first_logon::run_personal_restore_progress_shell(session_id)
+                }
+                None => Err(anyhow::anyhow!(
+                    "missing personal-file progress Shell session id"
+                )),
+            }
+        } else if matches!(
+            args.get(1).map(String::as_str),
+            Some("--internal-activate-personal-restore-shell-gate")
+                | Some("--internal-begin-personal-restore-second-logon")
+                | Some("--internal-rearm-personal-restore-before-shell")
+        ) {
+            match args.get(2) {
+                Some(session_id) => match args.get(1).map(String::as_str) {
+                    Some("--internal-activate-personal-restore-shell-gate") => {
+                        lr_core::first_logon::activate_personal_restore_shell_gate(session_id)
+                    }
+                    Some("--internal-begin-personal-restore-second-logon") => {
+                        lr_core::first_logon::begin_personal_restore_second_logon(session_id)
+                    }
+                    Some("--internal-rearm-personal-restore-before-shell") => {
+                        lr_core::first_logon::rearm_personal_restore_before_shell(session_id)
+                    }
+                    _ => unreachable!("startup route already classified the helper switch"),
+                },
+                None => Err(anyhow::anyhow!(
+                    "missing personal-file Shell gate session id"
+                )),
+            }
+        } else if matches!(
+            args.get(1).map(String::as_str),
+            Some("--internal-restore-personal-files")
+                | Some("--internal-restore-personal-files-at-shell")
+                | Some("--internal-restore-personal-files-before-shell")
+                | Some("--internal-restore-personal-files-after-shell")
+        ) {
+            match args.get(2) {
+                Some(session_id) => {
+                    let report = match args.get(1).map(String::as_str) {
+                        Some("--internal-restore-personal-files-at-shell") => {
+                            lr_core::first_logon::restore_personal_files_at_shell(session_id)?
+                        }
+                        Some("--internal-restore-personal-files-before-shell") => {
+                            lr_core::first_logon::restore_personal_files_before_shell(session_id)?
+                        }
+                        Some("--internal-restore-personal-files-after-shell") => {
+                            let automation = match args.get(3).map(String::as_str) {
+                                Some("true") => true,
+                                Some("false") => false,
+                                _ => anyhow::bail!(
+                                    "invalid personal-file Explorer-stage automation flag"
+                                ),
+                            };
+                            lr_core::first_logon::restore_personal_files_after_shell(
+                                session_id,
+                                automation,
+                            )?
+                        }
+                        _ => Some(
+                            lr_core::personal_files::restore_preserved_personal_files_for_current_user(
+                                session_id,
+                            )?,
+                        ),
+                    };
+                    if let Some(report) = report {
+                        println!(
+                            "completed profile={} sources={} directories={} files={} conflicts={}",
+                            report.current_profile_root.display(),
+                            report.source_profiles,
+                            report.restored_directories,
+                            report.restored_files,
+                            report.renamed_conflicts
+                        );
+                        for (name, path) in [
+                            "Desktop",
+                            "Documents",
+                            "Downloads",
+                            "Pictures",
+                            "Music",
+                            "Videos",
+                        ]
+                        .into_iter()
+                        .zip(report.personal_directories.iter())
+                        {
+                            println!(
+                                "destination scope=personal name={name} path={}",
+                                path.display()
+                            );
+                        }
+                        for (name, path) in [
+                            "Desktop",
+                            "Documents",
+                            "Downloads",
+                            "Pictures",
+                            "Music",
+                            "Videos",
+                        ]
+                        .into_iter()
+                        .zip(report.public_directories.iter())
+                        {
+                            println!(
+                                "destination scope=public name={name} path={}",
+                                path.display()
+                            );
+                        }
+                    } else {
+                        println!("completed cleanup-only receipt={session_id}");
+                    }
+                    Ok(())
+                }
+                None => Err(anyhow::anyhow!("missing personal-file restore session id")),
+            }
+        } else if args.get(1).map(String::as_str)
+            == Some("--internal-register-personal-files-at-shell")
+        {
+            match (args.get(2), args.get(3)) {
+                (Some(session_id), Some(launcher)) => {
+                    lr_core::first_logon::register_personal_restore_at_shell(
+                        session_id,
+                        std::path::Path::new(launcher),
+                    )
+                }
+                _ => Err(anyhow::anyhow!(
+                    "missing personal-file Explorer-stage registration arguments"
+                )),
+            }
+        } else if matches!(
+            args.get(1).map(String::as_str),
+            Some("--internal-begin-builtin-administrator-transition")
+                | Some("--internal-begin-builtin-administrator-transition-with-personal-restore")
+                | Some("--internal-finish-builtin-administrator-transition")
+                | Some("--internal-retire-builtin-administrator-transition")
+        ) {
+            match (args.get(2), args.get(3)) {
+                (Some(desired_name), Some(temporary_name)) => {
+                    let desired_name =
+                        lr_core::windows_accounts::decode_account_name_utf16_hex(desired_name)
+                            .map_err(anyhow::Error::from)?;
+                    let temporary_name =
+                        lr_core::windows_accounts::decode_account_name_utf16_hex(temporary_name)
+                            .map_err(anyhow::Error::from)?;
+                    match args.get(1).map(String::as_str) {
+                        Some("--internal-begin-builtin-administrator-transition") => {
+                            lr_core::first_logon::begin_builtin_administrator_transition(
+                                &desired_name,
+                                &temporary_name,
+                            )
+                        }
+                        Some(
+                            "--internal-begin-builtin-administrator-transition-with-personal-restore",
+                        ) => match args.get(4) {
+                            Some(session_id) => lr_core::first_logon::begin_builtin_administrator_transition_with_personal_restore(
+                                &desired_name,
+                                &temporary_name,
+                                session_id,
+                            ),
+                            None => Err(anyhow::anyhow!(
+                                "missing built-in Administrator personal-file session id"
+                            )),
+                        },
+                        Some("--internal-finish-builtin-administrator-transition") => {
+                            lr_core::first_logon::finish_builtin_administrator_transition(
+                                &desired_name,
+                                &temporary_name,
+                            )
+                        }
+                        Some("--internal-retire-builtin-administrator-transition") => {
+                            lr_core::first_logon::retire_builtin_administrator_transition(
+                                &desired_name,
+                                &temporary_name,
+                            )
+                        }
+                        _ => unreachable!("startup route already classified the helper switch"),
+                    }
+                }
+                _ => Err(anyhow::anyhow!(
+                    "missing built-in Administrator transition identities"
+                )),
+            }
+        } else if args.get(1).map(String::as_str)
+            == Some("--internal-cleanup-disabled-defaultuser0")
+        {
+            lr_core::windows_accounts::cleanup_disabled_default_oobe_account()
+                .map(|removed| println!("completed removed={removed}"))
+                .map_err(anyhow::Error::from)
+        } else if args.get(1).map(String::as_str)
+            == Some("--internal-delete-temporary-oobe-account")
+        {
+            match args.get(2) {
+                Some(name) => lr_core::windows_accounts::decode_account_name_utf16_hex(name)
+                    .and_then(|name| {
+                        lr_core::unattend_account::validate_temporary_oobe_account_name(&name)
+                            .map_err(|_| {
+                                lr_core::windows_accounts::AccountUpdateError::InvalidAccount
+                            })?;
+                        lr_core::windows_accounts::delete_local_account(&name)
+                    })
+                    .map_err(anyhow::Error::from),
+                None => Err(anyhow::anyhow!("missing temporary OOBE account identity")),
+            }
+        } else {
+            match (args.get(2).map(String::as_str), args.get(3)) {
+                (Some("500"), Some(name)) => {
+                    lr_core::windows_accounts::decode_account_name_utf16_hex(name)
+                        .and_then(|name| {
+                            lr_core::windows_accounts::prepare_local_account_by_rid(500, &name)
+                        })
+                        .map_err(anyhow::Error::from)
+                }
+                _ => Err(anyhow::anyhow!("invalid internal account-helper arguments")),
+            }
+        };
+        if let Err(error) = result {
+            println!("failed: {error:#}");
+            std::process::exit(if required_specialize_account_prepare {
+                lr_core::unattend_command::REQUIRED_SPECIALIZE_FAILURE_EXIT_CODE
+            } else {
+                1
+            });
+        }
+        std::process::exit(0);
+    }
+    if startup_route == StartupRoute::UnsupportedArguments {
+        std::process::exit(core::cli::startup_usage_error(
+            "unrecognized arguments; use 'help' for the public normal-Windows CLI",
+        ));
+    }
+    if startup_route == StartupRoute::RejectedLegacyCli {
+        std::process::exit(core::cli::startup_usage_error(
+            "deprecated normal-endpoint PE install/backup switches are permanently rejected; use the public normal-Windows install/backup CLI",
+        ));
+    }
+    let restore_windows_update = match parse_restore_windows_update_cli(&args) {
+        Ok(value) => value,
+        Err(error) => std::process::exit(core::cli::startup_usage_error(error)),
+    };
+
+    #[cfg(feature = "non-elevated-tests")]
+    let non_elevated_test_build = true;
+    #[cfg(not(feature = "non-elevated-tests"))]
+    let non_elevated_test_build = false;
+
+    if startup_route == StartupRoute::InternalCompatibilityCli {
+        if non_elevated_test_build {
+            std::process::exit(core::cli::development_run_denied());
+        }
+        if !utils::privilege::is_admin() {
+            std::process::exit(core::cli::administrator_required_for(
+                "the internal compatibility command",
+            ));
+        }
+    }
+
+    if should_request_gui_elevation(
+        startup_route,
+        utils::privilege::is_admin(),
+        non_elevated_test_build,
+    ) {
+        if let Err(error) = utils::privilege::restart_gui_as_admin() {
+            native_ui::enable_process_dpi_awareness();
+            show_error_message(&format!("无法获取管理员权限：{error}"));
+        }
+        return Ok(());
+    }
+
     // Suppress the system's modal "No disk" critical-error dialog before any background
     // preload probes drive letters. Empty/ejected optical drives are valid and must be skipped,
     // not allowed to block the whole process behind a system-owned retry dialog.
@@ -42,12 +443,34 @@ fn main() -> anyhow::Result<()> {
     // DPI instead of being bitmap-scaled and blurred by USER32.
     native_ui::enable_process_dpi_awareness();
 
+    if startup_route == StartupRoute::PublicCli {
+        if let Some(exit_code) = core::cli::execute_args(&args) {
+            std::process::exit(exit_code);
+        }
+        #[cfg(feature = "non-elevated-tests")]
+        if core::cli::is_destructive_run_request(&args) {
+            std::process::exit(core::cli::development_run_denied());
+        }
+        #[cfg(not(feature = "non-elevated-tests"))]
+        if core::cli::requires_administrator(&args) && !utils::privilege::is_admin() {
+            std::process::exit(core::cli::administrator_required());
+        }
+    }
+
     // 加载应用配置（用于获取日志设置）
     let app_config = core::app_config::AppConfig::load();
 
     // 初始化日志系统
     if let Err(e) = utils::logger::LogManager::init(app_config.log_enabled) {
-        eprintln!("日志系统初始化失败: {}", e);
+        if startup_route == StartupRoute::PublicCli {
+            core::cli::emit_progress(serde_json::json!({
+                "event": "warning",
+                "code": "logger_initialization_failed",
+                "message": e.to_string(),
+            }));
+        } else {
+            eprintln!("日志系统初始化失败: {}", e);
+        }
         // 即使日志初始化失败，程序也应该继续运行
     }
 
@@ -64,11 +487,16 @@ fn main() -> anyhow::Result<()> {
     // 应用 WIM 镜像引擎选择（libwim / wimgapi），供后续所有镜像操作使用
     app_config.apply_wim_engine();
 
+    if startup_route == StartupRoute::PublicCli {
+        if let Some(exit_code) = core::cli::execute_runtime_args(&args) {
+            std::process::exit(exit_code);
+        }
+    }
+
     log::info!("LetRecovery 启动中...");
     log::info!(
-        "[诊断环境] 软件版本: build={} | package={} | channel={} | arch={}",
+        "[诊断环境] 软件版本: version={} | channel={} | arch={}",
         env!("BUILD_VERSION"),
-        env!("CARGO_PKG_VERSION"),
         if crate::build_info::DEV {
             "dev-build"
         } else {
@@ -76,9 +504,6 @@ fn main() -> anyhow::Result<()> {
         },
         std::env::consts::ARCH
     );
-
-    // 检查命令行参数，处理PE环境下的自动安装/备份
-    let args: Vec<String> = std::env::args().collect();
 
     #[cfg(feature = "non-elevated-tests")]
     if args.iter().any(|arg| arg == "--ui-error-preview") {
@@ -95,56 +520,15 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // 该 feature 只用于无副作用的 UI/单元测试。即使调用者传入正式操作参数，
-    // 也不能在非管理员开发构建中进入安装、备份或 PE 工作流。
-    #[cfg(feature = "non-elevated-tests")]
-    if args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "/INSTALL" | "--install" | "/PEINSTALL" | "--pe-install" | "/PEBACKUP" | "--pe-backup"
-        )
-    }) {
-        log::error!("开发 UI 测试构建拒绝执行安装、备份或 PE 命令行入口");
-        return Ok(());
-    }
-
-    // 开发 UI 测试构建必须保持 asInvoker，避免每次视觉迭代都弹 UAC。
-    // build.rs 已拒绝 release + non-elevated-tests，因此正式产物仍强制管理员权限。
     #[cfg(not(feature = "non-elevated-tests"))]
-    {
-        if !utils::privilege::is_admin() {
-            log::warn!("需要管理员权限，正在尝试提升权限...");
-            if let Err(e) = utils::privilege::restart_as_admin() {
-                log::error!("提升权限失败: {}", e);
-                log::error!("需要管理员权限运行此程序");
-                show_error_message(&format!("无法获取管理员权限：{e}"));
-            }
-            return Ok(());
-        }
-        log::info!("已获得管理员权限");
+    log::info!("已获得管理员权限，或正在执行不需提权的公开 CLI");
+
+    if let Some(exit_code) = core::cli::execute_run_args(&args) {
+        std::process::exit(exit_code);
     }
 
-    #[cfg(feature = "non-elevated-tests")]
-    log::warn!("开发 UI 测试构建：已跳过管理员检测和自动提权");
-
-    // Legacy PE automation remains supported, but it must obey the same elevation boundary as
-    // every other disk-mutating command-line entry.
-    if args.contains(&"/PEINSTALL".to_string()) || args.contains(&"--pe-install".to_string()) {
-        log::info!("检测到PE安装模式，执行自动安装...");
-        return run_pe_install();
-    }
-
-    if args.contains(&"/PEBACKUP".to_string()) || args.contains(&"--pe-backup".to_string()) {
-        log::info!("检测到PE备份模式，执行自动备份...");
-        return run_pe_backup();
-    }
-
-    // 命令行无人值守安装：--install --config <install.json> [--advanced <advanced.json>]
-    // 放在确认管理员权限之后、GUI 初始化之前；不进 GUI，准备好后（默认）重启进 PE 完成安装。
-    if args.contains(&"/INSTALL".to_string()) || args.contains(&"--install".to_string()) {
-        let config = arg_value(&args, &["--config", "/CONFIG"]);
-        let advanced = arg_value(&args, &["--advanced", "/ADVANCED"]);
-        return run_cli_install_entry(config.as_deref(), advanced.as_deref());
+    if restore_windows_update {
+        return run_restore_windows_update_cli();
     }
 
     // 记录本机配置信息，便于用户反馈问题时开发者排查
@@ -161,25 +545,42 @@ fn main() -> anyhow::Result<()> {
     }
 
     #[cfg(feature = "non-elevated-tests")]
-    if args.iter().any(|arg| arg == "--ui-preview")
-        || std::env::var_os("LETRECOVERY_UI_SKIP_PRELOAD").is_some()
     {
-        // Deterministic visual-regression entry: bypass single-instance state and vendor
-        // WMI/SetupAPI providers, but retain the real config, native controls and message loop.
-        // This branch is absent from release builds and the dangerous CLI guard has already run.
-        // Visual/non-elevated runs must not change the host wallpaper or start packaged audio.
-        // The production path below still synchronizes the easter egg for the selected language.
-        let run_result = native_ui::run(Arc::new(PreloadedConfig {
-            app_config: app_config.clone(),
-            remote_config: None,
-            system_info: None,
-            hardware_info: None,
-            partitions: Vec::new(),
-            pca_firmware_receiver: Mutex::new(None),
-        }));
-        utils::dprk_easter_egg::shutdown();
-        run_result?;
-        return Ok(());
+        let progress_preview = args.iter().any(|arg| arg == "--ui-progress-preview");
+        let pe_maintenance_preview = args.iter().any(|arg| arg == "--ui-pe-maintenance-preview");
+        let about_preview = args.iter().any(|arg| arg == "--ui-about-preview");
+        if args.iter().any(|arg| arg == "--ui-preview")
+            || progress_preview
+            || pe_maintenance_preview
+            || about_preview
+            || std::env::var_os("LETRECOVERY_UI_SKIP_PRELOAD").is_some()
+        {
+            // Deterministic visual-regression entry: bypass single-instance state and vendor
+            // WMI/SetupAPI providers, but retain the real config, native controls and message loop.
+            // This branch is absent from release builds and the dangerous CLI guard has already run.
+            // Visual/non-elevated runs must not change the host wallpaper or start packaged audio.
+            // The production path below still synchronizes the easter egg for the selected language.
+            let preview_config = Arc::new(PreloadedConfig {
+                app_config: app_config.clone(),
+                remote_config: None,
+                system_info: None,
+                hardware_info: None,
+                partitions: Vec::new(),
+                pca_firmware_receiver: Mutex::new(None),
+            });
+            let run_result = if progress_preview {
+                native_ui::run_progress_preview(preview_config)
+            } else if pe_maintenance_preview {
+                native_ui::run_pe_maintenance_preview(preview_config)
+            } else if about_preview {
+                native_ui::run_about_preview(preview_config)
+            } else {
+                native_ui::run(preview_config)
+            };
+            utils::dprk_easter_egg::shutdown();
+            run_result?;
+            return Ok(());
+        }
     }
 
     #[cfg(not(feature = "non-elevated-tests"))]
@@ -296,8 +697,8 @@ fn preload_all_config(
 
     let partitions_handle = std::thread::spawn(|| {
         log::info!("开始获取分区信息...");
-        let partitions = core::disk::DiskManager::get_partitions().unwrap_or_default();
-        log::info!("分区信息获取完成: {} 个分区", partitions.len());
+        let partitions = core::disk::DiskManager::get_install_partitions().unwrap_or_default();
+        log::info!("可安装分区信息获取完成: {} 个分区", partitions.len());
         partitions
     });
 
@@ -469,12 +870,12 @@ fn log_partition_environment(partitions: &[core::disk::Partition]) {
 /// 检查系统核心组件完整性（用于检测极限精简系统）
 /// 返回 Ok(()) 表示所有组件存在，Err(Vec<String>) 包含缺失的组件列表
 fn check_system_components() -> Result<(), Vec<String>> {
-    // 获取系统盘路径 (通过 SYSTEMROOT 环境变量，通常为 C:\Windows)
-    let system_root = std::env::var("SYSTEMROOT")
-        .or_else(|_| std::env::var("WINDIR"))
-        .unwrap_or_else(|_| "C:\\Windows".to_string());
-
-    let system32_path = std::path::Path::new(&system_root).join("System32");
+    let system32_path = match lr_core::windows_compat::system_directory() {
+        Ok(path) => path,
+        Err(error) => {
+            return Err(vec![format!("无法通过 Windows API 定位系统目录 - {error}")]);
+        }
+    };
 
     // 必需的系统组件列表
     // 注：WIM 处理已改用内置的 libwim-15.dll，不再依赖系统 wimgapi.dll
@@ -497,388 +898,45 @@ fn check_system_components() -> Result<(), Vec<String>> {
     }
 }
 
-/// PE环境下自动执行安装
-/// 从参数列表取某个带值参数的值，支持 `--name value` 与 `--name=value`（名称大小写不敏感）。
-fn arg_value(args: &[String], names: &[&str]) -> Option<String> {
-    for (i, a) in args.iter().enumerate() {
-        for name in names {
-            if a.eq_ignore_ascii_case(name) {
-                return args.get(i + 1).cloned();
-            }
-            let prefix = format!("{}=", name);
-            if a.len() >= prefix.len() && a[..prefix.len()].eq_ignore_ascii_case(&prefix) {
-                return Some(a[prefix.len()..].to_string());
-            }
-        }
-    }
-    None
+fn is_restore_windows_update_arg(value: &str) -> bool {
+    value.eq_ignore_ascii_case("--restore-windows-update")
+        || value.eq_ignore_ascii_case("/RESTORE-WINDOWS-UPDATE")
 }
 
-/// `--install` 入口：校验参数后调用命令行无人值守安装。
-fn run_cli_install_entry(config: Option<&str>, advanced: Option<&str>) -> anyhow::Result<()> {
-    let config = match config {
-        Some(c) if !c.is_empty() => c,
-        _ => {
-            log::error!("[CLI INSTALL] 缺少 --config <install.json>");
-            log::error!(
-                "用法: LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]"
-            );
-            return Ok(());
-        }
-    };
-    if let Err(e) = core::cli_install::run_cli_install(config, advanced) {
-        log::error!("[CLI INSTALL] 失败: {:#}", e);
+/// Parse the fixed, parameterless Windows Update restore maintenance command.
+/// Other application arguments retain their existing behavior, but once this command is present
+/// it must be the only argument so a caller cannot accidentally combine restoration with install.
+fn parse_restore_windows_update_cli(args: &[String]) -> anyhow::Result<bool> {
+    let matches = args
+        .iter()
+        .skip(1)
+        .filter(|arg| is_restore_windows_update_arg(arg))
+        .count();
+    if matches == 0 {
+        return Ok(false);
     }
+    if matches != 1 || args.len() != 2 {
+        anyhow::bail!(
+            "--restore-windows-update is parameterless and cannot be combined with other commands"
+        );
+    }
+    Ok(true)
+}
+
+fn run_restore_windows_update_cli() -> anyhow::Result<()> {
+    let report = core::cli_update::restore_current_windows_update()?;
+    if !report.warnings.is_empty() || !report.missing_services.is_empty() {
+        log::error!(
+            "[UPDATE_RESTORE] compatibility_exit=partial restored={} missing_services={} warning_count={}",
+            report.applied_values,
+            report.missing_services.len(),
+            report.warnings.len()
+        );
+        utils::logger::LogManager::flush();
+        anyhow::bail!("Windows Update restore completed only partially");
+    }
+    utils::logger::LogManager::flush();
     Ok(())
-}
-
-fn run_pe_install() -> anyhow::Result<()> {
-    use core::install_config::ConfigFileManager;
-
-    log::info!("[PE INSTALL] ========== PE自动安装模式 ==========");
-
-    let (data_partition, target_partition, config) = match ConfigFileManager::find_install_task() {
-        Ok(task) => task,
-        Err(error) => {
-            log::error!("[PE INSTALL] 无法确认安装任务: {error}");
-            show_error_message(&format!("无法确认本次安装任务: {error}"));
-            return Ok(());
-        }
-    };
-
-    log::info!("[PE INSTALL] 数据分区: {}", data_partition);
-
-    log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
-    log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
-
-    // The staged image is a single file name. Reject absolute paths and traversal from a
-    // modified/stale INI before any image verification or target-volume write can begin.
-    if let Err(error) = lr_core::download_integrity::validate_download_filename(&config.image_path)
-    {
-        log::error!("[PE INSTALL] 错误: 无效的镜像文件名: {error}");
-        show_error_message(&format!("安装配置中的镜像文件名无效: {error}"));
-        return Ok(());
-    }
-
-    // 构建完整镜像路径
-    let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-    let image_path = std::path::Path::new(&data_dir)
-        .join(&config.image_path)
-        .to_string_lossy()
-        .into_owned();
-
-    if !std::path::Path::new(&image_path).exists() {
-        log::error!("[PE INSTALL] 错误: 镜像文件不存在: {}", image_path);
-        show_error_message(&format!("镜像文件不存在: {}", image_path));
-        return Ok(());
-    }
-
-    log::info!("[PE INSTALL] 完整镜像路径: {}", image_path);
-
-    // 执行安装
-    let result = execute_pe_install(&target_partition, &image_path, &config, &data_dir);
-
-    // 清理标记文件
-    ConfigFileManager::cleanup_partition_markers(&target_partition);
-
-    match result {
-        Ok(_) => {
-            log::info!("[PE INSTALL] 安装完成!");
-            if config.auto_reboot {
-                log::info!("[PE INSTALL] 即将重启...");
-                if let Err(error) = lr_core::windows_shutdown::schedule_restart(
-                    10,
-                    "LetRecovery 系统安装完成，即将重启...",
-                ) {
-                    log::error!("[PE INSTALL] 安排重启失败: {error}");
-                    show_error_message(&format!("安排重启失败: {error}"));
-                }
-            } else {
-                show_success_message("系统安装完成！请手动重启计算机。");
-            }
-        }
-        Err(e) => {
-            log::error!("[PE INSTALL] 安装失败: {}", e);
-            show_error_message(&format!("系统安装失败: {}", e));
-        }
-    }
-
-    Ok(())
-}
-
-/// PE环境下自动执行备份
-fn run_pe_backup() -> anyhow::Result<()> {
-    use core::install_config::ConfigFileManager;
-
-    log::info!("[PE BACKUP] ========== PE自动备份模式 ==========");
-
-    // 查找配置文件所在分区
-    let data_partition = match ConfigFileManager::find_data_partition() {
-        Some(p) => p,
-        None => {
-            log::error!("[PE BACKUP] 错误: 未找到备份配置文件");
-            show_error_message("未找到备份配置文件，无法继续备份。");
-            return Ok(());
-        }
-    };
-
-    log::info!("[PE BACKUP] 数据分区: {}", data_partition);
-
-    // 读取备份配置
-    let config = match ConfigFileManager::read_backup_config(&data_partition) {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("[PE BACKUP] 错误: 读取配置失败: {}", e);
-            show_error_message(&format!("读取备份配置失败: {}", e));
-            return Ok(());
-        }
-    };
-
-    log::info!("[PE BACKUP] 源分区: {}", config.source_partition);
-    log::info!("[PE BACKUP] 保存路径: {}", config.save_path);
-
-    // 查找备份标记分区
-    let source_partition = match ConfigFileManager::find_backup_marker_partition() {
-        Some(p) => p,
-        None => config.source_partition.clone(),
-    };
-
-    // 执行备份
-    let result = execute_pe_backup(&source_partition, &config);
-
-    // 清理标记文件
-    ConfigFileManager::cleanup_partition_markers(&source_partition);
-
-    match result {
-        Ok(_) => {
-            log::info!("[PE BACKUP] 备份完成!");
-            show_success_message(&format!("系统备份完成！\n保存位置: {}", config.save_path));
-        }
-        Err(e) => {
-            log::error!("[PE BACKUP] 备份失败: {}", e);
-            show_error_message(&format!("系统备份失败: {}", e));
-        }
-    }
-
-    Ok(())
-}
-
-/// 执行PE安装
-fn execute_pe_install(
-    target_partition: &str,
-    image_path: &str,
-    config: &core::install_config::InstallConfig,
-    data_dir: &str,
-) -> anyhow::Result<()> {
-    use anyhow::Context;
-
-    log::info!("[PE INSTALL] Step 0: 格式化前校验镜像");
-    let verification = core::image_verify::ImageVerifier::new().verify(image_path, None);
-    if verification.status != core::image_verify::VerifyStatus::Valid {
-        anyhow::bail!("镜像校验失败，未格式化目标分区: {}", verification.message);
-    }
-
-    log::info!("[PE INSTALL] Step 1: 格式化分区");
-    lr_core::format_command::FormatCommandSpec::new(target_partition, "NTFS", None)
-        .map_err(|error| anyhow::anyhow!("无效的格式化参数: {error}"))?;
-    let drive_letter = target_partition
-        .trim()
-        .chars()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("格式化目标缺少盘符"))?;
-    lr_core::windows_storage::format_drive(
-        drive_letter,
-        lr_core::windows_storage::FileSystem::Ntfs,
-        "",
-    )
-    .map_err(|error| anyhow::anyhow!("格式化分区失败: {error}"))?;
-
-    log::info!("[PE INSTALL] Step 2: 释放镜像");
-    // 释放镜像
-    let apply_dir = format!("{}\\", target_partition);
-
-    if config.is_gho {
-        // GHO镜像使用Ghost
-        let ghost = core::ghost::Ghost::new();
-        if !ghost.is_available() {
-            anyhow::bail!("Ghost工具不可用");
-        }
-
-        let partitions = core::disk::DiskManager::get_partitions().unwrap_or_default();
-        ghost.restore_image_to_letter(image_path, target_partition, &partitions, None)?;
-    } else {
-        // WIM/ESD使用DISM
-        let dism = core::dism::Dism::new();
-        dism.apply_image(image_path, &apply_dir, config.volume_index, None)?;
-    }
-
-    log::info!("[PE INSTALL] Step 3: 导入驱动");
-    // 导入驱动
-    if config.restore_drivers {
-        let driver_path = format!("{}\\drivers", data_dir);
-        if !std::path::Path::new(&driver_path).is_dir() {
-            anyhow::bail!("请求恢复驱动，但驱动目录不存在: {}", driver_path);
-        }
-        let dism = core::dism::Dism::new();
-        dism.add_drivers_offline(&apply_dir, &driver_path)?;
-        lr_core::driver::verify_offline_storage_driver_requirements(
-            std::path::Path::new(&apply_dir),
-            std::path::Path::new(&driver_path),
-        )?;
-    }
-
-    log::info!("[PE INSTALL] Step 4: 修复引导");
-    // 修复引导
-    let boot_manager = core::bcdedit::BootManager::new();
-    let use_uefi = match config.boot_mode {
-        1 => true,
-        2 => false,
-        _ => {
-            let target_style =
-                core::disk::DiskManager::get_partitions()
-                    .ok()
-                    .and_then(|partitions| {
-                        partitions
-                            .into_iter()
-                            .find(|partition| {
-                                partition.letter.eq_ignore_ascii_case(target_partition)
-                            })
-                            .map(|partition| partition.partition_style)
-                    });
-            match target_style {
-                Some(core::disk::PartitionStyle::GPT) => true,
-                Some(core::disk::PartitionStyle::MBR) => false,
-                _ => detect_uefi_mode()?,
-            }
-        }
-    };
-    // XP/2003 判定：配置标记 或 释放后缺少 \Windows\Boot（仅 Vista+ 才有）
-    let is_xp = config.is_xp
-        || !std::path::Path::new(&format!("{}\\Windows\\Boot", target_partition)).exists();
-    if is_xp {
-        if use_uefi {
-            log::info!("[PE INSTALL] XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
-            if let Err(e) = boot_manager.write_xp_uefi_gpt_boot(target_partition) {
-                log::warn!("[PE INSTALL] XP UEFI 引导失败({})，回退 Legacy(ntldr)", e);
-                boot_manager.write_xp_boot(target_partition)?;
-            }
-        } else {
-            log::info!("[PE INSTALL] XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
-            boot_manager.write_xp_boot(target_partition)?;
-        }
-    } else {
-        boot_manager.repair_boot_advanced(target_partition, use_uefi, config.boot_pca_mode)?;
-    }
-
-    log::info!("[PE INSTALL] Step 5: 应用高级选项");
-    // 应用高级选项
-    let advanced_options = core::advanced_options::AdvancedOptions {
-        remove_shortcut_arrow: config.remove_shortcut_arrow,
-        restore_classic_context_menu: config.restore_classic_context_menu,
-        bypass_nro: config.bypass_nro,
-        disable_windows_update: config.disable_windows_update,
-        disable_windows_defender: config.disable_windows_defender,
-        disable_reserved_storage: config.disable_reserved_storage,
-        disable_uac: config.disable_uac,
-        disable_device_encryption: config.disable_device_encryption,
-        remove_uwp_apps: config.remove_uwp_apps,
-        import_storage_controller_drivers: config.import_storage_controller_drivers,
-        custom_username: !config.custom_username.is_empty(),
-        username: config.custom_username.clone(),
-        builtin_administrator: config.builtin_administrator.clone(),
-        xp_inject_usb3_driver: config.xp_inject_usb3_driver,
-        xp_inject_nvme_driver: config.xp_inject_nvme_driver,
-        ..core::advanced_options::AdvancedOptions::default()
-    };
-
-    if let Err(error) = advanced_options.apply_to_system(target_partition, is_xp) {
-        if config.disable_windows_defender {
-            return Err(error);
-        }
-        log::warn!("[PE INSTALL] 应用高级选项失败: {}", error);
-    }
-
-    // 生成无人值守配置
-    if config.unattended {
-        generate_unattend_xml_pe(target_partition, config)
-            .context("[PE INSTALL] 生成无人值守配置失败")?;
-    }
-
-    log::info!("[PE INSTALL] Step 6: 清理临时文件");
-    // 清理数据目录
-    let _ = std::fs::remove_dir_all(data_dir);
-
-    Ok(())
-}
-
-/// 执行PE备份（按格式分发：0=WIM,1=ESD,2=SWM,3=GHO）。
-/// 此前恒走 LZX WIM，忽略 format/swm —— ESD/SWM/GHO 都会产出错误文件。
-fn execute_pe_backup(
-    source_partition: &str,
-    config: &core::install_config::BackupConfig,
-) -> anyhow::Result<()> {
-    let capture_dir = format!("{}\\", source_partition);
-
-    match config.format {
-        3 => {
-            let ghost = core::ghost::Ghost::new();
-            if !ghost.is_available() {
-                anyhow::bail!("Ghost 工具不可用");
-            }
-            ghost.create_image_from_letter(source_partition, &config.save_path, None)
-        }
-        1 => {
-            let dism = core::dism::Dism::new();
-            if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                dism.append_image_esd(
-                    &config.save_path,
-                    &capture_dir,
-                    &config.name,
-                    &config.description,
-                    None,
-                )
-            } else {
-                dism.capture_image_esd(
-                    &config.save_path,
-                    &capture_dir,
-                    &config.name,
-                    &config.description,
-                    None,
-                )
-            }
-        }
-        2 => {
-            let dism = core::dism::Dism::new();
-            dism.capture_image_swm(
-                &config.save_path,
-                &capture_dir,
-                &config.name,
-                &config.description,
-                config.swm_split_size,
-                None,
-            )
-        }
-        _ => {
-            let dism = core::dism::Dism::new();
-            if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                dism.append_image(
-                    &config.save_path,
-                    &capture_dir,
-                    &config.name,
-                    &config.description,
-                    None,
-                )
-            } else {
-                dism.capture_image(
-                    &config.save_path,
-                    &capture_dir,
-                    &config.name,
-                    &config.description,
-                    None,
-                )
-            }
-        }
-    }
 }
 
 /// 检测UEFI模式（使用 Windows API）
@@ -904,9 +962,16 @@ fn generate_unattend_xml_pe(
         &config.custom_username
     };
     let username = escape_xml_text(username);
+    let temporary_oobe_account = config
+        .builtin_administrator
+        .enabled
+        .then(|| lr_core::unattend_account::temporary_oobe_account_name(&config.session_id))
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("无法生成临时 OOBE 账户: {error}"))?;
     let builtin = lr_core::unattend_account::render_builtin_administrator_unattend(
         &config.builtin_administrator,
         1,
+        temporary_oobe_account.as_deref().unwrap_or_default(),
     )
     .map_err(|error| anyhow::anyhow!("内置 Administrator 配置无效: {error}"))?;
     let (specialize_settings, user_accounts, auto_logon) = if let Some(builtin) = builtin {
@@ -1138,5 +1203,409 @@ fn show_success_message(message: &str) {
     #[cfg(not(windows))]
     {
         log::info!("成功: {}", message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        classify_startup_route, parse_restore_windows_update_cli, should_request_gui_elevation,
+        StartupRoute,
+    };
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn restore_windows_update_cli_is_fixed_and_parameterless() {
+        assert!(
+            !parse_restore_windows_update_cli(&args(&["LetRecovery.exe"]))
+                .expect("ordinary startup should parse")
+        );
+        assert!(parse_restore_windows_update_cli(&args(&[
+            "LetRecovery.exe",
+            "--restore-windows-update",
+        ]))
+        .expect("fixed maintenance command should parse"));
+        assert!(parse_restore_windows_update_cli(&args(&[
+            "LetRecovery.exe",
+            "/restore-windows-update",
+        ]))
+        .expect("Windows-style spelling should be case-insensitive"));
+    }
+
+    #[test]
+    fn restore_windows_update_cli_rejects_duplicates_and_combinations() {
+        assert!(parse_restore_windows_update_cli(&args(&[
+            "LetRecovery.exe",
+            "--restore-windows-update",
+            "--restore-windows-update",
+        ]))
+        .is_err());
+        assert!(parse_restore_windows_update_cli(&args(&[
+            "LetRecovery.exe",
+            "--restore-windows-update",
+            "--install",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn startup_router_never_treats_cli_or_internal_handoffs_as_gui() {
+        for values in [
+            &["LetRecovery.exe", "help"][..],
+            &["LetRecovery.exe", "install", "run"][..],
+            &["LetRecovery.exe", "config", "generate"][..],
+            &["LetRecovery.exe", "update", "restore"][..],
+            &["LetRecovery.exe", "tool", "network-info", "inspect"][..],
+            &["LetRecovery.exe", "--restore-windows-update"][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files",
+                "0123456789abcdef0123456789abcdef",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files-at-shell",
+                "0123456789abcdef0123456789abcdef",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files-before-shell",
+                "0123456789abcdef0123456789abcdef",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-personal-restore-progress-shell",
+                "0123456789abcdef0123456789abcdef",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-activate-personal-restore-shell-gate",
+                "0123456789abcdef0123456789abcdef",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-begin-personal-restore-second-logon",
+                "0123456789abcdef0123456789abcdef",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-rearm-personal-restore-before-shell",
+                "0123456789abcdef0123456789abcdef",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files-after-shell",
+                "0123456789abcdef0123456789abcdef",
+                "true",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-register-personal-files-at-shell",
+                "0123456789abcdef0123456789abcdef",
+                r"C:\LetRecovery-first-logon.cmd",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-prepare-local-rid",
+                "500",
+                "004c005200410064006d0069006e00310031",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-store-builtin-administrator-secret",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-begin-builtin-administrator-transition-with-personal-restore",
+                "004c005200410064006d0069006e00310031",
+                "004c0072004f004f00420045002d003000310032003300340035003600370038003900610062",
+                "0123456789abcdef0123456789abcdef",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-delete-temporary-oobe-account",
+                "004c0072004f004f00420045002d003000310032003300340035003600370038003900610062",
+            ][..],
+            &[
+                "LetRecovery.exe",
+                "--internal-cleanup-disabled-defaultuser0",
+            ][..],
+            &["LetRecovery.exe", "/PEBACKUP"][..],
+        ] {
+            let route = classify_startup_route(&args(values));
+            assert_ne!(route, StartupRoute::Gui);
+            assert!(!should_request_gui_elevation(route, false, false));
+        }
+    }
+
+    #[test]
+    fn personal_restore_helper_route_requires_exact_private_arity() {
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files",
+                "0123456789abcdef0123456789abcdef",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files-at-shell",
+                "0123456789abcdef0123456789abcdef",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        for switch in [
+            "--internal-restore-personal-files-before-shell",
+            "--internal-activate-personal-restore-shell-gate",
+            "--internal-begin-personal-restore-second-logon",
+            "--internal-rearm-personal-restore-before-shell",
+        ] {
+            assert_eq!(
+                classify_startup_route(&args(&[
+                    "LetRecovery.exe",
+                    switch,
+                    "0123456789abcdef0123456789abcdef",
+                ])),
+                StartupRoute::InternalNativeHelper
+            );
+            assert_eq!(
+                classify_startup_route(&args(&["LetRecovery.exe", switch])),
+                StartupRoute::UnsupportedArguments
+            );
+        }
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-register-personal-files-at-shell",
+                "0123456789abcdef0123456789abcdef",
+                r"C:\LetRecovery-first-logon.cmd",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files-after-shell",
+                "0123456789abcdef0123456789abcdef",
+                "false",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-restore-personal-files-after-shell",
+                "0123456789abcdef0123456789abcdef",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-register-personal-files-at-shell",
+                "0123456789abcdef0123456789abcdef",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+    }
+
+    #[test]
+    fn built_in_account_prepare_route_requires_exact_private_arity() {
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-prepare-local-rid",
+                "500",
+                "004c005200410064006d0069006e00310031",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-prepare-local-rid",
+                "500",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+    }
+
+    #[test]
+    fn built_in_secret_store_route_requires_exact_private_arity() {
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-store-builtin-administrator-secret",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-store-builtin-administrator-secret",
+                "unexpected",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+    }
+
+    #[test]
+    fn built_in_account_transition_routes_require_exact_private_arity() {
+        for switch in [
+            "--internal-begin-builtin-administrator-transition",
+            "--internal-finish-builtin-administrator-transition",
+            "--internal-retire-builtin-administrator-transition",
+        ] {
+            assert_eq!(
+                classify_startup_route(&args(&[
+                    "LetRecovery.exe",
+                    switch,
+                    "004c005200410064006d0069006e00310031",
+                    "004c0072004f004f00420045002d003000310032003300340035003600370038003900610062",
+                ])),
+                StartupRoute::InternalNativeHelper
+            );
+            assert_eq!(
+                classify_startup_route(&args(&[
+                    "LetRecovery.exe",
+                    switch,
+                    "004c005200410064006d0069006e00310031",
+                ])),
+                StartupRoute::UnsupportedArguments
+            );
+        }
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-begin-builtin-administrator-transition-with-personal-restore",
+                "004c005200410064006d0069006e00310031",
+                "004c0072004f004f00420045002d003000310032003300340035003600370038003900610062",
+                "0123456789abcdef0123456789abcdef",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-begin-builtin-administrator-transition-with-personal-restore",
+                "004c005200410064006d0069006e00310031",
+                "004c0072004f004f00420045002d003000310032003300340035003600370038003900610062",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+    }
+
+    #[test]
+    fn temporary_oobe_cleanup_route_requires_exact_private_arity() {
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-cleanup-disabled-defaultuser0",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-cleanup-disabled-defaultuser0",
+                "unexpected",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-delete-temporary-oobe-account",
+                "004c0072004f004f00420045002d003000310032003300340035003600370038003900610062",
+            ])),
+            StartupRoute::InternalNativeHelper
+        );
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--internal-delete-temporary-oobe-account",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+    }
+
+    #[test]
+    fn retired_pe_switches_are_case_insensitive_rejections_and_require_exact_arity() {
+        assert_eq!(
+            classify_startup_route(&args(&["LetRecovery.exe", "/pebackup"])),
+            StartupRoute::RejectedLegacyCli
+        );
+        assert_eq!(
+            classify_startup_route(&args(&["LetRecovery.exe", "/peinstall", "extra"])),
+            StartupRoute::UnsupportedArguments
+        );
+    }
+
+    #[test]
+    fn only_plain_production_gui_launch_requests_elevation() {
+        let gui = classify_startup_route(&args(&["LetRecovery.exe"]));
+        assert_eq!(gui, StartupRoute::Gui);
+        assert!(should_request_gui_elevation(gui, false, false));
+        assert!(!should_request_gui_elevation(gui, true, false));
+        assert!(!should_request_gui_elevation(gui, false, true));
+        let unknown = classify_startup_route(&args(&["LetRecovery.exe", "--unknown"]));
+        assert_eq!(unknown, StartupRoute::UnsupportedArguments);
+        assert!(!should_request_gui_elevation(unknown, false, false));
+    }
+
+    #[cfg(feature = "non-elevated-tests")]
+    #[test]
+    fn personal_restore_progress_preview_is_a_non_elevated_native_route() {
+        let route = classify_startup_route(&args(&[
+            "LetRecovery.exe",
+            "--ui-personal-restore-progress-preview",
+        ]));
+        assert_eq!(route, StartupRoute::InternalNativeHelper);
+        assert!(!should_request_gui_elevation(route, false, true));
+        assert_eq!(
+            classify_startup_route(&args(&[
+                "LetRecovery.exe",
+                "--ui-personal-restore-progress-preview",
+                "extra",
+            ])),
+            StartupRoute::UnsupportedArguments
+        );
+    }
+
+    #[cfg(feature = "non-elevated-tests")]
+    #[test]
+    fn progress_preview_is_an_explicit_non_elevated_gui_route() {
+        let route = classify_startup_route(&args(&["LetRecovery.exe", "--ui-progress-preview"]));
+        assert_eq!(route, StartupRoute::Gui);
+        assert!(!should_request_gui_elevation(route, false, true));
+    }
+
+    #[cfg(feature = "non-elevated-tests")]
+    #[test]
+    fn pe_maintenance_preview_is_an_explicit_non_elevated_gui_route() {
+        let route =
+            classify_startup_route(&args(&["LetRecovery.exe", "--ui-pe-maintenance-preview"]));
+        assert_eq!(route, StartupRoute::Gui);
+        assert!(!should_request_gui_elevation(route, false, true));
+    }
+
+    #[cfg(feature = "non-elevated-tests")]
+    #[test]
+    fn about_preview_is_an_explicit_non_elevated_gui_route() {
+        let route = classify_startup_route(&args(&["LetRecovery.exe", "--ui-about-preview"]));
+        assert_eq!(route, StartupRoute::Gui);
+        assert!(!should_request_gui_elevation(route, false, true));
     }
 }

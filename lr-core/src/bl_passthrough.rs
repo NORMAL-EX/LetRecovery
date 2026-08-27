@@ -1,12 +1,15 @@
-//! BitLocker 密钥透传。
+//! Session-scoped BitLocker recovery-password bundle for authenticated PE maintenance.
 //!
-//! 正常系统端在"写 PE 引导"阶段，把各 BitLocker 加密卷的恢复密钥写成一个文本文件，
-//! 用 [`crate::wimlib::WimlibManager::add_file_to_image`] 打包进 PE 的 boot.wim；PE 启动后
-//! 从 `X:\` 读取该文件，对每个锁定的卷逐一尝试这些恢复密钥来解锁，然后继续部署。
-//!
-//! 采用极简纯文本格式（每行一个恢复密钥，`#` 开头为注释/标签），刻意不给 lr-core 引入
-//! 序列化依赖。恢复密钥本身由卷自校验（错误的密钥解锁会失败），因此 PE 端不需要把密钥与
-//! 具体卷精确配对——对每个锁定卷把所有密钥都试一遍即可，简单而稳健。
+//! The bytes are allowed only as a `ProtectedBitLockerSecret` artifact in the private boot WIM.
+//! The public config and manifest carry only length/hash bindings. A wrong recovery password is
+//! rejected by BitLocker itself, so PE can try the small deduplicated set against each currently
+//! locked volume without treating mutable drive letters or disk inventory as cross-boot identity.
+
+use zeroize::Zeroizing;
+
+const MAGIC: &str = "LRBL1";
+pub const MAX_KEYS: usize = 26;
+pub const MAX_BUNDLE_BYTES: u64 = 32 * 1024;
 
 /// 密钥文件在 WIM 镜像内的目标路径（也是 PE 启动后 `X:\` 下的路径）。
 pub const KEYS_WIM_PATH: &str = "\\LR_BitLockerKeys.txt";
@@ -14,39 +17,72 @@ pub const KEYS_WIM_PATH: &str = "\\LR_BitLockerKeys.txt";
 /// 密钥文件名（PE 端从 `X:\` 拼接读取）。
 pub const KEYS_FILE_NAME: &str = "LR_BitLockerKeys.txt";
 
-/// 把若干 `(标签, 恢复密钥)` 组装成密钥文件文本。
-pub fn serialize_keys(entries: &[(String, String)]) -> String {
-    let mut s = String::from("# LetRecovery BitLocker passthrough\r\n");
-    for (label, key) in entries {
-        let key = key.trim();
-        if key.is_empty() {
-            continue;
+/// Serialize canonical 48-digit recovery passwords without volume labels or other inventory.
+pub fn serialize_keys(entries: &[String]) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut keys = Zeroizing::new(Vec::<String>::new());
+    for entry in entries {
+        let key = crate::fveapi::format_recovery_key(entry)?;
+        if !keys.contains(&key) {
+            keys.push(key);
         }
-        if !label.is_empty() {
-            s.push_str("# ");
-            s.push_str(label);
-            s.push_str("\r\n");
-        }
-        s.push_str(key);
-        s.push_str("\r\n");
     }
-    s
+    if keys.is_empty() || keys.len() > MAX_KEYS {
+        return Err("BitLocker recovery-password count is outside the supported range".into());
+    }
+    let mut text = format!("{MAGIC}\r\nCount={}\r\n", keys.len());
+    for key in keys.iter() {
+        text.push_str("Key=");
+        text.push_str(key);
+        text.push_str("\r\n");
+    }
+    if text.len() as u64 > MAX_BUNDLE_BYTES {
+        return Err("BitLocker recovery-password bundle exceeds its byte limit".into());
+    }
+    Ok(Zeroizing::new(text.into_bytes()))
 }
 
-/// 从密钥文件文本解析出恢复密钥列表（跳过空行与 `#` 注释行，去重保序）。
-pub fn parse_keys(content: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let key = line.to_string();
-        if !out.contains(&key) {
-            out.push(key);
-        }
+/// Parse only the exact canonical form emitted by [`serialize_keys`].
+pub fn parse_keys(content: &[u8]) -> Result<Zeroizing<Vec<String>>, String> {
+    if content.is_empty() || content.len() as u64 > MAX_BUNDLE_BYTES {
+        return Err("BitLocker recovery-password bundle length is outside its limit".into());
     }
-    out
+    let text = std::str::from_utf8(content)
+        .map_err(|_| "BitLocker recovery-password bundle is not UTF-8".to_string())?;
+    if !text.ends_with("\r\n") || text.replace("\r\n", "").contains(['\r', '\n']) {
+        return Err("BitLocker recovery-password bundle has invalid line endings".into());
+    }
+    let mut lines = text.split("\r\n");
+    if lines.next() != Some(MAGIC) {
+        return Err("unsupported BitLocker recovery-password bundle".into());
+    }
+    let count = lines
+        .next()
+        .and_then(|line| line.strip_prefix("Count="))
+        .ok_or_else(|| "BitLocker recovery-password bundle has no count".to_string())?
+        .parse::<usize>()
+        .map_err(|_| "BitLocker recovery-password count is invalid".to_string())?;
+    if count == 0 || count > MAX_KEYS {
+        return Err("BitLocker recovery-password count is outside the supported range".into());
+    }
+    let mut keys = Zeroizing::new(Vec::with_capacity(count));
+    for _ in 0..count {
+        let raw = lines
+            .next()
+            .and_then(|line| line.strip_prefix("Key="))
+            .ok_or_else(|| "BitLocker recovery-password entry is missing".to_string())?;
+        let key = crate::fveapi::format_recovery_key(raw)?;
+        if keys.contains(&key) {
+            return Err("BitLocker recovery-password bundle contains a duplicate".into());
+        }
+        keys.push(key);
+    }
+    if lines.any(|line| !line.is_empty()) {
+        return Err("BitLocker recovery-password bundle has trailing fields".into());
+    }
+    if serialize_keys(&keys)?[..] != content[..] {
+        return Err("BitLocker recovery-password bundle is not canonical".into());
+    }
+    Ok(keys)
 }
 
 #[cfg(test)]
@@ -56,33 +92,25 @@ mod tests {
     #[test]
     fn roundtrip_and_skip_comments() {
         let entries = vec![
-            (
-                "C:".to_string(),
-                "111111-222222-333333-444444-555555-666666-777777-888888".to_string(),
-            ),
-            (
-                "D: 数据盘".to_string(),
-                "000000-111111-222222-333333-444444-555555-666666-777777".to_string(),
-            ),
+            "111111-222222-333333-444444-555555-666666-777777-888888".to_string(),
+            "000000-111111-222222-333333-444444-555555-666666-777777".to_string(),
         ];
-        let text = serialize_keys(&entries);
-        let keys = parse_keys(&text);
+        let text = serialize_keys(&entries).unwrap();
+        let keys = parse_keys(&text).unwrap();
         assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0], entries[0].1);
-        assert_eq!(keys[1], entries[1].1);
+        assert_eq!(keys[0], entries[0]);
+        assert_eq!(keys[1], entries[1]);
     }
 
     #[test]
     fn parse_dedup_and_blank() {
-        let text = "# header\r\nAAA\r\n\r\n  AAA  \r\n# label\r\nBBB\r\n";
-        let keys = parse_keys(text);
-        assert_eq!(keys, vec!["AAA".to_string(), "BBB".to_string()]);
+        let duplicate = b"LRBL1\r\nCount=2\r\nKey=111111-222222-333333-444444-555555-666666-777777-888888\r\nKey=111111-222222-333333-444444-555555-666666-777777-888888\r\n";
+        assert!(parse_keys(duplicate).is_err());
     }
 
     #[test]
     fn empty_keys_skipped() {
-        let entries = vec![("X".to_string(), "   ".to_string())];
-        let text = serialize_keys(&entries);
-        assert!(parse_keys(&text).is_empty());
+        assert!(serialize_keys(&[]).is_err());
+        assert!(parse_keys(b"LRBL1\nCount=1\n").is_err());
     }
 }

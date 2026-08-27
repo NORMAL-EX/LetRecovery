@@ -37,51 +37,28 @@ pub enum ExpandCWorkerMessage {
 pub enum ExpandCStartError {
     #[error("开发测试构建禁止准备真实扩容或 PE 启动环境")]
     DisabledInDevelopment,
+    #[error("当前版本只支持使用目标卷后方已有连续未分配空间的纯扩展；分区收缩、供体转移和原始块移动尚未开放")]
+    UnsupportedRawMove,
     #[error("无法启动扩容准备线程: {0}")]
     Spawn(String),
 }
 
-fn validate_adjacent_transfer_geometry(
-    target: &crate::core::native_quick_partition::DiskPartitionFingerprint,
-    donor: &crate::core::native_quick_partition::DiskPartitionFingerprint,
-    target_size_mb: u64,
-    donor_size_mb: u64,
-    borrow_from_left: bool,
-) -> Result<(), String> {
-    let target_end = target
-        .offset_bytes
-        .checked_add(target.size_bytes)
-        .ok_or_else(|| crate::tr!("执行前目标分区几何溢出。"))?;
-    let donor_end = donor
-        .offset_bytes
-        .checked_add(donor.size_bytes)
-        .ok_or_else(|| crate::tr!("执行前供体分区几何溢出。"))?;
-    let final_target_bytes = target_size_mb
-        .checked_mul(1024 * 1024)
-        .ok_or_else(|| crate::tr!("执行前目标分区大小溢出。"))?;
-    let final_donor_bytes = donor_size_mb
-        .checked_mul(1024 * 1024)
-        .ok_or_else(|| crate::tr!("执行前供体分区大小溢出。"))?;
-    let adjacent = if borrow_from_left {
-        donor_end == target.offset_bytes
-    } else {
-        donor.offset_bytes == target_end
-    };
-    if !adjacent
-        || final_target_bytes.checked_add(final_donor_bytes)
-            != target.size_bytes.checked_add(donor.size_bytes)
+fn require_supported_pure_extend(request: &ExpandCHandoffRequest) -> Result<(), ExpandCStartError> {
+    if request.borrow_from_left
+        || request.donor_target_size_mb != 0
+        || request.analyzed_no_move_max_mb <= request.analyzed_current_size_mb
+        || request.target_size_mb > request.analyzed_no_move_max_mb
     {
-        return Err(crate::tr!(
-            "相邻分区转移的当前与最终总容量不一致，请重新检查分区布局。"
-        ));
+        return Err(ExpandCStartError::UnsupportedRawMove);
     }
     Ok(())
 }
 
 #[cfg(feature = "non-elevated-tests")]
 pub fn start_expand_c_handoff(
-    _request: ExpandCHandoffRequest,
+    request: ExpandCHandoffRequest,
 ) -> Result<Receiver<ExpandCWorkerMessage>, ExpandCStartError> {
+    require_supported_pure_extend(&request)?;
     Err(ExpandCStartError::DisabledInDevelopment)
 }
 
@@ -89,6 +66,7 @@ pub fn start_expand_c_handoff(
 pub fn start_expand_c_handoff(
     request: ExpandCHandoffRequest,
 ) -> Result<Receiver<ExpandCWorkerMessage>, ExpandCStartError> {
+    require_supported_pure_extend(&request)?;
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("letrecovery-native-expand-c".to_owned())
@@ -109,17 +87,14 @@ fn run_handoff(
     use crate::core::install_config::{ConfigFileManager, ExpandConfig};
     use lr_core::cached_artifact::CachedArtifactStatus;
 
+    require_supported_pure_extend(request).map_err(|error| error.to_string())?;
     let target_partition = request.target_partition.to_ascii_uppercase();
     let _ = sender.send(ExpandCWorkerMessage::Progress(crate::tr!(
         "正在重新确认分区 {}: 布局...",
         target_partition
     )));
-    let fresh = if request.borrow_from_left {
-        super::native_expand_c_controller::analyze_expand_partition_from_left(target_partition)
-    } else {
-        super::native_expand_c_controller::analyze_expand_partition(target_partition)
-    }
-    .map_err(|error| error.to_string())?;
+    let fresh = super::native_expand_c_controller::analyze_expand_partition(target_partition)
+        .map_err(|error| error.to_string())?;
     let strict_snapshot_changed = request.strict_analysis_snapshot
         && (fresh.max_size_mb != request.analyzed_max_size_mb
             || fresh.no_move_max_mb != request.analyzed_no_move_max_mb);
@@ -131,7 +106,7 @@ fn run_handoff(
             .expected_partition_number
             .is_some_and(|expected| fresh.partition_number != expected);
     if !fresh.found
-        || fresh.max_size_mb <= fresh.current_size_mb
+        || fresh.no_move_max_mb <= fresh.current_size_mb
         || fresh.current_size_mb != request.analyzed_current_size_mb
         || strict_snapshot_changed
         || target_identity_changed
@@ -144,7 +119,7 @@ fn run_handoff(
     let minimum = fresh
         .current_size_mb
         .max(fresh.used_mb.saturating_add(request.minimum_free_mb));
-    if request.target_size_mb < minimum || request.target_size_mb > fresh.max_size_mb {
+    if request.target_size_mb < minimum || request.target_size_mb > fresh.no_move_max_mb {
         return Err(crate::tr!("目标大小已不在当前安全范围内，请重新分析。"));
     }
     let disk = fresh.disk.as_ref().ok_or_else(|| {
@@ -158,42 +133,6 @@ fn run_handoff(
         .iter()
         .find(|partition| partition.partition_number == fresh.partition_number)
         .ok_or_else(|| crate::tr!("执行前未能在磁盘指纹中定位目标分区。"))?;
-    let donor_fingerprint = if request.borrow_from_left {
-        Some(
-            disk.partitions
-                .iter()
-                .find(|partition| {
-                    partition.offset_bytes.checked_add(partition.size_bytes)
-                        == Some(target_fingerprint.offset_bytes)
-                })
-                .ok_or_else(|| crate::tr!("执行前未能在磁盘指纹中定位左侧相邻分区。"))?,
-        )
-    } else if request.donor_target_size_mb > 0 {
-        let target_end = target_fingerprint
-            .offset_bytes
-            .checked_add(target_fingerprint.size_bytes)
-            .ok_or_else(|| crate::tr!("执行前目标分区几何溢出。"))?;
-        Some(
-            disk.partitions
-                .iter()
-                .filter(|partition| partition.offset_bytes >= target_end)
-                .min_by_key(|partition| partition.offset_bytes)
-                .ok_or_else(|| crate::tr!("执行前未能在磁盘指纹中定位右侧相邻分区。"))?,
-        )
-    } else {
-        None
-    };
-    if request.donor_target_size_mb > 0 {
-        let donor = donor_fingerprint.ok_or_else(|| crate::tr!("执行前未能定位相邻供体分区。"))?;
-        validate_adjacent_transfer_geometry(
-            target_fingerprint,
-            donor,
-            request.target_size_mb,
-            request.donor_target_size_mb,
-            request.borrow_from_left,
-        )?;
-    }
-
     let pe_path = match super::pe::PeManager::check_cached_pe(
         &request.pe.filename,
         request.pe.sha256.as_deref(),
@@ -203,37 +142,54 @@ fn run_handoff(
         Ok(CachedArtifactStatus::Missing) => {
             return Err(crate::tr!("所选 PE 文件不存在，请重新下载。"));
         }
-        Err(error) => return Err(crate::tr!("PE 文件安全校验失败：{}", error)),
+        Err(error) => return Err(crate::tr!("PE 文件不可用：{}", error)),
     };
 
     let _ = sender.send(ExpandCWorkerMessage::Progress(crate::tr!(
         "正在写入扩容配置..."
     )));
     let config = ExpandConfig {
+        session_id: ConfigFileManager::new_session_id()
+            .map_err(|error| format!("generate expand session identifier: {error}"))?,
         target_partition: format!("{}:", target_partition),
-        target_size_mb: if request.use_maximum {
-            0
-        } else {
-            request.target_size_mb
-        },
+        // Always persist the authenticated no-move ceiling as an explicit size. A legacy zero
+        // means "maximum" and could silently include space which requires a raw block move.
+        target_size_mb: request.target_size_mb,
         wim_engine: request.wim_engine,
-        borrow_from_left: request.borrow_from_left,
-        donor_target_size_mb: request.donor_target_size_mb,
+        borrow_from_left: false,
+        donor_target_size_mb: 0,
         expected_disk_number: disk.disk_number,
         expected_disk_size_bytes: disk.size_bytes,
         expected_partition_number: target_fingerprint.partition_number,
         expected_partition_offset_bytes: target_fingerprint.offset_bytes,
         expected_partition_size_bytes: target_fingerprint.size_bytes,
-        expected_donor_partition_number: donor_fingerprint
-            .map_or(0, |partition| partition.partition_number),
-        expected_donor_offset_bytes: donor_fingerprint
-            .map_or(0, |partition| partition.offset_bytes),
-        expected_donor_size_bytes: donor_fingerprint.map_or(0, |partition| partition.size_bytes),
+        expected_donor_partition_number: 0,
+        expected_donor_offset_bytes: 0,
+        expected_donor_size_bytes: 0,
     };
     let target = format!("{}:", target_partition);
-    let transaction =
-        ConfigFileManager::write_expand_config_transactional(&target, &target, &config)
+    let auth_key = lr_core::handoff_auth::SessionAuthKey::generate()
+        .map_err(|error| format!("generate expand handoff authentication key: {error}"))?;
+    let mut transaction =
+        ConfigFileManager::write_expand_config_transactional(&target, &target, &config, &auth_key)
             .map_err(|error| crate::tr!("写入扩容配置失败: {}", error))?;
+    let session_id = transaction.session_id().to_owned();
+    let config_bytes = transaction
+        .take_boot_config_bytes()
+        .map_err(|error| format!("take authenticated expand config: {error}"))?;
+    let manifest_bytes = transaction
+        .take_boot_manifest_bytes()
+        .map_err(|error| format!("take authenticated expand manifest: {error}"))?;
+    let payload = super::pe::HandoffBootPayload::new(
+        auth_key,
+        lr_core::handoff_auth::HandoffPurpose::Expand,
+        &session_id,
+        config_bytes,
+        manifest_bytes,
+        None,
+        None,
+    )
+    .map_err(|error| format!("build authenticated expand boot payload: {error}"))?;
 
     let _ = sender.send(ExpandCWorkerMessage::Progress(crate::tr!(
         "正在安装 PE 启动项"
@@ -241,7 +197,12 @@ fn run_handoff(
     install_pe_boot_with_rollback(
         transaction,
         super::pe::PeManager::new()
-            .boot_to_pe(&pe_path.to_string_lossy(), &request.pe.display_name)
+            .boot_to_pe_for_expand(
+                &pe_path.to_string_lossy(),
+                &request.pe.display_name,
+                payload,
+            )
+            .and_then(|transaction| transaction.commit())
             .map_err(|error| error.to_string()),
     )?;
     let _ = sender.send(ExpandCWorkerMessage::ReadyToReboot);
@@ -281,31 +242,51 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_transfer_geometry_preserves_pair_total_and_adjacency() {
-        const MIB: u64 = 1024 * 1024;
-        let partition = |number, offset_mb, size_mb, letter| {
-            crate::core::native_quick_partition::DiskPartitionFingerprint {
-                partition_number: number,
-                offset_bytes: offset_mb * MIB,
-                size_bytes: size_mb * MIB,
-                drive_letter: Some(letter),
-                partition_type: "BASIC".into(),
-                is_esp: false,
-                is_msr: false,
-                is_recovery: false,
-            }
+    fn raw_move_requests_are_rejected_before_any_worker_or_handoff() {
+        let base = ExpandCHandoffRequest {
+            target_partition: 'C',
+            expected_disk: None,
+            expected_partition_number: None,
+            target_size_mb: 120,
+            use_maximum: false,
+            analyzed_current_size_mb: 100,
+            analyzed_max_size_mb: 160,
+            analyzed_no_move_max_mb: 120,
+            strict_analysis_snapshot: true,
+            borrow_from_left: false,
+            donor_target_size_mb: 0,
+            minimum_free_mb: 1,
+            wim_engine: 0,
+            pe: OnlinePE {
+                download_url: "https://example.invalid/pe.wim".to_owned(),
+                display_name: "Test PE".to_owned(),
+                filename: "test.wim".to_owned(),
+                md5: None,
+                sha256: Some("00".repeat(32)),
+            },
         };
-        let target = partition(1, 1, 100, 'D');
-        let donor = partition(2, 101, 150, 'E');
-        assert!(validate_adjacent_transfer_geometry(&target, &donor, 125, 125, false).is_ok());
-        assert!(validate_adjacent_transfer_geometry(&target, &donor, 125, 120, false).is_err());
-        let separated = partition(2, 102, 150, 'E');
-        assert!(validate_adjacent_transfer_geometry(&target, &separated, 125, 125, false).is_err());
-        let left_donor = partition(1, 1, 150, 'D');
-        let right_target = partition(2, 151, 100, 'E');
-        assert!(
-            validate_adjacent_transfer_geometry(&right_target, &left_donor, 125, 125, true).is_ok()
-        );
+        assert!(require_supported_pure_extend(&base).is_ok());
+
+        let mut right_move = base.clone();
+        right_move.target_size_mb = 121;
+        assert!(matches!(
+            require_supported_pure_extend(&right_move),
+            Err(ExpandCStartError::UnsupportedRawMove)
+        ));
+
+        let mut left_donor = base.clone();
+        left_donor.borrow_from_left = true;
+        assert!(matches!(
+            require_supported_pure_extend(&left_donor),
+            Err(ExpandCStartError::UnsupportedRawMove)
+        ));
+
+        let mut donor_transfer = base;
+        donor_transfer.donor_target_size_mb = 80;
+        assert!(matches!(
+            require_supported_pure_extend(&donor_transfer),
+            Err(ExpandCStartError::UnsupportedRawMove)
+        ));
     }
 
     #[cfg(feature = "non-elevated-tests")]
@@ -357,6 +338,7 @@ mod tests {
             &partition,
             &partition,
             &ExpandConfig {
+                session_id: String::new(),
                 target_partition: "C:".to_owned(),
                 target_size_mb: 0,
                 wim_engine: 0,
@@ -371,6 +353,7 @@ mod tests {
                 expected_donor_offset_bytes: 0,
                 expected_donor_size_bytes: 0,
             },
+            &lr_core::handoff_auth::SessionAuthKey::from_bytes([0x5a; 32]).unwrap(),
         )
         .unwrap();
 

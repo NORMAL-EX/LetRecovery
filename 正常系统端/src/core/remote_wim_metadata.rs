@@ -4,8 +4,8 @@
 //! URLs, the ISO 9660/Joliet directory records are read first so the embedded
 //! `sources/install.esd` or `sources/install.wim` byte extent can be addressed
 //! without downloading the ISO. This module never downloads an image payload.
-//! Servers must honor every exact byte range; a `200 OK` response is rejected
-//! so a metadata probe cannot accidentally transfer a multi-gigabyte image.
+//! Servers must honor every exact byte range; a `200 OK` response is never read by
+//! this metadata probe and is surfaced as a typed "download first" condition.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -29,6 +29,25 @@ const ISO_DESCRIPTOR_START_SECTOR: u64 = 16;
 const MAX_ISO_DESCRIPTOR_SECTORS: u64 = 64;
 const MAX_REMOTE_ISO_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_REMOTE_WIM_XML_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug)]
+struct RangeUnsupported;
+
+impl std::fmt::Display for RangeUnsupported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("server does not support exact HTTP byte ranges")
+    }
+}
+
+impl std::error::Error for RangeUnsupported {}
+
+/// Returns true only for the deliberate `200 OK` fallback condition. Transport failures,
+/// malformed `206` responses and changing entities remain hard metadata-probe errors.
+pub fn is_range_unsupported(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<RangeUnsupported>().is_some())
+}
 
 #[derive(Clone, Debug)]
 struct EntityValidator {
@@ -528,6 +547,9 @@ fn fetch_exact_range(
         .send()
         .context("remote metadata range request failed")?;
     if response.status() != StatusCode::PARTIAL_CONTENT {
+        if response.status() == StatusCode::OK {
+            return Err(RangeUnsupported.into());
+        }
         bail!(
             "server did not honor the metadata byte range (HTTP {})",
             response.status()
@@ -803,6 +825,15 @@ mod tests {
     }
 
     #[test]
+    fn only_typed_full_response_condition_enables_download_first_fallback() {
+        let fallback = anyhow::Error::new(RangeUnsupported).context("probe failed");
+        assert!(is_range_unsupported(&fallback));
+        assert!(!is_range_unsupported(&anyhow!(
+            "server did not honor the metadata byte range (HTTP 500)"
+        )));
+    }
+
+    #[test]
     fn redirect_policy_preserves_transport_boundary_and_rejects_credentials() {
         let https = reqwest::Url::parse("https://cdn.example.com/install.wim").unwrap();
         let http = reqwest::Url::parse("http://cdn.example.com/install.wim").unwrap();
@@ -894,6 +925,7 @@ mod tests {
             index: 1,
             name: name.to_owned(),
             size_bytes: 1,
+            hard_link_bytes: 0,
             installation_type: "Client".to_owned(),
             description: String::new(),
             major_version: major,
@@ -937,6 +969,7 @@ mod tests {
             index,
             name: name.to_owned(),
             size_bytes: 1,
+            hard_link_bytes: 0,
             installation_type: installation_type.to_owned(),
             description: String::new(),
             major_version: Some(6),

@@ -11,12 +11,45 @@ mod utils;
 mod workflow_journal;
 mod workflows;
 
-/// 日志文件路径：优先 exe 同目录；取不到则退回当前目录。
-fn log_file_path() -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("LetRecoveryPE.log")))
-        .unwrap_or_else(|| std::path::PathBuf::from("LetRecoveryPE.log"))
+static ACTIVE_LOG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+static ACTIVE_INSTALL_LOG_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+static LAST_PUBLISHED_INSTALL_LOG: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::path::PathBuf>>,
+> = std::sync::OnceLock::new();
+
+/// The packaged executable can run from a read-only ISO. Try writable WinPE locations in a stable
+/// order and remember the exact file selected so the final handoff never guesses a different path.
+fn log_file_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            candidates.push(directory.join(lr_core::install_log_handoff::PE_LOG_FILE));
+        }
+    }
+    candidates.push(std::path::PathBuf::from(format!(
+        "X:\\{}",
+        lr_core::install_log_handoff::PE_LOG_FILE
+    )));
+    candidates.push(std::env::temp_dir().join(lr_core::install_log_handoff::PE_LOG_FILE));
+    if let Ok(directory) = std::env::current_dir() {
+        candidates.push(directory.join(lr_core::install_log_handoff::PE_LOG_FILE));
+    }
+    candidates.dedup_by(|left, right| {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    });
+    candidates
+}
+
+fn active_log_path() -> Option<&'static std::path::PathBuf> {
+    ACTIVE_LOG_PATH.get()
+}
+
+fn runtime_log_directory() -> Option<std::path::PathBuf> {
+    active_log_path()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .or_else(pe_program_directory)
 }
 
 /// 文件日志器：每条日志**立即 flush 落盘**。
@@ -55,26 +88,755 @@ impl log::Log for FileLogger {
         if let Ok(mut f) = self.file.lock() {
             use std::io::Write;
             let _ = f.flush();
+            let _ = f.sync_all();
         }
     }
 }
 
 /// 初始化日志：自实现的文件日志器（每条 flush）。文件打不开时静默跳过，不影响启动。
 fn init_file_logger() {
-    let file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file_path())
-    {
-        Ok(f) => f,
-        Err(_) => return,
+    let mut selected = None;
+    for path in log_file_candidates() {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                selected = Some((path, file));
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    let Some((path, file)) = selected else {
+        return;
     };
     let logger = Box::new(FileLogger {
         file: std::sync::Mutex::new(file),
         level: log::LevelFilter::Info,
     });
     if log::set_boxed_logger(logger).is_ok() {
+        let _ = ACTIVE_LOG_PATH.set(path);
         log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
+fn pe_program_directory() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+}
+
+pub(crate) fn copy_desktop_install_log_into_pe(data_partition: &str, session_id: &str) {
+    if let Ok(mut active) = ACTIVE_INSTALL_LOG_SESSION
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *active = Some(session_id.to_owned());
+    }
+    let Some(pe_directory) = runtime_log_directory() else {
+        log::warn!("[INSTALL LOG] 无法确定 PE 可写日志目录，跳过正常端日志中继");
+        return;
+    };
+    let data_directory = crate::core::config::ConfigFileManager::get_data_dir(data_partition);
+    match lr_core::install_log_handoff::copy_desktop_log_to_pe(
+        std::path::Path::new(&data_directory),
+        &pe_directory,
+        session_id,
+    ) {
+        Ok(path) => log::info!(
+            "[INSTALL LOG] 正常端日志已复制到 PE RAM 盘: {}",
+            path.display()
+        ),
+        Err(error) => {
+            log::warn!("[INSTALL LOG] 正常端日志中继失败；安装继续，不弹出提示: {error:#}")
+        }
+    }
+}
+
+fn remember_published_install_log(path: &std::path::Path) {
+    if let Ok(mut published) = LAST_PUBLISHED_INSTALL_LOG
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *published = Some(path.to_owned());
+    }
+}
+
+fn publish_install_log_to_root(output_root: &std::path::Path, session_id: &str, label: &str) {
+    let Some(pe_directory) = runtime_log_directory() else {
+        log::warn!("[INSTALL LOG] 无法确定 PE 可写日志目录，跳过最终日志合并");
+        return;
+    };
+    log::info!("[INSTALL LOG] 开始发布正常端与 PE 端合并日志");
+    log::logger().flush();
+    let desktop = pe_directory.join(format!("NormalEndpoint.{session_id}.log"));
+    let pe_log = active_log_path()
+        .cloned()
+        .unwrap_or_else(|| pe_directory.join(lr_core::install_log_handoff::PE_LOG_FILE));
+    match lr_core::install_log_handoff::publish_combined_install_log(
+        desktop.is_file().then_some(desktop.as_path()),
+        pe_log.is_file().then_some(pe_log.as_path()),
+        output_root,
+        session_id,
+    ) {
+        Ok(path) => {
+            remember_published_install_log(&path);
+            log::info!("[INSTALL LOG] 合并日志已发布到{label}: {}", path.display());
+        }
+        Err(error) => {
+            log::warn!("[INSTALL LOG] 最终日志合并失败；安装完成状态和重启不受影响: {error:#}")
+        }
+    }
+}
+
+/// Returns a flush-complete normal+PE diagnostic for the terminal error prompt.
+///
+/// Destructive install paths normally already published the same combined file to the verified
+/// target/data volume. Pre-write failures have no armed target finalizer, so they receive a
+/// RAM-disk combined copy here. This diagnostic fallback must never change the workflow result.
+pub(crate) fn prepare_failure_log_for_ui() -> Option<std::path::PathBuf> {
+    log::logger().flush();
+    if let Some(path) = LAST_PUBLISHED_INSTALL_LOG
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|published| published.clone())
+        .filter(|path| path.is_file())
+    {
+        return Some(path);
+    }
+
+    let pe_directory = runtime_log_directory()?;
+    let session_id = ACTIVE_INSTALL_LOG_SESSION
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|active| active.clone())
+        .unwrap_or_else(|| format!("pe-runtime-{}", std::process::id()));
+    let desktop = pe_directory.join(format!("NormalEndpoint.{session_id}.log"));
+    let pe_log = active_log_path()
+        .cloned()
+        .unwrap_or_else(|| pe_directory.join(lr_core::install_log_handoff::PE_LOG_FILE));
+    let output_root = pe_directory.join("FailureReport");
+    match lr_core::install_log_handoff::publish_combined_install_log(
+        desktop.is_file().then_some(desktop.as_path()),
+        pe_log.is_file().then_some(pe_log.as_path()),
+        &output_root,
+        &session_id,
+    ) {
+        Ok(path) => {
+            remember_published_install_log(&path);
+            Some(path)
+        }
+        Err(error) => {
+            log::error!("[INSTALL LOG] 无法为错误弹窗生成合并日志: {error:#}");
+            pe_log.is_file().then_some(pe_log)
+        }
+    }
+}
+
+#[cfg(feature = "ci-automation")]
+static CI_TERMINAL_FINALIZED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "ci-automation")]
+static CI_AUTHENTICATED_RUN_CONTEXT: std::sync::OnceLock<CiRunContext> = std::sync::OnceLock::new();
+
+#[cfg(feature = "ci-automation")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CiRunContext {
+    run_id: String,
+    started_utc: String,
+    result_directory: std::path::PathBuf,
+    fault_injection: Option<CiFaultInjection>,
+}
+
+#[cfg(feature = "ci-automation")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CiFaultInjection {
+    BeforeTargetWrite,
+    AfterTargetFormat,
+}
+
+#[cfg(feature = "ci-automation")]
+impl CiFaultInjection {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "before_target_write" => Ok(Self::BeforeTargetWrite),
+            "after_target_format" => Ok(Self::AfterTargetFormat),
+            _ => anyhow::bail!("unsupported CI fault injection: {value}"),
+        }
+    }
+}
+
+#[cfg(feature = "ci-automation")]
+fn valid_ci_run_id(value: &str) -> bool {
+    (32..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+}
+
+#[cfg(all(feature = "ci-automation", windows))]
+fn ci_metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+        != 0
+}
+
+#[cfg(all(feature = "ci-automation", not(windows)))]
+fn ci_metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(feature = "ci-automation")]
+fn ci_plain_directory(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_dir() && !ci_metadata_is_reparse(&metadata))
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "ci-automation")]
+fn find_ci_run_context_in_roots<I>(roots: I, expected_run_id: &str) -> anyhow::Result<CiRunContext>
+where
+    I: IntoIterator<Item = std::path::PathBuf>,
+{
+    if !valid_ci_run_id(expected_run_id) {
+        anyhow::bail!("authenticated CI run id is invalid");
+    }
+    let mut matches = Vec::new();
+    for root in roots {
+        let ci_root = root.join("LR-CI");
+        let state_root = ci_root.join("state");
+        if !ci_plain_directory(&ci_root) || !ci_plain_directory(&state_root) {
+            continue;
+        }
+        let active_path = state_root.join("active-run.json");
+        let metadata = match std::fs::symlink_metadata(&active_path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !ci_metadata_is_reparse(&metadata)
+                    && metadata.len() <= 64 * 1024 =>
+            {
+                metadata
+            }
+            _ => continue,
+        };
+        let _ = metadata;
+        let bytes = match std::fs::read(&active_path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+            || value.get("phase").and_then(serde_json::Value::as_str) != Some("handoff_committed")
+        {
+            continue;
+        }
+        let Some(run_id) = value.get("run_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !valid_ci_run_id(run_id) {
+            continue;
+        }
+        if !run_id.eq_ignore_ascii_case(expected_run_id) {
+            continue;
+        }
+        let started_utc = value
+            .get("updated_utc")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        matches.push(CiRunContext {
+            run_id: run_id.to_ascii_lowercase(),
+            started_utc,
+            result_directory: ci_root.join("results").join(run_id),
+            fault_injection: None,
+        });
+    }
+    if matches.len() != 1 {
+        anyhow::bail!(
+            "CI PE terminal publication requires one active handoff record, found {}",
+            matches.len()
+        );
+    }
+    Ok(matches.remove(0))
+}
+
+#[cfg(feature = "ci-automation")]
+fn find_ci_install_fault_context_in_roots<I>(
+    roots: I,
+    expected_session_id: &str,
+) -> anyhow::Result<Option<CiRunContext>>
+where
+    I: IntoIterator<Item = std::path::PathBuf>,
+{
+    lr_core::handoff_auth::validate_session_id(expected_session_id)?;
+    let mut matches = Vec::new();
+    for root in roots {
+        let ci_root = root.join("LR-CI");
+        let state_root = ci_root.join("state");
+        if !ci_plain_directory(&ci_root) || !ci_plain_directory(&state_root) {
+            continue;
+        }
+        let active_path = state_root.join("active-run.json");
+        let metadata = match std::fs::symlink_metadata(&active_path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !ci_metadata_is_reparse(&metadata)
+                    && metadata.len() <= 64 * 1024 =>
+            {
+                metadata
+            }
+            _ => continue,
+        };
+        let _ = metadata;
+        let bytes = match std::fs::read(&active_path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+            || value.get("phase").and_then(serde_json::Value::as_str) != Some("handoff_committed")
+            || value.get("session_id").and_then(serde_json::Value::as_str)
+                != Some(expected_session_id)
+        {
+            continue;
+        }
+        let run_id = value
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            .context("matching CI install fault record has no run id")?;
+        if !valid_ci_run_id(run_id) {
+            anyhow::bail!("matching CI install fault record has an invalid run id");
+        }
+        let fault_name = value
+            .get("fault_injection")
+            .and_then(serde_json::Value::as_str)
+            .context("matching CI install record has no fault injection")?;
+        let fault_injection = if fault_name == "none"
+            && value
+                .get("preserve_personal_files")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            None
+        } else {
+            Some(CiFaultInjection::parse(fault_name)?)
+        };
+        let started_utc = value
+            .get("updated_utc")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        matches.push(CiRunContext {
+            run_id: run_id.to_ascii_lowercase(),
+            started_utc,
+            result_directory: ci_root.join("results").join(run_id),
+            fault_injection,
+        });
+    }
+    if matches.len() > 1 {
+        anyhow::bail!(
+            "CI install fault injection requires at most one session-bound active record, found {}",
+            matches.len()
+        );
+    }
+    Ok(matches.pop())
+}
+
+#[cfg(feature = "ci-automation")]
+pub(crate) fn register_ci_authenticated_backup_context(backup_name: &str) {
+    let Some(run_id) = backup_name.strip_prefix("LR-CI-") else {
+        return;
+    };
+    if !valid_ci_run_id(run_id) {
+        log::error!("[CI AUTOMATION] authenticated backup name contains an invalid run id");
+        return;
+    }
+    let context = (|| -> anyhow::Result<CiRunContext> {
+        let roots = lr_core::windows_storage::volume_guid_paths()
+            .context("enumerate volumes for authenticated CI run binding")?
+            .into_iter()
+            .map(std::path::PathBuf::from);
+        find_ci_run_context_in_roots(roots, run_id)
+    })();
+    match context {
+        Ok(context) => {
+            if let Err(rejected) = CI_AUTHENTICATED_RUN_CONTEXT.set(context.clone()) {
+                if CI_AUTHENTICATED_RUN_CONTEXT.get() != Some(&rejected) {
+                    log::error!(
+                        "[CI AUTOMATION] refusing to replace the authenticated CI run context"
+                    );
+                }
+            } else {
+                log::info!(
+                    "[CI AUTOMATION] bound authenticated backup task to run_id={}",
+                    context.run_id
+                );
+            }
+        }
+        Err(error) => {
+            log::error!("[CI AUTOMATION] authenticated CI run binding failed: {error:#}")
+        }
+    }
+}
+
+#[cfg(feature = "ci-automation")]
+pub(crate) fn register_ci_authenticated_install_context(session_id: &str) -> anyhow::Result<()> {
+    let roots = lr_core::windows_storage::volume_guid_paths()?
+        .into_iter()
+        .map(std::path::PathBuf::from);
+    let Some(context) = find_ci_install_fault_context_in_roots(roots, session_id)? else {
+        return Ok(());
+    };
+    if let Err(rejected) = CI_AUTHENTICATED_RUN_CONTEXT.set(context.clone()) {
+        if CI_AUTHENTICATED_RUN_CONTEXT.get() != Some(&rejected) {
+            anyhow::bail!("refusing to replace the authenticated CI run context");
+        }
+    } else {
+        log::warn!(
+            "[CI AUTOMATION] armed session-bound install fault {:?} for run_id={}",
+            context.fault_injection,
+            context.run_id
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ci-automation")]
+pub(crate) fn inject_ci_failure_before_target_write() -> anyhow::Result<()> {
+    if CI_AUTHENTICATED_RUN_CONTEXT
+        .get()
+        .and_then(|context| context.fault_injection)
+        == Some(CiFaultInjection::BeforeTargetWrite)
+    {
+        anyhow::bail!(
+            "CI fault injection before_target_write: authenticated inputs passed preflight; no target write has started and reversible cleanup is required"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ci-automation")]
+pub(crate) fn inject_ci_failure_after_target_format() -> anyhow::Result<()> {
+    if CI_AUTHENTICATED_RUN_CONTEXT
+        .get()
+        .and_then(|context| context.fault_injection)
+        == Some(CiFaultInjection::AfterTargetFormat)
+    {
+        anyhow::bail!(
+            "CI fault injection after_target_format: target format completed; old-system rollback remains disabled"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ci-automation")]
+fn atomic_write_ci_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("CI result path has no parent"))?;
+    let (temporary, mut file) =
+        lr_core::scoped_temp_file::ScopedTempFile::create_writer_in(parent, "lr-ci", "tmp")?;
+    file.write_all(contents)?;
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    temporary.persist_replace(path)
+}
+
+#[cfg(feature = "ci-automation")]
+fn copy_ci_log(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| std::io::Error::other("CI log path has no parent"))?;
+    let mut input = std::fs::File::open(source)?;
+    let (temporary, mut output) =
+        lr_core::scoped_temp_file::ScopedTempFile::create_writer_in(parent, "pe-failure", "tmp")?;
+    std::io::copy(&mut input, &mut output)?;
+    output.flush()?;
+    output.sync_all()?;
+    drop(output);
+    temporary.persist_replace(destination)
+}
+
+#[cfg(feature = "ci-automation")]
+fn publish_ci_terminal_failure(
+    error_message: &str,
+    merged_log: Option<&std::path::Path>,
+) -> anyhow::Result<std::path::PathBuf> {
+    let context = CI_AUTHENTICATED_RUN_CONTEXT
+        .get()
+        .cloned()
+        .context("no authenticated CI backup context was established")?;
+    let results_root = context
+        .result_directory
+        .parent()
+        .context("CI result directory has no results parent")?;
+    if results_root.exists() && !ci_plain_directory(results_root) {
+        anyhow::bail!("CI results parent is not a plain directory");
+    }
+    std::fs::create_dir_all(&context.result_directory).context("create CI PE result directory")?;
+    if !ci_plain_directory(&context.result_directory) {
+        anyhow::bail!("CI run result path is not a plain directory");
+    }
+    let mut warnings = Vec::new();
+    if let Some(log_path) = merged_log {
+        if let Err(error) = copy_ci_log(log_path, &context.result_directory.join("pe-failure.log"))
+        {
+            warnings.push(format!("copy PE failure log: {error}"));
+        }
+    } else {
+        warnings.push("PE failure log was unavailable".to_owned());
+    }
+    let final_path = context.result_directory.join("final.json");
+    let result = serde_json::json!({
+        "schema_version": 1,
+        "run_id": context.run_id,
+        "terminal": true,
+        "outcome": "product_failed",
+        "stage": "pe",
+        "started_utc": context.started_utc,
+        "finished_utc": chrono::Utc::now().to_rfc3339(),
+        "error": error_message,
+        "backup": serde_json::Value::Null,
+        "warnings": warnings,
+        "shutdown_requested": true,
+        "wim_engine": lr_core::active_engine().name(),
+        "pe_build": "ci-automation"
+    });
+    let mut bytes = serde_json::to_vec_pretty(&result)?;
+    bytes.push(b'\n');
+
+    atomic_write_ci_file(&final_path, &bytes).context("atomically publish CI final.json")?;
+    let readback: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&final_path).context("read back CI final.json")?)?;
+    if readback.get("run_id").and_then(serde_json::Value::as_str)
+        != result.get("run_id").and_then(serde_json::Value::as_str)
+        || readback
+            .get("terminal")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        anyhow::bail!("CI final.json round-trip mismatch");
+    }
+    Ok(final_path)
+}
+
+#[cfg(feature = "ci-automation")]
+pub(crate) fn finalize_ci_failure(error_message: &str) {
+    use std::sync::atomic::Ordering;
+    if CI_TERMINAL_FINALIZED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    log::error!("[CI AUTOMATION] terminal=failure error={error_message}");
+    let merged_log = prepare_failure_log_for_ui();
+    match publish_ci_terminal_failure(error_message, merged_log.as_deref()) {
+        Ok(path) => log::info!("[CI AUTOMATION] final result published: {}", path.display()),
+        Err(error) => log::error!("[CI AUTOMATION] terminal publication failed: {error:#}"),
+    }
+    log::logger().flush();
+    match lr_core::windows_shutdown::schedule_shutdown(
+        5,
+        "LetRecovery PE CI reached a terminal failure; this disposable VM will power off.",
+    ) {
+        Ok(()) => log::info!("[CI AUTOMATION] power-off accepted timeout_seconds=5"),
+        Err(error) => log::error!("[CI AUTOMATION] power-off request failed: {error:#}"),
+    }
+}
+pub(crate) fn publish_final_install_log(target_partition: &str, session_id: &str) {
+    publish_install_log_to_root(
+        &std::path::PathBuf::from(format!("{}\\", target_partition)),
+        session_id,
+        "新系统",
+    );
+}
+
+#[derive(Debug, Default)]
+struct TerminalLogPublishGate {
+    pending: bool,
+}
+
+impl TerminalLogPublishGate {
+    fn armed() -> Self {
+        Self { pending: true }
+    }
+
+    fn take(&mut self) -> bool {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalLogDestination {
+    TargetSystem,
+    VerifiedDataFallback,
+}
+
+fn terminal_log_destination(
+    completed: bool,
+    target_system_available: bool,
+) -> TerminalLogDestination {
+    if completed || target_system_available {
+        TerminalLogDestination::TargetSystem
+    } else {
+        TerminalLogDestination::VerifiedDataFallback
+    }
+}
+
+fn terminal_success_outcome(cleanup_verified: bool) -> &'static str {
+    if cleanup_verified {
+        "completed cleanup=verified"
+    } else {
+        "completed cleanup=incomplete"
+    }
+}
+
+/// One-shot, best-effort terminal log publisher for the target-write phase.
+///
+/// Construct this immediately before formatting or the first target write. Any
+/// later early return publishes a failure outcome from `Drop`; explicit terminal
+/// paths publish a more precise outcome and disarm the fallback first.
+pub(crate) struct InstallLogTerminalFinalizer {
+    target_partition: String,
+    data_volume_root: std::path::PathBuf,
+    data_directory: std::path::PathBuf,
+    expected_data_identity: Option<lr_core::windows_storage::StableVolumeIdentity>,
+    session_id: String,
+    target_system_available: bool,
+    gate: TerminalLogPublishGate,
+}
+
+impl InstallLogTerminalFinalizer {
+    pub(crate) fn armed(
+        target_partition: &str,
+        data_volume_root: &std::path::Path,
+        data_directory: &std::path::Path,
+        session_id: &str,
+    ) -> Self {
+        let expected_data_identity = match stable_log_volume_identity(data_volume_root) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                log::warn!(
+                    "[INSTALL LOG] cannot bind failure-log fallback to a stable data volume; fallback publication will be skipped: {error}"
+                );
+                None
+            }
+        };
+        Self {
+            target_partition: target_partition.to_owned(),
+            data_volume_root: data_volume_root.to_owned(),
+            data_directory: data_directory.to_owned(),
+            expected_data_identity,
+            session_id: session_id.to_owned(),
+            target_system_available: false,
+            gate: TerminalLogPublishGate::armed(),
+        }
+    }
+
+    /// Publish the first target-side checkpoint immediately after the new system exists.
+    ///
+    /// This is diagnostic-only and must never change the installation result. It closes the
+    /// failure window where a later driver/boot/advanced-option error previously left the useful
+    /// PE log only on the RAM disk or an unrelated data-volume fallback.
+    pub(crate) fn mark_target_system_available(&mut self) {
+        if self.target_system_available {
+            return;
+        }
+        self.target_system_available = true;
+        log::info!(
+            "[INSTALL LOG] target system is available; publishing the first target-side checkpoint"
+        );
+        publish_final_install_log(&self.target_partition, &self.session_id);
+    }
+
+    fn publish_to_verified_data_fallback(&self, label: &str) {
+        let actual = match stable_log_volume_identity(&self.data_volume_root) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                log::warn!(
+                    "[INSTALL LOG] data-volume fallback identity query failed; no fallback log was written: {error}"
+                );
+                None
+            }
+        };
+        if !lr_core::install_log_handoff::stable_log_destination_matches(
+            self.expected_data_identity,
+            actual,
+        ) {
+            log::warn!(
+                "[INSTALL LOG] data-volume fallback is missing or no longer maps to the armed stable volume; no fallback log was written"
+            );
+            return;
+        }
+        publish_install_log_to_root(&self.data_directory, &self.session_id, label);
+    }
+
+    fn publish_once(&mut self, completed: bool, outcome: &str) {
+        if !self.gate.take() {
+            return;
+        }
+        if completed {
+            log::info!("[PE INSTALL] terminal_outcome={outcome}");
+        } else {
+            log::error!("[PE INSTALL] terminal_outcome={outcome}");
+        }
+        if terminal_log_destination(completed, self.target_system_available)
+            == TerminalLogDestination::TargetSystem
+        {
+            // Image and boot deployment have already completed. Re-querying mutable inventory
+            // here cannot protect another destructive write and can only create a false failure.
+            publish_final_install_log(&self.target_partition, &self.session_id);
+        } else {
+            // A formatting failure can leave the target unmountable or only partially changed.
+            // The data partition is the already-validated diagnostic fallback and is deliberately
+            // preserved on every failure path.
+            self.publish_to_verified_data_fallback("数据分区失败诊断目录");
+        }
+    }
+
+    pub(crate) fn finish_success(&mut self, cleanup_verified: bool) {
+        self.publish_once(true, terminal_success_outcome(cleanup_verified));
+    }
+}
+
+fn stable_log_volume_identity(
+    data_volume_root: &std::path::Path,
+) -> Result<lr_core::windows_storage::StableVolumeIdentity, lr_core::windows_storage::StorageError>
+{
+    if let Some(letter) = lr_core::windows_storage::path_drive_letter(data_volume_root) {
+        lr_core::windows_storage::stable_volume_identity(letter)
+    } else {
+        let volume_guid_root = data_volume_root.as_os_str().to_string_lossy();
+        lr_core::windows_storage::stable_volume_identity_from_guid_path(&volume_guid_root)
+    }
+}
+
+impl Drop for InstallLogTerminalFinalizer {
+    fn drop(&mut self) {
+        let outcome = if self.target_system_available {
+            "failed stage=post_image_apply_early_return"
+        } else {
+            "failed stage=target_write_before_image_available"
+        };
+        self.publish_once(false, outcome);
     }
 }
 
@@ -132,13 +894,41 @@ fn load_matching_vmd_driver_into_running_pe() -> anyhow::Result<()> {
                 log::info!("[VMD/PE] runtime VMD driver loaded: {}", inf.display());
             }
             Ok(outcome) => {
-                anyhow::bail!(
-                    "drvload rejected {} (exit {:?}): stdout={} stderr={}",
-                    inf.display(),
-                    outcome.exit_code(),
-                    String::from_utf8_lossy(outcome.stdout()).trim(),
-                    String::from_utf8_lossy(outcome.stderr()).trim()
-                );
+                let stdout = lr_core::encoding::decode_windows_console_output(outcome.stdout());
+                let stderr = lr_core::encoding::decode_windows_console_output(outcome.stderr());
+                let present = lr_core::driver::list_present_devices().map_err(|status_error| {
+                    anyhow::anyhow!(
+                        "drvload rejected {} (exit {:?}): stdout={} stderr={}; authoritative devnode status query also failed: {status_error}",
+                        inf.display(),
+                        outcome.exit_code(),
+                        stdout.trim(),
+                        stderr.trim()
+                    )
+                })?;
+                let (usable, summary) = matched_vmd_controller_runtime_state(package, &present);
+                if usable {
+                    // DrvLoad returns a nonzero code when it has no driver to select, including an
+                    // already-bound controller. The supported runtime fact is the current PnP
+                    // devnode state: continue only when every exact generation-defining VMD node
+                    // is already started and has no Configuration Manager problem.
+                    log::warn!(
+                        "[VMD/PE] drvload returned exit {:?}, but the exact matched controller is already operational; continuing: package={:?} state={} stdout={} stderr={}",
+                        outcome.exit_code(),
+                        package,
+                        summary,
+                        stdout.trim(),
+                        stderr.trim()
+                    );
+                } else {
+                    anyhow::bail!(
+                        "drvload rejected {} (exit {:?}) and the matched VMD controller is not operational: state={} stdout={} stderr={}",
+                        inf.display(),
+                        outcome.exit_code(),
+                        summary,
+                        stdout.trim(),
+                        stderr.trim()
+                    );
+                }
             }
             Err(error) => {
                 anyhow::bail!("failed to start drvload for {}: {error}", inf.display());
@@ -148,35 +938,535 @@ fn load_matching_vmd_driver_into_running_pe() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn matched_vmd_controller_runtime_state(
+    package: lr_core::storage_driver_match::BuiltInStorageDriverPackage,
+    devices: &[lr_core::driver::PresentDeviceState],
+) -> (bool, String) {
+    let matched = devices
+        .iter()
+        .filter(|device| package.matches_hardware_ids(&device.hardware_ids))
+        .collect::<Vec<_>>();
+    let summary = if matched.is_empty() {
+        "no matching present devnode".to_owned()
+    } else {
+        matched
+            .iter()
+            .map(|device| {
+                format!(
+                    "ids=[{}] query_cr=0x{:08X} status=0x{:08X} problem={}",
+                    device.hardware_ids.join(","),
+                    device.status_query_cr,
+                    device.devnode_status,
+                    device
+                        .problem_number
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_owned())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    (
+        !matched.is_empty()
+            && matched
+                .iter()
+                .all(|device| device.is_started_without_problem()),
+        summary,
+    )
+}
+
 /// 探测界面语言：从（正常系统端随重启写入的）配置文件读取 Language 字段。
 /// 找不到数据分区或配置时返回空串（即简体中文内置）。
-fn detect_ui_language() -> String {
-    use core::config::{ConfigFileManager, OperationType};
-
-    let operation_type = match ConfigFileManager::detect_operation_type() {
-        Some(operation) => operation,
-        None => return String::new(),
+fn detect_ui_language(guard: &core::config::AuthenticatedOperationGuard) -> String {
+    let Ok(text) = std::str::from_utf8(guard.exact_config_bytes()) else {
+        return String::new();
     };
-    let data_partition = match ConfigFileManager::find_data_partition_for(operation_type) {
-        Some(p) => p,
-        None => return String::new(),
-    };
+    let mut language = None;
+    for line in text.lines() {
+        let Some(value) = line.strip_prefix("Language=") else {
+            continue;
+        };
+        if language.is_some()
+            || value.len() > 32
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return String::new();
+        }
+        language = Some(value.to_owned());
+    }
+    language.unwrap_or_default()
+}
 
-    match operation_type {
-        OperationType::Install => ConfigFileManager::read_install_config(&data_partition)
-            .map(|c| c.language)
-            .unwrap_or_default(),
-        OperationType::Backup => ConfigFileManager::read_backup_config(&data_partition)
-            .map(|c| c.language)
-            .unwrap_or_default(),
-        OperationType::Expand => ConfigFileManager::read_expand_config(&data_partition)
-            .map(|c| c.language)
-            .unwrap_or_default(),
+fn unlock_maintenance_volumes_best_effort(
+    guard: &core::config::AuthenticatedOperationGuard,
+) -> anyhow::Result<(usize, usize)> {
+    use lr_core::command::CommandExecutor as _;
+
+    guard.verify_unchanged()?;
+    let Some(secret) = guard.protected_bitlocker_secret_bytes() else {
+        return Ok((0, 0));
+    };
+    let keys = lr_core::bl_passthrough::parse_keys(secret).map_err(anyhow::Error::msg)?;
+    let mask = match lr_core::windows_storage::assigned_drive_letter_mask() {
+        Ok(mask) => mask,
+        Err(error) => {
+            log::warn!("[PE MAINTENANCE] 无法枚举盘符，已跳过 BitLocker 解锁: {error}");
+            return Ok((0, 0));
+        }
+    };
+    let executor = lr_core::command::SystemCommandExecutor;
+    let mut attempted_volumes = 0usize;
+    let mut unlocked_volumes = 0usize;
+    for index in 0..26_u32 {
+        if mask & (1_u32 << index) == 0 {
+            continue;
+        }
+        let drive = format!("{}:", char::from(b'A' + index as u8));
+        if !maintenance_volume_may_need_unlock(&drive) {
+            continue;
+        }
+        attempted_volumes += 1;
+        for key in keys.iter() {
+            // Microsoft documents this exact command as an unlock operation. It does not disable
+            // protectors and does not start decryption; secret-bearing arguments are never logged.
+            let request = lr_core::command::CommandRequest::new("manage-bde.exe").args([
+                "-unlock",
+                drive.as_str(),
+                "-recoverypassword",
+                key.as_str(),
+            ]);
+            match executor.execute(&request) {
+                Ok(outcome) if outcome.succeeded() => {
+                    unlocked_volumes += 1;
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!(
+                        "[PE MAINTENANCE] manage-bde 无法启动，停止后续自动解锁尝试: {error}"
+                    );
+                    guard.verify_unchanged()?;
+                    return Ok((attempted_volumes, unlocked_volumes));
+                }
+            }
+        }
+    }
+    guard.verify_unchanged()?;
+    Ok((attempted_volumes, unlocked_volumes))
+}
+
+fn maintenance_volume_may_need_unlock(drive: &str) -> bool {
+    use lr_core::fveapi::{FveApi, FveError, FveLockStatus};
+
+    let Ok(api) = FveApi::instance() else {
+        return true;
+    };
+    match api.get_status_by_path(drive) {
+        Ok(info) => info.lock_status == FveLockStatus::Locked,
+        Err(FveError::VolumeLocked | FveError::KeyRequired) => true,
+        Err(FveError::NotEncrypted | FveError::NotBitLockerVolume | FveError::NotSupported) => {
+            false
+        }
+        Err(_) => true,
     }
 }
 
+fn remain_in_hidden_pe_maintenance() -> ! {
+    log::info!("[PE MAINTENANCE] 自动解锁阶段结束；LetRecovery 窗口保持隐藏，PE 桌面可供维护");
+    loop {
+        std::thread::park();
+    }
+}
+
+fn is_removed_pe_cli_invocation(args: &[String]) -> bool {
+    args.len() == 2
+        && matches!(
+            args[1].to_ascii_lowercase().as_str(),
+            "/peinstall" | "--pe-install" | "/pebackup" | "--pe-backup"
+        )
+}
+
+#[cfg(feature = "ci-automation")]
+fn record_personal_restore_ci_probe(
+    report: &lr_core::personal_files::PersonalFileRestoreReport,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    let program_data = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("ProgramData is unavailable for the CI restore probe"))?;
+    let log_directory = program_data.join("LetRecovery").join("Logs");
+    std::fs::create_dir_all(&log_directory)?;
+    let log_path = log_directory.join("FirstLogon-finalize.log");
+    let expected = [
+        "lr-preserve-desktop.txt",
+        "lr-preserve-documents.txt",
+        "lr-preserve-downloads.txt",
+        "lr-preserve-pictures.txt",
+        "lr-preserve-music.txt",
+        "lr-preserve-videos.txt",
+    ];
+    let mut present = 0_u32;
+    let mut observations = Vec::with_capacity(expected.len());
+    for (directory, name) in report.personal_directories.iter().zip(expected) {
+        let path = directory.join(name);
+        let exists = std::fs::symlink_metadata(&path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false);
+        if exists {
+            present += 1;
+        }
+        observations.push(format!("{}={exists}", path.display()));
+    }
+    let desktop = report
+        .personal_directories
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("CI restore report has no Desktop destination"))?;
+    let documents = report
+        .personal_directories
+        .get(1)
+        .ok_or_else(|| anyhow::anyhow!("CI restore report has no Documents destination"))?;
+    let inside_shortcut = desktop.join("LR-Preserve-Inside-Users.lnk");
+    let canary = documents.join("LetRecovery-CI-post-restore-canary.txt");
+    std::fs::write(&canary, b"created-after-personal-restore")?;
+    let canary_readback = std::fs::read(&canary)? == b"created-after-personal-restore";
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    writeln!(
+        log,
+        "Personal files restore CI probe: immediate markers={present}/6 inside_shortcut={} canary={} details={}",
+        inside_shortcut.is_file(),
+        canary_readback,
+        observations.join("|")
+    )?;
+    log.flush()?;
+    Ok(())
+}
+
+#[cfg(feature = "ci-automation")]
+fn record_personal_restore_source_ci_probe(session_id: &str) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::os::windows::fs::MetadataExt as _;
+
+    let system_root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("SystemRoot is unavailable for the CI source probe"))?;
+    let volume_root = system_root
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("SystemRoot has no volume root for the CI source probe"))?;
+    let preserved = volume_root.join(format!("LetRecovery_Preserved_{session_id}"));
+    let mut stack = vec![preserved.clone()];
+    let mut files = Vec::new();
+    let mut marker_count = 0_u32;
+    let mut shortcut_count = 0_u32;
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if metadata.is_dir() && metadata.file_attributes() & 0x0000_0400 == 0 {
+                stack.push(entry.path());
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(&preserved)
+                .map_err(|_| anyhow::anyhow!("CI source probe path escaped preservation root"))?
+                .display()
+                .to_string();
+            let lower = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if lower.starts_with("lr-preserve-") && lower.ends_with(".txt") {
+                marker_count += 1;
+            }
+            if lower == "lr-preserve-inside-users.lnk" {
+                shortcut_count += 1;
+            }
+            if files.len() < 128 {
+                files.push(relative);
+            }
+        }
+    }
+    files.sort();
+    let program_data = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("ProgramData is unavailable for the CI source probe"))?;
+    let log_directory = program_data.join("LetRecovery").join("Logs");
+    std::fs::create_dir_all(&log_directory)?;
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_directory.join("FirstLogon-finalize.log"))?;
+    writeln!(
+        log,
+        "Personal files restore CI source probe: markers={marker_count} inside_shortcut={shortcut_count} files={} details={}",
+        files.len(),
+        files.join("|")
+    )?;
+    log.flush()?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
-    // 初始化日志：写入到 exe 同目录的 LetRecoveryPE.log。
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 3
+        && matches!(
+            args[1].as_str(),
+            "--internal-activate-personal-restore-shell-gate"
+                | "--internal-begin-personal-restore-second-logon"
+                | "--internal-rearm-personal-restore-before-shell"
+                | "--internal-personal-restore-progress-shell"
+        )
+    {
+        let result = match args[1].as_str() {
+            "--internal-activate-personal-restore-shell-gate" => {
+                lr_core::first_logon::activate_personal_restore_shell_gate(&args[2])
+            }
+            "--internal-begin-personal-restore-second-logon" => {
+                lr_core::first_logon::begin_personal_restore_second_logon(&args[2])
+            }
+            "--internal-rearm-personal-restore-before-shell" => {
+                lr_core::first_logon::rearm_personal_restore_before_shell(&args[2])
+            }
+            "--internal-personal-restore-progress-shell" => {
+                lr_core::first_logon::run_personal_restore_progress_shell(&args[2])
+            }
+            _ => unreachable!("private Shell-gate route was matched above"),
+        };
+        match result {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                println!("failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if (args.len() == 3
+        && matches!(
+            args[1].as_str(),
+            "--internal-restore-personal-files"
+                | "--internal-restore-personal-files-at-shell"
+                | "--internal-restore-personal-files-before-shell"
+        ))
+        || (args.len() == 4 && args[1] == "--internal-restore-personal-files-after-shell")
+    {
+        #[cfg(feature = "ci-automation")]
+        if args[1] == "--internal-restore-personal-files-after-shell" {
+            if let Err(error) = record_personal_restore_source_ci_probe(&args[2]) {
+                eprintln!("LETRECOVERY_PERSONAL_RESTORE_CI_SOURCE_PROBE_FAILURE {error:#}");
+            }
+        }
+        let result = match args[1].as_str() {
+            "--internal-restore-personal-files-at-shell" => {
+                lr_core::first_logon::restore_personal_files_at_shell(&args[2])
+            }
+            "--internal-restore-personal-files-before-shell" => {
+                lr_core::first_logon::restore_personal_files_before_shell(&args[2])
+            }
+            "--internal-restore-personal-files-after-shell" => match args[3].as_str() {
+                "true" => lr_core::first_logon::restore_personal_files_after_shell(&args[2], true),
+                "false" => {
+                    lr_core::first_logon::restore_personal_files_after_shell(&args[2], false)
+                }
+                _ => Err(anyhow::anyhow!(
+                    "invalid personal-file Explorer-stage automation flag"
+                )),
+            },
+            _ => {
+                lr_core::personal_files::restore_preserved_personal_files_for_current_user(&args[2])
+                    .map(Some)
+            }
+        };
+        match result {
+            Ok(Some(report)) => {
+                #[cfg(feature = "ci-automation")]
+                if let Err(error) = record_personal_restore_ci_probe(&report) {
+                    eprintln!("LETRECOVERY_PERSONAL_RESTORE_CI_PROBE_FAILURE {error:#}");
+                }
+                println!(
+                    "completed profile={} sources={} directories={} files={} conflicts={}",
+                    report.current_profile_root.display(),
+                    report.source_profiles,
+                    report.restored_directories,
+                    report.restored_files,
+                    report.renamed_conflicts
+                );
+                for (name, path) in [
+                    "Desktop",
+                    "Documents",
+                    "Downloads",
+                    "Pictures",
+                    "Music",
+                    "Videos",
+                ]
+                .into_iter()
+                .zip(report.personal_directories.iter())
+                {
+                    println!(
+                        "destination scope=personal name={name} path={}",
+                        path.display()
+                    );
+                }
+                for (name, path) in [
+                    "Desktop",
+                    "Documents",
+                    "Downloads",
+                    "Pictures",
+                    "Music",
+                    "Videos",
+                ]
+                .into_iter()
+                .zip(report.public_directories.iter())
+                {
+                    println!(
+                        "destination scope=public name={name} path={}",
+                        path.display()
+                    );
+                }
+                std::process::exit(0);
+            }
+            Ok(None) => {
+                println!("completed cleanup-only receipt={}", args[2]);
+                std::process::exit(0);
+            }
+            Err(error) => {
+                println!("failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.len() == 4 && args[1] == "--internal-register-personal-files-at-shell" {
+        let exit_code = match lr_core::first_logon::register_personal_restore_at_shell(
+            &args[2],
+            std::path::Path::new(&args[3]),
+        ) {
+            Ok(()) => 0,
+            Err(error) => {
+                println!("failed: {error:#}");
+                1
+            }
+        };
+        std::process::exit(exit_code);
+    }
+    if args.len() == 2 && args[1] == "--internal-store-builtin-administrator-secret" {
+        let exit_code = match lr_core::first_logon::protect_staged_builtin_administrator_secret() {
+            Ok(()) => 0,
+            Err(error) => {
+                println!("failed: {error:#}");
+                lr_core::unattend_command::REQUIRED_SPECIALIZE_FAILURE_EXIT_CODE
+            }
+        };
+        std::process::exit(exit_code);
+    }
+    if args.len() == 4 && args[1] == "--internal-prepare-local-rid" {
+        let exit_code = if args[2] == "500" {
+            match lr_core::windows_accounts::decode_account_name_utf16_hex(&args[3]).and_then(
+                |name| lr_core::windows_accounts::prepare_local_account_by_rid(500, &name),
+            ) {
+                Ok(()) => 0,
+                Err(_) => lr_core::unattend_command::REQUIRED_SPECIALIZE_FAILURE_EXIT_CODE,
+            }
+        } else {
+            lr_core::unattend_command::REQUIRED_SPECIALIZE_FAILURE_EXIT_CODE
+        };
+        std::process::exit(exit_code);
+    }
+    if args.len() == 5
+        && args[1] == "--internal-begin-builtin-administrator-transition-with-personal-restore"
+    {
+        let result = (|| -> anyhow::Result<()> {
+            let desired_name = lr_core::windows_accounts::decode_account_name_utf16_hex(&args[2])?;
+            let temporary_name =
+                lr_core::windows_accounts::decode_account_name_utf16_hex(&args[3])?;
+            lr_core::first_logon::begin_builtin_administrator_transition_with_personal_restore(
+                &desired_name,
+                &temporary_name,
+                &args[4],
+            )
+        })();
+        match result {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                println!("failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.len() == 4
+        && matches!(
+            args[1].as_str(),
+            "--internal-begin-builtin-administrator-transition"
+                | "--internal-finish-builtin-administrator-transition"
+                | "--internal-retire-builtin-administrator-transition"
+        )
+    {
+        let result = (|| -> anyhow::Result<()> {
+            let desired_name = lr_core::windows_accounts::decode_account_name_utf16_hex(&args[2])?;
+            let temporary_name =
+                lr_core::windows_accounts::decode_account_name_utf16_hex(&args[3])?;
+            match args[1].as_str() {
+                "--internal-begin-builtin-administrator-transition" => {
+                    lr_core::first_logon::begin_builtin_administrator_transition(
+                        &desired_name,
+                        &temporary_name,
+                    )
+                }
+                "--internal-finish-builtin-administrator-transition" => {
+                    lr_core::first_logon::finish_builtin_administrator_transition(
+                        &desired_name,
+                        &temporary_name,
+                    )
+                }
+                "--internal-retire-builtin-administrator-transition" => {
+                    lr_core::first_logon::retire_builtin_administrator_transition(
+                        &desired_name,
+                        &temporary_name,
+                    )
+                }
+                _ => unreachable!("private account transition route was matched above"),
+            }
+        })();
+        match result {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                println!("failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.len() == 2 && args[1] == "--internal-cleanup-disabled-defaultuser0" {
+        let exit_code = match lr_core::windows_accounts::cleanup_disabled_default_oobe_account() {
+            Ok(removed) => {
+                println!("completed removed={removed}");
+                0
+            }
+            Err(error) => {
+                println!("failed: {error}");
+                1
+            }
+        };
+        std::process::exit(exit_code);
+    }
+    if args.len() == 3 && args[1] == "--internal-delete-temporary-oobe-account" {
+        let exit_code = match lr_core::windows_accounts::decode_account_name_utf16_hex(&args[2])
+            .and_then(|name| {
+                lr_core::unattend_account::validate_temporary_oobe_account_name(&name)
+                    .map_err(|_| lr_core::windows_accounts::AccountUpdateError::InvalidAccount)?;
+                lr_core::windows_accounts::delete_local_account(&name)
+            }) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        };
+        std::process::exit(exit_code);
+    }
+    if is_removed_pe_cli_invocation(&args) {
+        // PE has no destructive command-line mode. Reject a stale legacy entry before logging,
+        // driver discovery, handoff authentication, UI initialization or any MessageBox.
+        return Ok(());
+    }
+    // 初始化日志：优先写入程序目录；只读介质自动回退到 WinPE RAM 盘。
     // PE 下 GUI 程序没有控制台，stderr 会被直接丢弃，必须落盘才能事后排查“怎么死的”。
     init_file_logger();
     // 安装 panic 钩子：安装流程跑在工作线程里，线程 panic 会“静默死亡”导致界面卡住，
@@ -185,16 +1475,16 @@ fn main() -> anyhow::Result<()> {
 
     log::info!("==================== LetRecovery PE 启动 ====================");
     log::info!(
-        "版本: {} | 包版本: {} | 日志文件: {}",
+        "版本: {} | 日志文件: {}",
         env!("BUILD_VERSION"),
-        env!("CARGO_PKG_VERSION"),
-        log_file_path().display()
+        active_log_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "[unavailable]".to_string())
     );
     let firmware = lr_core::boot_pca::inspect_firmware_pca();
     log::info!(
-        "[诊断环境] PE 程序: build={} | package={} | arch={}",
+        "[诊断环境] PE 程序: version={} | arch={}",
         env!("BUILD_VERSION"),
-        env!("CARGO_PKG_VERSION"),
         std::env::consts::ARCH
     );
     log::info!(
@@ -209,7 +1499,6 @@ fn main() -> anyhow::Result<()> {
     // same elapsed-time loading ring and paint timer used by the production page. It must run before
     // driver loading, BitLocker passthrough and task discovery so desktop QA cannot touch the host
     // storage stack. Release builds do not contain this branch.
-    let args: Vec<String> = std::env::args().collect();
     #[cfg(feature = "non-elevated-tests")]
     if args.iter().any(|arg| arg == "--ui-progress-preview-failed") {
         utils::i18n::init("");
@@ -240,18 +1529,31 @@ fn main() -> anyhow::Result<()> {
     // 检查命令行参数
     log::info!("命令行参数: {:?}", args);
 
-    // 【关键】BitLocker 密钥透传解锁必须在**任何**操作类型检测之前执行。
-    // 安装标记文件(LetRecovery_Install.marker)位于目标系统卷上，若该卷被 BitLocker 加密，
-    // 则 PE 启动后它处于锁定状态，detect_operation_type()/find_install_marker_partition()
-    // 会读不到标记 → 返回 None → GUI 安装流程(execute_install_workflow)根本不会启动，
-    // 而解锁逻辑原先恰好埋在 execute_install_workflow 里，形成“要解锁才能检测、要检测才会解锁”
-    // 的死锁。这里提前到 main 最前面统一解锁，GUI/自动/命令行所有模式都覆盖，
-    // 且无论是否加密都会在日志里留下解锁尝试记录。无密钥文件=未启用=安全空操作。
-    unlock_bitlocker_passthrough();
+    // The fixed X: LRHC1 capsule is the sole operation authority. No disk task file, drive letter,
+    // legacy INI, or unscoped recovery material is inspected before this succeeds.
+
+    let authenticated_handoff = match core::config::AuthenticatedOperationGuard::discover() {
+        Ok(guard) => guard,
+        Err(error) => {
+            log::error!("[HANDOFF AUTH] fixed X: LRHC1 payload rejected: {error:#}");
+            show_error_message(&tr!(
+                "PE 任务认证失败，尚未扫描或修改磁盘。请返回正常系统端重新创建任务。\r\n\r\n{}",
+                format_args!("{error:#}")
+            ));
+            return Ok(());
+        }
+    };
+    log::info!(
+        "[HANDOFF AUTH] accepted fixed boot payload: purpose={:?}, session={}, config_bytes={}, artifacts={}",
+        authenticated_handoff.purpose(),
+        authenticated_handoff.session_id(),
+        authenticated_handoff.exact_config_bytes().len(),
+        authenticated_handoff.manifest().artifacts.len()
+    );
 
     // 初始化多语言：从配置文件（正常系统端随重启写入 Language=）读取界面语言；空=简体中文（内置）。
     // 必须在任何 GUI/CLI 分支之前，确保所有模式下文案都按所选语言显示。
-    let ui_language = detect_ui_language();
+    let ui_language = detect_ui_language(&authenticated_handoff);
     utils::i18n::init(&ui_language);
     log::info!(
         "界面语言: {}",
@@ -262,53 +1564,43 @@ fn main() -> anyhow::Result<()> {
         }
     );
 
-    // 命令行模式（无GUI）
-    if args.contains(&"/PEINSTALL".to_string()) || args.contains(&"--pe-install".to_string()) {
-        log::info!("检测到PE安装模式（命令行），执行自动安装...");
-        return run_cli_mode(true);
+    if authenticated_handoff.purpose() == lr_core::handoff_auth::HandoffPurpose::Maintenance {
+        match unlock_maintenance_volumes_best_effort(&authenticated_handoff) {
+            Ok((attempted, unlocked)) => log::info!(
+                "[PE MAINTENANCE] BitLocker 自动解锁完成: enumerated_volumes={attempted}, accepted_unlocks={unlocked}"
+            ),
+            Err(error) => log::warn!(
+                "[PE MAINTENANCE] BitLocker 自动解锁材料不可用，维护环境继续: {error:#}"
+            ),
+        }
+        remain_in_hidden_pe_maintenance();
     }
-
-    if args.contains(&"/PEBACKUP".to_string()) || args.contains(&"--pe-backup".to_string()) {
-        log::info!("检测到PE备份模式（命令行），执行自动备份...");
-        return run_cli_mode(false);
-    }
+    let authenticated_operation = authenticated_handoff
+        .operation_type()
+        .context("non-maintenance handoff has no executable operation type")?;
 
     // 自动检测模式
     if args.contains(&"/AUTO".to_string()) || args.contains(&"--auto".to_string()) {
         log::info!("检测到自动模式，检测操作类型...");
 
-        use core::config::{ConfigFileManager, OperationType};
-
-        match ConfigFileManager::detect_operation_type() {
-            Some(OperationType::Install) => {
+        match authenticated_operation {
+            core::config::OperationType::Install => {
                 log::info!("检测到安装配置，启动GUI安装界面...");
             }
-            Some(OperationType::Backup) => {
+            core::config::OperationType::Backup => {
                 log::info!("检测到备份配置，启动GUI备份界面...");
             }
-            Some(OperationType::Expand) => {
+            core::config::OperationType::Expand => {
                 log::info!("检测到扩容配置，启动GUI扩容界面...");
-            }
-            None => {
-                log::warn!("未检测到配置文件，启动默认界面...");
-                show_error_message(&tr!(
-                    "未检测到安装或备份配置文件。\n\n请确保已正确准备配置文件后重试。"
-                ));
-                return Ok(());
             }
         }
     }
 
-    let Some(operation_type) = core::config::ConfigFileManager::detect_operation_type() else {
-        log::warn!("PE 原生界面未检测到安装、备份或扩容任务");
-        show_error_message(&tr!(
-            "未检测到安装或备份配置文件。\n\n请确保已正确准备配置文件后重试。"
-        ));
-        return Ok(());
-    };
+    let operation_type = authenticated_operation;
+    authenticated_handoff.verify_unchanged()?;
 
     log::info!("进入 PE 原生 Win32 进度界面");
-    if let Err(error) = native_ui::progress::run(operation_type) {
+    if let Err(error) = native_ui::progress::run(operation_type, authenticated_handoff) {
         log::error!("PE 原生 Win32 进度界面运行失败: {error}");
         show_error_message(&tr!("启动失败: {} - {}", "LetRecovery PE", error));
     }
@@ -323,827 +1615,551 @@ fn diagnostic_option(value: Option<bool>) -> &'static str {
     }
 }
 
-/// BitLocker 密钥透传解锁。
-///
-/// 若正常系统端在注入引导时把恢复密钥文件打包进了 boot.wim，则 PE 启动后该文件位于
-/// `X:\LR_BitLockerKeys.txt`。读取其中的恢复密钥，对 A–Z 各盘逐一尝试解锁。
-///
-/// 解锁优先用 fveapi，失败再回退 `manage-bde -unlock`（精简 WinPE 可能缺其一）。
-/// 全程写**日志**（GUI 无控制台，必须落盘到 LetRecoveryPE.log 才能排查），失败原因也记录。
-/// best-effort：无文件/无锁定卷/解锁失败都不致命。
-fn unlock_bitlocker_passthrough() {
-    let keys_path = format!("X:\\{}", lr_core::bl_passthrough::KEYS_FILE_NAME);
-    let content = match std::fs::read_to_string(&keys_path) {
-        Ok(c) => c,
-        Err(_) => {
-            log::info!(
-                "[实验] 未发现密钥透传文件 {}，跳过解锁（未启用透传/无加密卷）",
-                keys_path
-            );
-            return;
-        }
-    };
-    let keys = lr_core::bl_passthrough::parse_keys(&content);
-    if keys.is_empty() {
-        log::warn!(
-            "[实验] 密钥透传文件存在但未解析出任何恢复密钥: {}",
-            keys_path
-        );
-        return;
+fn validate_persistent_pe_payload(path: &std::path::Path, extension: &str) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("PE payload path has no parent"))?;
+    let parent_name = parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("PE payload parent name is invalid"))?;
+    if !path.is_absolute() || !parent_name.eq_ignore_ascii_case("LetRecovery_PE") {
+        anyhow::bail!("PE payload path is outside the persistent PE directory");
     }
-    let fveapi_ok = lr_core::fveapi::FveApi::instance().is_ok();
-    log::info!(
-        "[实验] BitLocker 密钥透传：解析到 {} 个恢复密钥，fveapi.dll={}，开始逐盘尝试解锁…",
-        keys.len(),
-        if fveapi_ok {
-            "可用(优先)"
-        } else {
-            "不可用(仅用 manage-bde)"
-        }
-    );
-
-    let mut any_unlocked = false;
-    for byte in b'A'..=b'Z' {
-        let letter = byte as char;
-        if letter == 'X' {
-            continue; // 跳过 PE 系统盘
-        }
-        let drive = format!("{}:", letter);
-        for (i, key) in keys.iter().enumerate() {
-            if try_unlock_fveapi(letter, key) {
-                log::info!(
-                    "[实验] {} 经 fveapi 用第 {} 个恢复密钥解锁成功",
-                    drive,
-                    i + 1
-                );
-                any_unlocked = true;
-                break;
-            }
-            if try_unlock_manage_bde(&drive, key) {
-                log::info!(
-                    "[实验] {} 经 manage-bde 用第 {} 个恢复密钥解锁成功",
-                    drive,
-                    i + 1
-                );
-                any_unlocked = true;
-                break;
-            }
-        }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("PE payload filename is not valid Unicode"))?;
+    if !name.starts_with("boot-") || !name.ends_with(extension) {
+        anyhow::bail!("PE payload filename is not session-scoped");
     }
-    if !any_unlocked {
-        log::warn!("[实验] 未解锁任何卷（若有锁定卷，请看上方各盘的 fveapi/manage-bde 失败原因）");
-    }
-    log::info!("[实验] BitLocker 密钥透传解锁流程结束");
-}
-
-/// 用 fveapi 对单个卷尝试恢复密钥解锁。返回是否成功；失败原因写日志。
-fn try_unlock_fveapi(drive_letter: char, recovery_key: &str) -> bool {
-    let api = match lr_core::fveapi::FveApi::instance() {
-        Ok(a) => a,
-        Err(_) => return false, // fveapi.dll 不可用（上层已记录一次）
-    };
-    let formatted = match lr_core::fveapi::format_recovery_key(recovery_key) {
-        Ok(f) => f,
-        Err(e) => {
-            log::warn!("[实验] 恢复密钥格式化失败: {}", e);
-            return false;
-        }
-    };
-    let path = format!("{}:", drive_letter);
-    match api.open_volume(&path) {
-        Ok(handle) => match handle.unlock_with_recovery_key(&formatted) {
-            Ok(_) => true,
-            Err(e) => {
-                // 开卷成功（通常即加密卷，含锁定卷）但本密钥解锁失败：记录具体错误便于定位
-                log::info!("[实验] {} fveapi 解锁失败: {:?}", path, e);
-                false
-            }
-        },
-        Err(e) => {
-            // 非 BitLocker / 未加密卷会在此返回，属正常，debug 级
-            log::debug!("[实验] {} fveapi 开卷失败/非加密: {:?}", path, e);
-            false
-        }
-    }
-}
-
-/// 回退：manage-bde 解锁（WinPE 可能未含该工具）。失败原因写日志。
-fn try_unlock_manage_bde(drive: &str, recovery_key: &str) -> bool {
-    match std::process::Command::new("manage-bde")
-        .args(["-unlock", drive, "-RecoveryPassword", recovery_key])
-        .output()
-    {
-        Ok(o) => {
-            if o.status.success() {
-                true
-            } else {
-                let out = String::from_utf8_lossy(&o.stdout);
-                let err = String::from_utf8_lossy(&o.stderr);
-                log::debug!(
-                    "[实验] {} manage-bde 解锁未成功: {} {}",
-                    drive,
-                    out.trim(),
-                    err.trim()
-                );
-                false
-            }
-        }
-        Err(e) => {
-            log::debug!("[实验] {} manage-bde 不可用: {}", drive, e);
-            false
-        }
-    }
-}
-
-/// 命令行模式执行
-fn run_cli_mode(is_install: bool) -> anyhow::Result<()> {
-    use core::bcdedit::BootManager;
-    use core::config::ConfigFileManager;
-    use core::disk::DiskManager;
-    use core::dism::Dism;
-    use core::ghost::Ghost;
-    use ui::advanced_options::apply_advanced_options;
-
-    if is_install {
-        log::info!("[PE INSTALL] ========== PE自动安装模式 ==========");
-        // 注：BitLocker 透传解锁已在 main() 最前面统一执行，这里不再重复。
-
-        // 查找配置文件所在分区
-        let (data_partition, target_partition, config) =
-            match ConfigFileManager::find_install_task() {
-                Ok(task) => task,
-                Err(e) => {
-                    log::error!("[PE INSTALL] 错误: 读取安装任务失败: {}", e);
-                    show_error_message(&tr!("读取安装任务失败: {}", e));
-                    return Ok(());
-                }
-            };
-
-        log::info!("[PE INSTALL] 数据分区: {}", data_partition);
-
-        // 切换到正常系统端选定的镜像引擎（随重启传入）
-        lr_core::set_active_engine(lr_core::WimEngine::from_u8(config.wim_engine));
-
-        log::info!("[PE INSTALL] 目标分区: {}", config.target_partition);
-        log::info!("[PE INSTALL] 镜像文件: {}", config.image_path);
-
-        let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-        let resolved_source = if config.is_xp_i386 {
-            ConfigFileManager::resolve_staged_xp_source(
-                &data_dir,
-                &config.image_path,
-                &config.xp_source_arch,
-            )
-        } else {
-            ConfigFileManager::resolve_staged_file(&data_dir, &config.image_path)
-        };
-        let image_path = match resolved_source {
-            Ok(path) => path.to_string_lossy().into_owned(),
-            Err(error) => {
-                log::error!("[PE INSTALL] 错误: {error}");
-                show_error_message(&tr!("安装配置中的镜像文件名无效: {}", error));
-                return Ok(());
-            }
-        };
-
-        if !std::path::Path::new(&image_path).exists() {
-            log::error!("[PE INSTALL] 错误: 镜像文件不存在: {}", image_path);
-            show_error_message(&tr!("镜像文件不存在: {}", image_path));
-            return Ok(());
-        }
-
-        log::info!("[PE INSTALL] 完整镜像路径: {}", image_path);
-
-        // Step 0: 校验镜像完整性（WIM/ESD；GHO 跳过）——放在格式化之前，坏镜像不糟蹋目标盘
-        let xp_custom_sif = if config.is_xp_i386 && !config.custom_unattend_file.is_empty() {
-            match ConfigFileManager::resolve_staged_file(&data_dir, &config.custom_unattend_file) {
-                Ok(path) => Some(path),
-                Err(error) => {
-                    show_error_message(&tr!("自定义 XP 应答文件名无效: {}", error));
-                    return Ok(());
-                }
-            }
-        } else {
-            None
-        };
-        if config.is_xp_i386 {
-            if let Err(error) =
-                lr_core::xp_i386::validate_i386_source(std::path::Path::new(&image_path))
-            {
-                show_error_message(&tr!("XP/2003 安装源校验失败: {}", error));
-                return Ok(());
-            }
-        }
-
-        if config.is_gho {
-            let ghost = core::ghost::Ghost::new();
-            if !ghost.is_available() {
-                show_error_message(&tr!("Ghost工具不可用"));
-                return Ok(());
-            }
-            if let Err(error) = ghost.verify_image_integrity(&image_path) {
-                show_error_message(&tr!("GHO 镜像预检失败: {}", error));
-                return Ok(());
-            }
-            log::info!("[PE安装/CLI] GHO 镜像预检通过，尚未修改目标分区");
-        } else if !config.is_xp_i386 {
-            log::info!("[PE INSTALL] Step 0: 校验镜像完整性");
-            log::info!("[PE安装/CLI] 开始校验镜像: {}", image_path);
-            let dism = Dism::new();
-            if let Err(e) = dism.verify_image(&image_path, None) {
-                log::error!("[PE INSTALL] 镜像校验失败: {}", e);
-                log::error!("[PE安装/CLI] 镜像校验失败: {}", e);
-                show_error_message(&tr!(
-                    "镜像校验失败：镜像可能已损坏或不完整（{}）。请重新获取镜像后重试。",
-                    e
-                ));
-                return Ok(());
-            }
-            log::info!("[PE安装/CLI] 镜像校验通过");
-        }
-
-        // PCA/EFI validation only protects a later boot write. When the user
-        // explicitly disabled boot repair, neither validate nor stage boot assets.
-        let boot_preflight = if !config.repair_boot || config.is_xp_i386 {
-            core::pca_preflight::BootPreflight {
-                pca_compat_package: None,
-                uefiseven_source: None,
-                secure_boot_disable_required: false,
-            }
-        } else {
-            // Keep CLI installs on the same fail-closed path as the PE GUI.
-            let staged_pca_compat = match core::pca_preflight::staged_config(
-                &config,
-                std::path::Path::new(&data_dir),
-            ) {
-                Ok(staged) => staged,
-                Err(error) => {
-                    show_error_message(&error);
-                    return Ok(());
-                }
-            };
-            match core::pca_preflight::verify_before_disk_write(
-                &image_path,
-                config.volume_index,
-                config.is_gho,
-                config.is_xp,
-                config.boot_mode != 2,
-                config.boot_pca_mode,
-                staged_pca_compat.as_ref(),
-                std::path::Path::new(&data_dir),
-            ) {
-                Ok(package) => package,
-                Err(error) => {
-                    show_error_message(&error);
-                    return Ok(());
-                }
-            }
-        };
-        let pca_compat_package = boot_preflight.pca_compat_package;
-        let uefiseven_source = boot_preflight.uefiseven_source;
-        let secure_boot_disable_required = boot_preflight.secure_boot_disable_required;
-
-        // Keep CLI installs on the same pre-destructive structural audit as the native UI.
-        if config.should_import_drivers() {
-            let driver_path = std::path::Path::new(&data_dir).join("drivers");
-            if !driver_path.is_dir() {
-                show_error_message(&tr!("驱动路径不存在: {}", driver_path.display()));
-                return Ok(());
-            }
-            if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
-                log::warn!(
-                    "[PE INSTALL] trust bootstrap failed; normal DISM verification remains active and controlled fallback may be unavailable: {error}"
-                );
-            }
-            match lr_core::driver_package_trust::audit_driver_directory(&driver_path) {
-                Ok(report) => {
-                    for failure in report.rejected() {
-                        log::warn!(
-                            "[PE INSTALL] optional driver deferred to exact-INF import: {}: {}",
-                            failure.inf_path().display(),
-                            failure.reason()
-                        );
-                    }
-                    log::info!(
-                        "[PE INSTALL] driver preflight: total={} independently_trusted={} deferred={}",
-                        report.total(),
-                        report.verified(),
-                        report.rejected().len()
-                    );
-                }
-                Err(error) => {
-                    log::error!("[PE INSTALL] unsafe driver directory before disk write: {error}");
-                    show_error_message(&tr!("驱动包预检失败: {}", error));
-                    return Ok(());
-                }
-            }
-        }
-
-        if config.run_diskpart_scripts {
-            log::info!("[PE INSTALL] Step 0.5: 检查已停用的旧分区脚本");
-            let scripts_dir = std::path::Path::new(&data_dir).join("diskpart");
-            if let Err(error) = lr_core::diskpart::run_scripts_in_dir(&scripts_dir) {
-                log::error!("[PE INSTALL] 旧分区脚本已停用: {error}");
-                show_error_message(&tr!("旧分区脚本已停用: {}", error));
-                return Ok(());
-            }
-        }
-
-        // Step 1: 格式化分区
-        if config.format_partition {
-            log::info!("[PE INSTALL] Step 1: 格式化分区");
-            let volume_label =
-                (!config.volume_label.is_empty()).then_some(config.volume_label.as_str());
-            if let Err(e) =
-                DiskManager::format_partition_with_label(&target_partition, volume_label)
-            {
-                log::error!("[PE INSTALL] 格式化失败: {}", e);
-                show_error_message(&tr!("格式化分区失败: {}", e));
-                return Ok(());
-            }
-        } else {
-            log::info!("[PE INSTALL] 用户已关闭格式化目标分区，跳过格式化");
-        }
-
-        // Step 2: 释放镜像
-        log::info!("[PE INSTALL] Step 2: 释放镜像");
-        if config.is_xp_i386 {
-            match lr_core::xp_i386::install_from_i386(
-                std::path::Path::new(&image_path),
-                &target_partition,
-                &utils::path::get_bin_dir(),
-                xp_custom_sif.as_deref(),
-            ) {
-                Ok(log_output) => log::info!("[PE INSTALL/XP TEXTMODE] {log_output}"),
-                Err(error) => {
-                    show_error_message(&tr!("准备 XP/2003 文本模式安装失败: {}", error));
-                    return Ok(());
-                }
-            }
-            if let Err(error) =
-                DiskManager::cleanup_auto_created_partition_and_extend(&target_partition)
-            {
-                log::error!("[PE INSTALL/XP TEXTMODE] cleanup failed: {error}");
-                show_error_message(&tr!("清理安装临时分区并合并空间失败: {}", error));
-                return Ok(());
-            }
-            ConfigFileManager::cleanup_all(&data_partition, &target_partition);
-            if config.auto_reboot {
-                if let Err(error) = lr_core::windows_shutdown::schedule_restart(
-                    10,
-                    "LetRecovery XP/2003 setup is ready",
-                ) {
-                    log::error!("[PE INSTALL/XP TEXTMODE] schedule restart failed: {error}");
-                    show_error_message(&tr!("安排重启失败: {}", error));
-                }
-            } else {
-                show_success_message(&tr!(
-                    "XP/2003 文本模式安装已准备完成，请重启计算机继续安装。"
-                ));
-            }
-            return Ok(());
-        }
-
-        let apply_dir = format!("{}\\", target_partition);
-
-        let apply_result = if config.is_gho {
-            let ghost = Ghost::new();
-            if !ghost.is_available() {
-                show_error_message(&tr!("Ghost工具不可用"));
-                return Ok(());
-            }
-            let partitions = DiskManager::get_partitions().unwrap_or_default();
-            ghost.restore_image_to_letter(&image_path, &target_partition, &partitions, None)
-        } else {
-            let dism = Dism::new();
-            dism.apply_image(&image_path, &apply_dir, config.volume_index, None)
-        };
-
-        if let Err(e) = apply_result {
-            log::error!("[PE INSTALL] 释放镜像失败: {}", e);
-            show_error_message(&tr!("释放镜像失败: {}", e));
-            return Ok(());
-        }
-
-        // Step 3: 导入驱动
-        log::info!("[PE INSTALL] Step 3: 导入驱动");
-        let driver_path = format!("{}\\drivers", data_dir);
-        let driver_path_exists = std::path::Path::new(&driver_path).exists();
-
-        let mut vmd_recovery_warning: Option<String> = None;
-        let mut secure_boot_disable_warning: Option<String> = None;
-        if config.should_import_drivers() && driver_path_exists {
-            if let Err(error) = lr_core::driver_trust::ensure_pe_driver_signing_trust() {
-                log::error!("[PE INSTALL] 初始化 PE 驱动签名信任链失败: {error}");
-                show_error_message(&tr!("离线驱动导入失败: {}", error));
-                return Ok(());
-            }
-            log::info!("[PE INSTALL] PE 驱动签名信任链已核验并初始化");
-            let dism = Dism::new();
-            let optional_failures = match dism.add_preserved_drivers_offline_with_progress(
-                &apply_dir,
-                &driver_path,
-                None,
-            ) {
-                Ok(failures) => failures,
-                Err(error) => {
-                    log::error!("[PE INSTALL] 驱动导入失败，安装停止: {error}");
-                    show_error_message(&tr!("离线驱动导入失败: {}", error));
-                    return Ok(());
-                }
-            };
-            for failure in &optional_failures {
-                log::warn!("[PE INSTALL] 可选驱动包未能导入，不阻断安装: {failure}");
-            }
-            if let Err(error) = lr_core::driver::verify_offline_storage_driver_requirements(
-                std::path::Path::new(&apply_dir),
-                std::path::Path::new(&driver_path),
-            ) {
-                let requirements = lr_core::driver::load_storage_driver_requirements(
-                    std::path::Path::new(&driver_path),
-                );
-                if requirements
-                    .as_ref()
-                    .map(|items| lr_core::driver::requirements_are_only_intel_vmd(items))
-                    .unwrap_or(false)
-                {
-                    let warning = tr!("系统已安装，但 Intel VMD 驱动未能导入。程序不会自动重启；请先在 BIOS 中关闭 VMD/Intel RST 后再启动新系统。");
-                    log::error!("[PE INSTALL] VMD driver verification failed; finishing installation without automatic restart: {error}");
-                    vmd_recovery_warning = Some(warning);
-                } else {
-                    log::error!("[PE INSTALL] 启动存储驱动导入后验证失败: {error}");
-                    show_error_message(&tr!("离线驱动导入失败: {}", error));
-                    return Ok(());
-                }
-            } else {
-                log::info!(
-                    "[PE INSTALL] 驱动导入完成，启动存储驱动覆盖验证通过；跳过可选包 {} 个",
-                    optional_failures.len()
-                );
-            }
-
-            match dism.add_packages_offline_from_dir(&apply_dir, &driver_path, None) {
-                Ok((success, _)) if success > 0 => {
-                    log::info!("[PE INSTALL] 驱动目录中的CAB安装完成: {success} 成功");
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    log::error!("[PE INSTALL] 驱动目录中的CAB安装失败: {error}");
-                    show_error_message(&tr!("批量 CAB 更新包安装失败: {}", error));
-                    return Ok(());
-                }
-            }
-        } else if config.should_import_drivers() && !driver_path_exists {
-            log::error!("[PE INSTALL] 请求自动导入驱动，但驱动目录不存在: {driver_path}");
-            show_error_message(&tr!("驱动路径不存在: {}", driver_path));
-            return Ok(());
-        } else {
-            log::info!("[PE INSTALL] 跳过驱动导入");
-        }
-
-        // Step 4: 安装CAB更新包
-        log::info!("[PE INSTALL] Step 4: 安装CAB更新包");
-        if config.install_cab_packages {
-            let cab_path = format!("{}\\updates", data_dir);
-            if std::path::Path::new(&cab_path).exists() {
-                let dism = Dism::new();
-                match dism.add_packages_offline_from_dir(&apply_dir, &cab_path, None) {
-                    Ok((success, _)) if success > 0 => {
-                        log::info!("[PE INSTALL] CAB更新包安装完成: {success} 成功");
-                    }
-                    Ok(_) => {
-                        show_error_message(&tr!("目录中没有找到驱动文件（.inf）或 CAB 包（.cab）"));
-                        return Ok(());
-                    }
-                    Err(error) => {
-                        log::error!("[PE INSTALL] CAB更新包安装失败: {error}");
-                        show_error_message(&tr!("批量 CAB 更新包安装失败: {}", error));
-                        return Ok(());
-                    }
-                }
-            } else {
-                log::error!("[PE INSTALL] 更新包目录不存在: {cab_path}");
-                show_error_message(&tr!("包目录不存在: {}", cab_path));
-                return Ok(());
-            }
-        } else {
-            log::info!("[PE INSTALL] 跳过CAB更新包安装");
-        }
-
-        if let Some(package) = pca_compat_package.as_ref() {
-            log::info!(
-                "[PE INSTALL] 为 Windows build {} / architecture {} 注入 PCA2023 BootEx",
-                package.target().build,
-                package.target().architecture
-            );
-            if let Err(error) =
-                package.inject_into_offline_windows(std::path::Path::new(&apply_dir))
-            {
-                log::error!("[PE INSTALL] PCA2023 兼容包注入失败: {error}");
-                show_error_message(&tr!("升级 PCA2023 引导文件失败：{}", error));
-                return Ok(());
-            }
-        }
-
-        // Step 5: 修复引导
-        if config.repair_boot {
-            log::info!("[PE INSTALL] Step 5: 修复引导");
-            let boot_manager = BootManager::new();
-            let use_uefi =
-                DiskManager::resolve_install_uefi_mode(config.boot_mode, &target_partition)?;
-
-            // NT5 只能来自经过验证的安装意图，不能根据目标目录缺失猜测。
-            let is_xp = config.is_xp || config.is_xp_i386;
-            let boot_result = if is_xp {
-                if use_uefi {
-                    log::info!("[PE INSTALL] 识别为 XP/2003 + UEFI，写入 XP UEFI/GPT 引导");
-                    boot_manager.write_xp_uefi_gpt_boot(&target_partition)
-                } else {
-                    log::info!("[PE INSTALL] 识别为 XP/2003(Legacy)，写入 XP 引导(ntldr/boot.ini)");
-                    boot_manager.write_xp_boot(&target_partition)
-                }
-            } else {
-                boot_manager.repair_boot_advanced(&target_partition, use_uefi, config.boot_pca_mode)
-            };
-            if let Err(e) = boot_result {
-                log::error!("[PE INSTALL] 修复引导失败: {}", e);
-                show_error_message(&tr!("修复引导失败: {}", e));
-                return Ok(());
-            }
-
-            // Step 5.5: 所选卷确认为 Win7 x64 且最终使用 UEFI 时自动应用 UefiSeven。
-            if use_uefi && uefiseven_source.is_some() {
-                log::info!("[PE INSTALL] Step 5.5: 应用 Win7 UEFI 补丁 (UefiSeven)");
-                match ui::advanced_options::apply_uefiseven_patch(
-                    uefiseven_source.as_deref().expect("checked above"),
-                    &target_partition,
-                ) {
-                    Ok(_) => {
-                        log::info!("[PE INSTALL] UefiSeven 补丁应用成功");
-                        if secure_boot_disable_required {
-                            secure_boot_disable_warning = Some(tr!("Windows 7 UEFI 已安装完成，但当前 Secure Boot（安全启动）仍处于开启状态。请先进入 BIOS/UEFI 关闭 Secure Boot，再启动新系统。程序不会自动重启。"));
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("[PE INSTALL] UefiSeven 补丁应用失败: {e}");
-                        show_error_message(&tr!("部署 Windows 7 UEFI 兼容加载器失败: {}", e));
-                        return Ok(());
-                    }
-                }
-            }
-        } else {
-            log::info!("[PE INSTALL] 用户已关闭添加引导，跳过引导模式探测和引导写入");
-        }
-
-        // Step 6: 应用高级选项
-        log::info!("[PE INSTALL] Step 6: 应用高级选项");
-        if let Err(error) = apply_advanced_options(&target_partition, &config) {
-            log::error!("[PE INSTALL] 应用高级选项失败，安装停止: {}", error);
-            show_error_message(&tr!("应用高级选项失败，未继续安装: {}", error));
-            return Ok(());
-        }
-        // 注入数据分区上的用户驱动（bin/drivers/<版本> 由正常端复制而来）
-        if let Err(error) =
-            ui::advanced_options::inject_user_drivers_from_data(&target_partition, &data_dir)
-        {
-            show_error_message(&tr!("注入用户驱动失败: {}", error));
-            return Ok(());
-        }
-
-        // Step 7: 生成无人值守配置
-        if config.unattended {
-            log::info!("[PE INSTALL] Step 7: 生成无人值守配置");
-            if !config.custom_unattend_file.is_empty() {
-                // 用户自定义无人值守文件：直接复制到目标系统
-                let data_dir = ConfigFileManager::get_data_dir(&data_partition);
-                let src = match ConfigFileManager::resolve_staged_file(
-                    &data_dir,
-                    &config.custom_unattend_file,
-                ) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        log::error!("[PE INSTALL] 自定义无人值守文件名无效: {error}");
-                        show_error_message(&tr!("自定义无人值守文件名无效: {}", error));
-                        return Ok(());
-                    }
-                };
-                if let Err(e) =
-                    app::apply_custom_unattend(&target_partition, &src.to_string_lossy())
-                {
-                    log::error!("[PE INSTALL] 应用自定义无人值守文件失败: {}", e);
-                    show_error_message(&tr!("应用自定义无人值守文件失败: {}", e));
-                    return Ok(());
-                }
-                log::info!("[PE INSTALL] 已应用自定义无人值守文件: {}", src.display());
-            } else if let Err(error) = app::generate_unattend_xml(&target_partition, &config) {
-                log::error!("[PE INSTALL] 生成无人值守配置失败: {error}");
-                show_error_message(&tr!("生成无人值守配置失败: {}", error));
-                return Ok(());
-            }
-        }
-
-        // Step 7.5: 离线登录兜底（放开空密码策略 + 已知用户名时配置自动登录）
-        if let Err(e) = core::account_fix::ensure_offline_login(
-            &target_partition,
-            &config.custom_username,
-            config.is_gho || config.is_xp,
-        ) {
-            log::warn!("[PE INSTALL] 离线登录兜底设置失败（不影响安装）: {}", e);
-        } else {
-            log::info!("[PE INSTALL] 已应用离线登录兜底设置");
-        }
-
-        // Step 8: 清理
-        log::info!("[PE INSTALL] Step 8: 清理临时文件");
-        // Step 9: 清理自动创建的数据分区并扩展目标分区
-        log::info!("[PE INSTALL] Step 9: 清理自动创建的分区");
-        if let Err(e) = DiskManager::cleanup_auto_created_partition_and_extend(&target_partition) {
-            log::error!("[PE INSTALL] 清理自动创建分区失败: {}", e);
-            show_error_message(&tr!("清理安装临时分区并合并空间失败: {}", e));
-            return Ok(());
-        }
-        log::info!("[PE INSTALL] 自动创建分区清理完成");
-        ConfigFileManager::cleanup_all(&data_partition, &target_partition);
-
-        log::info!("[PE INSTALL] 安装完成!");
-
-        let completion_warning = [vmd_recovery_warning, secure_boot_disable_warning]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if !completion_warning.is_empty() {
-            log::warn!("[PE INSTALL] post-install firmware action is required; automatic restart is suppressed");
-            show_success_message(&completion_warning);
-        } else if config.auto_reboot {
-            log::info!("[PE INSTALL] 即将重启...");
-            if let Err(error) = lr_core::windows_shutdown::schedule_restart(
-                10,
-                "LetRecovery 系统安装完成，即将重启...",
-            ) {
-                log::error!("[PE INSTALL] schedule restart failed: {error}");
-                show_error_message(&tr!("安排重启失败: {}", error));
-            }
-        } else {
-            show_success_message(&tr!("系统安装完成！请手动重启计算机。"));
-        }
-    } else {
-        // 备份模式
-        log::info!("[PE BACKUP] ========== PE自动备份模式 ==========");
-
-        // 查找配置文件所在分区
-        let data_partition = match ConfigFileManager::find_data_partition_for(
-            crate::core::config::OperationType::Backup,
-        ) {
-            Some(p) => p,
-            None => {
-                log::error!("[PE BACKUP] 错误: 未找到备份配置文件");
-                show_error_message(&tr!("未找到备份配置文件，无法继续备份。"));
-                return Ok(());
-            }
-        };
-
-        log::info!("[PE BACKUP] 数据分区: {}", data_partition);
-
-        // 读取备份配置
-        let config = match ConfigFileManager::read_backup_config(&data_partition) {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("[PE BACKUP] 错误: 读取配置失败: {}", e);
-                show_error_message(&tr!("读取备份配置失败: {}", e));
-                return Ok(());
-            }
-        };
-
-        // 切换到正常系统端选定的镜像引擎（随重启传入）
-        lr_core::set_active_engine(lr_core::WimEngine::from_u8(config.wim_engine));
-
-        log::info!("[PE BACKUP] 源分区: {}", config.source_partition);
-        log::info!("[PE BACKUP] 保存路径: {}", config.save_path);
-
-        // 查找备份标记分区
-        let source_partition = ConfigFileManager::find_backup_marker_partition()
-            .unwrap_or_else(|| config.source_partition.clone());
-
-        // 执行备份（按格式分发，与 PE GUI worker 一致）。
-        // 此前恒走 LZX WIM，忽略 config.format/swm —— ESD/SWM/GHO 都会产出错误文件。
-        let dism = Dism::new();
-        let capture_dir = format!("{}\\", source_partition);
-
-        use crate::core::config::BackupFormat;
-        let backup_result = match config.format {
-            BackupFormat::Gho => {
-                let ghost = core::ghost::Ghost::new();
-                if !ghost.is_available() {
-                    log::error!("[PE BACKUP] Ghost 工具不可用");
-                    show_error_message(&tr!("系统备份失败: Ghost 工具不可用"));
-                    return Ok(());
-                }
-                ghost.create_image_from_letter(&source_partition, &config.save_path, None)
-            }
-            BackupFormat::Esd => {
-                if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                    dism.append_image_esd(
-                        &config.save_path,
-                        &capture_dir,
-                        &config.name,
-                        &config.description,
-                        None,
-                    )
-                } else {
-                    dism.capture_image_esd(
-                        &config.save_path,
-                        &capture_dir,
-                        &config.name,
-                        &config.description,
-                        None,
-                    )
-                }
-            }
-            BackupFormat::Swm => dism.capture_image_swm(
-                &config.save_path,
-                &capture_dir,
-                &config.name,
-                &config.description,
-                config.swm_split_size,
-                None,
-            ),
-            BackupFormat::Wim => {
-                if config.incremental && std::path::Path::new(&config.save_path).exists() {
-                    dism.append_image(
-                        &config.save_path,
-                        &capture_dir,
-                        &config.name,
-                        &config.description,
-                        None,
-                    )
-                } else {
-                    dism.capture_image(
-                        &config.save_path,
-                        &capture_dir,
-                        &config.name,
-                        &config.description,
-                        None,
-                    )
-                }
-            }
-        };
-
-        if let Err(e) = backup_result {
-            log::error!("[PE BACKUP] 备份失败: {}", e);
-            show_error_message(&tr!("系统备份失败: {}", e));
-            return Ok(());
-        }
-
-        let verify_result = match config.format {
-            BackupFormat::Gho => {
-                core::ghost::Ghost::new().verify_image_integrity(&config.save_path)
-            }
-            BackupFormat::Wim | BackupFormat::Esd | BackupFormat::Swm => {
-                Dism::verify_captured_image(
-                    std::path::Path::new(&config.save_path),
-                    &config.name,
-                    &config.description,
-                )
-            }
-        };
-        if let Err(error) = verify_result {
-            log::error!("[PE BACKUP] 备份产物验证失败: {}", error);
-            show_error_message(&tr!("备份文件验证失败: {}", error));
-            return Ok(());
-        }
-
-        // 删除PE引导项
-        let boot_manager = BootManager::new();
-        if let Err(error) = boot_manager.delete_current_boot_entry() {
-            log::error!("[PE BACKUP] 删除 PE 引导项失败: {}", error);
-            show_error_message(&tr!("删除 PE 引导项失败: {}", error));
-            return Ok(());
-        }
-
-        // 清理
-        ConfigFileManager::cleanup_partition_markers(&source_partition);
-        ConfigFileManager::cleanup_data_dir(&data_partition);
-        ConfigFileManager::cleanup_pe_dir(&data_partition);
-
-        log::info!("[PE BACKUP] 备份完成!");
-        show_success_message(&tr!("系统备份完成！\n保存位置: {}", config.save_path));
-
-        // 自动重启
-        if let Err(error) =
-            lr_core::windows_shutdown::schedule_restart(10, "LetRecovery 系统备份完成，即将重启...")
-        {
-            log::error!("[PE BACKUP] schedule restart failed: {error}");
-            show_error_message(&tr!("安排重启失败: {}", error));
-        }
-    }
-
     Ok(())
+}
+
+#[cfg(test)]
+fn persistent_pe_payloads_from_journal(contents: &str) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let lines: Vec<&str> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        anyhow::bail!("active PE BCD journal is empty");
+    }
+    if lines.len() == 2
+        && lines
+            .iter()
+            .all(|line| line.starts_with('{') && line.ends_with('}'))
+    {
+        return Ok(vec![
+            std::path::PathBuf::from(r"C:\LetRecovery_PE\boot.wim"),
+            std::path::PathBuf::from(r"C:\LetRecovery_PE\boot.sdi"),
+        ]);
+    }
+    let mut payloads = Vec::new();
+    for line in lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 5 || fields[0] != "LRPE2" {
+            anyhow::bail!("invalid PE BCD journal record");
+        }
+        let wim = std::path::PathBuf::from(fields[3]);
+        let sdi = std::path::PathBuf::from(fields[4]);
+        validate_persistent_pe_payload(&wim, ".wim")?;
+        validate_persistent_pe_payload(&sdi, ".sdi")?;
+        payloads.push(wim);
+        payloads.push(sdi);
+    }
+    Ok(payloads)
+}
+
+fn remove_persistent_payload(path: &std::path::Path) -> anyhow::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect persistent PE payload {}", path.display()));
+        }
+    };
+    #[cfg(windows)]
+    let is_reparse = {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x0000_0400 != 0
+    };
+    #[cfg(not(windows))]
+    let is_reparse = metadata.file_type().is_symlink();
+    if is_reparse {
+        anyhow::bail!(
+            "refusing to remove a linked persistent PE payload: {}",
+            path.display()
+        );
+    }
+    std::fs::remove_file(path)
+        .with_context(|| format!("remove persistent PE payload {}", path.display()))?;
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            log::info!("已删除持久 PE 会话载荷: {}", path.display());
+            Ok(())
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("read back persistent PE payload {}", path.display())),
+        Ok(_) => anyhow::bail!(
+            "persistent PE payload still exists after removal: {}",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn lock_persistent_pe_root(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .context("open persistent PE root without delete sharing")?;
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+    let metadata = file
+        .metadata()
+        .context("inspect locked persistent PE root")?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        anyhow::bail!("persistent PE root is a reparse point or not a directory");
+    }
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+fn lock_persistent_pe_root(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        anyhow::bail!("persistent PE root is a symlink or not a directory");
+    }
+    Ok(std::fs::File::open(path)?)
+}
+
+const MAX_PERSISTENT_JOURNAL_BYTES: u64 = 256 * 1024;
+
+struct LockedPersistentJournal {
+    file: std::fs::File,
+    contents: String,
+}
+
+impl LockedPersistentJournal {
+    fn verify_unchanged(&mut self) -> anyhow::Result<()> {
+        use std::io::{Read, Seek};
+
+        let length = self.file.metadata()?.len();
+        if length > MAX_PERSISTENT_JOURNAL_BYTES {
+            anyhow::bail!("persistent PE journal grew beyond its bounded size");
+        }
+        self.file.rewind()?;
+        let mut bytes = Vec::with_capacity(length as usize);
+        self.file
+            .by_ref()
+            .take(MAX_PERSISTENT_JOURNAL_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_PERSISTENT_JOURNAL_BYTES
+            || bytes.as_slice() != self.contents.as_bytes()
+        {
+            anyhow::bail!("persistent PE journal changed after authentication");
+        }
+        Ok(())
+    }
+}
+
+fn read_persistent_journal(
+    path: &std::path::Path,
+) -> anyhow::Result<Option<LockedPersistentJournal>> {
+    use std::io::Read;
+
+    #[cfg(windows)]
+    let mut file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Foundation::GENERIC_READ;
+        use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .access_mode(GENERIC_READ.0)
+            // Keep the exact journal object stable while matching and deleting only this session's
+            // BCD/payload objects. Denying write/delete sharing avoids a path reopen race.
+            .share_mode(FILE_SHARE_READ.0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+        }
+    };
+    #[cfg(not(windows))]
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect locked {}", path.display()))?;
+    #[cfg(windows)]
+    let is_reparse = {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x0000_0400 != 0
+    };
+    #[cfg(not(windows))]
+    let is_reparse = metadata.file_type().is_symlink();
+    if !metadata.is_file() || is_reparse {
+        anyhow::bail!(
+            "persistent PE journal is not a regular file: {}",
+            path.display()
+        );
+    }
+    if metadata.len() > MAX_PERSISTENT_JOURNAL_BYTES {
+        anyhow::bail!("persistent PE journal exceeds its bounded size");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_PERSISTENT_JOURNAL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read locked persistent PE journal {}", path.display()))?;
+    if bytes.len() as u64 > MAX_PERSISTENT_JOURNAL_BYTES {
+        anyhow::bail!("persistent PE journal exceeds its bounded size");
+    }
+    let contents = String::from_utf8(bytes)
+        .with_context(|| format!("decode persistent PE journal {}", path.display()))?;
+    Ok(Some(LockedPersistentJournal { file, contents }))
+}
+
+#[cfg(test)]
+fn merge_persistent_pe_payload_journals(
+    active: Option<&str>,
+    pending: Option<&str>,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let mut payloads = Vec::new();
+    for (role, contents) in [("active", active), ("pending", pending)] {
+        if let Some(contents) = contents {
+            if role == "pending"
+                && (contents
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count()
+                    != 1
+                    || !contents.trim().starts_with("LRPE2\t"))
+            {
+                anyhow::bail!("pending PE BCD journal must contain exactly one LRPE2 record");
+            }
+            let parsed = persistent_pe_payloads_from_journal(contents)
+                .with_context(|| format!("parse {role} PE BCD journal"))?;
+            if role == "pending" && parsed.len() != 2 {
+                anyhow::bail!("pending PE BCD journal must contain exactly one LRPE2 record");
+            }
+            for path in parsed {
+                if !payloads.iter().any(|existing: &std::path::PathBuf| {
+                    existing
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&path.to_string_lossy())
+                }) {
+                    payloads.push(path);
+                }
+            }
+        }
+    }
+    Ok(payloads)
+}
+
+#[derive(Clone, Debug)]
+struct TrustedPersistentPeRecord {
+    ramdisk_guid: String,
+    loader_guid: String,
+    session_id: String,
+    wim_name: String,
+    sdi_name: String,
+    root_identity: lr_core::install_handoff::CanonicalInstallTargetV2,
+    purpose: lr_core::handoff_auth::HandoffPurpose,
+    capsule_sha256: [u8; 32],
+}
+
+fn parse_trusted_persistent_pe_record(line: &str) -> anyhow::Result<TrustedPersistentPeRecord> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() != 14 || fields[0] != "LRPE4" {
+        anyhow::bail!("not an LRPE4 persistent PE journal record");
+    }
+    let session_id = fields[5];
+    lr_core::handoff_auth::validate_session_id(session_id).context("invalid LRPE4 SessionId")?;
+    let wim = std::path::PathBuf::from(fields[3]);
+    let sdi = std::path::PathBuf::from(fields[4]);
+    validate_persistent_pe_payload(&wim, ".wim")?;
+    validate_persistent_pe_payload(&sdi, ".sdi")?;
+    let identity = lr_core::install_handoff::canonical_target_from_fields(
+        Some(lr_core::install_handoff::CANONICAL_TARGET_VERSION),
+        Some(fields[6]),
+        Some(fields[7].parse().context("parse LRPE4 root offset")?),
+        Some(fields[8].parse().context("parse LRPE4 root length")?),
+        Some(fields[9]),
+        Some(fields[10]),
+        (fields[11] != "none").then_some(fields[11]),
+    )?
+    .context("LRPE4 root identity is absent")?;
+    Ok(TrustedPersistentPeRecord {
+        ramdisk_guid: fields[1].to_string(),
+        loader_guid: fields[2].to_string(),
+        session_id: session_id.to_string(),
+        wim_name: wim
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("LRPE4 WIM filename is invalid")?
+            .to_string(),
+        sdi_name: sdi
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("LRPE4 SDI filename is invalid")?
+            .to_string(),
+        root_identity: identity,
+        purpose: lr_core::handoff_auth::HandoffPurpose::parse(fields[12])?,
+        capsule_sha256: lr_core::install_handoff::decode_hex_array::<32>(
+            fields[13],
+            "LRPE4 capsule SHA-256",
+        )?,
+    })
+}
+
+fn rewrite_persistent_journal_without_line(
+    root: &std::path::Path,
+    journal: &std::path::Path,
+    original: &str,
+    removed_line: &str,
+) -> anyhow::Result<()> {
+    let remaining = original
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != removed_line)
+        .collect::<Vec<_>>();
+    if remaining.is_empty() {
+        remove_persistent_payload(journal)?;
+        return Ok(());
+    }
+    let bytes = format!("{}\r\n", remaining.join("\r\n")).into_bytes();
+    let temporary = lr_core::scoped_temp_file::ScopedTempFile::create_in(
+        root,
+        "pe-journal-cleanup",
+        "tmp",
+        &bytes,
+    )?;
+    temporary.persist_replace(journal)?;
+    let actual = std::fs::read(journal)?;
+    if actual != bytes {
+        anyhow::bail!("persistent PE journal readback mismatch after exact cleanup");
+    }
+    Ok(())
+}
+
+fn persistent_record_matches_running(
+    record: &TrustedPersistentPeRecord,
+    session_id: &str,
+    purpose: lr_core::handoff_auth::HandoffPurpose,
+    capsule_sha256: &[u8; 32],
+) -> bool {
+    record.session_id == session_id
+        && record.purpose == purpose
+        && record.capsule_sha256 == *capsule_sha256
+}
+
+fn persistent_pe_root_for_volume(volume_guid_root: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(volume_guid_root).join("LetRecovery_PE")
+}
+
+fn remove_empty_private_pe_root(root: &std::path::Path) -> anyhow::Result<bool> {
+    if std::fs::read_dir(root)?.next().is_some() {
+        return Ok(false);
+    }
+    match std::fs::remove_dir(root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("remove empty private PE payload root {}", root.display())
+            });
+        }
+    }
+    match std::fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error)
+            .with_context(|| format!("read back private PE payload root {}", root.display())),
+        Ok(_) => anyhow::bail!(
+            "private PE payload root still exists after exact removal: {}",
+            root.display()
+        ),
+    }
+}
+
+pub(crate) fn cleanup_persistent_pe_boot_payload(
+    authenticated_handoff: &core::config::AuthenticatedOperationGuard,
+) -> anyhow::Result<()> {
+    authenticated_handoff.verify_unchanged()?;
+    let session_id = authenticated_handoff.session_id();
+    let purpose = authenticated_handoff.purpose();
+    let capsule_sha256 = authenticated_handoff.capsule_sha256()?;
+    let mut matches = Vec::new();
+    for volume_root in lr_core::windows_storage::volume_guid_paths()? {
+        let root = persistent_pe_root_for_volume(&volume_root);
+        if !root.is_dir() {
+            continue;
+        }
+        for name in ["pe_guid.txt", "pe_pending.txt"] {
+            let journal = root.join(name);
+            let Ok(Some(locked_journal)) = read_persistent_journal(&journal) else {
+                // Unreadable, linked, non-file or malformed same-name journals cannot match the
+                // complete authenticated tuple. Ignore them so they cannot hide a valid record on
+                // another current volume; zero exact matches remains a failure below.
+                continue;
+            };
+            let lines = locked_journal
+                .contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+            let mut journal_matches = Vec::new();
+            for line in &lines {
+                if !line.starts_with("LRPE4\t") {
+                    continue;
+                }
+                if line.split('\t').nth(5) != Some(session_id) {
+                    continue;
+                }
+                let Ok(record) = parse_trusted_persistent_pe_record(line) else {
+                    // A same-name stale, truncated or otherwise malformed journal is environment
+                    // noise. It cannot match the complete authenticated tuple and must not hide a
+                    // valid record on another volume.
+                    continue;
+                };
+                if !persistent_record_matches_running(&record, session_id, purpose, &capsule_sha256)
+                {
+                    continue;
+                }
+                if name == "pe_pending.txt" && lines.len() != 1 {
+                    continue;
+                }
+                // This journal authorizes only deletion of this session's bounded BCD objects and
+                // private payload filenames. The running private WIM already supplies the exact
+                // SessionId, purpose and capsule digest. Requiring the normal-Windows disk GUID,
+                // layout digest, disk number or historical extent to match again provides no
+                // additional authenticity, but can falsely block cleanup after legitimate WinPE
+                // enumeration or topology changes. Keep root_identity parseable for journal
+                // compatibility/diagnostics; never use it as a cross-reboot gate.
+                journal_matches.push(((*line).to_string(), record));
+            }
+            if journal_matches.len() > 1 {
+                anyhow::bail!(
+                    "expected exactly one stable/session-bound LRPE4 journal, found multiple exact records in {}",
+                    journal.display()
+                );
+            }
+            if let Some((line, record)) = journal_matches.pop() {
+                matches.push((root.clone(), journal, line, record, locked_journal));
+            }
+        }
+    }
+    if matches.len() != 1 {
+        anyhow::bail!(
+            "expected exactly one stable/session-bound LRPE4 journal, found {}",
+            matches.len()
+        );
+    }
+    let (root, journal, line, record, mut locked_journal) = matches.pop().unwrap();
+    let root_lock = lock_persistent_pe_root(&root)?;
+    locked_journal.verify_unchanged()?;
+    log::info!(
+        "[PE HANDOFF] matched LRPE4 by current session/purpose/capsule; historical root geometry is diagnostic only: offset={} length={} style={:?}",
+        record.root_identity.partition_offset_bytes,
+        record.root_identity.partition_length_bytes,
+        record.root_identity.style
+    );
+    crate::core::bcdedit::BootManager::new()
+        .delete_trusted_pe_boot_objects(&record.loader_guid, &record.ramdisk_guid)?;
+    remove_persistent_payload(&root.join(&record.wim_name))?;
+    remove_persistent_payload(&root.join(&record.sdi_name))?;
+    // Keep the exact ordinary, non-reparse journal object locked until every operation it
+    // authorizes has completed. The protected root remains locked while the handle is released and
+    // the journal is atomically rewritten without this one exact record.
+    locked_journal.verify_unchanged()?;
+    let contents = locked_journal.contents.clone();
+    drop(locked_journal);
+    rewrite_persistent_journal_without_line(&root, &journal, &contents, &line)?;
+    if journal.exists()
+        && std::fs::read_to_string(journal)?
+            .lines()
+            .any(|candidate| candidate.trim() == line)
+    {
+        anyhow::bail!("trusted LRPE4 journal record remains after cleanup");
+    }
+    drop(root_lock);
+    if remove_empty_private_pe_root(&root)? {
+        // This directory is not a mounted image; it is the private on-disk RAM-boot payload root.
+        // Remove only the now-empty exact directory (never recursively) so a subsequent system
+        // backup cannot archive a product-generated placeholder.
+        log::info!(
+            "[PE HANDOFF] removed empty private PE payload root: {}",
+            root.display()
+        );
+    } else {
+        log::warn!(
+            "[PE HANDOFF] private PE payload root still contains unrelated entries and was retained: {}",
+            root.display()
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn save_only_driver_destination(
+    target_partition: &str,
+    session_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let token = session_id.trim().trim_matches(['{', '}']);
+    if token.is_empty()
+        || token.len() > 64
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        anyhow::bail!("SaveOnly requires a valid non-empty installation SessionId");
+    }
+    Ok(std::path::PathBuf::from(format!(
+        "{}\\LetRecovery_Drivers\\session-{}",
+        target_partition,
+        token.to_ascii_lowercase()
+    )))
 }
 
 /// 显示错误消息框
 fn show_error_message(message: &str) {
-    #[cfg(windows)]
+    #[cfg(feature = "ci-automation")]
+    {
+        log::error!("PE startup error: {message}");
+        finalize_ci_failure(message);
+    }
+    #[cfg(all(windows, not(feature = "ci-automation")))]
     {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
@@ -1173,46 +2189,479 @@ fn show_error_message(message: &str) {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(feature = "ci-automation")))]
     {
         log::error!("错误: {}", message);
     }
 }
 
-/// 显示成功消息框
-fn show_success_message(message: &str) {
-    #[cfg(windows)]
-    {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use std::ptr::null_mut;
+#[cfg(test)]
+mod persistent_payload_tests {
+    use super::{
+        is_removed_pe_cli_invocation, matched_vmd_controller_runtime_state,
+        merge_persistent_pe_payload_journals, parse_trusted_persistent_pe_record,
+        persistent_pe_payloads_from_journal, persistent_pe_root_for_volume,
+        persistent_record_matches_running, remove_empty_private_pe_root,
+        save_only_driver_destination, terminal_log_destination, terminal_success_outcome,
+        TerminalLogDestination, TerminalLogPublishGate,
+    };
 
-        let wide_message: Vec<u16> = OsStr::new(message)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let wide_title: Vec<u16> = OsStr::new("LetRecovery PE")
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
+    #[test]
+    fn private_pe_root_is_removed_only_when_empty() {
+        let workspace = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "pe-root-cleanup-test",
+        )
+        .unwrap();
+        let empty = workspace.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(remove_empty_private_pe_root(&empty).unwrap());
+        assert!(!empty.exists());
 
-        unsafe {
-            #[link(name = "user32")]
-            extern "system" {
-                fn MessageBoxW(
-                    hwnd: *mut std::ffi::c_void,
-                    text: *const u16,
-                    caption: *const u16,
-                    utype: u32,
-                ) -> i32;
-            }
-            MessageBoxW(null_mut(), wide_message.as_ptr(), wide_title.as_ptr(), 0x40);
-            // MB_ICONINFORMATION
-        }
+        let occupied = workspace.path().join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("foreign.bin"), b"keep").unwrap();
+        assert!(!remove_empty_private_pe_root(&occupied).unwrap());
+        assert_eq!(
+            std::fs::read(occupied.join("foreign.bin")).unwrap(),
+            b"keep"
+        );
     }
 
-    #[cfg(not(windows))]
-    {
-        log::info!("成功: {}", message);
+    #[test]
+    fn failed_drvload_is_nonfatal_only_for_an_exact_operational_controller() {
+        use lr_core::driver::PresentDeviceState;
+        use lr_core::storage_driver_match::BuiltInStorageDriverPackage;
+
+        let operational = PresentDeviceState {
+            hardware_ids: vec!["PCI\\VEN_8086&DEV_467F&SUBSYS_00000000".to_owned()],
+            status_query_cr: 0,
+            devnode_status: 0x0000_0008,
+            problem_number: None,
+        };
+        assert!(
+            matched_vmd_controller_runtime_state(
+                BuiltInStorageDriverPackage::IntelVmdCurrent,
+                std::slice::from_ref(&operational),
+            )
+            .0
+        );
+
+        let failed_start = PresentDeviceState {
+            devnode_status: 0x0000_0400,
+            problem_number: Some(10),
+            ..operational.clone()
+        };
+        assert!(
+            !matched_vmd_controller_runtime_state(
+                BuiltInStorageDriverPackage::IntelVmdCurrent,
+                &[failed_start],
+            )
+            .0
+        );
+
+        let unrelated_status_failure = PresentDeviceState {
+            hardware_ids: vec!["PCI\\VEN_1234&DEV_5678".to_owned()],
+            status_query_cr: 0x0000_000D,
+            devnode_status: 0,
+            problem_number: None,
+        };
+        assert!(
+            matched_vmd_controller_runtime_state(
+                BuiltInStorageDriverPackage::IntelVmdCurrent,
+                &[operational.clone(), unrelated_status_failure],
+            )
+            .0
+        );
+
+        let matched_status_failure = PresentDeviceState {
+            status_query_cr: 0x0000_000D,
+            devnode_status: 0,
+            problem_number: None,
+            ..operational.clone()
+        };
+        assert!(
+            !matched_vmd_controller_runtime_state(
+                BuiltInStorageDriverPackage::IntelVmdCurrent,
+                &[matched_status_failure],
+            )
+            .0
+        );
+        assert!(
+            !matched_vmd_controller_runtime_state(
+                BuiltInStorageDriverPackage::IntelVmd11th,
+                &[operational],
+            )
+            .0
+        );
+    }
+
+    #[test]
+    fn removed_pe_cli_is_case_insensitive_and_requires_exact_arity() {
+        let program = "LetRecoveryPE.exe".to_owned();
+        for argument in ["/PEINSTALL", "--Pe-Install", "/pebackup", "--PE-BACKUP"] {
+            assert!(is_removed_pe_cli_invocation(&[
+                program.clone(),
+                argument.to_owned()
+            ]));
+        }
+        assert!(!is_removed_pe_cli_invocation(std::slice::from_ref(
+            &program
+        )));
+        assert!(!is_removed_pe_cli_invocation(&[
+            program,
+            "/PEINSTALL".to_owned(),
+            "unexpected".to_owned(),
+        ]));
+    }
+
+    #[test]
+    fn lrpe4_parser_preserves_session_guids_stable_root_and_capsule_binding() {
+        let record = parse_trusted_persistent_pe_record(concat!(
+            "LRPE4\t{11111111-1111-1111-1111-111111111111}\t",
+            "{22222222-2222-2222-2222-222222222222}\t",
+            "C:\\LetRecovery_PE\\boot-session.wim\t",
+            "C:\\LetRecovery_PE\\boot-session.sdi\t",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t",
+            "1111111111111111111111111111111111111111111111111111111111111111\t",
+            "1048576\t8000000\tGPT\t33333333333333333333333333333333\t",
+            "2222222222222222222222222222222222222222222222222222222222222222\t",
+            "install\t4444444444444444444444444444444444444444444444444444444444444444"
+        ))
+        .unwrap();
+        assert_eq!(record.session_id, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(record.wim_name, "boot-session.wim");
+        assert_eq!(record.root_identity.partition_offset_bytes, 1_048_576);
+        assert_eq!(
+            record.purpose,
+            lr_core::handoff_auth::HandoffPurpose::Install
+        );
+        assert_eq!(record.capsule_sha256, [0x44; 32]);
+    }
+
+    #[test]
+    fn lrpe4_parser_accepts_private_payload_on_non_c_system_volume() {
+        let record = parse_trusted_persistent_pe_record(concat!(
+            "LRPE4\t{11111111-1111-1111-1111-111111111111}\t",
+            "{22222222-2222-2222-2222-222222222222}\t",
+            "D:\\LetRecovery_PE\\boot-session.wim\t",
+            "D:\\LetRecovery_PE\\boot-session.sdi\t",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t",
+            "1111111111111111111111111111111111111111111111111111111111111111\t",
+            "1048576\t8000000\tGPT\t33333333333333333333333333333333\t",
+            "2222222222222222222222222222222222222222222222222222222222222222\t",
+            "backup\t4444444444444444444444444444444444444444444444444444444444444444"
+        ))
+        .unwrap();
+        assert_eq!(record.wim_name, "boot-session.wim");
+        assert_eq!(record.sdi_name, "boot-session.sdi");
+        assert_eq!(
+            record.purpose,
+            lr_core::handoff_auth::HandoffPurpose::Backup
+        );
+    }
+
+    #[test]
+    fn persistent_cleanup_binding_ignores_historical_disk_inventory() {
+        let record = parse_trusted_persistent_pe_record(concat!(
+            "LRPE4\t{11111111-1111-1111-1111-111111111111}\t",
+            "{22222222-2222-2222-2222-222222222222}\t",
+            "C:\\LetRecovery_PE\\boot-session.wim\t",
+            "C:\\LetRecovery_PE\\boot-session.sdi\t",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t",
+            // Deliberately unrelated historical disk/layout values. They remain parseable for
+            // journal compatibility but are not part of the running-session match.
+            "9999999999999999999999999999999999999999999999999999999999999999\t",
+            "4608\t8000512\tGPT\t33333333333333333333333333333333\t",
+            "2222222222222222222222222222222222222222222222222222222222222222\t",
+            "install\t4444444444444444444444444444444444444444444444444444444444444444"
+        ))
+        .unwrap();
+        assert!(persistent_record_matches_running(
+            &record,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            lr_core::handoff_auth::HandoffPurpose::Install,
+            &[0x44; 32],
+        ));
+        assert!(!persistent_record_matches_running(
+            &record,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            lr_core::handoff_auth::HandoffPurpose::Install,
+            &[0x44; 32],
+        ));
+        assert!(!persistent_record_matches_running(
+            &record,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            lr_core::handoff_auth::HandoffPurpose::Install,
+            &[0x55; 32],
+        ));
+    }
+
+    #[test]
+    fn persistent_cleanup_scans_a_volume_guid_root_without_a_drive_letter() {
+        assert_eq!(
+            persistent_pe_root_for_volume(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\"),
+            std::path::PathBuf::from(
+                r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\LetRecovery_PE"
+            )
+        );
+    }
+
+    #[test]
+    fn terminal_log_publish_gate_is_one_shot() {
+        let mut gate = TerminalLogPublishGate::armed();
+        assert!(gate.take());
+        assert!(!gate.take());
+
+        let mut unarmed = TerminalLogPublishGate::default();
+        assert!(!unarmed.take());
+    }
+
+    #[test]
+    fn terminal_log_moves_to_target_as_soon_as_the_image_exists() {
+        assert_eq!(
+            terminal_log_destination(false, false),
+            TerminalLogDestination::VerifiedDataFallback
+        );
+        assert_eq!(
+            terminal_log_destination(false, true),
+            TerminalLogDestination::TargetSystem
+        );
+        assert_eq!(
+            terminal_log_destination(true, true),
+            TerminalLogDestination::TargetSystem
+        );
+    }
+
+    #[test]
+    fn terminal_success_never_claims_verified_cleanup_after_a_cleanup_warning() {
+        assert_eq!(terminal_success_outcome(true), "completed cleanup=verified");
+        assert_eq!(
+            terminal_success_outcome(false),
+            "completed cleanup=incomplete"
+        );
+    }
+
+    #[test]
+    fn lrpe2_journal_resolves_only_session_scoped_payloads() {
+        let payloads = persistent_pe_payloads_from_journal(concat!(
+            "LRPE2\t{11111111-1111-1111-1111-111111111111}\t",
+            "{22222222-2222-2222-2222-222222222222}\t",
+            "C:\\LetRecovery_PE\\boot-session.wim\t",
+            "C:\\LetRecovery_PE\\boot-session.sdi\r\n"
+        ))
+        .unwrap();
+        assert_eq!(payloads.len(), 2);
+        assert!(payloads[0].ends_with("boot-session.wim"));
+        assert!(payloads[1].ends_with("boot-session.sdi"));
+    }
+
+    #[test]
+    fn persistent_payload_journal_rejects_empty_and_escaped_paths() {
+        assert!(persistent_pe_payloads_from_journal("").is_err());
+        assert!(persistent_pe_payloads_from_journal(concat!(
+            "LRPE2\t{11111111-1111-1111-1111-111111111111}\t",
+            "{22222222-2222-2222-2222-222222222222}\t",
+            "C:\\Windows\\boot-session.wim\t",
+            "C:\\LetRecovery_PE\\boot-session.sdi\r\n"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn pending_only_crash_window_still_resolves_session_payloads() {
+        let pending = concat!(
+            "LRPE2\t{11111111-1111-1111-1111-111111111111}\t",
+            "{22222222-2222-2222-2222-222222222222}\t",
+            "C:\\LetRecovery_PE\\boot-pending.wim\t",
+            "C:\\LetRecovery_PE\\boot-pending.sdi\r\n"
+        );
+
+        let payloads = merge_persistent_pe_payload_journals(None, Some(pending)).unwrap();
+
+        assert_eq!(payloads.len(), 2);
+        assert!(payloads[0].ends_with("boot-pending.wim"));
+        assert!(payloads[1].ends_with("boot-pending.sdi"));
+    }
+
+    #[test]
+    fn pending_journal_rejects_multiple_or_legacy_records() {
+        let record = concat!(
+            "LRPE2\t{11111111-1111-1111-1111-111111111111}\t",
+            "{22222222-2222-2222-2222-222222222222}\t",
+            "C:\\LetRecovery_PE\\boot-pending.wim\t",
+            "C:\\LetRecovery_PE\\boot-pending.sdi\r\n"
+        );
+        assert!(
+            merge_persistent_pe_payload_journals(None, Some(&format!("{record}{record}"))).is_err()
+        );
+        assert!(merge_persistent_pe_payload_journals(
+            None,
+            Some("{11111111-1111-1111-1111-111111111111}\r\n{22222222-2222-2222-2222-222222222222}\r\n")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn save_only_destination_is_session_scoped_and_rejects_path_syntax() {
+        let destination =
+            save_only_driver_destination("C:", "{11111111-1111-1111-1111-111111111111}").unwrap();
+        assert!(destination
+            .ends_with("LetRecovery_Drivers\\session-11111111-1111-1111-1111-111111111111"));
+        assert!(save_only_driver_destination("C:", "../escape").is_err());
+        assert!(save_only_driver_destination("C:", "").is_err());
+    }
+}
+#[cfg(all(test, feature = "ci-automation"))]
+mod ci_automation_tests {
+    use super::{
+        atomic_write_ci_file, find_ci_install_fault_context_in_roots, find_ci_run_context_in_roots,
+        valid_ci_run_id, CiFaultInjection,
+    };
+
+    #[test]
+    fn ci_fault_parser_accepts_only_supported_boundaries() {
+        assert_eq!(
+            CiFaultInjection::parse("before_target_write").unwrap(),
+            CiFaultInjection::BeforeTargetWrite
+        );
+        assert_eq!(
+            CiFaultInjection::parse("after_target_format").unwrap(),
+            CiFaultInjection::AfterTargetFormat
+        );
+        assert!(CiFaultInjection::parse("before_target_format").is_err());
+    }
+
+    fn write_active(root: &std::path::Path, run_id: &str, phase: &str) {
+        let state = root.join("LR-CI").join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join("active-run.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "phase": phase,
+                "updated_utc": "2026-08-20T00:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ci_run_id_and_active_record_selection_are_strict_and_unique() {
+        assert!(valid_ci_run_id("0123456789abcdef0123456789abcdef"));
+        assert!(!valid_ci_run_id("short"));
+        assert!(!valid_ci_run_id("0123456789abcdef0123456789abcdeg"));
+        let first = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-ci-context-first",
+        )
+        .unwrap();
+        let second = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-ci-context-second",
+        )
+        .unwrap();
+        let run_id = "0123456789abcdef0123456789abcdef";
+        write_active(first.path(), run_id, "handoff_committed");
+        let selected = find_ci_run_context_in_roots(vec![first.path().to_owned()], run_id).unwrap();
+        assert_eq!(selected.run_id, run_id);
+        let stale_run_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_active(second.path(), stale_run_id, "handoff_committed");
+        let selected = find_ci_run_context_in_roots(
+            vec![first.path().to_owned(), second.path().to_owned()],
+            run_id,
+        )
+        .unwrap();
+        assert_eq!(selected.run_id, run_id);
+        write_active(second.path(), run_id, "handoff_committed");
+        assert!(find_ci_run_context_in_roots(
+            vec![first.path().to_owned(), second.path().to_owned()],
+            run_id
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ci_final_file_replaces_atomically_and_round_trips() {
+        let directory = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-ci-final",
+        )
+        .unwrap();
+        let path = directory.path().join("final.json");
+        atomic_write_ci_file(&path, br#"{"terminal":false}"#).unwrap();
+        atomic_write_ci_file(&path, br#"{"terminal":true}"#).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["terminal"], true);
+    }
+
+    #[test]
+    fn install_fault_record_requires_exact_session_and_unique_plain_record() {
+        let first = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-ci-install-fault-first",
+        )
+        .unwrap();
+        let second = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-ci-install-fault-second",
+        )
+        .unwrap();
+        let run_id = "0123456789abcdef0123456789abcdef";
+        let session_id = "11111111111111111111111111111111";
+        let write_fault =
+            |root: &std::path::Path, session: &str, fault: &str, preserve_personal_files: bool| {
+                let state = root.join("LR-CI").join("state");
+                std::fs::create_dir_all(&state).unwrap();
+                std::fs::write(
+                    state.join("active-run.json"),
+                    serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1,
+                        "run_id": run_id,
+                        "phase": "handoff_committed",
+                        "session_id": session,
+                        "fault_injection": fault,
+                        "preserve_personal_files": preserve_personal_files,
+                        "updated_utc": "2026-08-23T00:00:00Z"
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            };
+        write_fault(first.path(), session_id, "after_target_format", false);
+        let selected =
+            find_ci_install_fault_context_in_roots(vec![first.path().to_owned()], session_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            selected.fault_injection,
+            Some(CiFaultInjection::AfterTargetFormat)
+        );
+        assert!(find_ci_install_fault_context_in_roots(
+            vec![first.path().to_owned()],
+            "22222222222222222222222222222222"
+        )
+        .unwrap()
+        .is_none());
+        write_fault(second.path(), session_id, "after_target_format", false);
+        assert!(find_ci_install_fault_context_in_roots(
+            vec![first.path().to_owned(), second.path().to_owned()],
+            session_id
+        )
+        .is_err());
+        write_fault(second.path(), session_id, "unknown", false);
+        assert!(
+            find_ci_install_fault_context_in_roots(vec![second.path().to_owned()], session_id)
+                .is_err()
+        );
+        write_fault(second.path(), session_id, "none", true);
+        let preservation =
+            find_ci_install_fault_context_in_roots(vec![second.path().to_owned()], session_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(preservation.fault_injection, None);
     }
 }

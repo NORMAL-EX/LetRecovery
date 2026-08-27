@@ -116,10 +116,6 @@ impl DownloadWorker {
     pub fn try_recv(&self) -> Result<DownloadWorkerMessage, mpsc::TryRecvError> {
         self.messages.try_recv()
     }
-
-    pub fn receiver(&self) -> &Receiver<DownloadWorkerMessage> {
-        &self.messages
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,12 +183,14 @@ fn validate_plan(plan: &DownloadPlan) -> Result<(), String> {
     }
     match &plan.completion {
         DownloadCompletion::None => {}
-        DownloadCompletion::OpenSystemImage(path) | DownloadCompletion::RunDownloadedFile(path)
-            if path != &destination =>
-        {
+        DownloadCompletion::OpenSystemImage(path) if path != &destination => {
             return Err("completion path does not match downloaded file".into());
         }
-        DownloadCompletion::OpenSystemImage(_) | DownloadCompletion::RunDownloadedFile(_) => {}
+        DownloadCompletion::RunDownloadedInstaller { path, .. } if path != &destination => {
+            return Err("completion path does not match downloaded file".into());
+        }
+        DownloadCompletion::OpenSystemImage(_)
+        | DownloadCompletion::RunDownloadedInstaller { .. } => {}
     }
     Ok(())
 }

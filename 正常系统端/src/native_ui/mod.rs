@@ -8,6 +8,7 @@ pub mod dialog;
 pub mod driver_transfer_dialog;
 pub(crate) mod layout;
 mod pages;
+pub mod preinstall_dialog;
 mod redraw;
 mod scrollbar_compositor;
 mod theme;
@@ -23,3 +24,5 @@ pub(crate) use lr_core::windows_compat::{
 
 pub(crate) use window::enable_process_dpi_awareness;
 pub use window::run;
+#[cfg(feature = "non-elevated-tests")]
+pub use window::{run_about_preview, run_pe_maintenance_preview, run_progress_preview};

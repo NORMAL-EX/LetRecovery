@@ -1,4 +1,15 @@
 fn main() {
+    let profile = std::env::var("PROFILE").unwrap_or_default();
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if profile == "release" && target != "x86_64-win7-windows-msvc" {
+        panic!(
+            "LetRecovery release builds must use the Windows 7 target; run \
+             powershell -ExecutionPolicy Bypass -File \
+             .github/scripts/build-win7-normal.ps1 from the workspace root \
+             instead of cargo build --workspace --release (current target: {target})"
+        );
+    }
+
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     // BUILD_VERSION is derived from the build date.  Keep the build script tied to the actual
     // application inputs instead of only the icon/theme assets; otherwise Cargo can reuse a
@@ -6,6 +17,8 @@ fn main() {
     // date for a newly compiled executable.
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=../lr-core/src");
+    println!("cargo:rerun-if-changed=../lr-core/Cargo.toml");
     println!("cargo:rerun-if-changed=assets/icon.png");
     println!("cargo:rerun-if-changed=assets/easter_egg/dprk_wallpaper.jpg");
     println!("cargo:rerun-if-changed=assets/win11_button_theme");
@@ -27,7 +40,7 @@ fn main() {
         generate_win11_button_theme();
         generate_win11_scrollbar_theme();
         let non_elevated_tests = std::env::var_os("CARGO_FEATURE_NON_ELEVATED_TESTS").is_some();
-        if non_elevated_tests && std::env::var("PROFILE").as_deref() == Ok("release") {
+        if non_elevated_tests && profile == "release" {
             panic!("non-elevated-tests must never be enabled for release builds");
         }
 
@@ -57,15 +70,15 @@ fn main() {
         res.set_version_info(winres::VersionInfo::FILEVERSION, ver_u64);
         res.set_version_info(winres::VersionInfo::PRODUCTVERSION, ver_u64);
 
-        // 正式程序请求管理员权限；纯测试特性使用 asInvoker，避免测试 EXE
-        // 在无交互 CI/本地终端中因 UAC 清单而无法启动。
+        // The normal-side EXE is always asInvoker. Startup policy elevates only a plain,
+        // argument-free GUI launch. CLI routes remain in the caller's token.
         let manifest = r#"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
         <security>
             <requestedPrivileges>
-                <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+                <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
             </requestedPrivileges>
         </security>
     </trustInfo>
@@ -92,12 +105,7 @@ fn main() {
     </dependency>
 </assembly>
 "#;
-        let manifest = if non_elevated_tests {
-            manifest.replace("requireAdministrator", "asInvoker")
-        } else {
-            manifest.to_string()
-        };
-        res.set_manifest(&manifest);
+        res.set_manifest(manifest);
 
         res.compile()
             .expect("failed to compile required Windows resources and elevation manifest");

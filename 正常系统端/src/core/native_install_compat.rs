@@ -74,7 +74,16 @@ pub struct DefaultUnattendOptions<'a> {
     pub family: WindowsFamily,
     pub username: Option<&'a str>,
     pub builtin_administrator: Option<&'a BuiltInAdministratorOptions>,
+    pub temporary_oobe_account_name: Option<&'a str>,
     pub remove_uwp_apps: bool,
+    pub run_deploy_script: bool,
+    /// The fixed SecHealthUI online-removal script was staged and may be called from the
+    /// built-in Windows 10/11 specialize pass.
+    pub remove_security_ui: bool,
+    /// Opaque proof that the target passed the centralized Windows 10 2004+ gate. The backend
+    /// passes it here only after staging succeeds; `None` makes an unsupported injection
+    /// unrepresentable in this renderer.
+    pub reserved_storage_support: Option<lr_core::reserved_storage::SupportedTargetVersion>,
     pub international: Option<&'a OfflineInternationalSettings>,
 }
 
@@ -90,39 +99,18 @@ pub fn render_default_unattend(options: &DefaultUnattendOptions<'_>) -> Result<S
     lr_core::unattend_account::validate_unattended_local_account_name(raw_username)
         .map_err(|error| format!("invalid unattended local account name: {error}"))?;
     let username = xml_escape(raw_username);
-    let mut first_logon_commands = String::from(
-        r#"
-                <SynchronousCommand wcm:action="add">
-                    <Order>1</Order>
-                    <CommandLine>cmd /c if exist %SystemDrive%\LetRecovery_Scripts\firstlogon.bat call %SystemDrive%\LetRecovery_Scripts\firstlogon.bat</CommandLine>
-                    <Description>Run first login script</Description>
-                </SynchronousCommand>"#,
-    );
-    let mut order = 2;
-    if options.remove_uwp_apps
-        && matches!(
-            options.family,
-            WindowsFamily::Windows10 | WindowsFamily::Windows11
+    let first_logon_commands =
+        lr_core::first_logon::render_command(1).map_err(|error| error.to_string())?;
+    let deploy_specialize_command = if options.run_deploy_script {
+        lr_core::unattend_command::render_specialize_run_synchronous_command(
+            1,
+            r#"cmd /d /c if exist %SystemDrive%\LetRecovery_Scripts\deploy.bat call %SystemDrive%\LetRecovery_Scripts\deploy.bat"#,
+            "Run custom deploy script",
         )
-    {
-        first_logon_commands.push_str(&format!(
-            r#"
-                <SynchronousCommand wcm:action="add">
-                    <Order>{order}</Order>
-                    <CommandLine>powershell -ExecutionPolicy Bypass -File %SystemDrive%\LetRecovery_Scripts\remove_uwp.ps1</CommandLine>
-                    <Description>Remove preinstalled UWP apps</Description>
-                </SynchronousCommand>"#
-        ));
-        order += 1;
-    }
-    first_logon_commands.push_str(&format!(
-        r#"
-                <SynchronousCommand wcm:action="add">
-                    <Order>{order}</Order>
-                    <CommandLine>cmd /c rd /s /q %SystemDrive%\LetRecovery_Scripts</CommandLine>
-                    <Description>Cleanup scripts directory</Description>
-                </SynchronousCommand>"#
-    ));
+        .map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
 
     let oobe = match options.family {
         WindowsFamily::Windows7 => {
@@ -181,7 +169,13 @@ pub fn render_default_unattend(options: &DefaultUnattendOptions<'_>) -> Result<S
 
     let builtin = options
         .builtin_administrator
-        .map(|administrator| render_builtin_administrator_unattend(administrator, 2))
+        .map(|administrator| {
+            render_builtin_administrator_unattend(
+                administrator,
+                2,
+                options.temporary_oobe_account_name.unwrap_or_default(),
+            )
+        })
         .transpose()
         .map_err(|error| error.to_string())?
         .flatten();
@@ -202,6 +196,35 @@ pub fn render_default_unattend(options: &DefaultUnattendOptions<'_>) -> Result<S
             ),
         )
     };
+    let specialize_security_ui_command = if options.remove_security_ui
+        && matches!(
+            options.family,
+            WindowsFamily::Windows10 | WindowsFamily::Windows11
+        ) {
+        lr_core::sec_health_ui::render_specialize_command(3).map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
+    let specialize_reserved_storage_command = if options.reserved_storage_support.is_some()
+        && matches!(
+            options.family,
+            WindowsFamily::Windows10 | WindowsFamily::Windows11
+        ) {
+        lr_core::reserved_storage::render_specialize_command(4)
+            .map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
+    let specialize_curated_appx_command = if options.remove_uwp_apps
+        && matches!(
+            options.family,
+            WindowsFamily::Windows10 | WindowsFamily::Windows11
+        ) {
+        lr_core::offline_appx::render_curated_specialize_command(6)
+            .map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
 
     Ok(format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -214,7 +237,7 @@ pub fn render_default_unattend(options: &DefaultUnattendOptions<'_>) -> Result<S
     <settings pass="specialize">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{architecture}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><ComputerName>*</ComputerName></component>
         <component name="Microsoft-Windows-Deployment" processorArchitecture="{architecture}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-            <RunSynchronous><RunSynchronousCommand wcm:action="add"><Order>1</Order><Path>cmd /c if exist %SystemDrive%\LetRecovery_Scripts\deploy.bat call %SystemDrive%\LetRecovery_Scripts\deploy.bat</Path><Description>Run custom deploy script</Description></RunSynchronousCommand>{specialize_account_command}</RunSynchronous>
+            <RunSynchronous>{deploy_specialize_command}{specialize_account_command}{specialize_security_ui_command}{specialize_reserved_storage_command}{specialize_curated_appx_command}</RunSynchronous>
         </component>
     </settings>
     <settings pass="oobeSystem">
@@ -344,7 +367,11 @@ mod tests {
             family: WindowsFamily::Windows7,
             username: Some("A-B_User"),
             builtin_administrator: None,
+            temporary_oobe_account_name: None,
             remove_uwp_apps: true,
+            run_deploy_script: false,
+            remove_security_ui: false,
+            reserved_storage_support: None,
             international: None,
         })
         .unwrap();
@@ -352,6 +379,7 @@ mod tests {
         assert!(win7.contains("A-B_User"));
         assert!(!win7.contains("HideOnlineAccountScreens"));
         assert!(!win7.contains("remove_uwp.ps1"));
+        assert!(!win7.contains("remove-onedrive-win32.ps1"));
 
         let international = OfflineInternationalSettings {
             ui_language: "zh-CN".to_string(),
@@ -365,17 +393,37 @@ mod tests {
             family: WindowsFamily::Windows11,
             username: None,
             builtin_administrator: None,
+            temporary_oobe_account_name: None,
             remove_uwp_apps: true,
+            run_deploy_script: false,
+            remove_security_ui: true,
+            reserved_storage_support: lr_core::reserved_storage::SupportedTargetVersion::new(
+                10, 0, 22_621,
+            ),
             international: Some(&international),
         })
         .unwrap();
         assert!(win11.contains("HideOnlineAccountScreens"));
-        assert!(win11.contains("remove_uwp.ps1"));
-        assert!(win11.contains("<Order>3</Order>"));
+        assert!(!win11.contains("remove_uwp.ps1"));
+        assert!(!win11.contains("<Order>2</Order>"));
+        assert!(win11.contains(lr_core::first_logon::LAUNCHER_FILE_NAME));
+        assert!(!win11.contains(lr_core::first_logon::SCRIPT_FILE_NAME));
+        assert!(win11.contains("cmd.exe /d /c %SystemDrive%"));
         assert!(win11.contains("<UILanguage>zh-CN</UILanguage>"));
         assert!(win11.contains("<InputLocale>0804:00000804</InputLocale>"));
         assert!(win11.contains("<TimeZone>China Standard Time</TimeZone>"));
         assert!(!win11.contains("HideLocalAccountScreen"));
+        assert!(win11.contains("remove-sec-health-ui.ps1"));
+        assert!(win11.contains("<Order>3</Order>"));
+        assert!(win11.contains("disable-reserved-storage.ps1"));
+        assert!(win11.contains("<Order>4</Order>"));
+        assert!(!win11.contains("remove-onedrive-win32.ps1"));
+        assert!(win11.contains(lr_core::offline_appx::CURATED_ONLINE_SCRIPT_FILE_NAME));
+        assert!(win11.contains("<Order>6</Order>"));
+        let order3 = win11.find("<Order>3</Order>").unwrap();
+        let order4 = win11.find("<Order>4</Order>").unwrap();
+        let order6 = win11.find("<Order>6</Order>").unwrap();
+        assert!(order3 < order4 && order4 < order6);
     }
 
     #[test]
@@ -393,7 +441,11 @@ mod tests {
                 family: WindowsFamily::Windows11,
                 username: Some(username),
                 builtin_administrator: None,
+                temporary_oobe_account_name: None,
                 remove_uwp_apps: false,
+                run_deploy_script: false,
+                remove_security_ui: false,
+                reserved_storage_support: None,
                 international: Some(&international),
             });
             assert!(result.is_err(), "{username}");
@@ -407,7 +459,11 @@ mod tests {
             family: WindowsFamily::Windows11,
             username: None,
             builtin_administrator: None,
+            temporary_oobe_account_name: None,
             remove_uwp_apps: false,
+            run_deploy_script: false,
+            remove_security_ui: false,
+            reserved_storage_support: None,
             international: None,
         })
         .unwrap_err();
@@ -415,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_administrator_replaces_local_account_and_can_rename_rid_500() {
+    fn builtin_administrator_uses_temporary_oobe_account_and_defers_rid_500() {
         let international = OfflineInternationalSettings {
             ui_language: "en-US".to_string(),
             system_locale: "en-US".to_string(),
@@ -431,23 +487,65 @@ mod tests {
             // logon so Windows 10/11 does not reopen OOBE account creation.
             auto_logon: false,
         };
+        let temporary_oobe_account = lr_core::unattend_account::temporary_oobe_account_name(
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
         let xml = render_default_unattend(&DefaultUnattendOptions {
             architecture: UnattendArchitecture::Amd64,
             family: WindowsFamily::Windows11,
             username: None,
             builtin_administrator: Some(&builtin),
+            temporary_oobe_account_name: Some(&temporary_oobe_account),
             remove_uwp_apps: false,
+            run_deploy_script: false,
+            remove_security_ui: true,
+            reserved_storage_support: lr_core::reserved_storage::SupportedTargetVersion::new(
+                10, 0, 22_621,
+            ),
             international: Some(&international),
         })
         .unwrap();
 
         assert!(xml.contains("<AdministratorPassword>"));
         assert!(xml.contains("<Value>temporary-secret</Value>"));
-        assert!(xml.contains("<Username>RecoveryAdmin</Username>"));
+        assert!(xml.contains("<Username>LrOOBE-0123456789ab</Username>"));
+        assert!(xml.contains("<Name>LrOOBE-0123456789ab</Name>"));
         assert!(xml.contains("<LogonCount>1</LogonCount>"));
-        assert!(xml.contains("powershell.exe"));
-        assert!(xml.contains("-EncodedCommand"));
-        assert!(!xml.contains("<LocalAccount"));
+        assert!(!xml.contains("--internal-prepare-local-rid 500"));
+        assert!(!xml.contains("Win32_UserAccount"));
+        assert!(xml.contains("remove-sec-health-ui.ps1"));
+        assert!(xml.contains(lr_core::first_logon::LAUNCHER_FILE_NAME));
+        assert!(!xml.contains(lr_core::first_logon::SCRIPT_FILE_NAME));
+        assert!(xml.contains("<Order>3</Order>"));
+        assert!(xml.contains("disable-reserved-storage.ps1"));
+        assert!(xml.contains("<Order>4</Order>"));
+        assert!(xml.contains("<LocalAccounts>"));
+        assert_eq!(xml.matches("<LocalAccount wcm:action=\"add\">").count(), 1);
+
+        let document = roxmltree::Document::parse(&xml).unwrap();
+        let paths = document
+            .descendants()
+            .filter(|node| node.tag_name().name() == "Path")
+            .map(|node| node.text().unwrap())
+            .collect::<Vec<_>>();
+        assert!(!paths.is_empty());
+        assert!(paths.iter().all(|path| {
+            path.encode_utf16().count() <= lr_core::unattend_command::RUN_SYNCHRONOUS_PATH_MAX_UTF16
+        }));
+        let secret_path = paths
+            .iter()
+            .find(|path| path.contains(lr_core::first_logon::ACCOUNT_HELPER_FILE_NAME))
+            .unwrap();
+        assert!(secret_path.contains("--internal-store-builtin-administrator-secret"));
+        assert!(!secret_path.contains("temporary-secret"));
+        let first_logon_commands = document
+            .descendants()
+            .filter(|node| node.tag_name().name() == "FirstLogonCommands")
+            .flat_map(|node| node.children())
+            .filter(|node| node.tag_name().name() == "SynchronousCommand")
+            .count();
+        assert_eq!(first_logon_commands, 1);
     }
 
     #[test]

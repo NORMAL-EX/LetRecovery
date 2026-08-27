@@ -1,7 +1,12 @@
-//! Scheduled local restart through the documented shutdown API.
+//! Scheduled local shutdown/restart through the documented shutdown API.
 
 #[cfg(windows)]
-pub fn schedule_restart(timeout_seconds: u32, message: &str) -> anyhow::Result<()> {
+fn schedule_power_action(
+    timeout_seconds: u32,
+    message: &str,
+    force_apps_closed: bool,
+    reboot_after_shutdown: bool,
+) -> anyhow::Result<()> {
     use anyhow::{bail, Context};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
@@ -83,15 +88,66 @@ pub fn schedule_restart(timeout_seconds: u32, message: &str) -> anyhow::Result<(
             PCWSTR::null(),
             PCWSTR(message_wide.as_ptr()),
             timeout_seconds,
-            false,
-            true,
+            force_apps_closed,
+            reboot_after_shutdown,
             reason,
         )
         .context("InitiateSystemShutdownExW")
     }
 }
 
+/// Schedule a planned local restart. Applications are not forcibly closed; the documented API
+/// may therefore wait for an interactive application to finish protecting unsaved work.
+#[cfg(windows)]
+pub fn schedule_restart(timeout_seconds: u32, message: &str) -> anyhow::Result<()> {
+    schedule_power_action(timeout_seconds, message, false, true)
+}
+
+/// Schedule a planned restart for an explicitly unattended environment such as WinPE or a
+/// pre-desktop first-logon transition. Unlike the interactive restart boundary above, this opts
+/// into closing applications so a shell/helper process without user-authored data cannot
+/// indefinitely block the requested restart. Callers must finish and read back all durable state
+/// before entering this boundary.
+#[cfg(windows)]
+pub fn schedule_restart_for_automation(timeout_seconds: u32, message: &str) -> anyhow::Result<()> {
+    schedule_power_action(timeout_seconds, message, true, true)
+}
+
+/// Schedule a planned local power-off while allowing the interactive session and User Profile
+/// Service to close normally. This is used by first-logon automation after writing user files;
+/// Microsoft's contract explicitly warns that forcing applications closed can lose data.
+#[cfg(windows)]
+pub fn schedule_graceful_shutdown(timeout_seconds: u32, message: &str) -> anyhow::Result<()> {
+    schedule_power_action(timeout_seconds, message, false, false)
+}
+
+/// Schedule a planned local power-off for an explicitly unattended automation run. The force flag
+/// is enabled only for this opt-in path so a disposable VM cannot remain blocked by an invisible
+/// first-logon process after all LetRecovery terminal diagnostics have been flushed.
+#[cfg(windows)]
+pub fn schedule_shutdown(timeout_seconds: u32, message: &str) -> anyhow::Result<()> {
+    schedule_power_action(timeout_seconds, message, true, false)
+}
+
 #[cfg(not(windows))]
 pub fn schedule_restart(_timeout_seconds: u32, _message: &str) -> anyhow::Result<()> {
+    anyhow::bail!("Windows shutdown APIs are unavailable on this platform")
+}
+
+#[cfg(not(windows))]
+pub fn schedule_restart_for_automation(
+    _timeout_seconds: u32,
+    _message: &str,
+) -> anyhow::Result<()> {
+    anyhow::bail!("Windows shutdown APIs are unavailable on this platform")
+}
+
+#[cfg(not(windows))]
+pub fn schedule_graceful_shutdown(_timeout_seconds: u32, _message: &str) -> anyhow::Result<()> {
+    anyhow::bail!("Windows shutdown APIs are unavailable on this platform")
+}
+
+#[cfg(not(windows))]
+pub fn schedule_shutdown(_timeout_seconds: u32, _message: &str) -> anyhow::Result<()> {
     anyhow::bail!("Windows shutdown APIs are unavailable on this platform")
 }

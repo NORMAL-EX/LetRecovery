@@ -29,41 +29,29 @@ pub fn is_admin() -> bool {
 }
 
 /// 以管理员权限重新启动程序
-pub fn restart_as_admin() -> Result<()> {
+/// Elevate only a plain GUI launch. CLI routing must never call this helper, and no command-line
+/// arguments are forwarded across the elevation boundary.
+pub fn restart_gui_as_admin() -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let exe_path = std::env::current_exe()?;
     let exe_path_wide: Vec<u16> = exe_path
-        .to_string_lossy()
-        .encode_utf16()
+        .as_os_str()
+        .encode_wide()
         .chain(std::iter::once(0))
         .collect();
 
     let operation: Vec<u16> = "runas\0".encode_utf16().collect();
-
-    // 转发原始命令行参数（含空格的参数加引号），使 --install 等在 UAC 提权后仍能继续；
-    // 无参数时为空字符串，行为与传 null 一致。
-    let params: String = std::env::args()
-        .skip(1)
-        .map(|a| {
-            if a.contains(' ') {
-                format!("\"{}\"", a)
-            } else {
-                a
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let params_wide: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
 
     let result = unsafe {
         ShellExecuteW(
             None,
             PCWSTR(operation.as_ptr()),
             PCWSTR(exe_path_wide.as_ptr()),
-            PCWSTR(params_wide.as_ptr()),
+            PCWSTR::null(),
             PCWSTR::null(),
             SW_SHOWNORMAL,
         )
@@ -78,5 +66,5 @@ pub fn restart_as_admin() -> Result<()> {
         );
     }
 
-    std::process::exit(0);
+    Ok(())
 }

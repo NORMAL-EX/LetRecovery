@@ -8,9 +8,7 @@
 use anyhow::Result;
 use aria2_ws::response::TaskStatus;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
-use tokio::sync::Mutex as TokioMutex;
+use std::sync::Arc;
 
 use crate::tr;
 use crate::utils::cmd::create_command;
@@ -34,12 +32,6 @@ fn generate_rpc_secret() -> Result<String> {
     }
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
-
-/// 全局aria2管理器（延迟初始化）
-static GLOBAL_ARIA2: OnceLock<Arc<TokioMutex<Option<Aria2Manager>>>> = OnceLock::new();
-
-/// aria2是否已预热
-static ARIA2_WARMED_UP: AtomicBool = AtomicBool::new(false);
 
 /// 下载进度信息
 #[derive(Debug, Clone)]
@@ -78,59 +70,6 @@ pub struct Aria2Manager {
 }
 
 impl Aria2Manager {
-    /// 预热aria2（在后台启动进程并建立连接）
-    ///
-    /// 可以在应用启动时或用户选择PE时调用，提前准备好aria2
-    pub async fn warmup() -> Result<()> {
-        if ARIA2_WARMED_UP.load(Ordering::SeqCst) {
-            log::info!("[aria2] 已经预热过，跳过");
-            return Ok(());
-        }
-
-        log::info!("[aria2] 开始预热...");
-
-        // 获取或创建全局管理器
-        let global = GLOBAL_ARIA2.get_or_init(|| Arc::new(TokioMutex::new(None)));
-        let mut guard = global.lock().await;
-
-        if guard.is_some() {
-            log::info!("[aria2] 全局管理器已存在");
-            ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
-            return Ok(());
-        }
-
-        // 启动新的管理器
-        match Self::start_internal(16).await {
-            Ok(manager) => {
-                *guard = Some(manager);
-                ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
-                log::info!("[aria2] 预热完成");
-                Ok(())
-            }
-            Err(e) => {
-                log::warn!("[aria2] 预热失败: {}", e);
-                Err(e)
-            }
-        }
-    }
-
-    /// 获取全局aria2管理器（如果已预热）或创建新的
-    pub async fn get_or_start() -> Result<Arc<TokioMutex<Option<Aria2Manager>>>> {
-        let global = GLOBAL_ARIA2.get_or_init(|| Arc::new(TokioMutex::new(None)));
-
-        {
-            let mut guard = global.lock().await;
-            if guard.is_none() {
-                log::info!("[aria2] 全局管理器不存在，正在创建...");
-                let manager = Self::start_internal(16).await?;
-                *guard = Some(manager);
-                ARIA2_WARMED_UP.store(true, Ordering::SeqCst);
-            }
-        }
-
-        Ok(Arc::clone(global))
-    }
-
     /// 内部启动方法
     async fn start_internal(download_threads: u8) -> Result<Self> {
         let download_threads =
@@ -377,17 +316,6 @@ impl Drop for Aria2Manager {
         if let Some(mut process) = self.aria2_process.take() {
             let _ = process.kill();
         }
-    }
-}
-
-/// 清理全局aria2管理器
-pub async fn cleanup_global_aria2() {
-    if let Some(global) = GLOBAL_ARIA2.get() {
-        let mut guard = global.lock().await;
-        if let Some(mut manager) = guard.take() {
-            let _ = manager.shutdown().await;
-        }
-        ARIA2_WARMED_UP.store(false, Ordering::SeqCst);
     }
 }
 

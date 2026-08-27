@@ -7,13 +7,12 @@
 //! - CAB 包安装：使用 dism.exe 命令行
 
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use crate::core::dism_exe::{DismExe, DismExeProgress};
 use crate::tr;
 use lr_core::image_meta::{WimProgress, WIM_COMPRESS_LZMS, WIM_COMPRESS_LZX};
-use lr_core::wimlib::WimlibManager;
 use lr_core::WimEngineManager;
 
 /// 操作进度
@@ -23,18 +22,27 @@ pub struct DismProgress {
     pub status: String,
 }
 
-/// 镜像分卷信息
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ImageInfo {
-    pub index: u32,
-    pub name: String,
-    pub size_bytes: u64,
-    /// 安装类型，用于过滤 WindowsPE 等非系统镜像
-    pub installation_type: String,
+pub struct Dism;
+
+const VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS: u8 = 2;
+
+fn should_retry_verify_error(error_code: i32, attempt: u8) -> bool {
+    error_code == lr_core::wimlib::WIMLIB_ERR_NOMEM && attempt < VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS
 }
 
-pub struct Dism;
+#[derive(Debug, thiserror::Error)]
+pub enum ImageVerificationError {
+    #[error("可用内存不足，连续 {attempts} 次无法完成镜像校验：{detail}")]
+    OutOfMemory { attempts: u8, detail: String },
+    #[error("{0}")]
+    Other(String),
+}
+
+impl ImageVerificationError {
+    pub fn is_out_of_memory(&self) -> bool {
+        matches!(self, Self::OutOfMemory { .. })
+    }
+}
 
 impl Dism {
     pub fn new() -> Self {
@@ -51,7 +59,7 @@ impl Dism {
         &self,
         image_file: &str,
         progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
+    ) -> Result<(), ImageVerificationError> {
         use lr_core::wimlib::Wimlib;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
@@ -59,11 +67,8 @@ impl Dism {
 
         log::info!("[Dism] 校验镜像完整性: {}", image_file);
 
-        let lib =
-            Wimlib::new().map_err(|e| anyhow::anyhow!("{}", tr!("wimlib 初始化失败: {}", e)))?;
-        let handle = lib
-            .open_wim(image_file)
-            .map_err(|e| anyhow::anyhow!("{}", tr!("打开镜像失败: {}", e)))?;
+        let lib = Wimlib::new()
+            .map_err(|error| ImageVerificationError::Other(tr!("wimlib 初始化失败: {}", error)))?;
 
         // 进度监控线程：读取 wimlib 全局校验进度并上报
         let done = Arc::new(AtomicBool::new(false));
@@ -92,7 +97,42 @@ impl Dism {
             }
         });
 
-        let result = handle.verify();
+        let result = 'verify: {
+            for attempt in 1..=VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS {
+                let handle = lib.open_wim(image_file).map_err(|error| {
+                    ImageVerificationError::Other(tr!("打开镜像失败: {}", error))
+                })?;
+                match handle.verify_detailed() {
+                    Ok(()) => break 'verify Ok(()),
+                    Err(error) if should_retry_verify_error(error.code(), attempt) => {
+                        log::warn!(
+                            "[Dism] 镜像校验遇到瞬时内存不足，将在释放句柄后重试 ({}/{}): {}",
+                            attempt,
+                            VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS,
+                            error
+                        );
+                        if let Some(ref sender) = progress_tx {
+                            let _ = sender.send(DismProgress {
+                                percentage: 0,
+                                status: tr!("可用内存不足，正在释放资源并重试镜像校验..."),
+                            });
+                        }
+                        drop(handle);
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                    Err(error) if error.code() == lr_core::wimlib::WIMLIB_ERR_NOMEM => {
+                        break 'verify Err(ImageVerificationError::OutOfMemory {
+                            attempts: attempt,
+                            detail: error.to_string(),
+                        });
+                    }
+                    Err(error) => {
+                        break 'verify Err(ImageVerificationError::Other(error.to_string()));
+                    }
+                }
+            }
+            unreachable!("bounded verification attempts always return on their final attempt");
+        };
         done.store(true, Ordering::SeqCst);
         let _ = monitor.join();
 
@@ -101,15 +141,33 @@ impl Dism {
                 log::info!("[Dism] 镜像校验通过");
                 Ok(())
             }
-            Err(e) => anyhow::bail!("{}", e),
+            Err(error) => Err(error),
         }
     }
 
     /// 应用系统镜像 (WIM/ESD)
     /// 使用 wimlib (libwim-15.dll) 实现
-    pub fn apply_image(
+    pub fn apply_image_with_exact_swm_resources(
         &self,
         image_file: &str,
+        exact_resource_files: &[PathBuf],
+        apply_dir: &str,
+        index: u32,
+        progress_tx: Option<Sender<DismProgress>>,
+    ) -> Result<()> {
+        self.apply_image_internal(
+            image_file,
+            Some(exact_resource_files),
+            apply_dir,
+            index,
+            progress_tx,
+        )
+    }
+
+    fn apply_image_internal(
+        &self,
+        image_file: &str,
+        exact_resource_files: Option<&[PathBuf]>,
         apply_dir: &str,
         index: u32,
         progress_tx: Option<Sender<DismProgress>>,
@@ -136,7 +194,17 @@ impl Dism {
         });
 
         // 应用镜像
-        let result = wim_manager.apply_image(image_file, apply_dir, index, Some(wim_tx));
+        let result = match exact_resource_files {
+            Some(resources) if image_file.to_ascii_lowercase().ends_with(".swm") => wim_manager
+                .apply_image_with_exact_swm_resources(
+                    image_file,
+                    resources,
+                    apply_dir,
+                    index,
+                    Some(wim_tx),
+                ),
+            _ => wim_manager.apply_image(image_file, apply_dir, index, Some(wim_tx)),
+        };
 
         // 等待转发线程结束
         let _ = forward_thread.join();
@@ -150,26 +218,6 @@ impl Dism {
                 anyhow::bail!("{}", tr!("镜像应用失败: {}", e))
             }
         }
-    }
-
-    /// 捕获系统镜像 (备份)
-    /// 使用 wimlib (libwim-15.dll) 实现
-    pub fn capture_image(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        self.capture_image_atomic(
-            image_file,
-            capture_dir,
-            name,
-            description,
-            WIM_COMPRESS_LZX,
-            progress_tx,
-        )
     }
 
     fn capture_image_raw(
@@ -222,290 +270,37 @@ impl Dism {
         }
     }
 
-    /// 增量备份镜像
-    /// 使用 wimlib (libwim-15.dll) 实现
-    pub fn append_image(
+    /// Capture directly into an already private, same-volume publication directory.
+    /// The backup workflow performs completed-image verification and handle-bound CAS.
+    pub(crate) fn capture_image_staged(
         &self,
         image_file: &str,
         capture_dir: &str,
         name: &str,
         description: &str,
+        esd: bool,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
-        log::info!(
-            "[Dism] 使用 wimlib 追加镜像: {} -> {}",
-            capture_dir,
-            image_file
-        );
-
         self.capture_image_raw(
             image_file,
             capture_dir,
             name,
             description,
-            WIM_COMPRESS_LZX,
-            progress_tx,
-        )?;
-        Self::verify_captured_image(Path::new(image_file), name, description)
-    }
-
-    /// 捕获系统镜像为ESD格式（高压缩）
-    /// 使用 wimlib (libwim-15.dll) + LZMS 压缩
-    pub fn capture_image_esd(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        self.capture_image_atomic(
-            image_file,
-            capture_dir,
-            name,
-            description,
-            WIM_COMPRESS_LZMS,
+            if esd {
+                WIM_COMPRESS_LZMS
+            } else {
+                WIM_COMPRESS_LZX
+            },
             progress_tx,
         )
     }
 
-    fn capture_image_esd_raw(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        log::info!("[Dism] 捕获ESD镜像: {} -> {}", capture_dir, image_file);
-
-        let wim_manager = WimEngineManager::new_current()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("镜像引擎初始化失败: {}", e)))?;
-
-        let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
-
-        let progress_tx_clone = progress_tx.clone();
-        let forward_thread = std::thread::spawn(move || {
-            while let Ok(progress) = wim_rx.recv() {
-                if let Some(ref tx) = progress_tx_clone {
-                    let _ = tx.send(DismProgress {
-                        percentage: progress.percentage,
-                        status: progress.status,
-                    });
-                }
-            }
-        });
-
-        let result = wim_manager.capture_image(
-            capture_dir,
-            image_file,
-            name,
-            description,
-            WIM_COMPRESS_LZMS,
-            Some(wim_tx),
-        );
-
-        let _ = forward_thread.join();
-
-        match result {
-            Ok(_) => {
-                log::info!("[Dism] ESD镜像捕获成功");
-                Ok(())
-            }
-            Err(e) => {
-                anyhow::bail!("{}", tr!("ESD镜像捕获失败: {}", e))
-            }
-        }
+    pub fn read_verified_backup_catalog(
+        path: &Path,
+    ) -> Result<lr_core::backup_image_catalog::BackupImageCatalog> {
+        lr_core::wimlib::read_verified_backup_catalog(path).map_err(anyhow::Error::msg)
     }
 
-    /// 增量备份ESD镜像
-    pub fn append_image_esd(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        log::info!(
-            "[Dism] 使用 wimlib 追加ESD镜像: {} -> {}",
-            capture_dir,
-            image_file
-        );
-        self.capture_image_esd_raw(image_file, capture_dir, name, description, progress_tx)?;
-        Self::verify_captured_image(Path::new(image_file), name, description)
-    }
-
-    fn capture_image_atomic(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        compression: u32,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        let target = Path::new(image_file);
-        let parent = target
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let file_name = target
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("backup destination has no file name"))?;
-        let staging =
-            lr_core::scoped_temp_file::ScopedTempDir::create_in(parent, "letrecovery-backup")?;
-        let staged = staging.path().join(file_name);
-        self.capture_image_raw(
-            &staged.to_string_lossy(),
-            capture_dir,
-            name,
-            description,
-            compression,
-            progress_tx,
-        )?;
-        Self::verify_captured_image(&staged, name, description)?;
-        lr_core::scoped_temp_file::atomic_replace_path(&staged, target)?;
-        Ok(())
-    }
-
-    pub fn verify_captured_image(path: &Path, name: &str, description: &str) -> Result<()> {
-        let library = lr_core::wimlib::Wimlib::new()
-            .map_err(|error| anyhow::anyhow!("captured image verifier unavailable: {error}"))?;
-        let handle = library
-            .open_wim(&path.to_string_lossy())
-            .map_err(|error| anyhow::anyhow!("cannot reopen captured image: {error}"))?;
-        handle
-            .verify()
-            .map_err(|error| anyhow::anyhow!("captured image verification failed: {error}"))?;
-        let index = handle.get_image_count();
-        if index <= 0 {
-            anyhow::bail!("captured image contains no image");
-        }
-        if handle.get_image_name(index).as_deref() != Some(name) {
-            anyhow::bail!("captured image name does not match the requested name");
-        }
-        if !description.is_empty()
-            && handle.get_image_description(index).as_deref() != Some(description)
-        {
-            anyhow::bail!("captured image description does not match the requested description");
-        }
-        Ok(())
-    }
-
-    /// 捕获系统镜像为SWM分卷格式
-    /// 先创建WIM，然后分割
-    pub fn capture_image_swm(
-        &self,
-        image_file: &str,
-        capture_dir: &str,
-        name: &str,
-        description: &str,
-        split_size_mb: u32,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        log::info!(
-            "[Dism] 捕获SWM分卷镜像: {} -> {} (分卷大小: {}MB)",
-            capture_dir,
-            image_file,
-            split_size_mb
-        );
-
-        let target = Path::new(image_file);
-        let parent = target
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let staging =
-            lr_core::scoped_temp_file::ScopedTempDir::create_in(parent, "letrecovery-swm")?;
-        let temp_wim = staging.path().join("capture.wim");
-
-        // Step 1: 捕获为WIM
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.send(DismProgress {
-                percentage: 0,
-                status: tr!("正在捕获镜像..."),
-            });
-        }
-
-        let engine = WimEngineManager::new_current()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("镜像引擎初始化失败: {}", e)))?;
-
-        let (wim_tx, wim_rx) = std::sync::mpsc::channel::<WimProgress>();
-
-        let progress_tx_clone = progress_tx.clone();
-        let forward_thread = std::thread::spawn(move || {
-            while let Ok(progress) = wim_rx.recv() {
-                if let Some(ref tx) = progress_tx_clone {
-                    // 捕获阶段占80%进度
-                    let _ = tx.send(DismProgress {
-                        percentage: (progress.percentage as u32 * 80 / 100) as u8,
-                        status: progress.status,
-                    });
-                }
-            }
-        });
-
-        let result = engine.capture_image(
-            capture_dir,
-            &temp_wim.to_string_lossy(),
-            name,
-            description,
-            WIM_COMPRESS_LZX,
-            Some(wim_tx),
-        );
-
-        let _ = forward_thread.join();
-
-        if let Err(e) = result {
-            let _ = std::fs::remove_file(&temp_wim);
-            anyhow::bail!("{}", tr!("捕获镜像失败: {}", e));
-        }
-        Self::verify_captured_image(&temp_wim, name, description)?;
-
-        // Step 2: 分割WIM为SWM
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.send(DismProgress {
-                percentage: 80,
-                status: tr!("正在分割镜像..."),
-            });
-        }
-
-        // 分卷由 libwim 执行（与生成引擎无关）。
-        let wim_manager = WimlibManager::new()
-            .map_err(|e| anyhow::anyhow!("{}", tr!("wimlib 初始化失败: {}", e)))?;
-        let split_result = wim_manager.split_wim(
-            &temp_wim.to_string_lossy(),
-            image_file,
-            split_size_mb as u64,
-        );
-
-        // 清理临时WIM
-        let _ = std::fs::remove_file(&temp_wim);
-
-        match split_result {
-            Ok(_) => {
-                if let Some(ref tx) = progress_tx {
-                    let _ = tx.send(DismProgress {
-                        percentage: 100,
-                        status: tr!("分卷完成"),
-                    });
-                }
-                log::info!("[Dism] SWM分卷镜像创建成功");
-                Ok(())
-            }
-            Err(e) => {
-                anyhow::bail!("{}", tr!("分割镜像失败: {}", e))
-            }
-        }
-    }
-
-    // ========================================================================
-    // 驱动操作 - 使用 dism.exe 命令行
-    // ========================================================================
-
-    /// 导入驱动到离线系统 (PE环境下使用)
-    /// 使用 dism.exe 命令行实现，在 PE 环境下兼容性最佳
     pub fn add_drivers_offline(&self, image_path: &str, driver_path: &str) -> Result<()> {
         log::info!(
             "[Dism] 使用 dism.exe 离线导入驱动: {} -> {}",
@@ -523,62 +318,10 @@ impl Dism {
         Ok(())
     }
 
-    /// 导入驱动到离线系统（带进度回调）
-    #[allow(dead_code)] // Retained as the strict/manual counterpart to tolerant automatic restore.
-    pub fn add_drivers_offline_with_progress(
+    pub fn add_preserved_driver_inf_files_offline_with_progress(
         &self,
         image_path: &str,
-        driver_path: &str,
-        progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<()> {
-        log::info!(
-            "[Dism] 使用 dism.exe 离线导入驱动（带进度）: {} -> {}",
-            driver_path,
-            image_path
-        );
-
-        let dism_exe =
-            DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
-
-        // 创建进度转换通道
-        let (exe_tx, exe_rx) = std::sync::mpsc::channel::<DismExeProgress>();
-
-        // 启动进度转发线程
-        let progress_tx_clone = progress_tx.clone();
-        let forward_thread = std::thread::spawn(move || {
-            while let Ok(progress) = exe_rx.recv() {
-                if let Some(ref tx) = progress_tx_clone {
-                    let _ = tx.send(DismProgress {
-                        percentage: progress.percentage,
-                        status: progress.status,
-                    });
-                }
-            }
-        });
-
-        let result =
-            dism_exe.add_drivers_from_directory_resilient(image_path, driver_path, Some(exe_tx));
-
-        // 等待转发线程结束
-        let _ = forward_thread.join();
-
-        match result {
-            Ok(_) => {
-                log::info!("[Dism] 离线驱动导入成功");
-                Ok(())
-            }
-            Err(e) => {
-                anyhow::bail!("{}", tr!("离线驱动导入失败: {}", e))
-            }
-        }
-    }
-
-    /// Imports an exported driver backup while deferring the final boot-storage decision to the
-    /// manifest verification performed by the installation flow.
-    pub fn add_preserved_drivers_offline_with_progress(
-        &self,
-        image_path: &str,
-        driver_path: &str,
+        inf_files: &[std::path::PathBuf],
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<Vec<String>> {
         let dism_exe =
@@ -595,11 +338,8 @@ impl Dism {
                 }
             }
         });
-        let result = dism_exe.add_preserved_drivers_from_directory_resilient(
-            image_path,
-            driver_path,
-            Some(exe_tx),
-        );
+        let result =
+            dism_exe.add_preserved_driver_inf_files_resilient(image_path, inf_files, Some(exe_tx));
         let _ = forward_thread.join();
         result
     }
@@ -633,26 +373,21 @@ impl Dism {
         Ok(())
     }
 
-    /// 批量添加 CAB 更新包到离线系统
-    pub fn add_packages_offline_from_dir(
+    /// Install only the exact package paths retained by the authenticated task.
+    /// No directory enumeration is performed here, so a late same-directory CAB cannot be
+    /// incorporated into the servicing operation.
+    pub fn add_optional_package_paths_offline(
         &self,
         image_path: &str,
-        cab_dir: &str,
+        package_paths: &[std::path::PathBuf],
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<(usize, usize)> {
-        log::info!(
-            "[Dism] 使用 dism.exe 批量安装 CAB 更新包: {} -> {}",
-            cab_dir,
-            image_path
-        );
-
+        if package_paths.is_empty() {
+            return Ok((0, 0));
+        }
         let dism_exe =
             DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
-
-        // 创建进度转换通道
         let (exe_tx, exe_rx) = std::sync::mpsc::channel::<DismExeProgress>();
-
-        // 启动进度转发线程
         let progress_tx_clone = progress_tx.clone();
         let forward_thread = std::thread::spawn(move || {
             while let Ok(progress) = exe_rx.recv() {
@@ -664,168 +399,35 @@ impl Dism {
                 }
             }
         });
-
-        let result =
-            dism_exe.add_packages_from_directory(image_path, Path::new(cab_dir), Some(exe_tx));
-
-        // 等待转发线程结束
+        let result = dism_exe.add_packages_batch(image_path, package_paths, Some(exe_tx));
         let _ = forward_thread.join();
-
-        match result {
-            Ok((success, fail)) => {
-                log::info!(
-                    "[Dism] 批量 CAB 更新包安装完成: 成功 {}, 失败 {}",
-                    success,
-                    fail
-                );
-                Ok((success, fail))
-            }
-            Err(e) => {
-                anyhow::bail!("{}", tr!("批量 CAB 更新包安装失败: {}", e))
-            }
-        }
-    }
-
-    // ========================================================================
-    // 镜像信息 - 使用 wimlib (libwim-15.dll) + WIM XML 解析
-    // ========================================================================
-
-    /// 获取 WIM/ESD 镜像信息（所有分卷）
-    /// 使用 wimlib (libwim-15.dll) 或直接解析 WIM XML 元数据
-    #[allow(dead_code)]
-    pub fn get_image_info(&self, image_file: &str) -> Result<Vec<ImageInfo>> {
-        // 首先尝试使用 wimlib
-        if let Ok(wim_manager) = WimlibManager::new() {
-            if let Ok(images) = wim_manager.get_image_info(image_file) {
-                log::info!("[Dism] 从 wimlib 成功获取 {} 个镜像信息", images.len());
-                return Ok(images
-                    .into_iter()
-                    .map(|img| ImageInfo {
-                        index: img.index,
-                        name: img.name,
-                        size_bytes: img.size_bytes,
-                        installation_type: img.installation_type,
-                    })
-                    .collect());
-            }
-        }
-
-        // 尝试直接解析 WIM XML 元数据
-        if let Ok(images) = Self::parse_wim_xml_metadata(image_file) {
-            if !images.is_empty() {
-                log::info!("[Dism] 从 WIM XML 元数据成功解析出 {} 个镜像", images.len());
-                return Ok(images);
-            }
-        }
-
-        anyhow::bail!("{}", tr!("无法获取镜像信息"))
-    }
-
-    /// 直接解析 WIM 文件的 XML 元数据
-    fn parse_wim_xml_metadata(image_file: &str) -> Result<Vec<ImageInfo>> {
-        use std::fs::File;
-        use std::io::{Read, Seek, SeekFrom};
-
-        log::info!("[Dism] 尝试直接解析 WIM XML 元数据: {}", image_file);
-
-        let mut file = File::open(image_file)?;
-
-        // 读取 WIM 文件头（208 字节）
-        let file_size = file.metadata()?.len();
-        let mut header = [0u8; lr_core::image_meta::WIM_HEADER_SIZE];
-        file.read_exact(&mut header)?;
-        let resource = lr_core::image_meta::parse_wim_xml_resource(&header, Some(file_size))
-            .map_err(|error| anyhow::anyhow!("{}: {error}", tr!("XML 元数据位置无效")))?;
-        let xml_offset = resource.offset;
-        let xml_size = resource.stored_size;
-
-        log::info!("[Dism] XML 偏移: {}, 大小: {}", xml_offset, xml_size);
-
-        // 读取 XML 数据
-        file.seek(SeekFrom::Start(xml_offset))?;
-        let mut xml_data = vec![0u8; xml_size as usize];
-        file.read_exact(&mut xml_data)?;
-
-        // XML 数据是 UTF-16LE 编码
-        let xml_string = lr_core::image_meta::decode_wim_xml(&xml_data)
-            .map_err(|error| anyhow::anyhow!("{}: {error}", tr!("UTF-16 解码失败")))?;
-
-        // 解析 XML
-        Self::parse_wim_xml(&xml_string)
-    }
-
-    /// 解析 WIM XML 元数据字符串
-    fn parse_wim_xml(xml: &str) -> Result<Vec<ImageInfo>> {
-        let mut images = Vec::new();
-
-        let mut pos = 0;
-        while let Some(start) = xml[pos..].find("<IMAGE INDEX=\"") {
-            let abs_start = pos + start;
-
-            let index_start = abs_start + 14;
-            if let Some(index_end) = xml[index_start..].find('"') {
-                let index_str = &xml[index_start..index_start + index_end];
-                let index: u32 = index_str.parse().unwrap_or(0);
-
-                if let Some(image_end) = xml[abs_start..].find("</IMAGE>") {
-                    let image_block = &xml[abs_start..abs_start + image_end + 8];
-
-                    // 优先使用 DISPLAYNAME，其次使用 NAME，最后使用默认名称
-                    let name = Self::extract_xml_tag(image_block, "DISPLAYNAME")
-                        .or_else(|| Self::extract_xml_tag(image_block, "NAME"))
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| tr!("镜像 {}", index));
-
-                    let size_bytes = Self::extract_xml_tag(image_block, "TOTALBYTES")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-
-                    let installation_type =
-                        Self::extract_xml_tag(image_block, "INSTALLATIONTYPE").unwrap_or_default();
-
-                    if index > 0 {
-                        images.push(ImageInfo {
-                            index,
-                            name,
-                            size_bytes,
-                            installation_type,
-                        });
-                    }
-
-                    pos = abs_start + image_end + 8;
-                } else {
-                    pos = abs_start + 14;
-                }
-            } else {
-                pos = abs_start + 14;
-            }
-        }
-
-        if images.is_empty() {
-            anyhow::bail!("{}", tr!("未找到有效的镜像信息"));
-        }
-
-        Ok(images)
-    }
-
-    /// 从 XML 块中提取指定标签的内容
-    fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
-        let open_tag = format!("<{}>", tag);
-        let close_tag = format!("</{}>", tag);
-
-        if let Some(start) = xml.find(&open_tag) {
-            let content_start = start + open_tag.len();
-            if let Some(end) = xml[content_start..].find(&close_tag) {
-                let content = &xml[content_start..content_start + end];
-                return Some(content.trim().to_string());
-            }
-        }
-        None
+        result
     }
 }
 
 impl Default for Dism {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_retry_verify_error, VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS};
+
+    #[test]
+    fn retries_only_the_first_explicit_out_of_memory_failure() {
+        assert!(should_retry_verify_error(
+            lr_core::wimlib::WIMLIB_ERR_NOMEM,
+            1
+        ));
+        assert!(!should_retry_verify_error(
+            lr_core::wimlib::WIMLIB_ERR_NOMEM,
+            VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS
+        ));
+        assert!(!should_retry_verify_error(
+            lr_core::wimlib::WIMLIB_ERR_INTEGRITY,
+            1
+        ));
     }
 }

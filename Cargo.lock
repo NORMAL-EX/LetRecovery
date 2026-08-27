@@ -37,6 +37,7 @@ dependencies = [
  "windows",
  "winreg",
  "winres",
+ "zeroize",
 ]
 
 [[package]]
@@ -1477,6 +1478,7 @@ dependencies = [
  "walkdir",
  "windows",
  "winres",
+ "zeroize",
 ]
 
 [[package]]
@@ -1546,9 +1548,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "url",
  "walkdir",
  "windows",
+ "zeroize",
 ]
 
 [[package]]

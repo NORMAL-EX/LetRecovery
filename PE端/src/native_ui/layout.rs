@@ -205,15 +205,6 @@ pub(crate) fn progress_geometry(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ShellGeometry {
-    pub pad: i32,
-    pub title: PixelRect,
-    pub subtitle: Option<PixelRect>,
-    pub body: PixelRect,
-    pub command: PixelRect,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CommandBarGeometry {
     pub back: Option<PixelRect>,
     pub details: Option<PixelRect>,
@@ -274,53 +265,6 @@ pub(crate) fn command_bar_geometry(
         details,
         close,
         footer,
-    }
-}
-
-pub(crate) fn shell_geometry(width: i32, height: i32, dpi: u32) -> ShellGeometry {
-    let width = width.max(1);
-    let height = height.max(1);
-    let scale = |value| scaled(value, dpi);
-    let pad = scale(20).min((width / 16).max(8));
-    let content_width = (width - pad * 2).max(1);
-    let top = scale(16).min(24);
-    let gap = scale(6).min(12);
-    let title_height = scale(28);
-    let subtitle_height = scale(24);
-    let button_height = scale(30);
-    let command_height = (button_height + scale(12).min(24)).min(height / 3).max(1);
-    let command_top = (height - command_height).max(0);
-    let title = PixelRect {
-        x: pad,
-        y: top,
-        width: content_width,
-        height: title_height.min((command_top - top).max(1)),
-    };
-    let show_subtitle = command_top - title.bottom() >= subtitle_height + gap + scale(72);
-    let subtitle = show_subtitle.then(|| PixelRect {
-        x: pad,
-        y: title.bottom() + gap,
-        width: content_width,
-        height: subtitle_height,
-    });
-    let body_top = subtitle.map_or(title.bottom() + gap, |rect| rect.bottom() + gap);
-    let body = PixelRect {
-        x: pad,
-        y: body_top,
-        width: content_width,
-        height: (command_top - gap - body_top).max(1),
-    };
-    ShellGeometry {
-        pad,
-        title,
-        subtitle,
-        body,
-        command: PixelRect {
-            x: 0,
-            y: command_top,
-            width,
-            height: height - command_top,
-        },
     }
 }
 
@@ -431,16 +375,17 @@ mod tests {
     }
 
     #[test]
-    fn shell_regions_stay_above_the_command_bar_at_supported_low_sizes() {
-        for (width, height) in SIZES {
-            for dpi in DPIS {
-                let layout = shell_geometry(width, height, dpi);
-                assert!(layout.title.bottom() <= layout.command.y);
-                assert!(layout.body.y >= layout.title.bottom());
-                assert!(layout.body.bottom() <= layout.command.y);
-                assert!(layout.body.height > 0);
-            }
-        }
+    fn compact_backup_client_fits_every_row_without_a_large_empty_tail() {
+        // A 360 logical-pixel outer window at 150% DPI has a 540px outer height. The observed
+        // WinPE non-client area is about 54px, leaving this conservative 486px client height.
+        let dpi = 144;
+        let client_height = 486;
+        let layout = progress_geometry(700, client_height, dpi, scaled(52, dpi), true, 6, false);
+
+        assert_eq!(layout.rows.height, scaled(24, dpi) * 6);
+        assert!(layout.rows.bottom() <= client_height);
+        assert!(client_height - layout.rows.bottom() <= scaled(48, dpi));
+        assert!(layout.step_bar.is_some());
     }
 
     #[test]

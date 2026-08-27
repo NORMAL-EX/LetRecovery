@@ -12,6 +12,10 @@ description = "LetRecovery PE安装助手"
 # Test harnesses must not trigger a UAC prompt. build.rs rejects this feature
 # for release builds so production binaries always require elevation.
 non-elevated-tests = []
+# Explicit disposable-VM build. Production/release packaging does not enable this feature.
+# Terminal failures publish a structured LR-CI result and request power-off without showing
+# modal UI that would block an unattended Hyper-V run.
+ci-automation = []
 
 [dependencies]
 # 序列化
@@ -44,6 +48,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
+    "Win32_System_RestartManager",
 ] }
 
 # 两端共享核心库
@@ -66,6 +71,7 @@ thiserror = "1"
 
 # 其他工具
 walkdir = "2"
+zeroize = "1"
 
 [build-dependencies]
 winres = "0.1"

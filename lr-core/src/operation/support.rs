@@ -256,15 +256,39 @@ impl SupportBundleBuilder {
         for secret in &self.explicit_secrets {
             output = output.replace(secret, "[REDACTED]");
         }
-        output = credential_regex()
-            .replace_all(&output, |captures: &Captures<'_>| {
-                format!("{}[REDACTED]", &captures[1])
-            })
-            .into_owned();
-        recovery_key_regex()
-            .replace_all(&output, "[BITLOCKER-RECOVERY-KEY-REDACTED]")
-            .into_owned()
+        redact_log_text(&output)
     }
+}
+
+/// Redact credential-shaped values and BitLocker recovery keys from diagnostic text.
+///
+/// This shared boundary is intentionally conservative and is also used by the
+/// desktop-to-PE installation log handoff. Callers must still avoid logging
+/// sensitive configuration values in the first place.
+pub fn redact_log_text(input: &str) -> String {
+    let output = credential_regex()
+        .replace_all(input, |captures: &Captures<'_>| {
+            format!("{}[REDACTED]", &captures[1])
+        })
+        .into_owned();
+    let output = signed_url_query_regex()
+        .replace_all(&output, |captures: &Captures<'_>| {
+            format!("{}[REDACTED]", &captures[1])
+        })
+        .into_owned();
+    recovery_key_regex()
+        .replace_all(&output, "[BITLOCKER-RECOVERY-KEY-REDACTED]")
+        .into_owned()
+}
+
+fn signed_url_query_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?i)([?&](?:sig|signature|auth[_-]?key|wssecret|ossaccesskeyid|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|code)=)[^&#\s]+"#,
+        )
+        .expect("signed URL query redaction regex is valid")
+    })
 }
 
 struct TailBytes {
@@ -391,6 +415,18 @@ mod tests {
         assert!(!content.contains("111111-222222"));
         assert!(!content.contains("private-user-value"));
         assert!(content.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_signed_url_query_credentials_without_hiding_safe_parameters() {
+        let input = "https://cdn.example/image.wim?arch=x64&sig=secret-signature&X-Amz-Credential=credential-value&code=oauth-code&lang=zh-cn";
+        let output = redact_log_text(input);
+        assert!(output.contains("arch=x64"));
+        assert!(output.contains("lang=zh-cn"));
+        assert!(!output.contains("secret-signature"));
+        assert!(!output.contains("credential-value"));
+        assert!(!output.contains("oauth-code"));
+        assert_eq!(output.matches("[REDACTED]").count(), 3);
     }
 
     #[test]

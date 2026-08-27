@@ -9,7 +9,7 @@
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 
-const MICROSOFT_ROOT_CA_2010_SHA256: &str =
+pub const MICROSOFT_ROOT_CA_2010_SHA256: &str =
     "df545bf919a2439c36983b54cdfc903dfa4f37d3996d8d84b4c31eec6f3c163e";
 const MICROSOFT_WINDOWS_THIRD_PARTY_COMPONENT_CA_2012_SHA256: &str =
     "9d08973e4d108da40a1a0b274180e17371134b4dd1621fa5c1f131b739b4b823";

@@ -509,7 +509,13 @@ fn normalize_drive_letter(value: &str) -> Option<char> {
 #[derive(Debug)]
 pub struct TemporaryEspMountGuard {
     letter: Option<String>,
-    identity: Option<crate::windows_storage::VolumeIdentity>,
+    identity: Option<OwnedEspIdentity>,
+}
+
+#[derive(Debug)]
+struct OwnedEspIdentity {
+    volume: crate::windows_storage::VolumeIdentity,
+    layout: crate::windows_storage::DiskLayoutSnapshot,
 }
 
 impl TemporaryEspMountGuard {
@@ -517,16 +523,18 @@ impl TemporaryEspMountGuard {
     pub fn new(
         esp_letter: &str,
         expected: crate::windows_storage::VolumeIdentity,
+        expected_layout: crate::windows_storage::DiskLayoutSnapshot,
     ) -> Result<Self, String> {
         let letter = normalize_drive_letter(esp_letter)
             .ok_or_else(|| format!("无效的 ESP 盘符: {esp_letter}"))?;
         let identity = match crate::windows_storage::volume_identity(letter) {
             Ok(identity) => identity,
             Err(error) => {
-                let cleanup = crate::windows_storage::remove_partition_drive_letter(
+                let cleanup = crate::windows_storage::remove_partition_drive_letter_checked(
                     expected.disk_number,
                     expected.offset_bytes,
                     letter,
+                    &expected_layout,
                 );
                 return Err(match cleanup {
                     Ok(()) => format!("无法确认临时 ESP {letter}: 的卷身份，已撤销盘符: {error}"),
@@ -539,10 +547,11 @@ impl TemporaryEspMountGuard {
         if identity.disk_number != expected.disk_number
             || identity.offset_bytes != expected.offset_bytes
         {
-            let cleanup = crate::windows_storage::remove_partition_drive_letter(
+            let cleanup = crate::windows_storage::remove_partition_drive_letter_checked(
                 expected.disk_number,
                 expected.offset_bytes,
                 letter,
+                &expected_layout,
             );
             return Err(match cleanup {
                 Ok(()) => format!(
@@ -564,7 +573,10 @@ impl TemporaryEspMountGuard {
         }
         Ok(Self {
             letter: Some(format!("{letter}:")),
-            identity: Some(expected),
+            identity: Some(OwnedEspIdentity {
+                volume: expected,
+                layout: expected_layout,
+            }),
         })
     }
 
@@ -590,7 +602,7 @@ impl TemporaryEspMountGuard {
             .letter
             .take()
             .expect("ESP mount guard can only be closed once");
-        match self.identity {
+        match self.identity.take() {
             Some(identity) => unmount_owned_esp(&letter, identity),
             None => Ok(()),
         }
@@ -701,7 +713,7 @@ where
 impl Drop for TemporaryEspMountGuard {
     fn drop(&mut self) {
         if let Some(letter) = self.letter.take() {
-            if let Some(identity) = self.identity {
+            if let Some(identity) = self.identity.take() {
                 if let Err(error) = unmount_owned_esp(&letter, identity) {
                     log::warn!("[BOOT PCA] 卸载临时 ESP {} 失败: {}", letter, error);
                 }
@@ -710,14 +722,16 @@ impl Drop for TemporaryEspMountGuard {
     }
 }
 
-fn unmount_owned_esp(
-    esp_letter: &str,
-    identity: crate::windows_storage::VolumeIdentity,
-) -> Result<(), String> {
+fn unmount_owned_esp(esp_letter: &str, identity: OwnedEspIdentity) -> Result<(), String> {
     let letter = normalize_drive_letter(esp_letter)
         .ok_or_else(|| format!("无效的 ESP 盘符: {esp_letter}"))?;
-    crate::windows_storage::remove_drive_letter_if_matches(letter, identity)
-        .map_err(|error| format!("卸载 ESP {letter}: 失败: {error}"))
+    crate::windows_storage::remove_partition_drive_letter_checked(
+        identity.volume.disk_number,
+        identity.volume.offset_bytes,
+        letter,
+        &identity.layout,
+    )
+    .map_err(|error| format!("卸载 ESP {letter}: 失败: {error}"))
 }
 
 #[cfg(not(windows))]

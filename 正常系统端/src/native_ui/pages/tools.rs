@@ -7,12 +7,12 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, BS_OWNERDRAW, SW_HIDE, SW_SHOW,
-    WM_SETFONT, WS_TABSTOP,
+    SendMessageW, SetWindowTextW, ShowWindow, BS_OWNERDRAW, SW_HIDE, SW_SHOW, WM_SETFONT,
+    WS_TABSTOP,
 };
 
 use super::download::PageRect;
-use crate::native_ui::controls::{child, wide};
+use crate::native_ui::controls::{child, move_layout_window as MoveWindow, wide};
 
 const FIRST_TOOL_ID: u16 = 5_100;
 
@@ -48,11 +48,12 @@ pub enum ToolIntent {
     ResetPassword,
     ExpandC,
     HardwareInspector,
+    EnterPeMaintenance,
 }
 
 impl ToolIntent {
     /// Existing command IDs remain stable; new tools are appended.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::NvidiaDriverRemoval,
         Self::PartitionCopy,
         Self::BatchFormat,
@@ -74,6 +75,7 @@ impl ToolIntent {
         Self::ResetPassword,
         Self::ExpandC,
         Self::HardwareInspector,
+        Self::EnterPeMaintenance,
     ];
 
     pub const fn command_id(self) -> u16 {
@@ -118,16 +120,17 @@ fn tool_grid_layout(rect: PageRect, dpi: u32, tool_count: usize) -> ToolGridLayo
     }
 }
 
-fn tool_availability(supports_appx: bool) -> [bool; 21] {
-    let mut available = [true; 21];
+fn tool_availability(supports_appx: bool, show_pe_maintenance: bool) -> [bool; 22] {
+    let mut available = [true; 22];
     available[ToolIntent::RemoveAppx as usize] = supports_appx;
+    available[ToolIntent::EnterPeMaintenance as usize] = show_pe_maintenance;
     available
 }
 
 pub struct ToolsPage {
     pub introduction: HWND,
-    pub buttons: [HWND; 21],
-    available: Cell<[bool; 21]>,
+    pub buttons: [HWND; 22],
+    available: Cell<[bool; 22]>,
 }
 
 impl ToolsPage {
@@ -138,7 +141,7 @@ impl ToolsPage {
         labels: &ToolLabels<'_>,
     ) -> windows::core::Result<Self> {
         let introduction = child(parent, w!("STATIC"), labels.introduction, 0, 5_099)?;
-        let mut buttons = [HWND::default(); 21];
+        let mut buttons = [HWND::default(); 22];
         for (index, intent) in ToolIntent::ALL.into_iter().enumerate() {
             // Keep the existing `ToolLabels` contract untouched for the first nineteen tools.
             // The restored legacy entry owns its caption here until the host adopts a dedicated
@@ -146,6 +149,7 @@ impl ToolsPage {
             let label = match intent {
                 ToolIntent::ExpandC => crate::tr!("无损扩大C盘"),
                 ToolIntent::HardwareInspector => crate::tr!("详细硬件检测"),
+                ToolIntent::EnterPeMaintenance => crate::tr!("进入 PE 维护环境"),
                 _ => labels.buttons[index].to_owned(),
             };
             buttons[index] = child(
@@ -159,7 +163,7 @@ impl ToolsPage {
         let page = Self {
             introduction,
             buttons,
-            available: Cell::new([true; 21]),
+            available: Cell::new([true; 22]),
         };
         page.apply_font(font);
         page.show(false);
@@ -173,8 +177,13 @@ impl ToolsPage {
     }
 
     /// Some tools are deliberately unavailable outside their supported environment.
-    pub unsafe fn apply_environment(&self, is_pe: bool, supports_appx: bool) {
-        let available = tool_availability(supports_appx);
+    pub unsafe fn apply_environment(
+        &self,
+        is_pe: bool,
+        supports_appx: bool,
+        show_pe_maintenance: bool,
+    ) {
+        let available = tool_availability(supports_appx, show_pe_maintenance && !is_pe);
         self.available.set(available);
 
         for intent in [
@@ -183,6 +192,7 @@ impl ToolsPage {
             ToolIntent::ResetNetwork,
             ToolIntent::ExpandC,
             ToolIntent::HardwareInspector,
+            ToolIntent::EnterPeMaintenance,
         ] {
             let supported = match intent {
                 ToolIntent::RepairBoot => is_pe,
@@ -190,6 +200,7 @@ impl ToolsPage {
                 | ToolIntent::ResetNetwork
                 | ToolIntent::ExpandC
                 | ToolIntent::HardwareInspector => !is_pe,
+                ToolIntent::EnterPeMaintenance => !is_pe && show_pe_maintenance,
                 _ => true,
             };
             let _ = EnableWindow(self.buttons[intent as usize], supported);
@@ -202,6 +213,7 @@ impl ToolsPage {
             let label = match intent {
                 ToolIntent::ExpandC => crate::tr!("无损扩大C盘"),
                 ToolIntent::HardwareInspector => crate::tr!("详细硬件检测"),
+                ToolIntent::EnterPeMaintenance => crate::tr!("进入 PE 维护环境"),
                 _ => labels.buttons[index].to_owned(),
             };
             set_text(self.buttons[index], &label);
@@ -219,7 +231,7 @@ impl ToolsPage {
             rect.y,
             rect.width.max(0),
             s(24).min(rect.height.max(0)),
-            true,
+            false,
         );
         let mut visible_index = 0i32;
         for (index, button) in self.buttons.iter().copied().enumerate() {
@@ -234,7 +246,7 @@ impl ToolsPage {
                 layout.grid_y + row * (layout.button_height + layout.gap),
                 layout.button_width,
                 layout.button_height,
-                true,
+                false,
             );
             visible_index += 1;
         }
@@ -280,11 +292,11 @@ mod tests {
 
     #[test]
     fn legacy_windows_hides_only_the_appx_entry() {
-        let legacy = tool_availability(false);
+        let legacy = tool_availability(false, false);
         assert!(!legacy[ToolIntent::RemoveAppx as usize]);
         assert_eq!(legacy.iter().filter(|available| **available).count(), 20);
 
-        let modern = tool_availability(true);
+        let modern = tool_availability(true, true);
         assert!(modern.into_iter().all(|available| available));
     }
 
@@ -303,7 +315,11 @@ mod tests {
             ToolsPage::command_intent(FIRST_TOOL_ID + 20),
             Some(ToolIntent::HardwareInspector)
         );
-        assert_eq!(ToolsPage::command_intent(FIRST_TOOL_ID + 21), None);
+        assert_eq!(
+            ToolsPage::command_intent(FIRST_TOOL_ID + 21),
+            Some(ToolIntent::EnterPeMaintenance)
+        );
+        assert_eq!(ToolsPage::command_intent(FIRST_TOOL_ID + 22), None);
     }
 
     #[test]

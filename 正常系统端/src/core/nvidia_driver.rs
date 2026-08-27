@@ -792,43 +792,6 @@ pub fn uninstall_nvidia_drivers_offline(_target_partition: &str) -> Result<Unins
     })
 }
 
-/// 格式化显示系统硬件摘要
-pub fn format_hardware_summary(summary: &SystemHardwareSummary) -> String {
-    let mut output = String::new();
-
-    // 显卡信息
-    for (i, gpu) in summary.gpu_devices.iter().enumerate() {
-        let display_name = if !gpu.friendly_name.is_empty() {
-            beautify_gpu_name(&gpu.friendly_name)
-        } else {
-            beautify_gpu_name(&gpu.name)
-        };
-
-        output.push_str(&tr!("显卡{}型号: {}\n", i + 1, display_name));
-        output.push_str(&tr!("显卡{}硬件ID: {}\n", i + 1, gpu.hardware_id));
-    }
-
-    // 分隔线
-    output.push_str("---------------------------------------------------------------------\n");
-
-    // CPU 信息
-    output.push_str(&format!("{}\n", summary.cpu_name));
-
-    // 分隔线
-    output.push_str("---------------------------------------------------------------------\n");
-
-    // 内存信息
-    let total_gb = summary.memory_size as f64 / (1024.0 * 1024.0 * 1024.0);
-    let avail_gb = summary.memory_available as f64 / (1024.0 * 1024.0 * 1024.0);
-    output.push_str(&tr!(
-        "内存大小: {} GB ({} GB可用)\n",
-        format!("{:.0}", total_gb.ceil()),
-        format!("{:.1}", avail_gb)
-    ));
-
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

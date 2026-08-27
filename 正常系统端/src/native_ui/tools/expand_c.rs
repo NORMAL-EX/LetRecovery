@@ -84,9 +84,15 @@ impl ExpandCDialogState {
             .max(self.analysis.used_mb.saturating_add(1024))
     }
 
-    pub fn apply_analysis(&mut self, analysis: ExpandCAnalysis) {
+    pub fn apply_analysis(&mut self, mut analysis: ExpandCAnalysis) {
         self.loading = false;
         self.executing = false;
+        if analysis.found && analysis.no_move_max_mb <= analysis.current_size_mb {
+            analysis.can_expand = false;
+            analysis.reason = crate::tr!(
+                "当前版本只支持使用 C 盘后方已有连续未分配空间的纯扩展；需要移动或收缩其它分区的方案尚未开放"
+            );
+        }
         self.message = if !analysis.found {
             crate::tr!("未找到当前系统 C 盘")
         } else if !analysis.can_expand {
@@ -98,8 +104,9 @@ impl ExpandCDialogState {
         } else {
             String::new()
         };
-        self.target_size_mb = analysis.max_size_mb;
-        self.target_size_text = format_gb_value(analysis.max_size_mb);
+        let supported_maximum = analysis.no_move_max_mb.min(analysis.max_size_mb);
+        self.target_size_mb = supported_maximum;
+        self.target_size_text = format_gb_value(supported_maximum);
         self.analysis = analysis;
     }
 
@@ -110,7 +117,8 @@ impl ExpandCDialogState {
     /// a 300 GB minimum into 0 GB while controls are being initialized.
     fn apply_slider_position(&mut self, position_tenths: i32) {
         let minimum = tenth_gb(self.min_target_mb());
-        let maximum = tenth_gb(self.analysis.max_size_mb).max(minimum);
+        let maximum =
+            tenth_gb(self.analysis.no_move_max_mb.min(self.analysis.max_size_mb)).max(minimum);
         let position_tenths = position_tenths.clamp(minimum, maximum);
         self.target_size_mb = mb_from_tenth_gb(position_tenths);
         self.target_size_text = format!("{:.1}", f64::from(position_tenths) / 10.0);
@@ -130,7 +138,7 @@ impl ExpandCDialogState {
         }
         let target_size_mb = (target_gb * 1024.0).round() as u64;
         let minimum = self.min_target_mb();
-        let maximum = self.analysis.max_size_mb;
+        let maximum = self.analysis.no_move_max_mb.min(self.analysis.max_size_mb);
         if target_size_mb < minimum || target_size_mb > maximum {
             return Err(ExpandCValidationError::OutsideRange {
                 target_size_mb,
@@ -143,14 +151,15 @@ impl ExpandCDialogState {
             expected_disk: None,
             expected_partition_number: None,
             target_size_mb,
-            use_maximum: target_size_mb >= maximum,
-            requires_partition_move: self.analysis.no_move_max_mb > 0
-                && target_size_mb > self.analysis.no_move_max_mb,
+            // Persist an explicit authenticated size. Legacy `0 = maximum` can include a raw
+            // move after the layout changes and therefore is not used by this production path.
+            use_maximum: false,
+            requires_partition_move: false,
             borrow_from_left: false,
             donor_target_size_mb: 0,
             minimum_free_mb: 1024,
             analyzed_current_size_mb: self.analysis.current_size_mb,
-            analyzed_max_size_mb: maximum,
+            analyzed_max_size_mb: self.analysis.max_size_mb,
             analyzed_no_move_max_mb: self.analysis.no_move_max_mb,
             strict_analysis_snapshot: true,
         })
@@ -219,10 +228,22 @@ impl std::fmt::Display for ExpandCValidationError {
 
 impl std::error::Error for ExpandCValidationError {}
 
+impl ExpandCRequest {
+    /// Returns true when this intent needs any partition shrink/transfer/raw block movement.
+    /// Such plans stay disabled until the checked PhysicalDrive+journal transaction is complete.
+    pub fn requires_unsupported_raw_move(&self) -> bool {
+        self.requires_partition_move
+            || self.borrow_from_left
+            || self.donor_target_size_mb != 0
+            || self.analyzed_no_move_max_mb <= self.analyzed_current_size_mb
+            || self.target_size_mb > self.analyzed_no_move_max_mb
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpandCDialogIntent {
     Analyze,
-    RequestConfirmation(ExpandCRequest),
+    RequestConfirmation(Box<ExpandCRequest>),
     Close,
 }
 
@@ -399,7 +420,7 @@ impl NativeExpandCDialog {
                 match self.state.request() {
                     Ok(request) => {
                         self.shell.hide_modeless();
-                        Some(ExpandCDialogIntent::RequestConfirmation(request))
+                        Some(ExpandCDialogIntent::RequestConfirmation(Box::new(request)))
                     }
                     Err(error) => {
                         self.state.message = error.to_string();
@@ -588,26 +609,27 @@ impl NativeExpandCDialog {
 
     unsafe fn render_state(&mut self) {
         let analysis = &self.state.analysis;
+        let supported_maximum = analysis.no_move_max_mb.min(analysis.max_size_mb);
         set_text(
             self.controls.current_value,
             &format_gb(analysis.current_size_mb),
         );
         set_text(self.controls.used_value, &format_gb(analysis.used_mb));
         set_text(self.controls.free_value, &format_gb(analysis.free_mb));
-        set_text(self.controls.max_value, &format_gb(analysis.max_size_mb));
+        set_text(self.controls.max_value, &format_gb(supported_maximum));
         set_text(self.controls.target_edit, &self.state.target_size_text);
         set_text(
             self.controls.range,
             &crate::tr!(
                 "可设置范围: {} GB - {} GB",
                 format_gb_value(self.state.min_target_mb()),
-                format_gb_value(analysis.max_size_mb)
+                format_gb_value(supported_maximum)
             ),
         );
         set_slider_range(
             self.controls.slider,
             self.state.min_target_mb(),
-            analysis.max_size_mb,
+            supported_maximum,
         );
         set_slider_position(self.controls.slider, self.state.target_size_mb);
         let enabled =
@@ -908,12 +930,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_default_selects_the_maximum() {
+    fn default_stops_at_the_no_move_maximum() {
         let state = available();
         let request = state.request().unwrap();
-        assert_eq!(request.target_size_mb, 160 * 1024);
-        assert!(request.use_maximum);
-        assert!(request.requires_partition_move);
+        assert_eq!(request.target_size_mb, 120 * 1024);
+        assert!(!request.use_maximum);
+        assert!(!request.requires_partition_move);
+        assert!(!request.requires_unsupported_raw_move());
     }
 
     #[test]
@@ -942,6 +965,26 @@ mod tests {
         assert_eq!(request.analyzed_current_size_mb, 100 * 1024);
         assert_eq!(request.analyzed_no_move_max_mb, 120 * 1024);
         assert_eq!(request.analyzed_max_size_mb, 160 * 1024);
+    }
+
+    #[test]
+    fn analysis_with_only_move_space_is_disabled_before_confirmation() {
+        let mut state = ExpandCDialogState::default();
+        state.apply_analysis(ExpandCAnalysis {
+            found: true,
+            current_size_mb: 100 * 1024,
+            used_mb: 70 * 1024,
+            free_mb: 30 * 1024,
+            no_move_max_mb: 100 * 1024,
+            max_size_mb: 160 * 1024,
+            can_expand: true,
+            reason: String::new(),
+        });
+        assert!(!state.analysis.can_expand);
+        assert!(matches!(
+            state.request(),
+            Err(ExpandCValidationError::AnalysisUnavailable)
+        ));
     }
 
     #[test]
@@ -976,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn slider_position_is_absolute_and_clamped_to_the_analyzed_range() {
+    fn slider_position_is_absolute_and_clamped_to_the_safe_no_move_range() {
         let mut state = available();
         state.apply_slider_position(1_150);
         assert_eq!(state.target_size_text, "115.0");
@@ -988,8 +1031,12 @@ mod tests {
         assert_eq!(state.target_size_mb, 100 * 1024);
 
         state.apply_slider_position(99_999);
-        assert_eq!(state.target_size_text, "160.0");
-        assert_eq!(state.target_size_mb, 160 * 1024);
+        assert_eq!(state.analysis.max_size_mb, 160 * 1024);
+        assert_eq!(state.target_size_text, "120.0");
+        assert_eq!(state.target_size_mb, state.analysis.no_move_max_mb);
+        let request = state.request().unwrap();
+        assert!(!request.requires_partition_move);
+        assert!(!request.requires_unsupported_raw_move());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -11,23 +12,26 @@ use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
     CreatePen, CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject,
     DrawTextW, FillRect, GdiFlush, GetCurrentObject, GetDC, GetTextMetricsW, InvalidateRect,
-    ReleaseDC, RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetStretchBltMode,
-    SetTextColor, SetWindowRgn, StretchBlt, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CENTER,
-    DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HFONT, OBJ_FONT, OPAQUE, PEN_STYLE,
-    RGN_DIFF, RGN_ERROR, SRCCOPY, TRANSPARENT,
+    RedrawWindow, ReleaseDC, RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode,
+    SetStretchBltMode, SetTextColor, SetWindowRgn, StretchBlt, StretchDIBits, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+    DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HFONT,
+    OBJ_FONT, OPAQUE, PEN_STYLE, RDW_FRAME, RDW_INVALIDATE, RGN_DIFF, RGN_ERROR, SRCCOPY,
+    TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    SetWindowTheme, DRAWITEMSTRUCT, ODA_FOCUS, ODS_DISABLED, ODS_FOCUS, ODS_HOTLIGHT, ODS_SELECTED,
+    CloseThemeData, DrawThemeTextEx, OpenThemeData, SetWindowTheme, DRAWITEMSTRUCT, DTTOPTS,
+    DTT_COMPOSITED, DTT_TEXTCOLOR, ODA_FOCUS, ODS_DISABLED, ODS_FOCUS, ODS_HOTLIGHT, ODS_SELECTED,
     WM_MOUSELEAVE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GetParent, GetPropW, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, IsWindow, LoadCursorW, RemovePropW, SendMessageW,
-    SetCursor, SetPropW, SetWindowPos, ShowWindow, BS_OWNERDRAW, GWL_STYLE, HMENU, HWND_TOP,
-    IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOWPOS,
+    BeginDeferWindowPos, CreateWindowExW, DeferWindowPos, DestroyWindow, EndDeferWindowPos,
+    GetParent, GetPropW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    IsWindow, LoadCursorW, MoveWindow as Win32MoveWindow, RemovePropW, SendMessageW, SetCursor,
+    SetPropW, SetWindowPos, ShowWindow, BS_OWNERDRAW, GWL_STYLE, HMENU, HWND_TOP, IDC_ARROW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOWPOS,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_ENABLE, WM_ERASEBKGND, WM_GETFONT,
     WM_MOUSEMOVE, WM_NCDESTROY, WM_SETCURSOR, WM_SETFONT, WM_SHOWWINDOW, WM_WINDOWPOSCHANGED,
     WM_WINDOWPOSCHANGING, WS_BORDER, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
@@ -45,6 +49,202 @@ const LIST_VIEW_LAYOUT_SUBCLASS_ID: usize = 0x4c52_4c46;
 const LIST_VIEW_FRAME_PROPERTY: PCWSTR = w!("LetRecovery.InnoListView.Frame");
 const LIST_VIEW_OWNER_PROPERTY: PCWSTR = w!("LetRecovery.InnoListView.Owner");
 const LIST_VIEW_INTERNAL_LAYOUT_PROPERTY: PCWSTR = w!("LetRecovery.InnoListView.Layout");
+
+#[derive(Clone, Copy)]
+struct LayoutRequest {
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    old_width: Option<i32>,
+    old_height: Option<i32>,
+}
+
+thread_local! {
+    static LAYOUT_REQUESTS: RefCell<Option<Vec<LayoutRequest>>> = const { RefCell::new(None) };
+}
+
+/// Collects one visible surface's child-window geometry and publishes it in same-parent groups.
+///
+/// `DeferWindowPos` is a USER32 API available since Windows 2000. Microsoft requires every window
+/// in one multiple-position structure to have the same parent, so nested page controls are split
+/// into separate groups. A failed group is replayed with ordinary `MoveWindow`; geometry remains
+/// idempotent and the documented failed structure is never passed to `EndDeferWindowPos`.
+pub(crate) struct LayoutBatchGuard {
+    owns_batch: bool,
+}
+
+pub(crate) fn begin_layout_batch() -> LayoutBatchGuard {
+    let owns_batch = LAYOUT_REQUESTS.with(|cell| {
+        let mut state = cell.borrow_mut();
+        if state.is_some() {
+            false
+        } else {
+            *state = Some(Vec::new());
+            true
+        }
+    });
+    LayoutBatchGuard { owns_batch }
+}
+
+impl Drop for LayoutBatchGuard {
+    fn drop(&mut self) {
+        if self.owns_batch {
+            unsafe { publish_layout_batch() };
+        }
+    }
+}
+
+unsafe fn publish_layout_batch() {
+    let Some(requests) = LAYOUT_REQUESTS.with(|cell| cell.borrow_mut().take()) else {
+        return;
+    };
+    let mut groups: Vec<(HWND, Vec<LayoutRequest>)> = Vec::new();
+    let mut ungrouped = Vec::new();
+    for request in requests {
+        let Ok(parent) = GetParent(request.hwnd) else {
+            ungrouped.push(request);
+            continue;
+        };
+        if let Some((_, group)) = groups
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == parent)
+        {
+            group.push(request);
+        } else {
+            groups.push((parent, vec![request]));
+        }
+    }
+
+    for (_, group) in groups {
+        let deferred = (|| -> windows::core::Result<()> {
+            let mut batch = BeginDeferWindowPos(group.len() as i32)?;
+            for request in &group {
+                batch = DeferWindowPos(
+                    batch,
+                    request.hwnd,
+                    HWND::default(),
+                    request.x,
+                    request.y,
+                    request.width,
+                    request.height,
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                )?;
+            }
+            EndDeferWindowPos(batch)
+        })();
+        if deferred.is_err() {
+            // DeferWindowPos explicitly says to abandon the batch after any failed append.
+            // Replaying the final desired rectangles is safe even if EndDeferWindowPos itself
+            // returned an indeterminate error because these operations are idempotent.
+            for request in &group {
+                let _ = Win32MoveWindow(
+                    request.hwnd,
+                    request.x,
+                    request.y,
+                    request.width,
+                    request.height,
+                    false,
+                );
+                invalidate_resized_layout_child(*request);
+            }
+        }
+    }
+    for request in ungrouped {
+        let _ = Win32MoveWindow(
+            request.hwnd,
+            request.x,
+            request.y,
+            request.width,
+            request.height,
+            false,
+        );
+        invalidate_resized_layout_child(request);
+    }
+}
+
+unsafe fn invalidate_resized_layout_child(request: LayoutRequest) {
+    let size_changed =
+        request.old_width != Some(request.width) || request.old_height != Some(request.height);
+    if size_changed {
+        let _ = RedrawWindow(request.hwnd, None, None, RDW_INVALIDATE | RDW_FRAME);
+    }
+}
+
+/// Moves a layout child without synchronously repainting it. If its size changed, queue only that
+/// child's client/non-client repaint; USER32 can preserve valid client pixels for a pure move.
+/// The parent layout publishes its newly exposed background separately.
+pub(crate) unsafe fn move_layout_window(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    repaint: bool,
+) -> windows::core::Result<()> {
+    // Preserve the ordinary MoveWindow contract for dialog and one-shot call sites that
+    // explicitly request an immediate repaint. Live layout always passes `false`.
+    if repaint {
+        return Win32MoveWindow(hwnd, x, y, width, height, true);
+    }
+    let mut before = RECT::default();
+    let had_geometry = GetWindowRect(hwnd, &mut before).is_ok();
+    let old_width = had_geometry.then_some(before.right.saturating_sub(before.left));
+    let old_height = had_geometry.then_some(before.bottom.saturating_sub(before.top));
+    let old_position = if had_geometry {
+        let parent = GetParent(hwnd).ok();
+        let mut point = POINT {
+            x: before.left,
+            y: before.top,
+        };
+        parent
+            .filter(|parent| ScreenToClient(*parent, &mut point).as_bool())
+            .map(|_| (point.x, point.y))
+    } else {
+        None
+    };
+    if old_position == Some((x, y)) && old_width == Some(width) && old_height == Some(height) {
+        return Ok(());
+    }
+    let queued = LAYOUT_REQUESTS.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(requests) = state.as_mut() else {
+            return false;
+        };
+        if let Some(request) = requests.iter_mut().find(|request| request.hwnd == hwnd) {
+            request.x = x;
+            request.y = y;
+            request.width = width;
+            request.height = height;
+        } else {
+            requests.push(LayoutRequest {
+                hwnd,
+                x,
+                y,
+                width,
+                height,
+                old_width,
+                old_height,
+            });
+        }
+        true
+    });
+    if queued {
+        return Ok(());
+    }
+    Win32MoveWindow(hwnd, x, y, width, height, false)?;
+    invalidate_resized_layout_child(LayoutRequest {
+        hwnd,
+        x,
+        y,
+        width,
+        height,
+        old_width,
+        old_height,
+    });
+    Ok(())
+}
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     COLORREF((red as u32) | ((green as u32) << 8) | ((blue as u32) << 16))
@@ -139,7 +339,9 @@ struct ButtonSurfaceVisual {
 pub fn button_visual(palette: Palette, role: ButtonRole, state: ControlState) -> ButtonVisual {
     if state.disabled {
         return ButtonVisual {
-            fill: if palette.dark {
+            fill: if palette.window.0 == 0 {
+                palette.window
+            } else if palette.dark {
                 rgb(47, 47, 47)
             } else {
                 rgb(249, 249, 249)
@@ -277,13 +479,41 @@ pub unsafe fn draw_inno_button(
             draw_button_surface(
                 memory_dc,
                 local_rect,
-                item.hwndItem,
                 visual,
-                metrics,
-                background,
-                font,
+                ButtonRenderContext {
+                    hwnd: item.hwndItem,
+                    metrics,
+                    background,
+                    font,
+                    composited_text: true,
+                },
             );
             if !bits.is_null() {
+                // GDI writes RGB but leaves alpha at zero in this top-down transparent carrier. Preserve
+                // DTT_COMPOSITED glyph alpha and reconstruct coverage for the pre-blended rounded
+                // fill/border. Full-colour body pixels become opaque while antialiased edge pixels
+                // retain proportional alpha; untouched black carrier pixels remain transparent.
+                let pixels = std::slice::from_raw_parts_mut(
+                    bits.cast::<u8>(),
+                    width as usize * height as usize * 4,
+                );
+                let max_channel = |color: COLORREF| {
+                    let value = color.0;
+                    (value as u8)
+                        .max((value >> 8) as u8)
+                        .max((value >> 16) as u8)
+                };
+                let reference = max_channel(visual.fill).max(max_channel(visual.border));
+                for pixel in pixels.chunks_exact_mut(4) {
+                    if pixel[3] == 0 && reference != 0 {
+                        let covered = pixel[0].max(pixel[1]).max(pixel[2]);
+                        if covered != 0 {
+                            pixel[3] = ((u16::from(covered) * 255 + u16::from(reference) / 2)
+                                / u16::from(reference))
+                            .min(255) as u8;
+                        }
+                    }
+                }
                 let _ = StretchDIBits(
                     item.hDC,
                     item.rcItem.left,
@@ -325,50 +555,58 @@ pub unsafe fn draw_inno_button(
     draw_button_surface(
         item.hDC,
         item.rcItem,
-        item.hwndItem,
         visual,
-        metrics,
-        background,
-        font,
+        ButtonRenderContext {
+            hwnd: item.hwndItem,
+            metrics,
+            background,
+            font,
+            composited_text: false,
+        },
     );
+}
+
+#[derive(Clone, Copy)]
+struct ButtonRenderContext {
+    hwnd: HWND,
+    metrics: InnoMetrics,
+    background: COLORREF,
+    font: HFONT,
+    composited_text: bool,
 }
 
 unsafe fn draw_button_surface(
     dc: HDC,
     rect: RECT,
-    hwnd: HWND,
     visual: ButtonSurfaceVisual,
-    metrics: InnoMetrics,
-    background: COLORREF,
-    font: HFONT,
+    context: ButtonRenderContext,
 ) {
     fill_round_rect_antialiased(
         dc,
         rect,
-        metrics.corner_radius,
+        context.metrics.corner_radius,
         visual.fill,
         visual.border,
-        background,
+        context.background,
     );
 
     // Keep a single outline. Win32 assigns keyboard focus on mouse-down as well, so an
     // additional inset focus rectangle would make every clicked button look double framed.
 
-    let length = GetWindowTextLengthW(hwnd).max(0) as usize;
+    let length = GetWindowTextLengthW(context.hwnd).max(0) as usize;
     let mut text = vec![0u16; length + 1];
-    let copied = GetWindowTextW(hwnd, &mut text).max(0) as usize;
+    let copied = GetWindowTextW(context.hwnd, &mut text).max(0) as usize;
     text.truncate(copied);
     let _ = SetBkMode(dc, TRANSPARENT);
     let _ = SetTextColor(dc, visual.text);
-    let old_font = SelectObject(dc, font);
+    let old_font = SelectObject(dc, context.font);
     let mut text_rect = rect;
-    draw_native_text(
-        dc,
-        &text,
-        &mut text_rect,
-        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-        visual.text,
-    );
+    let flags = DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
+    if !context.composited_text
+        || !draw_composited_native_text(dc, &text, &mut text_rect, flags, visual.text)
+    {
+        draw_native_text(dc, &text, &mut text_rect, flags, visual.text);
+    }
     let _ = SelectObject(dc, old_font);
 }
 
@@ -381,6 +619,33 @@ pub(crate) unsafe fn draw_native_text(
     color: COLORREF,
 ) {
     draw_text_fallback(dc, text, rect, flags, color);
+}
+
+/// Draws opaque-colour text with antialiased alpha into a caller-owned top-down DIB.
+///
+/// Microsoft requires `DTT_COMPOSITED` to target a top-down DIB section.  Callers must therefore
+/// use this only inside `BeginBufferedPaint(BPBF_TOPDOWNDIB)` or the equivalent DIB path and retain
+/// the ordinary `draw_native_text` fallback for allocation/theme failures.
+pub(crate) unsafe fn draw_composited_native_text(
+    dc: HDC,
+    text: &[u16],
+    rect: &mut RECT,
+    flags: DRAW_TEXT_FORMAT,
+    color: COLORREF,
+) -> bool {
+    let theme = OpenThemeData(HWND::default(), w!("WINDOW"));
+    if theme.is_invalid() {
+        return false;
+    }
+    let options = DTTOPTS {
+        dwSize: std::mem::size_of::<DTTOPTS>() as u32,
+        dwFlags: DTT_COMPOSITED | DTT_TEXTCOLOR,
+        crText: color,
+        ..Default::default()
+    };
+    let drawn = DrawThemeTextEx(theme, dc, 0, 0, text, flags, rect, Some(&options)).is_ok();
+    let _ = CloseThemeData(theme);
+    drawn
 }
 
 /// Publishes an already premultiplied top-down BGRA surface over a classic child-window DC.
@@ -577,17 +842,6 @@ fn top_down_bgra_bitmap_info(width: i32, height: i32) -> BITMAPINFO {
     }
 }
 
-pub unsafe fn draw_separator(dc: HDC, rect: RECT, palette: Palette, dpi: u32) {
-    let height = InnoMetrics::for_dpi(dpi).separator_thickness;
-    let line = RECT {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: (rect.top + height).min(rect.bottom),
-    };
-    fill_solid_rect(dc, &line, palette.separator);
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressRole {
     Normal,
@@ -611,7 +865,9 @@ pub unsafe fn draw_progress(
     if width == 0 || height == 0 {
         return;
     }
-    let radius = ((height * 5 + 8) / 16).clamp(2, (height / 2).max(2));
+    // Match the PE client: the track is a thin capsule whose corner radius is exactly half its
+    // height at every DPI.
+    let radius = ((height + 1) / 2).max(1);
     let inner_width = (width - 2).max(0);
     let filled = if total == 0 {
         0
@@ -651,12 +907,7 @@ fn render_progress_pixels(
     palette: Palette,
 ) -> Vec<u8> {
     const SAMPLE_GRID: usize = 4;
-    let colors = [
-        colorref_rgb(palette.window),
-        colorref_rgb(palette.border),
-        colorref_rgb(palette.edit),
-        colorref_rgb(fill_color),
-    ];
+    let colors = progress_layer_colors(palette, fill_color);
     let mut pixels = vec![0_u8; width as usize * height as usize * 4];
     let sample_count = (SAMPLE_GRID * SAMPLE_GRID) as u32;
     for y in 0..height as usize {
@@ -683,6 +934,166 @@ fn render_progress_pixels(
         }
     }
     pixels
+}
+
+fn progress_layer_colors(palette: Palette, fill_color: COLORREF) -> [(u8, u8, u8); 4] {
+    // Keep the same layer mapping as the PE renderer: the anti-aliased capsule edge and its
+    // interior are one continuous track. A separate border consumes a visible pixel at the top
+    // and bottom and makes an otherwise identical 10px bar look thinner.
+    let window = colorref_rgb(palette.window);
+    let track = colorref_rgb(palette.edit);
+    [window, track, track, colorref_rgb(fill_color)]
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProgressRingFrame {
+    pub start_radians: f64,
+    pub sweep_radians: f64,
+}
+
+/// Returns the same two-second linear Cloud-MGR ProgressRing frame used by the PE client.
+pub fn progress_ring_frame(elapsed_seconds: f64) -> ProgressRingFrame {
+    const PERIOD_SECONDS: f64 = 2.0;
+    const DASH_MIN: f64 = 0.01;
+    const DASH_HALF: f64 = 21.99;
+    const CIRCUMFERENCE: f64 = std::f64::consts::TAU * 7.0;
+    const ROTATION_MID_RADIANS: f64 = std::f64::consts::PI * 2.5;
+    const ROTATION_END_RADIANS: f64 = std::f64::consts::PI * 6.0;
+    let phase = elapsed_seconds.rem_euclid(PERIOD_SECONDS) / PERIOD_SECONDS;
+    let (dash, rotation) = if phase < 0.5 {
+        let progress = phase / 0.5;
+        (
+            DASH_MIN + (DASH_HALF - DASH_MIN) * progress,
+            ROTATION_MID_RADIANS * progress,
+        )
+    } else {
+        let progress = (phase - 0.5) / 0.5;
+        (
+            DASH_HALF + (DASH_MIN - DASH_HALF) * progress,
+            ROTATION_MID_RADIANS + (ROTATION_END_RADIANS - ROTATION_MID_RADIANS) * progress,
+        )
+    };
+    ProgressRingFrame {
+        start_radians: rotation - std::f64::consts::FRAC_PI_2,
+        sweep_radians: dash / CIRCUMFERENCE * std::f64::consts::TAU,
+    }
+}
+
+/// Draws the PE-identical indeterminate ring with analytic supersampling and circular caps.
+pub unsafe fn draw_indeterminate_ring(dc: HDC, rect: RECT, elapsed_seconds: f64, palette: Palette) {
+    const SAMPLE_GRID: usize = 4;
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let size = width.min(height) as f64;
+    let cx = width as f64 / 2.0;
+    let cy = height as f64 / 2.0;
+    let radius = size * 7.0 / 16.0;
+    let half_thickness = size * 1.5 / 16.0 / 2.0;
+    let frame = progress_ring_frame(elapsed_seconds);
+    let start_cap = (
+        cx + radius * frame.start_radians.cos(),
+        cy + radius * frame.start_radians.sin(),
+    );
+    let end_angle = frame.start_radians + frame.sweep_radians;
+    let end_cap = (cx + radius * end_angle.cos(), cy + radius * end_angle.sin());
+    let arc = RoundArcGeometry {
+        center: (cx, cy),
+        radius,
+        half_thickness,
+        frame,
+        start_cap,
+        end_cap,
+    };
+    let background = colorref_rgb(palette.window);
+    // The normal endpoint's dark `accent_fill` is the muted primary-button surface, while the PE
+    // ProgressRing uses its bright cyan accent. `highlight_fill` is the audited identical cyan in
+    // the normal palette; light mode already shares PE's #005FB8 accent directly.
+    let ring_color = if palette.dark {
+        palette.highlight_fill
+    } else {
+        palette.accent_fill
+    };
+    let foreground = colorref_rgb(ring_color);
+    let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+    let sample_count = (SAMPLE_GRID * SAMPLE_GRID) as u32;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let mut covered = 0_u32;
+            for sample_y in 0..SAMPLE_GRID {
+                for sample_x in 0..SAMPLE_GRID {
+                    let px = x as f64 + (sample_x as f64 + 0.5) / SAMPLE_GRID as f64;
+                    let py = y as f64 + (sample_y as f64 + 0.5) / SAMPLE_GRID as f64;
+                    if point_in_round_arc(px, py, &arc) {
+                        covered += 1;
+                    }
+                }
+            }
+            let offset = (y * width as usize + x) * 4;
+            let red = blend_channel(background.0, foreground.0, covered, sample_count);
+            let green = blend_channel(background.1, foreground.1, covered, sample_count);
+            let blue = blend_channel(background.2, foreground.2, covered, sample_count);
+            pixels[offset] = blue;
+            pixels[offset + 1] = green;
+            pixels[offset + 2] = red;
+            pixels[offset + 3] = 255;
+        }
+    }
+    let info = top_down_bgra_bitmap_info(width, height);
+    let _ = StretchDIBits(
+        dc,
+        rect.left,
+        rect.top,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height,
+        Some(pixels.as_ptr().cast()),
+        &info,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RoundArcGeometry {
+    center: (f64, f64),
+    radius: f64,
+    half_thickness: f64,
+    frame: ProgressRingFrame,
+    start_cap: (f64, f64),
+    end_cap: (f64, f64),
+}
+
+fn point_in_round_arc(x: f64, y: f64, arc: &RoundArcGeometry) -> bool {
+    let cap_radius_squared = arc.half_thickness * arc.half_thickness;
+    let in_start_cap =
+        squared_distance(x, y, arc.start_cap.0, arc.start_cap.1) <= cap_radius_squared;
+    let in_end_cap = squared_distance(x, y, arc.end_cap.0, arc.end_cap.1) <= cap_radius_squared;
+    if in_start_cap || in_end_cap {
+        return true;
+    }
+    let dx = x - arc.center.0;
+    let dy = y - arc.center.1;
+    let distance = dx.hypot(dy);
+    if (distance - arc.radius).abs() > arc.half_thickness {
+        return false;
+    }
+    let relative = (dy.atan2(dx) - arc.frame.start_radians).rem_euclid(std::f64::consts::TAU);
+    relative <= arc.frame.sweep_radians
+}
+
+fn squared_distance(x: f64, y: f64, other_x: f64, other_y: f64) -> f64 {
+    (x - other_x).powi(2) + (y - other_y).powi(2)
+}
+
+fn blend_channel(background: u8, foreground: u8, coverage: u32, total: u32) -> u8 {
+    ((u32::from(foreground) * coverage + u32::from(background) * (total - coverage) + total / 2)
+        / total) as u8
 }
 
 fn progress_sample_layer(
@@ -962,28 +1373,6 @@ pub(crate) unsafe fn draw_antialiased_control_frame_with_vertical_interiors(
         (top_interior, bottom_interior),
         border,
         CornerExterior::Color(exterior),
-    );
-}
-
-/// Draws a rounded outline without fabricating pixels outside the rounded popup surface.  A
-/// ComboLBox is a separate top-level window and its four corners can overlap arbitrary content;
-/// using the owner's nominal window colour there produces visible dark/light blocks.  Fully
-/// exterior pixels therefore remain under USER32's native paint, while the outline itself is
-/// still generated deterministically.
-pub(crate) unsafe fn draw_antialiased_control_frame_preserving_exterior(
-    dc: HDC,
-    rect: RECT,
-    geometry: RoundedControlFrameGeometry,
-    interior: COLORREF,
-    border: COLORREF,
-) {
-    draw_antialiased_control_frame_impl(
-        dc,
-        rect,
-        geometry,
-        (interior, interior),
-        border,
-        CornerExterior::PreserveNative,
     );
 }
 
@@ -2421,13 +2810,42 @@ mod tests {
 
     #[test]
     fn progress_raster_preserves_window_color_outside_rounded_track() {
-        let pixels = render_progress_pixels(80, 16, 5, 20, Palette::DARK.progress, Palette::DARK);
+        let pixels = render_progress_pixels(80, 10, 5, 20, Palette::DARK.progress, Palette::DARK);
         let (red, green, blue) = colorref_rgb(Palette::DARK.window);
         assert_eq!(&pixels[..4], &[blue, green, red, 255]);
-        let fill_offset = (8 * 80 + 4) * 4;
+        let fill_offset = (5 * 80 + 4) * 4;
         assert_ne!(
             &pixels[fill_offset..fill_offset + 4],
             &[blue, green, red, 255]
         );
+    }
+
+    #[test]
+    fn progress_track_matches_pe_and_has_no_independent_outline_colour() {
+        let colors = progress_layer_colors(Palette::DARK, Palette::DARK.progress);
+        assert_eq!(colors[1], colors[2]);
+        assert_ne!(colors[1], colorref_rgb(Palette::DARK.border));
+    }
+
+    #[test]
+    fn progress_ring_matches_pe_cloud_mgr_linear_keyframes() {
+        let start = progress_ring_frame(0.0);
+        let midpoint = progress_ring_frame(1.0);
+        let shrinking = progress_ring_frame(1.5);
+        let repeated = progress_ring_frame(2.0);
+        assert!((start.start_radians + std::f64::consts::FRAC_PI_2).abs() < 1.0e-9);
+        assert!(start.sweep_radians > 0.0 && start.sweep_radians < 0.01);
+        assert!(midpoint.sweep_radians > start.sweep_radians);
+        assert!((midpoint.start_radians - std::f64::consts::TAU).abs() < 1.0e-9);
+        assert!(shrinking.start_radians > midpoint.start_radians);
+        assert!(shrinking.sweep_radians < midpoint.sweep_radians);
+        assert_eq!(start, repeated);
+    }
+
+    #[test]
+    fn progress_ring_uses_the_same_theme_foreground_as_pe() {
+        assert_eq!(Palette::LIGHT.accent_fill, COLORREF(0x00b8_5f00));
+        assert_eq!(Palette::DARK.highlight_fill, COLORREF(0x00ff_c24c));
+        assert_ne!(Palette::DARK.highlight_fill, Palette::DARK.accent_fill);
     }
 }

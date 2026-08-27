@@ -1,126 +1,52 @@
 ---
-title: 命令行参数与无人值守安装
-description: LetRecovery 与 PE 端的命令行参数、安装/高级选项 JSON 配置。
+title: 命令行参考
+description: 正常系统端安装、备份与版本化配置生成器。
 ---
 
-# 命令行参数与无人值守安装
+# 命令行参考
 
-LetRecovery 由两个可执行程序组成，各自支持一组命令行参数：
+公开 CLI 只适用于正常系统端 `LetRecovery.exe`。PE 不提供用户 CLI：旧 `/PEINSTALL`、`/PEBACKUP` 已停用并固定拒绝；只有 `/AUTO` 是正常系统端认证交接使用的内部入口，外部脚本不得直接构造或调用。
 
-- **`LetRecovery.exe`**（正常系统端，在已安装的 Windows 中运行）
-- **`LetRecoveryPE.exe`**（PE 端，在 WinPE 中运行）
+图形界面可在“关于”页启用默认关闭的自动化导出入口，再从安装或备份页生成 `cli\*.json` 与相对路径 CMD。导出只写文件、不执行任务；它复用下面同一份严格 schema 和验证边界。
 
-参数名**大小写不敏感**，同时提供 `/FLAG` 与 `--flag` 两种写法。
+```text
+inspect disks|image|pe-cache ...
+install plan --config <file> | install run --config <file> [--yes] [--dry-run]
+backup plan --config <file> | backup run --config <file> [--yes] [--dry-run]
+update restore
+config generate|validate|normalize|show ...
+```
 
-::: tip 关于 PE 端文件名
-PE 端的可执行文件名是 **`LetRecoveryPE.exe`**（Cargo 包名 `letrecovery-pe` 仅为内部名称）。
-:::
+`disable_windows_update` 只设置可逆的 Windows Update 策略和服务启动类型，不删除服务、任务、文件、ACL，也不改动 BITS 或写入 Defender 旧禁用策略。它会阻止 Windows Update/Microsoft Update 的自动投递，包括 Defender 平台和安全情报更新，但 Store、Office、手工安装、企业管理或功能升级仍可能重新部署组件。
 
-## 一、LetRecovery.exe（正常系统端）
+`update restore` 只恢复仍由 LetRecovery 拥有且未被管理员、域策略或 MDM 改写的 Windows Update 设置。它要求已提权控制台，但不会自动触发 UAC 或弹出消息框；冲突和部分恢复通过结构化日志及最终 JSON 返回。
 
-| 参数 | 别名 | 说明 |
-| --- | --- | --- |
-| *(无参数)* | | 启动图形界面。非管理员运行时会自动请求 UAC 提权（并转发原命令行参数）。 |
-| `--install` | `/INSTALL` | **命令行无人值守安装**（从桌面一键驱动重装，见下文）。需配合 `--config`。 |
-| `--config <路径>` | `/CONFIG`，`--config=<路径>` | 指定**安装配置 JSON**（见 [install.json](#安装配置-install-json)）。 |
-| `--advanced <路径>` | `/ADVANCED`，`--advanced=<路径>` | 指定**高级选项 JSON**（可选，见 [advanced.json](#高级选项-advanced-json)）。 |
-| `/PEINSTALL` | `--pe-install` | 读取数据分区中已写好的安装配置并执行安装（通常由程序自身在准备后调用）。 |
-| `/PEBACKUP` | `--pe-backup` | 读取数据分区中已写好的备份配置并执行备份。 |
+高级优化项不会扩大到模糊匹配：`remove_uwp_apps` 仅处理共享固定清单中的精确 Name/PFN，明确保留新 Outlook、OneDrive Sync 与 Win32 OneDrive；Windows 11 还会在默认用户首次生成前关闭开始菜单推荐和预装内容投递，避免“入门”、纸牌、微软电脑管家等动态入口重新出现。`disable_windows_defender` 深度移除 Defender Antivirus 引擎，并仅尽力移除两个精确 SecHealthUI PFN；SecurityHealthService、Windows Security Center 服务、防火墙、UAC、SmartScreen、VBS 和 Defender for Endpoint 保留。`disable_reserved_storage` 只在已确认 Windows 10/11 build 19041+、使用内置无人值守时调用在线 DISM，失败或最终状态未确认只记 warning。
 
-### 命令行无人值守安装
+`inspect disks`、`inspect image --path <image>` 和 `inspect pe-cache` 提供 fresh 只读库存，便于先选择目标、镜像卷索引和已验证 PE。
+
+真正执行的 `run` 必须在已经提权的管理员控制台运行并显式使用 `--yes`；程序不会为 CLI 弹出 UAC 或消息框。`plan` 与 `run --dry-run` 不执行写盘，也不要求管理员权限。旧 `--install`/`--advanced` 会返回迁移错误。
+
+配置是 `schema_version: 1` 的严格 JSON，`operation.type` 为 `install` 或 `backup`，未知字段、JSON 任意层级的重复键和重复命令行参数都会被拒绝。驱动行为只由 `driver_action` 决定。备份意图使用 `execution_mode`（`auto|direct|via_pe`）、`output_policy`（`create|replace|append`）和 `auto_reboot`；旧 `incremental` 布尔值被拒绝。当前正常系统端 CLI 放行 WIM/ESD 的 `auto|direct + create|replace|append + auto_reboot=false`；`create` 拒绝既有目标，`replace`/`append` 要求并完整绑定既有普通文件，执行时从同一拒绝写入/删除共享的旧文件句柄复制到私有暂存区，完整验证后通过 PREPARED journal 和句柄 CAS 发布。需要 PE 的系统卷、`via_pe` 和自动重启仍在 plan 阶段失败关闭；PE 端没有公共 CLI。只有显式 `--interactive` 才会启动向导，提示也是 stderr JSON Lines，输入提前结束会失败；覆盖配置必须 `--force`。配置文件发布后会再次核对 protected DACL 只授予当前用户、SYSTEM 和 Administrators，父目录 ACL 不会被修改；`show` 和所有事件都会隐藏密码。
+
+```json
+{"schema_version":1,"operation":{"type":"install","target_partition":"C:","image_path":"D:\\install.wim","volume_index":1,"format_partition":true,"repair_boot":true,"auto_reboot":false}}
+```
+
+安装字段还包括 `image_backing_path`、`unattended`、`automation_shutdown_on_terminal`、`driver_action`、`boot_mode`、`boot_pca_mode`、`custom_unattend_path`、`inherit_app_install_prefs`、`preinstalled_software_ids` 和 `advanced`。显式继承时，EXE 相邻的有效 `config.json` 是所用安装偏好的唯一来源；缺失或损坏会失败。软件 ID 每次从当前 v4 目录唯一解析，URL 和静默命令不从旧偏好继承。生成器对应接受 `--inherit-app-install-prefs true` 与逗号分隔的 `--preinstalled-software-ids todesk,7zip-x64,bandizip-x64`。`--automation-shutdown-on-terminal true` 专供可丢弃虚拟机：已确认执行的 normal/PE 失败会安排关机；成功会继续启动新系统并等首登逐项尝试所有软件后关机，软件单项失败仍只作为 warning。本地源支持 WIM、ESD、SWM、GHO、GHS；控制器按目标状态选择 Direct 或受认证 ViaPE。ViaPE 的 SWM/GHS 全套连续分卷逐项进入 LRHM3，PE fresh 枚举拒绝 missing/extra/乱序项。当前 ViaPE 对自定义 answer 或 Administrator 密码失败关闭，Direct 支持的组合不受该 gate 影响。`advanced` 支持快捷方式箭头、经典右键、NRO、Windows Update、Defender/SecHealthUI、保留存储、UAC、设备加密、精选 AppX，部署/首次登录脚本、自定义驱动、存储控制器驱动、注册表、文件、用户名、卷标、内置 Administrator、仅在 VMware 来宾中规划的 VMware Tools，以及受控的 Windows 7 ACPI、USB3/NVMe、存储修复、UEFI 补丁和 XP USB3/NVMe 项。图形界面还能把本次 Wi-Fi profile 写入受保护 JSON；SSID、profile XML 和密码都会脱敏，含凭据的字段不接受命令行参数。生成器可设置 `--image-backing-path`、`--install-vmware-tools`、Windows 7 对应开关/路径及内置 Administrator 非密码字段；密码不接受命令行参数。备份字段为 `source_partition`、`save_path`、`name`、`description`、`format`（`wim|esd`）、`execution_mode`、`output_policy` 和 `auto_reboot`。
+
+```json
+{"schema_version":1,"operation":{"type":"backup","source_partition":"D:","save_path":"E:\\Backups\\data.wim","name":"Data","description":"Fresh direct backup","format":"wim","execution_mode":"direct","output_policy":"create","auto_reboot":false}}
+```
+
+对应的非交互生成命令：
 
 ```bat
-LetRecovery.exe --install --config <install.json> [--advanced <advanced.json>]
+LetRecovery.exe config generate --operation backup --output D:\lr-backup.json --source-partition D: --save-path E:\Backups\data.wim --name Data --format wim --execution-mode direct --output-policy create --auto-reboot false
 ```
 
-**行为**：在**正常 Windows 桌面**执行；读取 `--config`（与可选的 `--advanced`）→ 把镜像放进自动选定的数据分区 → 写入安装配置与目标盘标记 → 设置下次重启进 PE →（默认）重启。重启后进入 PE 由 PE 端读取配置完成实际部署（格式化目标盘、释放镜像、导入驱动、应用高级选项、修复引导）。
+最终 stdout 是单个 JSON；脱敏进度为 stderr JSON Lines。计划结果包含实际采用的 `effective_config`、fresh 库存绑定和 `warnings`，不是简单回显输入。旧正常端 PE 开关会在读取配置或请求管理员权限前固定拒绝。退出码为：0 成功、2 用法/权限/确认错误、3 配置错误、4 预检错误、5 执行错误。
 
-::: warning 必须在已提权环境运行
-需在"已提权（管理员）"环境运行（如以管理员身份打开的命令行 / 计划任务）。若从非提权环境启动，会弹 UAC；同意后参数会被转发并继续。
-:::
+批处理需用 `start /wait "" LetRecovery.exe ...` 后读取 `%ERRORLEVEL%`；PowerShell 使用 `Start-Process -Wait -PassThru -NoNewWindow` 后读取 `ExitCode`。这是 Windows 子系统单 EXE，程序会复用标准句柄或连接父控制台，不会新增 CLI EXE。
 
-## 二、LetRecoveryPE.exe（PE 端）
-
-| 参数 | 别名 | 说明 |
-| --- | --- | --- |
-| *(无参数)* | | 启动 PE 图形界面。 |
-| `/PEINSTALL` | `--pe-install` | 命令行模式自动安装（读取数据分区配置，无 GUI）。 |
-| `/PEBACKUP` | `--pe-backup` | 命令行模式自动备份。 |
-| `/AUTO` | `--auto` | 自动检测数据分区中的配置类型（安装/备份）并启动相应界面；未找到配置则提示。 |
-
-## 安装配置 install.json
-
-`--config` 指向的 JSON。**前三项必填**，其余可省略（取下表默认值）。
-
-| 字段 | 类型 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `target_partition` | string | **必填** | 要重装的系统盘盘符，如 `"C:"`。进 PE 后会被格式化。 |
-| `image_path` | string | **必填** | 镜像**绝对路径**（`.wim`/`.esd`/`.swm` 或 `.gho`/`.ghs`）。 |
-| `pe_path` | string | **必填** | PE 启动文件**绝对路径**（`.wim` 或 `.iso`）。 |
-| `volume_index` | number | `1` | 镜像内分卷索引（WIM/ESD 多版本时选择）。 |
-| `is_gho` | bool | 按扩展名自动判断 | 是否 GHO 镜像。 |
-| `is_xp` | bool | `false` | 是否为 XP/2003 镜像；用于进入对应的兼容预检与安装路径。 |
-| `driver_action_mode` | number | `0` | 驱动处理：`0`=不处理，`1`=仅备份，`2`=自动导入（从数据目录 `drivers\` 导入）。 |
-| `unattended` | bool | `false` | 是否生成无人值守配置。 |
-| `auto_reboot` | bool | `true` | 准备完成后是否自动重启进 PE。 |
-| `custom_unattend_path` | string | `""` | 自定义无人值守 XML 绝对路径（会被复制进数据目录）。 |
-| `data_partition` | string\|null | `null`（自动选择） | 暂存配置/镜像的数据分区盘符；缺省自动选一个空间足够、非目标盘的分区。 |
-| `pe_display_name` | string\|null | `"LetRecovery PE"` | PE 启动项显示名。 |
-
-示例：
-
-```json
-{
-  "target_partition": "C:",
-  "image_path": "D:\\Images\\Win11_24H2.wim",
-  "pe_path": "D:\\LetRecovery\\bin\\pe\\LetRecovery_PE.wim",
-  "volume_index": 1,
-  "is_gho": false,
-  "driver_action_mode": 2,
-  "unattended": true,
-  "auto_reboot": true,
-  "custom_unattend_path": "",
-  "data_partition": null,
-  "pe_display_name": "LetRecovery PE"
-}
-```
-
-## 高级选项 advanced.json
-
-`--advanced` 指向的 JSON，对应程序内「高级选项」。**可只写需要的字段**，其余取默认值。下列字段会在 PE 安装流程中**生效**（与图形界面"重启进 PE 安装"路径完全一致）：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `bypass_nro` | bool | OOBE 绕过强制联网。 |
-| `remove_uwp_apps` | bool | 删除预装 UWP 应用。 |
-| `import_storage_controller_drivers` | bool | 导入磁盘控制器驱动（Win10/11 x64）。 |
-| `disable_windows_update` | bool | 禁用 Windows 更新。 |
-| `disable_windows_defender` | bool | 深度移除 Microsoft Defender Antivirus 杀毒引擎；保留 Windows 安全中心、UAC、防火墙、SmartScreen、VBS 与 Defender for Endpoint。 |
-| `disable_reserved_storage` | bool | 禁用系统保留空间。 |
-| `disable_uac` | bool | 禁用用户账户控制。 |
-| `disable_device_encryption` | bool | 禁用自动设备加密。 |
-| `remove_shortcut_arrow` | bool | 移除快捷方式小箭头。 |
-| `restore_classic_context_menu` | bool | Win11 恢复经典右键菜单。 |
-| `custom_username` + `username` | bool + string | 自定义用户名（`custom_username=true` 时取 `username`）。 |
-| `custom_volume_label` + `volume_label` | bool + string | 自定义系统盘卷标。 |
-
-示例：
-
-```json
-{
-  "bypass_nro": true,
-  "remove_uwp_apps": true,
-  "import_storage_controller_drivers": true,
-  "disable_device_encryption": true,
-  "custom_username": true,
-  "username": "User",
-  "custom_volume_label": true,
-  "volume_label": "OS"
-}
-```
-
-::: warning 注意
-- `win7_*` 是旧配置兼容字段，不是稳定的用户命令行接口，不应在新的 `advanced.json` 中手工设置。旧 0x7B 字段和本命令行路径中的 ACPI 尝试会固定关闭；Windows 7 的锁定 USB3/NVMe/UEFI 自动策略请使用图形界面创建最终安装意图。
-- `AdvancedOptions` 中其余更丰富的项（自定义脚本、自定义驱动目录、注册表导入、自定义文件、迁移 WiFi 等）**不属于"重启进 PE 安装"流程**（图形界面同样如此），即便写进 advanced.json 也不会在本命令行安装流程中生效。
-- 路径建议使用绝对路径；JSON 中的反斜杠需转义（`"D:\\Images\\x.wim"`）。
-:::
+完整字段和示例请参阅仓库文档 `docs/命令行参数.md`。

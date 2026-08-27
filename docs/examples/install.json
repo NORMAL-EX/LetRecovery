@@ -1,13 +1,20 @@
 {
-  "target_partition": "C:",
-  "image_path": "D:\\Images\\Win11_24H2.wim",
-  "pe_path": "D:\\LetRecovery\\bin\\pe\\LetRecovery_PE.wim",
-  "volume_index": 1,
-  "is_gho": false,
-  "driver_action_mode": 2,
-  "unattended": true,
-  "auto_reboot": true,
-  "custom_unattend_path": "",
-  "data_partition": null,
-  "pe_display_name": "LetRecovery PE"
+  "schema_version": 1,
+  "operation": {
+    "type": "install",
+    "target_partition": "C:",
+    "image_path": "D:\\Images\\install.wim",
+    "volume_index": 1,
+    "format_partition": true,
+    "repair_boot": true,
+    "unattended": true,
+    "auto_reboot": false,
+    "automation_shutdown_on_terminal": false,
+    "driver_action": "auto_import",
+    "boot_mode": "auto",
+    "boot_pca_mode": "auto",
+    "inherit_app_install_prefs": false,
+    "preinstalled_software_ids": ["todesk", "7zip-x64", "bandizip-x64"],
+    "advanced": {}
+  }
 }

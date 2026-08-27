@@ -9,14 +9,14 @@ use windows::Win32::Graphics::Gdi::{InvalidateRect, HFONT};
 use windows::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    MoveWindow, SendMessageW, SetWindowTextW, ShowWindow, BM_GETCHECK, BM_SETCHECK,
-    BS_AUTOCHECKBOX, BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT,
-    CB_SETCURSEL, SW_HIDE, SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP,
+    SendMessageW, SetWindowTextW, ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX,
+    BS_OWNERDRAW, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
+    SW_HIDE, SW_SHOW, WM_SETFONT, WS_BORDER, WS_TABSTOP,
 };
 
 use super::download::PageRect;
 use crate::core::native_easy_mode_controller::EasyModeView;
-use crate::native_ui::controls::{child, wide};
+use crate::native_ui::controls::{child, move_layout_window as MoveWindow, wide};
 use crate::native_ui::layout::measured_button_width;
 use crate::native_ui::theme::{apply_control_theme, NativeControlKind, Palette};
 
@@ -277,7 +277,7 @@ impl EasyModePage {
             y,
             (width - tip_button_width - gap).max(0),
             tip_height,
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.dismiss_tip,
@@ -285,7 +285,7 @@ impl EasyModePage {
             y,
             tip_button_width,
             control_height,
-            true,
+            false,
         );
         y += tip_height + gap;
 
@@ -300,10 +300,10 @@ impl EasyModePage {
             y,
             field_width,
             label_height,
-            true,
+            false,
         );
         y += label_height;
-        let _ = MoveWindow(self.system, rect.x, y, field_width, s(240), true);
+        let _ = MoveWindow(self.system, rect.x, y, field_width, s(240), false);
         y += control_height + gap;
         let _ = MoveWindow(
             self.volume_label,
@@ -311,10 +311,10 @@ impl EasyModePage {
             y,
             field_width,
             label_height,
-            true,
+            false,
         );
         y += label_height;
-        let _ = MoveWindow(self.volume, rect.x, y, field_width, s(240), true);
+        let _ = MoveWindow(self.volume, rect.x, y, field_width, s(240), false);
         let logo_y = y - label_height - control_height - gap;
         let _ = MoveWindow(
             self.logo,
@@ -322,7 +322,7 @@ impl EasyModePage {
             logo_y,
             logo_size,
             logo_size,
-            true,
+            false,
         );
         y += control_height + gap;
         let install_y = (rect.y + height - control_height).max(rect.y);
@@ -334,7 +334,7 @@ impl EasyModePage {
             description_y,
             width,
             description_height,
-            true,
+            false,
         );
         let _ = MoveWindow(
             self.install,
@@ -342,7 +342,7 @@ impl EasyModePage {
             install_y,
             button_width,
             control_height,
-            true,
+            false,
         );
     }
 

@@ -233,13 +233,6 @@ impl NativeAppxDialog {
         load
     }
 
-    pub unsafe fn set_targets_loading(&mut self) {
-        self.state.set_targets(Vec::new());
-        self.state.targets_loading = true;
-        self.state.status = crate::tr!("正在检测Windows分区...");
-        self.render_state();
-    }
-
     pub unsafe fn set_packages(
         &mut self,
         inventory_target: &str,

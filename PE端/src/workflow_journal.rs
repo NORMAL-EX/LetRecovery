@@ -7,15 +7,16 @@
 use std::path::{Path, PathBuf};
 
 use lr_core::operation::{
-    unix_time_millis, CheckpointStore, OperationCheckpoint, OperationError, OperationErrorKind,
-    OperationJournal, OperationKind, OperationStatus, StepDefinition, SupportBundleBuilder,
+    unix_time_millis, OperationCheckpoint, OperationError, OperationErrorKind, OperationJournal,
+    OperationStatus, SupportBundleBuilder,
 };
+#[cfg(test)]
+use lr_core::operation::{OperationKind, StepDefinition};
 
-use crate::core::config::{ConfigFileManager, OperationType};
+#[cfg(test)]
+use crate::core::config::OperationType;
 use crate::ui::progress::{BackupStep, InstallStep};
 
-const CHECKPOINT_FILE: &str = "LetRecovery.operation.json";
-const SUPPORT_FILE: &str = "LetRecovery-support.json";
 const LAST_RUNTIME_LOG_FILE: &str = "LetRecoveryPE-last.log";
 
 pub(crate) struct PeWorkflowJournal {
@@ -35,50 +36,6 @@ pub(crate) struct RecoveryCheckpointSnapshot {
 }
 
 impl PeWorkflowJournal {
-    pub(crate) fn create(operation_type: OperationType) -> Result<Option<Self>, OperationError> {
-        let Some(data_partition) = ConfigFileManager::find_data_partition_for(operation_type)
-        else {
-            return Ok(None);
-        };
-        let root = partition_root(&data_partition)?;
-        let store = CheckpointStore::new(root.join(CHECKPOINT_FILE));
-        let support_path = root.join(SUPPORT_FILE);
-        let now = unix_time_millis();
-
-        let mut previous_interrupted = false;
-        if let Some(mut previous) = OperationJournal::open(store.clone())? {
-            if !matches!(
-                previous.checkpoint().status,
-                OperationStatus::Succeeded | OperationStatus::Cancelled
-            ) {
-                previous_interrupted = true;
-                previous.mark_interrupted(now)?;
-                write_support_bundle(
-                    previous.checkpoint(),
-                    &support_path,
-                    &data_partition,
-                    "previous_interrupted",
-                )?;
-            }
-            previous.remove()?;
-        }
-
-        let (kind, steps, id_prefix) = operation_definition(operation_type);
-        let checkpoint =
-            OperationCheckpoint::new(format!("pe-{id_prefix}-{now}"), kind, steps, now)?;
-        let mut journal = OperationJournal::create(store, checkpoint)?;
-        if operation_type == OperationType::Expand {
-            journal.observe_step("expand", now)?;
-        }
-
-        Ok(Some(Self {
-            journal,
-            support_path,
-            data_partition,
-            previous_interrupted,
-        }))
-    }
-
     pub(crate) fn observe_install_step(&mut self, step: InstallStep) -> Result<(), OperationError> {
         self.journal
             .observe_step(install_step_id(step), unix_time_millis())?;
@@ -130,6 +87,7 @@ impl PeWorkflowJournal {
     }
 }
 
+#[cfg(test)]
 fn operation_definition(
     operation_type: OperationType,
 ) -> (OperationKind, Vec<StepDefinition>, &'static str) {
@@ -196,6 +154,7 @@ fn backup_step_id(step: BackupStep) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn install_step_is_idempotent(step: InstallStep) -> bool {
     matches!(
         step,
@@ -206,6 +165,7 @@ fn install_step_is_idempotent(step: InstallStep) -> bool {
     )
 }
 
+#[cfg(test)]
 fn backup_step_is_idempotent(step: BackupStep) -> bool {
     matches!(
         step,
@@ -236,7 +196,7 @@ fn write_support_bundle(
 ) -> Result<(), OperationError> {
     let mut builder = SupportBundleBuilder::new(
         "LetRecovery",
-        env!("CARGO_PKG_VERSION"),
+        env!("BUILD_VERSION"),
         "pe",
         unix_time_millis(),
     )?;

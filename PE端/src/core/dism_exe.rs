@@ -85,6 +85,85 @@ pub struct OfflineInternationalSettings {
     pub time_zone: String,
 }
 
+fn validate_preserved_driver_inf_files(inf_files: &[PathBuf]) -> Result<()> {
+    if inf_files.is_empty() {
+        bail!("no authenticated INF files were supplied");
+    }
+    for inf in inf_files {
+        if inf
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_none_or(|value| !value.eq_ignore_ascii_case("inf"))
+            || !inf.is_file()
+        {
+            bail!(
+                "authenticated driver path is not an INF file: {}",
+                inf.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A process launch, pipe, read, or wait failure means DISM itself was unavailable. That is
+/// different from DISM running and rejecting one optional package: retrying every INF cannot make
+/// an unavailable servicing process trustworthy, and the caller must not downgrade it to a package
+/// warning. `anyhow::Context` preserves the originating `std::io::Error` in the chain.
+fn is_dism_infrastructure_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
+}
+
+fn import_preserved_driver_infs_resilient<Batch, One>(
+    inf_files: &[PathBuf],
+    run_batch: Batch,
+    mut run_one: One,
+) -> Result<Vec<String>>
+where
+    Batch: FnOnce() -> Result<()>,
+    One: FnMut(&Path) -> Result<()>,
+{
+    validate_preserved_driver_inf_files(inf_files)?;
+    match run_batch() {
+        Ok(()) => return Ok(Vec::new()),
+        Err(error) if is_dism_infrastructure_error(&error) => {
+            return Err(error).context("DISM infrastructure failed during driver batch import");
+        }
+        Err(error) => log::warn!(
+            "[DISM.EXE] exact authenticated driver batch failed; isolating exact INF packages: {}",
+            error
+        ),
+    }
+
+    let mut failures = Vec::new();
+    for inf in inf_files {
+        // The authenticated set was checked immediately before the batch. If an artifact vanished
+        // in between, that is a structural/integrity failure, not an optional compatibility result.
+        if !inf.is_file() {
+            bail!(
+                "authenticated driver INF disappeared during import: {}",
+                inf.display()
+            );
+        }
+        if let Err(error) = run_one(inf) {
+            if is_dism_infrastructure_error(&error) {
+                return Err(error).with_context(|| {
+                    format!(
+                        "DISM infrastructure failed while importing {}",
+                        inf.display()
+                    )
+                });
+            }
+            failures.push(format!(
+                "DISM rejected optional driver package {}: {error:#}",
+                inf.display()
+            ));
+        }
+    }
+    Ok(failures)
+}
+
 fn field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
     let (name, value) = line.split_once(':')?;
     name.trim()
@@ -356,7 +435,7 @@ impl DismExe {
     ///
     /// 按照优先级查找：
     /// 1. PE 环境 (X:\Windows\System32\dism.exe)
-    /// 2. 系统目录 (C:\Windows\System32\dism.exe)
+    /// 2. Win32 API 返回的当前系统目录
     /// 3. PATH 环境变量
     fn find_dism_exe() -> Result<PathBuf> {
         // PE 环境路径（优先使用）
@@ -389,15 +468,15 @@ impl DismExe {
             }
         }
 
-        // 常见系统路径
-        let system_paths = [
-            PathBuf::from(r"C:\Windows\System32\dism.exe"),
-            PathBuf::from(r"C:\Windows\System32\Dism\dism.exe"),
-        ];
-
-        for path in &system_paths {
-            if path.exists() {
-                return Ok(path.clone());
+        // 使用 Win32 API 返回的实际系统目录；不得把正常系统或自定义 PE 的盘符写死为 C。
+        if let Ok(system_directory) = lr_core::windows_compat::system_directory() {
+            for path in [
+                system_directory.join("dism.exe"),
+                system_directory.join("Dism").join("dism.exe"),
+            ] {
+                if path.exists() {
+                    return Ok(path);
+                }
             }
         }
 
@@ -412,8 +491,8 @@ impl DismExe {
             tr!(
                 "无法找到 dism.exe。请确保在 PE 环境或 Windows 系统中运行。\n\
              已搜索的路径:\n\
-             - X:\\Windows\\System32\\dism.exe (PE 环境)\n\
-             - C:\\Windows\\System32\\dism.exe (Windows 系统)"
+             - Windows API 返回的实际 System32\\dism.exe\n\
+             - X:\\Windows\\System32\\dism.exe (常见 PE 环境)"
             )
         )
     }
@@ -700,36 +779,20 @@ impl DismExe {
     /// - `image_path`: 离线系统根目录（如 "D:\\"）
     /// - `driver_path`: 驱动目录或 INF 文件路径
     /// - `recurse`: 是否递归搜索子目录
-    /// - `force_unsigned`: 是否强制安装未签名驱动
     /// - `progress_tx`: 进度通道（可选）
     ///
     /// # 示例
     /// ```ignore
     /// let dism = DismExe::new()?;
-    /// dism.add_driver_offline("D:\\", "C:\\Drivers", true, false, None)?;
+    /// dism.add_driver_offline("D:\\", "C:\\Drivers", true, None)?;
     /// ```
     pub fn add_driver_offline(
         &self,
         image_path: &str,
         driver_path: &str,
         recurse: bool,
-        force_unsigned: bool,
         progress_tx: Option<Sender<DismExeProgress>>,
     ) -> Result<()> {
-        // Never bypass catalog validation for an offline target. A rejected boot-start driver
-        // otherwise becomes an unbootable installation instead of an actionable import error.
-        let verified_package = if force_unsigned {
-            if recurse {
-                bail!("controlled signed-driver fallback cannot use /Recurse");
-            }
-            let package =
-                lr_core::driver_package_trust::verify_driver_package(Path::new(driver_path.trim()))
-                    .context("driver package did not pass independent SetupAPI verification")?;
-            package.revalidate()?;
-            Some(package)
-        } else {
-            None
-        };
         log::info!(
             "[DISM.EXE] 添加驱动到离线系统: {} -> {}",
             driver_path,
@@ -762,15 +825,6 @@ impl DismExe {
         if recurse {
             args.push("/Recurse".to_string());
         }
-        if let Some(package) = verified_package {
-            log::warn!(
-                "[DISM.EXE] signature false-negative fallback for {} (signer: {})",
-                package.inf_path().display(),
-                package.signer()
-            );
-            args.push("/ForceUnsigned".to_string());
-        }
-
         args.push(format!("/scratchdir:{}", scratch_dir));
 
         // 转换为 &str 切片
@@ -780,8 +834,93 @@ impl DismExe {
         Ok(())
     }
 
-    /// Imports a directory normally first, then isolates the failing signed package and only
-    /// uses `/ForceUnsigned` for an exact INF independently accepted by SetupAPI.
+    /// Add only the manifest-authenticated INF paths supplied by the typed task. Microsoft DISM
+    /// supports repeating `/Driver` on one `/Add-Driver` command and installs them in command-line
+    /// order; this avoids both a slow process per package and a recursive scan that could discover
+    /// a file outside the authenticated set.
+    pub fn add_driver_inf_files_offline(
+        &self,
+        image_path: &str,
+        inf_files: &[PathBuf],
+        progress_tx: Option<Sender<DismExeProgress>>,
+    ) -> Result<()> {
+        for inf in inf_files {
+            if !inf.is_file() {
+                bail!(
+                    "authenticated driver path is not an INF file: {}",
+                    inf.display()
+                );
+            }
+        }
+        let scratch_dir = Self::ensure_scratch_directory();
+        let args = Self::build_add_driver_inf_arguments(image_path, inf_files, &scratch_dir)?;
+        let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
+        self.execute_with_progress(&args_ref, progress_tx)?;
+        Ok(())
+    }
+
+    fn build_add_driver_inf_arguments(
+        image_path: &str,
+        inf_files: &[PathBuf],
+        scratch_dir: &str,
+    ) -> Result<Vec<String>> {
+        if image_path.trim().is_empty() {
+            bail!("offline image path is empty");
+        }
+        if inf_files.is_empty() {
+            bail!("no authenticated INF files were supplied");
+        }
+        if scratch_dir.trim().is_empty() {
+            bail!("DISM scratch directory is empty");
+        }
+        let normalized_image = if image_path.ends_with('\\') {
+            image_path.to_owned()
+        } else {
+            format!("{image_path}\\")
+        };
+        let mut args = vec![
+            format!("/Image:{normalized_image}"),
+            "/Add-Driver".to_owned(),
+        ];
+        for inf in inf_files {
+            if inf
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_none_or(|value| !value.eq_ignore_ascii_case("inf"))
+            {
+                bail!(
+                    "authenticated driver path is not an INF file: {}",
+                    inf.display()
+                );
+            }
+            args.push(format!("/Driver:{}", inf.display()));
+        }
+        args.push(format!("/scratchdir:{scratch_dir}"));
+        Ok(args)
+    }
+
+    pub fn add_preserved_driver_inf_files_resilient(
+        &self,
+        image_path: &str,
+        inf_files: &[PathBuf],
+        progress_tx: Option<Sender<DismExeProgress>>,
+    ) -> Result<Vec<String>> {
+        import_preserved_driver_infs_resilient(
+            inf_files,
+            || self.add_driver_inf_files_offline(image_path, inf_files, progress_tx.clone()),
+            |inf| {
+                self.add_driver_offline(
+                    image_path,
+                    &inf.to_string_lossy(),
+                    false,
+                    progress_tx.clone(),
+                )
+            },
+        )
+    }
+
+    /// Imports a directory with standard DISM policy first, then isolates failures to exact INF
+    /// packages without adding a second signing-policy implementation.
     pub fn add_drivers_from_directory_resilient(
         &self,
         image_path: &str,
@@ -794,17 +933,6 @@ impl DismExe {
         Ok(())
     }
 
-    /// Imports a preserved driver backup without letting an unrelated optional package abort the
-    /// installation. Callers must still verify the captured boot-storage requirements afterward.
-    pub fn add_preserved_drivers_from_directory_resilient(
-        &self,
-        image_path: &str,
-        driver_dir: &str,
-        progress_tx: Option<Sender<DismExeProgress>>,
-    ) -> Result<Vec<String>> {
-        self.add_drivers_from_directory_impl(image_path, driver_dir, progress_tx, true)
-    }
-
     fn add_drivers_from_directory_impl(
         &self,
         image_path: &str,
@@ -812,7 +940,7 @@ impl DismExe {
         progress_tx: Option<Sender<DismExeProgress>>,
         tolerate_package_failures: bool,
     ) -> Result<Vec<String>> {
-        match self.add_driver_offline(image_path, driver_dir, true, false, progress_tx.clone()) {
+        match self.add_driver_offline(image_path, driver_dir, true, progress_tx.clone()) {
             Ok(()) => return Ok(Vec::new()),
             Err(batch_error) => log::warn!(
                 "[DISM.EXE] recursive import failed; retrying exact INF packages: {}",
@@ -844,39 +972,17 @@ impl DismExe {
         for inf in inf_files {
             let inf_text = inf.to_string_lossy();
             if let Err(normal_error) =
-                self.add_driver_offline(image_path, &inf_text, false, false, progress_tx.clone())
+                self.add_driver_offline(image_path, &inf_text, false, progress_tx.clone())
             {
-                if !lr_core::driver_package_trust::is_known_dism_signature_false_negative(
-                    &normal_error.to_string(),
-                ) {
-                    let failure = format!(
-                        "DISM rejected driver package {}: {normal_error:#}",
-                        inf.display()
-                    );
-                    if tolerate_package_failures {
-                        log::warn!("[DISM.EXE] skipping optional driver package: {failure}");
-                        failures.push(failure);
-                        continue;
-                    }
-                    bail!("{failure}");
+                let failure = format!(
+                    "DISM rejected driver package {}: {normal_error:#}",
+                    inf.display()
+                );
+                if tolerate_package_failures {
+                    failures.push(failure);
+                    continue;
                 }
-                if let Err(fallback_error) = self
-                    .add_driver_offline(image_path, &inf_text, false, true, progress_tx.clone())
-                    .with_context(|| {
-                        format!(
-                            "verified signed-driver fallback failed for {}",
-                            inf.display()
-                        )
-                    })
-                {
-                    if tolerate_package_failures {
-                        let failure = format!("{fallback_error:#}");
-                        log::warn!("[DISM.EXE] skipping optional driver package: {failure}");
-                        failures.push(failure);
-                        continue;
-                    }
-                    return Err(fallback_error);
-                }
+                bail!("{failure}");
             }
         }
         Ok(failures)
@@ -1003,7 +1109,7 @@ impl DismExe {
     ) -> Result<(usize, usize)> {
         let total = package_paths.len();
         let mut success_count = 0;
-        let mut failed_packages = Vec::new();
+        let mut failed_packages = lr_core::bounded_failure_summary::BoundedFailureCollector::new(3);
 
         for (index, package_path) in package_paths.iter().enumerate() {
             // 发送当前进度
@@ -1019,18 +1125,14 @@ impl DismExe {
             match self.add_package_offline(image_path, &package_str, false, None) {
                 Ok(_) => {
                     success_count += 1;
-                    log::info!("[DISM.EXE] 更新包安装成功: {}", package_path.display());
                 }
                 Err(e) => {
-                    failed_packages.push(format!("{}: {e}", package_path.display()));
-                    log::warn!(
-                        "[DISM.EXE] 更新包安装失败: {} - {}",
-                        package_path.display(),
-                        e
-                    );
+                    failed_packages.push(format_args!("{}: {e}", package_path.display()));
                 }
             }
         }
+
+        let failure_summary = failed_packages.finish();
 
         // 发送完成进度
         if let Some(ref tx) = progress_tx {
@@ -1039,7 +1141,7 @@ impl DismExe {
                 status: tr!(
                     "完成: {} 成功, {} 失败",
                     success_count,
-                    failed_packages.len()
+                    failure_summary.total()
                 ),
             });
         }
@@ -1047,74 +1149,13 @@ impl DismExe {
         log::info!(
             "[DISM.EXE] 批量更新包安装完成: 成功 {}, 失败 {}",
             success_count,
-            failed_packages.len()
+            failure_summary.total()
         );
 
-        if !failed_packages.is_empty() {
-            bail!(
-                "{} CAB package(s) failed; first failure: {}",
-                failed_packages.len(),
-                failed_packages[0]
-            );
+        if !failure_summary.is_empty() {
+            log::warn!("[DISM.EXE] 部分可选 CAB 未能安装: {failure_summary}");
         }
-        Ok((success_count, 0))
-    }
-
-    /// 搜索目录中的所有 CAB 文件并安装
-    ///
-    /// # 参数
-    /// - `image_path`: 离线系统根目录
-    /// - `cab_dir`: 包含 CAB 文件的目录
-    /// - `progress_tx`: 进度通道（可选）
-    ///
-    /// # 返回
-    /// - (成功数, 失败数)
-    pub fn add_packages_from_directory(
-        &self,
-        image_path: &str,
-        cab_dir: &Path,
-        progress_tx: Option<Sender<DismExeProgress>>,
-    ) -> Result<(usize, usize)> {
-        // 收集所有 CAB 文件
-        let cab_files = Self::find_cab_files(cab_dir)?;
-
-        if cab_files.is_empty() {
-            log::info!("[DISM.EXE] 目录中没有找到 CAB 文件: {}", cab_dir.display());
-            return Ok((0, 0));
-        }
-
-        log::info!(
-            "[DISM.EXE] 在 {} 中找到 {} 个 CAB 文件",
-            cab_dir.display(),
-            cab_files.len()
-        );
-
-        self.add_packages_batch(image_path, &cab_files, progress_tx)
-    }
-
-    /// 递归查找目录中的所有 CAB 文件
-    fn find_cab_files(dir: &Path) -> Result<Vec<PathBuf>> {
-        let metadata = dir
-            .symlink_metadata()
-            .with_context(|| format!("CAB directory is unavailable: {}", dir.display()))?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            bail!("CAB source is not a regular directory: {}", dir.display());
-        }
-        let mut cab_files = Vec::new();
-        for entry in WalkDir::new(dir).follow_links(false) {
-            let entry = entry
-                .with_context(|| format!("failed to enumerate CAB directory: {}", dir.display()))?;
-            if entry.file_type().is_file()
-                && entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
-            {
-                cab_files.push(entry.into_path());
-            }
-        }
-        cab_files.sort();
-        Ok(cab_files)
+        Ok((success_count, failure_summary.total()))
     }
 }
 
@@ -1127,6 +1168,25 @@ impl Default for DismExe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn driver_test_tree(
+        names: &[&str],
+    ) -> (lr_core::scoped_temp_file::ScopedTempDir, Vec<PathBuf>) {
+        let temporary = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-pe-driver-import",
+        )
+        .expect("temporary driver directory");
+        let mut files = Vec::new();
+        for name in names {
+            let path = temporary.path().join(name);
+            std::fs::write(&path, b"[Version]\r\nSignature=\"$Windows NT$\"\r\n")
+                .expect("write test INF");
+            files.push(path);
+        }
+        (temporary, files)
+    }
 
     #[test]
     fn test_parse_progress_line() {
@@ -1190,6 +1250,164 @@ mod tests {
     }
 
     #[test]
+    fn exact_driver_arguments_repeat_driver_without_recursive_discovery() {
+        let args = DismExe::build_add_driver_inf_arguments(
+            r"C:\",
+            &[
+                PathBuf::from(r"R:\drivers\wifi\net.inf"),
+                PathBuf::from(r"R:\drivers\storage\stor.INF"),
+            ],
+            r"X:\Windows\Temp",
+        )
+        .unwrap();
+        assert_eq!(args[0], r"/Image:C:\");
+        assert_eq!(args[1], "/Add-Driver");
+        assert_eq!(args[2], r"/Driver:R:\drivers\wifi\net.inf");
+        assert_eq!(args[3], r"/Driver:R:\drivers\storage\stor.INF");
+        assert_eq!(args[4], r"/scratchdir:X:\Windows\Temp");
+        assert!(!args.iter().any(|arg| arg.eq_ignore_ascii_case("/Recurse")));
+    }
+
+    #[test]
+    fn exact_driver_arguments_reject_empty_or_non_inf_inputs() {
+        assert!(DismExe::build_add_driver_inf_arguments(r"C:\", &[], r"X:\Windows\Temp").is_err());
+        assert!(DismExe::build_add_driver_inf_arguments(
+            r"C:\",
+            &[PathBuf::from(r"R:\drivers\payload.sys")],
+            r"X:\Windows\Temp"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn resilient_driver_import_stops_on_empty_or_structurally_invalid_authenticated_sets() {
+        assert!(import_preserved_driver_infs_resilient(&[], || Ok(()), |_| Ok(())).is_err());
+
+        let (temporary, mut files) = driver_test_tree(&["valid.inf"]);
+        files.push(temporary.path().join("missing.inf"));
+        let batch_ran = Cell::new(false);
+        assert!(import_preserved_driver_infs_resilient(
+            &files,
+            || {
+                batch_ran.set(true);
+                Ok(())
+            },
+            |_| Ok(())
+        )
+        .is_err());
+        assert!(!batch_ran.get());
+    }
+
+    #[test]
+    fn resilient_driver_import_batch_success_never_runs_individual_fallback() {
+        let (_temporary, files) = driver_test_tree(&["printer.inf", "network.inf"]);
+        let batch_runs = Cell::new(0_u32);
+        let individual_runs = Cell::new(0_u32);
+        let failures = import_preserved_driver_infs_resilient(
+            &files,
+            || {
+                batch_runs.set(batch_runs.get() + 1);
+                Ok(())
+            },
+            |_| {
+                individual_runs.set(individual_runs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(failures.is_empty());
+        assert_eq!(batch_runs.get(), 1);
+        assert_eq!(individual_runs.get(), 0);
+    }
+
+    #[test]
+    fn resilient_driver_import_isolates_single_and_all_optional_package_failures() {
+        let (_temporary, files) =
+            driver_test_tree(&["printer.inf", "bad-network.inf", "virtual-device.inf"]);
+        let attempts = Cell::new(0_u32);
+        let failures = import_preserved_driver_infs_resilient(
+            &files,
+            || anyhow::bail!("DISM batch rejected one package"),
+            |inf| {
+                attempts.set(attempts.get() + 1);
+                if inf
+                    .file_name()
+                    .is_some_and(|name| name == "bad-network.inf")
+                {
+                    anyhow::bail!("package is not applicable");
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("bad-network.inf"));
+
+        let all_failures = import_preserved_driver_infs_resilient(
+            &files,
+            || anyhow::bail!("DISM batch rejected all packages"),
+            |_| anyhow::bail!("package is not applicable"),
+        )
+        .unwrap();
+        assert_eq!(all_failures.len(), files.len());
+    }
+
+    #[test]
+    fn resilient_driver_import_never_downgrades_dism_infrastructure_failure() {
+        let (_temporary, files) = driver_test_tree(&["printer.inf", "network.inf"]);
+        let individual_runs = Cell::new(0_u32);
+        let batch_error = import_preserved_driver_infs_resilient(
+            &files,
+            || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "dism.exe could not be started",
+                )
+                .into())
+            },
+            |_| {
+                individual_runs.set(individual_runs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(batch_error.to_string().contains("infrastructure"));
+        assert_eq!(individual_runs.get(), 0);
+
+        let individual_error = import_preserved_driver_infs_resilient(
+            &files,
+            || anyhow::bail!("DISM batch rejected one package"),
+            |_| {
+                Err(
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "lost DISM output pipe")
+                        .into(),
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(individual_error.to_string().contains("infrastructure"));
+    }
+
+    #[test]
+    fn resilient_driver_import_treats_authenticated_artifact_disappearance_as_fatal() {
+        let (_temporary, files) = driver_test_tree(&["first.inf", "second.inf"]);
+        let second = files[1].clone();
+        let error = import_preserved_driver_infs_resilient(
+            &files,
+            || anyhow::bail!("DISM batch rejected one package"),
+            |inf| {
+                if inf.file_name().is_some_and(|name| name == "first.inf") {
+                    std::fs::remove_file(&second).unwrap();
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disappeared"));
+    }
+
+    #[test]
     fn parses_offline_international_settings_for_chinese_image() {
         let output = r#"
 Default system UI language : zh-CN
@@ -1241,40 +1459,5 @@ Keyboard layered driver : Not installed.
         assert!(locale_id_from_registry("not-a-lcid").is_err());
         assert!(input_locale_from_keyboard_layout("804").is_err());
         assert!(input_locale_from_keyboard_layout("0000080Z").is_err());
-    }
-
-    #[test]
-    fn cab_inventory_is_recursive_case_insensitive_and_sorted() {
-        let staging = lr_core::scoped_temp_file::ScopedTempDir::create_in(
-            &std::env::temp_dir(),
-            "lr-dism-cab-test",
-        )
-        .unwrap();
-        let nested = staging.path().join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(staging.path().join("b.CAB"), b"cab").unwrap();
-        std::fs::write(nested.join("a.cab"), b"cab").unwrap();
-        std::fs::write(nested.join("ignored.txt"), b"text").unwrap();
-
-        let files = DismExe::find_cab_files(staging.path()).unwrap();
-        assert_eq!(files.len(), 2);
-        assert!(files[0] < files[1]);
-        assert!(files.iter().all(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("cab"))
-        }));
-
-        let regular_file = staging.path().join("not-a-directory");
-        std::fs::write(&regular_file, b"file").unwrap();
-        assert!(DismExe::find_cab_files(&regular_file).is_err());
-    }
-
-    #[test]
-    fn unsigned_driver_override_rejects_recursive_directories() {
-        let dism = DismExe::new().expect("DISM command boundary should initialize");
-        let error = dism
-            .add_driver_offline(r"Z:\missing-image", r"Z:\missing-driver", true, true, None)
-            .expect_err("verified fallback must reject /Recurse");
-        assert!(error.to_string().contains("cannot use /Recurse"));
     }
 }

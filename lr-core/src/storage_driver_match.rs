@@ -149,6 +149,14 @@ impl BuiltInStorageDriverPackage {
         }
     }
 
+    pub fn matches_hardware_ids(self, hardware_ids: &[String]) -> bool {
+        hardware_ids.iter().any(|hardware_id| {
+            self.controller_hardware_ids()
+                .iter()
+                .any(|controller_id| contains_device_id(hardware_id, controller_id))
+        })
+    }
+
     const fn locked_files(self) -> &'static [LockedPackageFile] {
         match self {
             Self::IntelVmd11th => &INTEL_VMD_11TH_FILES,
