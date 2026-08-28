@@ -300,14 +300,26 @@ impl Dism {
         Ok(count)
     }
 
+    fn remove_storage_driver_manifest(destination: &Path) -> Result<bool> {
+        let manifest_path = destination.join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE);
+        match std::fs::symlink_metadata(&manifest_path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("无法检查旧存储驱动清单: {}", manifest_path.display())
+                })
+            }
+        }
+        std::fs::remove_file(&manifest_path)
+            .with_context(|| format!("无法清理旧存储驱动清单: {}", manifest_path.display()))?;
+        Ok(true)
+    }
+
     fn prepare_storage_driver_manifest(
         destination: &Path,
     ) -> Result<Vec<lr_core::driver::StorageDriverRequirement>> {
-        let manifest_path = destination.join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE);
-        if manifest_path.exists() {
-            std::fs::remove_file(&manifest_path)
-                .with_context(|| format!("无法清理旧存储驱动清单: {}", manifest_path.display()))?;
-        }
+        Self::remove_storage_driver_manifest(destination)?;
         let requirements = lr_core::driver::list_present_oem_storage_driver_requirements()
             .context("无法枚举当前硬件已绑定的 OEM 启动存储控制器驱动，已拒绝继续导出")?;
         log::info!(
@@ -328,6 +340,129 @@ impl Dism {
         }
         lr_core::driver::write_storage_driver_requirements(destination, storage_requirements)
             .context("驱动导出完成，但启动存储驱动清单生成或覆盖验证失败")?;
+        Ok(count)
+    }
+
+    /// Maps the selected drive's current physical storage ancestry to driver models that DISM says
+    /// are actually staged in the offline source image. This avoids both unsafe source mixing
+    /// (WinPE's bound INF is not the offline Windows binding) and the old all-controller heuristic.
+    ///
+    /// `None` means the read-only inventory was incomplete. Package export can still satisfy an
+    /// explicit SaveOnly request, but AutoImport must not receive a fabricated empty manifest.
+    fn offline_storage_driver_requirements(
+        system_partition: &str,
+    ) -> Result<Option<Vec<lr_core::driver::StorageDriverRequirement>>> {
+        let source_root = Path::new(system_partition);
+        let Some(drive_letter) = lr_core::windows_storage::path_drive_letter(source_root) else {
+            anyhow::bail!(
+                "离线 Windows 根目录没有可解析的绝对盘符: {}",
+                source_root.display()
+            );
+        };
+        let path_devices = match lr_core::driver::list_storage_path_devices_for_drive(drive_letter)
+        {
+            Ok(devices) => devices,
+            Err(error) => {
+                log::warn!(
+                    "[Dism] 无法把离线系统卷映射到当前物理存储父链；仅保留驱动包，不发布启动存储清单: {error:#}"
+                );
+                return Ok(None);
+            }
+        };
+        let controllers = path_devices
+            .into_iter()
+            .filter(lr_core::driver::StoragePathDevice::is_storage_controller)
+            .collect::<Vec<_>>();
+
+        let scratch_dir = std::env::temp_dir();
+        let inventory_log = scratch_dir.join(format!(
+            "LetRecovery-DismApi-offline-export-{}.log",
+            std::process::id()
+        ));
+        let inventory = match lr_core::dism_driver_inventory::enumerate_offline_driver_candidates(
+            source_root,
+            &scratch_dir,
+            &inventory_log,
+        ) {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                log::warn!(
+                    "[Dism] 无法读取离线源系统的 DISM 驱动库存；仅保留驱动包，不发布启动存储清单: {error:#}"
+                );
+                return Ok(None);
+            }
+        };
+
+        let inventory_incomplete = !inventory.package_query_failures.is_empty()
+            || inventory.omitted_package_query_failures != 0;
+        let mut requirements = Vec::new();
+        for controller in controllers {
+            let mut device_ids = controller.hardware_ids.clone();
+            device_ids.extend(controller.compatible_ids.iter().cloned());
+            let matching = inventory
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    device_ids.iter().any(|device_id| {
+                        !device_id.is_empty()
+                            && candidate.hardware_id.eq_ignore_ascii_case(device_id)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                if inventory_incomplete {
+                    log::warn!(
+                        "[Dism] 离线 DISM 库存有未读取包，且存储路径设备 {} 尚无候选；仅保留驱动包，不发布不完整清单",
+                        controller.instance_id
+                    );
+                    return Ok(None);
+                }
+                // No staged third-party candidate exists for this path device. The offline source
+                // therefore contributes no OEM package to preserve for it.
+                continue;
+            }
+            let Some(source_package) = matching
+                .iter()
+                .copied()
+                .filter(|candidate| !candidate.in_box)
+                .min_by(|left, right| {
+                    left.published_name
+                        .to_ascii_lowercase()
+                        .cmp(&right.published_name.to_ascii_lowercase())
+                })
+            else {
+                // The source image covers this device only with inbox candidates; DISM
+                // /Export-Driver intentionally has no OEM package to preserve for it.
+                continue;
+            };
+            requirements.push(lr_core::driver::StorageDriverRequirement {
+                description: if controller.description.trim().is_empty() {
+                    controller.instance_id.clone()
+                } else {
+                    controller.description.clone()
+                },
+                source_inf: source_package.published_name.clone(),
+                hardware_ids: controller.hardware_ids,
+                compatible_ids: controller.compatible_ids,
+                device_instance_id: Some(controller.instance_id),
+            });
+        }
+        Ok(Some(requirements))
+    }
+
+    fn finalize_offline_driver_export(
+        destination: &Path,
+        storage_requirements: Option<&[lr_core::driver::StorageDriverRequirement]>,
+    ) -> Result<usize> {
+        // Remove again after DISM returns so a stale file that appeared during a reused-directory
+        // export cannot be mistaken for evidence about this offline source. This must happen even
+        // when the exported payload is empty and finalization subsequently fails.
+        Self::remove_storage_driver_manifest(destination)?;
+        let count = Self::require_exported_drivers(destination)?;
+        if let Some(requirements) = storage_requirements {
+            lr_core::driver::write_storage_driver_requirements(destination, requirements)
+                .context("离线驱动已导出，但真实存储父链清单无法写入或覆盖验证失败")?;
+        }
         Ok(count)
     }
 
@@ -404,7 +539,9 @@ impl Dism {
 
     /// 从指定系统分区导出驱动 (PE/正常环境均可)。
     /// 在线系统允许回退到 SetupAPI；离线系统只能使用 DISM 的受支持导出边界，禁止按
-    /// FileRepository 目录名猜测第三方包。
+    /// FileRepository 目录名猜测第三方包。离线导出只在所选源卷的当前物理父链能够与
+    /// 离线 DISM 驱动库存完整对应时发布版本 2 启动存储清单；证据不足仍可完成 SaveOnly，
+    /// 但会删除旧清单，避免把当前 WinPE 或复用目录中的信息冒充为离线源绑定。
     pub fn export_drivers_from_system(
         &self,
         system_partition: &str,
@@ -429,7 +566,9 @@ impl Dism {
         }
 
         let destination_path = Path::new(destination);
-        let storage_requirements = Self::prepare_storage_driver_manifest(destination_path)?;
+        // A reused destination may contain a manifest produced by an earlier online export. Remove
+        // it before DISM starts so every failure path also leaves no mixed-source critical claim.
+        Self::remove_storage_driver_manifest(destination_path)?;
 
         if let Err(error) = DismCmd::new()
             .and_then(|dism| dism.export_drivers_offline(system_partition, destination, None))
@@ -438,11 +577,23 @@ impl Dism {
                 "DISM 离线驱动导出失败，已拒绝使用不完整的手工 DriverStore 回退: {error:#}"
             );
         }
-        let count = Self::finalize_driver_export(destination_path, &storage_requirements, false)?;
-        log::info!(
-            "[Dism] DISM 离线驱动导出完成，共 {} 个 INF；启动存储驱动清单已原子写入并验证",
-            count
-        );
+        let storage_requirements = Self::offline_storage_driver_requirements(system_partition)?;
+        let count = Self::finalize_offline_driver_export(
+            destination_path,
+            storage_requirements.as_deref(),
+        )?;
+        if let Some(requirements) = storage_requirements {
+            log::info!(
+                "[Dism] DISM 离线驱动导出完成，共 {} 个 INF；已用目标卷当前物理父链和离线镜像 DISM 库存生成 {} 个启动存储要求",
+                count,
+                requirements.len()
+            );
+        } else {
+            log::warn!(
+                "[Dism] DISM 离线驱动导出完成，共 {} 个 INF；证据不足，未生成启动存储清单。SaveOnly 备份可正常使用，AutoImport 必须将清单缺失分类为启动覆盖未确认",
+                count
+            );
+        }
         Ok(count)
     }
 
@@ -918,5 +1069,39 @@ mod tests {
             .path()
             .join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE)
             .is_file());
+    }
+
+    #[test]
+    fn offline_export_finalization_removes_stale_manifest_without_publishing_empty_claim() {
+        let temporary =
+            lr_core::scoped_temp_file::ScopedTempDir::create_in(&std::env::temp_dir(), "lr-dism")
+                .expect("temporary driver directory");
+        let nested = temporary.path().join("driver");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("OEM42.INF"), b"[Version]\r\n").unwrap();
+        let manifest = temporary
+            .path()
+            .join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE);
+        std::fs::write(&manifest, b"stale online-source manifest").unwrap();
+
+        assert_eq!(
+            Dism::finalize_offline_driver_export(temporary.path(), None).unwrap(),
+            1
+        );
+        assert!(!manifest.exists());
+    }
+
+    #[test]
+    fn offline_export_finalization_rejects_empty_payload_and_removes_stale_manifest() {
+        let temporary =
+            lr_core::scoped_temp_file::ScopedTempDir::create_in(&std::env::temp_dir(), "lr-dism")
+                .expect("temporary driver directory");
+        let manifest = temporary
+            .path()
+            .join(lr_core::driver::STORAGE_DRIVER_REQUIREMENTS_FILE);
+        std::fs::write(&manifest, b"stale online-source manifest").unwrap();
+
+        assert!(Dism::finalize_offline_driver_export(temporary.path(), None).is_err());
+        assert!(!manifest.exists());
     }
 }

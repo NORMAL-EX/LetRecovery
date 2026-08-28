@@ -94,6 +94,7 @@ const DIGCF_PRESENT: u32 = 0x0000_0002;
 const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
 
 const SPDRP_HARDWAREID: u32 = 0x0000_0001;
+const SPDRP_COMPATIBLEIDS: u32 = 0x0000_0002;
 const SPDRP_DEVICEDESC: u32 = 0x0000_0000;
 const SPDRP_MFG: u32 = 0x0000_000B;
 const SPDRP_CLASS: u32 = 0x0000_0007;
@@ -172,6 +173,14 @@ type FnSetupDiEnumDeviceInfo = unsafe extern "system" fn(
     dev_info: HDevInfo,
     member_index: u32,
     device_info_data: *mut SpDevInfoData,
+) -> BOOL;
+
+type FnSetupDiGetDeviceInstanceIdW = unsafe extern "system" fn(
+    dev_info: HDevInfo,
+    device_info_data: *const SpDevInfoData,
+    device_instance_id: *mut u16,
+    device_instance_id_size: u32,
+    required_size: *mut u32,
 ) -> BOOL;
 
 type FnSetupDiGetDeviceRegistryPropertyW = unsafe extern "system" fn(
@@ -337,12 +346,61 @@ pub struct DriverInfo {
     pub hardware_id: String,
     /// 完整硬件 ID 列表（SetupAPI `REG_MULTI_SZ`，按系统排名顺序）
     pub hardware_ids: Vec<String>,
+    /// Compatible ID 列表（SetupAPI `SPDRP_COMPATIBLEIDS` / `REG_MULTI_SZ`）。
+    pub compatible_ids: Vec<String>,
+    /// 当前 PnP 设备实例 ID；只在本次设备树中用于拓扑关联。
+    pub device_instance_id: String,
     /// 设备类别
     pub device_class: String,
     /// 类别 GUID
     pub class_guid: String,
     /// 是否为第三方驱动 (OEM)
     pub is_oem: bool,
+}
+
+/// Read-only inventory for one present device on a specified drive's current storage path.
+///
+/// `bound_inf` describes the running environment only. In WinPE it must not be treated as proof of
+/// which package an offline Windows image has staged; callers can instead map the exact hardware
+/// and compatible IDs to DISM's inventory for that image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoragePathDevice {
+    pub instance_id: String,
+    pub description: String,
+    pub device_class: String,
+    pub class_guid: String,
+    pub hardware_ids: Vec<String>,
+    pub compatible_ids: Vec<String>,
+    pub bound_inf: Option<String>,
+}
+
+impl StoragePathDevice {
+    /// Classifies a controller only after this device came from a specified drive's ancestry
+    /// inventory. Calling this on arbitrary present devices does not establish boot-path proof.
+    pub fn is_storage_controller(&self) -> bool {
+        const STORAGE_CLASS_GUIDS: [&str; 2] = [
+            "{4D36E97B-E325-11CE-BFC1-08002BE10318}", // SCSIAdapter
+            "{4D36E96A-E325-11CE-BFC1-08002BE10318}", // HDC
+        ];
+        const VMD_IDS: [&str; 6] = ["09AB", "9A0B", "467F", "A77F", "7D0B", "AD0B"];
+        self.device_class.eq_ignore_ascii_case("SCSIAdapter")
+            || self.device_class.eq_ignore_ascii_case("HDC")
+            || STORAGE_CLASS_GUIDS
+                .iter()
+                .any(|guid| self.class_guid.eq_ignore_ascii_case(guid))
+            || self.hardware_ids.iter().any(|id| {
+                let normalized = id.to_ascii_uppercase();
+                VMD_IDS
+                    .iter()
+                    .any(|device| normalized.contains(&format!("PCI\\VEN_8086&DEV_{device}")))
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EnumeratedPresentDevice {
+    inventory: StoragePathDevice,
+    manufacturer: String,
 }
 
 /// Current PnP state for one device returned by the same present-device SetupAPI enumeration as
@@ -381,6 +439,33 @@ pub struct StorageDriverRequirement {
     pub description: String,
     pub source_inf: String,
     pub hardware_ids: Vec<String>,
+    #[serde(default)]
+    pub compatible_ids: Vec<String>,
+    /// Present only when this requirement was derived from the selected volume's actual current
+    /// storage ancestry. Version-1 manifests deserialize this as `None` and are never upgraded to
+    /// topology proof merely because they remain parseable.
+    #[serde(default)]
+    pub device_instance_id: Option<String>,
+}
+
+impl StorageDriverRequirement {
+    pub fn is_topology_proven(&self) -> bool {
+        self.device_instance_id
+            .as_deref()
+            .is_some_and(|instance_id| !instance_id.is_empty())
+    }
+
+    /// Exact, case-insensitive PnP candidate matching. One hardware or compatible ID is enough to
+    /// establish candidate coverage; Windows does not require every ID reported by a device to
+    /// appear in one package.
+    pub fn matches_candidate_id(&self, candidate_id: &str) -> bool {
+        !candidate_id.is_empty()
+            && self
+                .hardware_ids
+                .iter()
+                .chain(self.compatible_ids.iter())
+                .any(|id| id.eq_ignore_ascii_case(candidate_id))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +484,7 @@ struct SetupApi {
     _cfgmgr32: Library,
     get_class_devs: FnSetupDiGetClassDevsW,
     enum_device_info: FnSetupDiEnumDeviceInfo,
+    get_device_instance_id: FnSetupDiGetDeviceInstanceIdW,
     get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW,
     get_device_property: Option<FnSetupDiGetDevicePropertyW>,
     destroy_device_info_list: FnSetupDiDestroyDeviceInfoList,
@@ -415,6 +501,8 @@ impl SetupApi {
         unsafe {
             let get_class_devs: FnSetupDiGetClassDevsW = *lib.get(b"SetupDiGetClassDevsW")?;
             let enum_device_info: FnSetupDiEnumDeviceInfo = *lib.get(b"SetupDiEnumDeviceInfo")?;
+            let get_device_instance_id: FnSetupDiGetDeviceInstanceIdW =
+                *lib.get(b"SetupDiGetDeviceInstanceIdW")?;
             let get_device_registry_property: FnSetupDiGetDeviceRegistryPropertyW =
                 *lib.get(b"SetupDiGetDeviceRegistryPropertyW")?;
             let get_device_property = lib
@@ -439,6 +527,7 @@ impl SetupApi {
                 _cfgmgr32: cfgmgr32,
                 get_class_devs,
                 enum_device_info,
+                get_device_instance_id,
                 get_device_registry_property,
                 get_device_property,
                 destroy_device_info_list,
@@ -591,11 +680,64 @@ impl SetupApi {
         Ok((!value.trim().is_empty()).then_some(value))
     }
 
-    /// 枚举所有设备的驱动信息
-    fn enumerate_drivers(&self) -> Result<Vec<DriverInfo>> {
-        let mut drivers = Vec::new();
+    fn get_device_instance_id(
+        &self,
+        dev_info: HDevInfo,
+        dev_info_data: &SpDevInfoData,
+    ) -> Result<String> {
+        // SetupDiGetDeviceInstanceIdW is available since Windows 2000. Buffer sizes are UTF-16
+        // character counts (including the terminating NUL), unlike registry-property byte counts.
+        let mut required_size = 0_u32;
+        let probe = unsafe {
+            (self.get_device_instance_id)(
+                dev_info,
+                dev_info_data,
+                null_mut(),
+                0,
+                &mut required_size,
+            )
+        };
+        if probe.0 == 0 {
+            let error = get_last_error();
+            if error != ERROR_INSUFFICIENT_BUFFER || required_size < 2 {
+                bail!("SetupDiGetDeviceInstanceIdW probe failed: {error}");
+            }
+        }
+        if !(2..=32_768).contains(&required_size) {
+            bail!("invalid SetupAPI device-instance ID size: {required_size}");
+        }
+        let mut buffer = vec![0_u16; required_size as usize];
+        let result = unsafe {
+            (self.get_device_instance_id)(
+                dev_info,
+                dev_info_data,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                &mut required_size,
+            )
+        };
+        if result.0 == 0 {
+            bail!(
+                "SetupDiGetDeviceInstanceIdW read failed: {}",
+                get_last_error()
+            );
+        }
+        let instance_id = wide_to_string(&buffer);
+        if instance_id.is_empty() || instance_id.contains(['\r', '\n', '\0']) {
+            bail!("SetupDiGetDeviceInstanceIdW returned an invalid device-instance ID");
+        }
+        Ok(instance_id)
+    }
 
-        // 获取所有设备
+    /// Enumerates present devices, optionally limiting property reads to exact instance IDs.
+    ///
+    /// The instance ID is queried first. An unrelated device with a broken optional property must
+    /// not prevent storage-path inventory for the selected volume.
+    fn enumerate_present_device_inventory(
+        &self,
+        instance_filter: Option<&std::collections::HashSet<String>>,
+    ) -> Result<Vec<EnumeratedPresentDevice>> {
+        let mut devices = Vec::new();
         let dev_info = unsafe {
             (self.get_class_devs)(
                 null_mut(),
@@ -612,14 +754,10 @@ impl SetupApi {
             handle: dev_info,
             destroy: self.destroy_device_info_list,
         };
-
-        // 枚举每个设备
         let mut index = 0u32;
         loop {
             let mut dev_info_data = SpDevInfoData::default();
-
             let result = unsafe { (self.enum_device_info)(dev_info, index, &mut dev_info_data) };
-
             if result.0 == 0 {
                 let err = get_last_error();
                 if err == ERROR_NO_MORE_ITEMS {
@@ -627,48 +765,75 @@ impl SetupApi {
                 }
                 bail!("SetupDiEnumDeviceInfo failed at index {index}: {err}");
             }
-
-            // 获取安装该设备的已发布 INF 名称。
-            if let Some(inf_path) = self.get_device_driver_inf_path(dev_info, &dev_info_data)? {
-                // 检查是否为 OEM 驱动
-                let is_oem = inf_path.to_lowercase().starts_with("oem");
-
-                let description = self
-                    .get_device_property_string(dev_info, &dev_info_data, SPDRP_DEVICEDESC)?
-                    .unwrap_or_default();
-
-                let manufacturer = self
-                    .get_device_property_string(dev_info, &dev_info_data, SPDRP_MFG)?
-                    .unwrap_or_default();
-
-                let hardware_ids =
-                    self.get_device_property_strings(dev_info, &dev_info_data, SPDRP_HARDWAREID)?;
-                let hardware_id = hardware_ids.first().cloned().unwrap_or_default();
-
-                let device_class = self
-                    .get_device_property_string(dev_info, &dev_info_data, SPDRP_CLASS)?
-                    .unwrap_or_default();
-
-                let class_guid = self
-                    .get_device_property_string(dev_info, &dev_info_data, SPDRP_CLASSGUID)?
-                    .unwrap_or_default();
-
-                drivers.push(DriverInfo {
-                    description,
-                    manufacturer,
-                    inf_path,
-                    hardware_id,
-                    hardware_ids,
-                    device_class,
-                    class_guid,
-                    is_oem,
-                });
+            let instance_id = self.get_device_instance_id(dev_info, &dev_info_data)?;
+            if instance_filter
+                .is_some_and(|filter| !filter.contains(&instance_id.to_ascii_lowercase()))
+            {
+                index += 1;
+                continue;
             }
-
+            let inventory = StoragePathDevice {
+                instance_id,
+                description: self
+                    .get_device_property_string(dev_info, &dev_info_data, SPDRP_DEVICEDESC)?
+                    .unwrap_or_default(),
+                device_class: self
+                    .get_device_property_string(dev_info, &dev_info_data, SPDRP_CLASS)?
+                    .unwrap_or_default(),
+                class_guid: self
+                    .get_device_property_string(dev_info, &dev_info_data, SPDRP_CLASSGUID)?
+                    .unwrap_or_default(),
+                hardware_ids: self.get_device_property_strings(
+                    dev_info,
+                    &dev_info_data,
+                    SPDRP_HARDWAREID,
+                )?,
+                compatible_ids: self.get_device_property_strings(
+                    dev_info,
+                    &dev_info_data,
+                    SPDRP_COMPATIBLEIDS,
+                )?,
+                bound_inf: self.get_device_driver_inf_path(dev_info, &dev_info_data)?,
+            };
+            let manufacturer = self
+                .get_device_property_string(dev_info, &dev_info_data, SPDRP_MFG)?
+                .unwrap_or_default();
+            devices.push(EnumeratedPresentDevice {
+                inventory,
+                manufacturer,
+            });
             index += 1;
         }
-
         drop(dev_info_set);
+        Ok(devices)
+    }
+
+    /// 枚举所有设备的驱动信息
+    fn enumerate_drivers(&self) -> Result<Vec<DriverInfo>> {
+        let mut drivers = Vec::new();
+        for device in self.enumerate_present_device_inventory(None)? {
+            let Some(inf_path) = device.inventory.bound_inf.clone() else {
+                continue;
+            };
+            let hardware_id = device
+                .inventory
+                .hardware_ids
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            drivers.push(DriverInfo {
+                description: device.inventory.description,
+                manufacturer: device.manufacturer,
+                is_oem: is_published_oem_inf_name(&inf_path),
+                inf_path,
+                hardware_id,
+                hardware_ids: device.inventory.hardware_ids,
+                compatible_ids: device.inventory.compatible_ids,
+                device_instance_id: device.inventory.instance_id,
+                device_class: device.inventory.device_class,
+                class_guid: device.inventory.class_guid,
+            });
+        }
         Ok(drivers)
     }
 
@@ -931,6 +1096,61 @@ impl DriverManager {
         self.setup_api.enumerate_present_devices()
     }
 
+    fn storage_path_devices_from_ancestry(
+        &self,
+        ancestry_instance_ids: &[String],
+    ) -> Result<Vec<StoragePathDevice>> {
+        let ancestry = ancestry_instance_ids
+            .iter()
+            .map(|id| id.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>();
+        let devices = self
+            .setup_api
+            .enumerate_present_device_inventory(Some(&ancestry))?
+            .into_iter()
+            .map(|device| device.inventory)
+            .collect::<Vec<_>>();
+        let selected = select_storage_path_devices(devices, ancestry_instance_ids);
+        if selected.is_empty() {
+            bail!("current storage ancestry did not match any present SetupAPI device");
+        }
+        let matched = selected
+            .iter()
+            .map(|device| device.instance_id.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>();
+        let missing = ancestry
+            .difference(&matched)
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            bail!(
+                "current storage ancestry changed during SetupAPI inventory; unmatched device IDs: {}",
+                missing.join(", ")
+            );
+        }
+        Ok(selected)
+    }
+
+    /// Returns present devices on every current physical extent behind `drive_letter`.
+    pub fn storage_path_devices_for_drive(
+        &self,
+        drive_letter: char,
+    ) -> Result<Vec<StoragePathDevice>> {
+        let ancestry =
+            crate::windows_storage::storage_ancestor_instance_ids_for_drive(drive_letter)
+                .map_err(anyhow::Error::new)?;
+        self.storage_path_devices_from_ancestry(&ancestry)
+    }
+
+    /// Online-current-system wrapper. Offline image code should use the explicit-drive inventory
+    /// and map its IDs to that image's DISM inventory instead of trusting WinPE's bound INF.
+    pub fn current_windows_storage_path_devices(&self) -> Result<Vec<StoragePathDevice>> {
+        let ancestry = crate::windows_storage::current_windows_storage_ancestor_instance_ids()
+            .map_err(anyhow::Error::new)?;
+        self.storage_path_devices_from_ancestry(&ancestry)
+    }
+
     /// 枚举第三方 (OEM) 驱动
     pub fn enumerate_oem_drivers(&self) -> Result<Vec<DriverInfo>> {
         let all_drivers = self.setup_api.enumerate_drivers()?;
@@ -1030,54 +1250,18 @@ impl DriverManager {
         })
     }
 
-    /// Returns every currently bound third-party boot-storage package that must survive a
-    /// reinstall. Intel VMD selection is independently checked so a lone 09AB dummy function
-    /// cannot be mistaken for a generation-defining controller.
+    /// Returns every third-party storage-controller package bound to the running Windows volume's
+    /// actual current PnP ancestry.
     pub fn present_oem_storage_requirements(&self) -> Result<Vec<StorageDriverRequirement>> {
-        let present_ids = self.setup_api.enumerate_present_hardware_ids()?;
-        crate::storage_driver_match::select_builtin_storage_driver_packages(
-            present_ids.iter().map(String::as_str),
-        )
-        .map_err(anyhow::Error::new)?;
+        requirements_from_storage_path_devices(&self.current_windows_storage_path_devices()?)
+    }
 
-        let mut requirements =
-            std::collections::BTreeMap::<String, StorageDriverRequirement>::new();
-        for driver in self.setup_api.enumerate_drivers()? {
-            if !driver.is_oem || !is_boot_storage_driver(&driver) {
-                continue;
-            }
-            let ids = driver
-                .hardware_ids
-                .iter()
-                .filter(|id| !id.trim().is_empty())
-                .cloned()
-                .collect::<Vec<_>>();
-            if ids.is_empty() {
-                bail!(
-                    "bound OEM storage driver has no hardware ID: {} ({})",
-                    driver.description,
-                    driver.inf_path
-                );
-            }
-            let key = driver.inf_path.to_ascii_lowercase();
-            let requirement = requirements
-                .entry(key)
-                .or_insert_with(|| StorageDriverRequirement {
-                    description: driver.description.clone(),
-                    source_inf: driver.inf_path.clone(),
-                    hardware_ids: Vec::new(),
-                });
-            for hardware_id in ids {
-                if !requirement
-                    .hardware_ids
-                    .iter()
-                    .any(|existing| existing.eq_ignore_ascii_case(&hardware_id))
-                {
-                    requirement.hardware_ids.push(hardware_id);
-                }
-            }
-        }
-        Ok(requirements.into_values().collect())
+    /// Explicit-drive variant for callers that have intentionally selected a current volume.
+    pub fn present_oem_storage_requirements_for_drive(
+        &self,
+        drive_letter: char,
+    ) -> Result<Vec<StorageDriverRequirement>> {
+        requirements_from_storage_path_devices(&self.storage_path_devices_for_drive(drive_letter)?)
     }
 
     /// 导出第三方驱动到指定目录
@@ -1627,10 +1811,28 @@ pub fn list_present_devices() -> Result<Vec<PresentDeviceState>> {
     manager.enumerate_present_devices()
 }
 
-/// Enumerates third-party packages currently bound to boot-storage controller classes.
+/// Read-only current PnP inventory for the storage ancestry of an explicit drive letter.
+pub fn list_storage_path_devices_for_drive(drive_letter: char) -> Result<Vec<StoragePathDevice>> {
+    DriverManager::new()?.storage_path_devices_for_drive(drive_letter)
+}
+
+/// Read-only online-current-system storage-path inventory.
+pub fn list_current_windows_storage_path_devices() -> Result<Vec<StoragePathDevice>> {
+    DriverManager::new()?.current_windows_storage_path_devices()
+}
+
+/// Enumerates third-party controller packages proven to be on the running Windows storage path.
 pub fn list_present_oem_storage_driver_requirements() -> Result<Vec<StorageDriverRequirement>> {
     let manager = DriverManager::new()?;
     manager.present_oem_storage_requirements()
+}
+
+/// Explicit-drive OEM manifest source. The selected drive must belong to the running device tree;
+/// an offline image's package root alone cannot establish current ancestry.
+pub fn list_present_oem_storage_driver_requirements_for_drive(
+    drive_letter: char,
+) -> Result<Vec<StorageDriverRequirement>> {
+    DriverManager::new()?.present_oem_storage_requirements_for_drive(drive_letter)
 }
 
 /// Measures the online third-party driver export directly from existing Driver Store files.
@@ -1641,9 +1843,9 @@ pub fn estimate_online_oem_driver_export() -> Result<DriverExportEstimate> {
 fn storage_driver_requirements_manifest_bytes(
     requirements: &[StorageDriverRequirement],
 ) -> Result<Vec<u8>> {
-    validate_requirement_values(requirements)?;
+    validate_requirement_values(requirements, true)?;
     serde_json::to_vec_pretty(&StorageDriverRequirementsManifest {
-        version: 1,
+        version: 2,
         requirements: requirements.to_vec(),
     })
     .context("serialize storage driver requirements manifest")
@@ -1703,20 +1905,32 @@ pub fn validate_storage_driver_requirements(
     driver_tree: &Path,
     requirements: &[StorageDriverRequirement],
 ) -> Result<()> {
-    validate_requirement_values(requirements)?;
+    validate_requirement_values(requirements, false)?;
     for requirement in requirements {
-        for hardware_id in &requirement.hardware_ids {
-            if !crate::storage_driver_match::inf_tree_contains_hardware_id(
+        let mut covered = false;
+        for candidate_id in requirement
+            .hardware_ids
+            .iter()
+            .chain(requirement.compatible_ids.iter())
+        {
+            if crate::storage_driver_match::inf_tree_contains_hardware_id(
                 driver_tree,
-                hardware_id,
+                candidate_id,
             )? {
-                bail!(
-                    "missing exported boot-storage driver coverage: {} ({}, hardware ID: {})",
-                    requirement.description,
-                    requirement.source_inf,
-                    hardware_id
-                );
+                covered = true;
+                break;
             }
+        }
+        if !covered {
+            bail!(
+                "missing exported boot-storage driver candidate coverage: {} ({}, device: {})",
+                requirement.description,
+                requirement.source_inf,
+                requirement
+                    .device_instance_id
+                    .as_deref()
+                    .unwrap_or("legacy-v1-unproven")
+            );
         }
     }
     Ok(())
@@ -1741,7 +1955,7 @@ pub fn load_storage_driver_requirements(
             manifest_path.display()
         );
     }
-    let manifest: StorageDriverRequirementsManifest =
+    let mut manifest: StorageDriverRequirementsManifest =
         serde_json::from_slice(&std::fs::read(&manifest_path).with_context(|| {
             format!(
                 "failed to read storage driver manifest: {}",
@@ -1754,13 +1968,18 @@ pub fn load_storage_driver_requirements(
                 manifest_path.display()
             )
         })?;
-    if manifest.version != 1 {
-        bail!(
-            "unsupported storage driver manifest version: {}",
-            manifest.version
-        );
+    match manifest.version {
+        1 => {
+            // Version 1 predates storage-ancestry provenance. Even if an unknown producer placed
+            // a same-named field in old JSON, it must not be upgraded into topology proof.
+            for requirement in &mut manifest.requirements {
+                requirement.device_instance_id = None;
+            }
+            validate_requirement_values(&manifest.requirements, false)?;
+        }
+        2 => validate_requirement_values(&manifest.requirements, true)?,
+        version => bail!("unsupported storage driver manifest version: {version}"),
     }
-    validate_requirement_values(&manifest.requirements)?;
     Ok(manifest.requirements)
 }
 
@@ -1786,15 +2005,20 @@ pub fn requirements_are_only_intel_vmd(requirements: &[StorageDriverRequirement]
         })
 }
 
-fn validate_requirement_values(requirements: &[StorageDriverRequirement]) -> Result<()> {
+fn validate_requirement_values(
+    requirements: &[StorageDriverRequirement],
+    require_topology_provenance: bool,
+) -> Result<()> {
     if requirements.len() > 128 {
         bail!("too many boot-storage driver requirements");
     }
     for requirement in requirements {
         if requirement.description.len() > 1024
             || requirement.source_inf.len() > 260
-            || requirement.hardware_ids.is_empty()
             || requirement.hardware_ids.len() > 64
+            || requirement.compatible_ids.len() > 64
+            || (requirement.hardware_ids.is_empty() && requirement.compatible_ids.is_empty())
+            || (require_topology_provenance && !requirement.is_topology_proven())
         {
             bail!(
                 "invalid boot-storage driver requirement: {}",
@@ -1816,6 +2040,7 @@ fn validate_requirement_values(requirements: &[StorageDriverRequirement]) -> Res
         if requirement
             .hardware_ids
             .iter()
+            .chain(requirement.compatible_ids.iter())
             .any(|id| id.is_empty() || id.len() > 1024 || id.contains(['\r', '\n', '\0']))
         {
             bail!(
@@ -1823,27 +2048,102 @@ fn validate_requirement_values(requirements: &[StorageDriverRequirement]) -> Res
                 requirement.source_inf
             );
         }
+        if requirement
+            .device_instance_id
+            .as_deref()
+            .is_some_and(|id| id.is_empty() || id.len() > 1024 || id.contains(['\r', '\n', '\0']))
+        {
+            bail!(
+                "invalid storage controller device-instance ID in {}",
+                requirement.source_inf
+            );
+        }
     }
     Ok(())
 }
 
-fn is_boot_storage_driver(driver: &DriverInfo) -> bool {
-    const STORAGE_CLASS_GUIDS: [&str; 2] = [
-        "{4D36E97B-E325-11CE-BFC1-08002BE10318}", // SCSIAdapter
-        "{4D36E96A-E325-11CE-BFC1-08002BE10318}", // HDC
-    ];
-    const VMD_IDS: [&str; 6] = ["09AB", "9A0B", "467F", "A77F", "7D0B", "AD0B"];
-    driver.device_class.eq_ignore_ascii_case("SCSIAdapter")
-        || driver.device_class.eq_ignore_ascii_case("HDC")
-        || STORAGE_CLASS_GUIDS
-            .iter()
-            .any(|guid| driver.class_guid.eq_ignore_ascii_case(guid))
-        || driver.hardware_ids.iter().any(|id| {
-            let normalized = id.to_ascii_uppercase();
-            VMD_IDS
-                .iter()
-                .any(|device| normalized.contains(&format!("PCI\\VEN_8086&DEV_{device}")))
-        })
+fn select_storage_path_devices(
+    devices: Vec<StoragePathDevice>,
+    ancestry_instance_ids: &[String],
+) -> Vec<StoragePathDevice> {
+    let ancestry = ancestry_instance_ids
+        .iter()
+        .map(|id| id.to_ascii_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    let mut selected = devices
+        .into_iter()
+        .filter(|device| ancestry.contains(&device.instance_id.to_ascii_lowercase()))
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        left.instance_id
+            .to_ascii_lowercase()
+            .cmp(&right.instance_id.to_ascii_lowercase())
+    });
+    selected.dedup_by(|left, right| left.instance_id.eq_ignore_ascii_case(&right.instance_id));
+    selected
+}
+
+fn deduplicate_device_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut deduplicated = std::collections::BTreeMap::new();
+    for id in ids {
+        if !id.is_empty() {
+            deduplicated.entry(id.to_ascii_lowercase()).or_insert(id);
+        }
+    }
+    deduplicated.into_values().collect()
+}
+
+fn requirements_from_storage_path_devices(
+    devices: &[StoragePathDevice],
+) -> Result<Vec<StorageDriverRequirement>> {
+    let mut requirements = Vec::new();
+    for device in devices {
+        if !device.is_storage_controller() {
+            continue;
+        }
+        let Some(source_inf) = device
+            .bound_inf
+            .as_deref()
+            .filter(|name| is_published_oem_inf_name(name))
+        else {
+            continue;
+        };
+        let hardware_ids = deduplicate_device_ids(device.hardware_ids.iter().cloned());
+        let compatible_ids = deduplicate_device_ids(device.compatible_ids.iter().cloned());
+        if hardware_ids.is_empty() && compatible_ids.is_empty() {
+            bail!(
+                "topology-proven OEM storage controller has no hardware or compatible ID: {} ({source_inf}, {})",
+                device.description,
+                device.instance_id
+            );
+        }
+        requirements.push(StorageDriverRequirement {
+            description: device.description.clone(),
+            source_inf: source_inf.to_owned(),
+            hardware_ids,
+            compatible_ids,
+            device_instance_id: Some(device.instance_id.clone()),
+        });
+    }
+    requirements.sort_by(|left, right| {
+        left.source_inf
+            .to_ascii_lowercase()
+            .cmp(&right.source_inf.to_ascii_lowercase())
+            .then_with(|| {
+                left.device_instance_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .cmp(
+                        &right
+                            .device_instance_id
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_ascii_lowercase(),
+                    )
+            })
+    });
+    Ok(requirements)
 }
 
 #[cfg(test)]
@@ -1904,29 +2204,60 @@ mod tests {
     }
 
     #[test]
-    fn identifies_bound_oem_scsi_and_vmd_packages() {
+    fn storage_path_classification_excludes_unrelated_ahci_and_keeps_actual_ahci_vmd() {
         assert_eq!(DIIRFLAG_FORCE_INF, 0x0000_0002);
-        let scsi = DriverInfo {
-            description: "OEM storage".into(),
-            manufacturer: "Vendor".into(),
-            inf_path: "oem1.inf".into(),
-            hardware_id: "PCI\\VEN_1234&DEV_5678".into(),
-            hardware_ids: vec!["PCI\\VEN_1234&DEV_5678".into()],
+        let nvme = StoragePathDevice {
+            instance_id: "PCI\\NVME_CONTROLLER".into(),
+            description: "NVMe controller".into(),
             device_class: "SCSIAdapter".into(),
             class_guid: String::new(),
-            is_oem: true,
+            hardware_ids: vec!["PCI\\VEN_144D&DEV_A80A".into()],
+            compatible_ids: vec!["PCI\\CC_010802".into()],
+            bound_inf: Some("stornvme.inf".into()),
         };
-        assert!(is_boot_storage_driver(&scsi));
+        let unrelated_ahci = StoragePathDevice {
+            instance_id: "PCI\\UNRELATED_AHCI".into(),
+            description: "Unrelated AHCI".into(),
+            device_class: "HDC".into(),
+            class_guid: String::new(),
+            hardware_ids: vec!["PCI\\VEN_1234&DEV_5678".into()],
+            compatible_ids: vec!["PCI\\CC_010601".into()],
+            bound_inf: Some("oem1.inf".into()),
+        };
+        let all = vec![nvme.clone(), unrelated_ahci];
+        let selected = select_storage_path_devices(all, std::slice::from_ref(&nvme.instance_id));
+        assert_eq!(selected, vec![nvme]);
+        assert!(requirements_from_storage_path_devices(&selected)
+            .unwrap()
+            .is_empty());
 
-        let mut vmd = scsi.clone();
-        vmd.device_class = "System".into();
-        vmd.hardware_ids = vec!["PCI\\VEN_8086&DEV_A77F".into()];
-        assert!(is_boot_storage_driver(&vmd));
-
-        let mut network = scsi;
-        network.device_class = "Net".into();
-        network.hardware_ids = vec!["PCI\\VEN_1234&DEV_5678".into()];
-        assert!(!is_boot_storage_driver(&network));
+        let ahci = StoragePathDevice {
+            instance_id: "PCI\\ACTUAL_AHCI".into(),
+            description: "Actual AHCI".into(),
+            device_class: "HDC".into(),
+            class_guid: String::new(),
+            hardware_ids: vec!["PCI\\VEN_8086&DEV_1E02".into()],
+            compatible_ids: vec!["PCI\\CC_010601".into()],
+            bound_inf: Some("oem42.inf".into()),
+        };
+        let vmd = StoragePathDevice {
+            instance_id: "PCI\\ACTUAL_VMD".into(),
+            description: "Actual VMD".into(),
+            device_class: "System".into(),
+            class_guid: String::new(),
+            hardware_ids: vec!["PCI\\VEN_8086&DEV_A77F".into()],
+            compatible_ids: Vec::new(),
+            bound_inf: Some("oem43.inf".into()),
+        };
+        let requirements = requirements_from_storage_path_devices(&[ahci, vmd]).unwrap();
+        assert_eq!(requirements.len(), 2);
+        assert!(requirements.iter().all(|item| item.is_topology_proven()));
+        assert!(requirements
+            .iter()
+            .any(|item| item.source_inf.eq_ignore_ascii_case("oem42.inf")));
+        assert!(requirements
+            .iter()
+            .any(|item| item.source_inf.eq_ignore_ascii_case("oem43.inf")));
     }
 
     #[test]
@@ -1960,6 +2291,8 @@ mod tests {
             description: "Intel VMD".into(),
             source_inf: "oem42.inf".into(),
             hardware_ids: vec!["PCI\\VEN_8086&DEV_A77F&SUBSYS_12341043".into()],
+            compatible_ids: vec!["PCI\\VEN_8086&DEV_A77F".into()],
+            device_instance_id: Some("PCI\\VMD\\0".into()),
         };
         write_storage_driver_requirements(&exported.0, std::slice::from_ref(&requirement)).unwrap();
 
@@ -1985,6 +2318,8 @@ mod tests {
                 "PCI\\VEN_8086&DEV_A77F".into(),
                 "PCI\\VEN_1234&DEV_5678".into(),
             ],
+            compatible_ids: Vec::new(),
+            device_instance_id: Some("PCI\\VMD\\1".into()),
         };
         assert!(validate_storage_driver_requirements(
             &offline
@@ -1992,7 +2327,70 @@ mod tests {
                 .join("Windows/System32/DriverStore/FileRepository"),
             &[incomplete]
         )
-        .is_err());
+        .is_ok());
+    }
+
+    #[test]
+    fn storage_requirement_coverage_accepts_any_exact_hardware_or_compatible_id() {
+        let requirement = StorageDriverRequirement {
+            description: "AHCI".into(),
+            source_inf: "oem7.inf".into(),
+            hardware_ids: vec!["PCI\\VEN_8086&DEV_1E02&SUBSYS_00000000".into()],
+            compatible_ids: vec!["PCI\\CC_010601".into(), "PCI\\CC_0106".into()],
+            device_instance_id: Some("PCI\\VEN_8086&DEV_1E02\\0".into()),
+        };
+        assert!(requirement.matches_candidate_id("pci\\cc_010601"));
+        assert!(requirement.matches_candidate_id("PCI\\VEN_8086&DEV_1E02&SUBSYS_00000000"));
+        assert!(!requirement.matches_candidate_id("PCI\\CC_0106&EXTRA"));
+        assert!(!requirement.matches_candidate_id(""));
+    }
+
+    #[test]
+    fn version_one_manifest_remains_readable_but_never_gains_topology_provenance() {
+        let exported = TestDirectory::new("manifest-v1");
+        std::fs::write(
+            exported.0.join(STORAGE_DRIVER_REQUIREMENTS_FILE),
+            br#"{
+  "version": 1,
+  "requirements": [{
+    "description": "legacy AHCI",
+    "source_inf": "oem9.inf",
+    "hardware_ids": ["PCI\\VEN_8086&DEV_1E02"],
+    "device_instance_id": "PCI\\SHOULD_NOT_BECOME_PROOF"
+  }]
+}"#,
+        )
+        .unwrap();
+        let requirements = load_storage_driver_requirements(&exported.0).unwrap();
+        assert_eq!(requirements.len(), 1);
+        assert!(requirements[0].compatible_ids.is_empty());
+        assert_eq!(requirements[0].device_instance_id, None);
+        assert!(!requirements[0].is_topology_proven());
+    }
+
+    #[test]
+    fn new_manifest_serialization_is_version_two_and_requires_provenance() {
+        let requirement = StorageDriverRequirement {
+            description: "VMD".into(),
+            source_inf: "oem10.inf".into(),
+            hardware_ids: vec!["PCI\\VEN_8086&DEV_A77F".into()],
+            compatible_ids: Vec::new(),
+            device_instance_id: Some("PCI\\VEN_8086&DEV_A77F\\0".into()),
+        };
+        let value: serde_json::Value = serde_json::from_slice(
+            &storage_driver_requirements_manifest_bytes(std::slice::from_ref(&requirement))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["version"], 2);
+        assert_eq!(
+            value["requirements"][0]["device_instance_id"],
+            "PCI\\VEN_8086&DEV_A77F\\0"
+        );
+
+        let mut unproven = requirement;
+        unproven.device_instance_id = None;
+        assert!(storage_driver_requirements_manifest_bytes(&[unproven]).is_err());
     }
 
     #[test]
@@ -2001,6 +2399,8 @@ mod tests {
             description: "Intel VMD".into(),
             source_inf: "iastorvd.inf".into(),
             hardware_ids: vec!["PCI\\VEN_8086&DEV_A77F&SUBSYS_12341043".into()],
+            compatible_ids: Vec::new(),
+            device_instance_id: Some("PCI\\VMD\\0".into()),
         };
         assert!(requirements_are_only_intel_vmd(std::slice::from_ref(&vmd)));
         let mut vmd_with_managed_function = vmd.clone();
@@ -2016,6 +2416,8 @@ mod tests {
             description: "NVMe".into(),
             source_inf: "stornvme.inf".into(),
             hardware_ids: vec!["PCI\\VEN_144D&DEV_A80A".into()],
+            compatible_ids: Vec::new(),
+            device_instance_id: Some("PCI\\NVME\\0".into()),
         };
         assert!(!requirements_are_only_intel_vmd(&[vmd, nvme]));
     }

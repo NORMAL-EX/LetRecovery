@@ -778,6 +778,82 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
+const MAX_STORAGE_ANCESTRY_DEPTH: usize = 128;
+
+/// Collects device-instance IDs from one or more disk-interface devnodes through the PnP root.
+///
+/// This helper is Win32-independent so alias convergence, cycles and API failures can be tested
+/// without touching a real device tree. A devnode may be reached through several disk interfaces;
+/// only a cycle within one parent chain is invalid. Configuration Manager device-instance IDs are
+/// case-insensitive, so aliases are deduplicated case-insensitively.
+fn collect_storage_ancestor_instance_ids<Parents, InstanceIds>(
+    starting_devnodes: impl IntoIterator<Item = u32>,
+    root_devnode: u32,
+    mut parent_of: Parents,
+    mut instance_id_of: InstanceIds,
+) -> Result<Vec<String>, StorageError>
+where
+    Parents: FnMut(u32) -> Result<u32, StorageError>,
+    InstanceIds: FnMut(u32) -> Result<String, StorageError>,
+{
+    let mut starts = starting_devnodes.into_iter().collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    if starts.is_empty() {
+        return Err(StorageError::new(
+            "resolve storage device ancestry",
+            "no disk-interface devnodes were supplied",
+        ));
+    }
+
+    let mut instance_ids = std::collections::BTreeMap::<String, String>::new();
+    for start in starts {
+        let mut current = start;
+        let mut chain = std::collections::HashSet::new();
+        let mut reached_root = false;
+        for _ in 0..MAX_STORAGE_ANCESTRY_DEPTH {
+            if !chain.insert(current) {
+                return Err(StorageError::new(
+                    "resolve storage device ancestry",
+                    format!(
+                        "Configuration Manager parent chain contains a cycle at devnode {current}"
+                    ),
+                ));
+            }
+            if current == root_devnode {
+                reached_root = true;
+                break;
+            }
+            let instance_id = instance_id_of(current)?;
+            if instance_id.is_empty() || instance_id.contains(['\r', '\n', '\0']) {
+                return Err(StorageError::new(
+                    "resolve storage device ancestry",
+                    format!("Configuration Manager returned an invalid ID for devnode {current}"),
+                ));
+            }
+            instance_ids
+                .entry(instance_id.to_ascii_lowercase())
+                .or_insert(instance_id);
+            current = parent_of(current)?;
+        }
+        if !reached_root {
+            return Err(StorageError::new(
+                "resolve storage device ancestry",
+                format!(
+                    "Configuration Manager parent chain from devnode {start} exceeded {MAX_STORAGE_ANCESTRY_DEPTH} nodes"
+                ),
+            ));
+        }
+    }
+    if instance_ids.is_empty() {
+        return Err(StorageError::new(
+            "resolve storage device ancestry",
+            "disk interfaces resolved directly to the PnP root",
+        ));
+    }
+    Ok(instance_ids.into_values().collect())
+}
+
 /// Hash a canonical IOCTL layout snapshot with an explicit version/domain separator.
 ///
 /// The encoding is fixed-width and independent of Rust struct padding or VDS enumeration order.
@@ -1031,6 +1107,12 @@ mod platform {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct PresentDiskInterfaceNode {
+        interface: PresentDiskInterface,
+        dev_inst: u32,
+    }
+
     fn validated_physical_disk_device_number(
         device_type: u32,
         device_number: u32,
@@ -1135,12 +1217,12 @@ mod platform {
     /// The opaque interface path and its current disk number stay paired. Inventory callers must
     /// issue capacity and layout IOCTLs through this exact path instead of reopening a potentially
     /// different `PhysicalDriveN` alias exposed by a vendor filter stack.
-    pub unsafe fn present_physical_disk_interfaces(
-    ) -> Result<Vec<PresentDiskInterface>, StorageError> {
+    unsafe fn present_physical_disk_interface_nodes(
+    ) -> Result<Vec<PresentDiskInterfaceNode>, StorageError> {
         use windows::Win32::Devices::DeviceAndDriverInstallation::{
             SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
             SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
-            SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+            SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
         };
         use windows::Win32::Foundation::{GetLastError, ERROR_NO_MORE_ITEMS, HWND};
         use windows::Win32::System::Ioctl::GUID_DEVINTERFACE_DISK;
@@ -1153,7 +1235,7 @@ mod platform {
         )
         .map_err(|error| api_error("enumerate present disk interfaces", error))?;
 
-        let result = (|| -> Result<Vec<PresentDiskInterface>, StorageError> {
+        let result = (|| -> Result<Vec<PresentDiskInterfaceNode>, StorageError> {
             let mut interfaces = Vec::new();
             let mut index = 0_u32;
             loop {
@@ -1176,7 +1258,7 @@ mod platform {
                 index = index.saturating_add(1);
 
                 let mut required = 0_u32;
-                let _ = SetupDiGetDeviceInterfaceDetailW(
+                let probe = SetupDiGetDeviceInterfaceDetailW(
                     set,
                     &interface,
                     None,
@@ -1184,6 +1266,13 @@ mod platform {
                     Some(&mut required),
                     None,
                 );
+                if probe.is_ok() || GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                    log::warn!(
+                        "SetupAPI disk interface {} detail-size probe did not return the documented ERROR_INSUFFICIENT_BUFFER result and was skipped",
+                        index - 1
+                    );
+                    continue;
+                }
                 if required < size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32 {
                     log::warn!(
                         "SetupAPI disk interface {} returned invalid detail size {} and was skipped",
@@ -1197,13 +1286,20 @@ mod platform {
                     .as_mut_ptr()
                     .cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
                 (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+                let mut device_info = SP_DEVINFO_DATA {
+                    cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
+                    ..Default::default()
+                };
+                // SetupDiGetDeviceInterfaceDetailW has returned SP_DEVINFO_DATA (including
+                // DevInst) since Windows 2000. The path remains opaque; DevInst is valid only for
+                // this current device-information set and is consumed before the set is released.
                 if let Err(error) = SetupDiGetDeviceInterfaceDetailW(
                     set,
                     &interface,
                     Some(detail),
                     required,
                     None,
-                    None,
+                    Some(&mut device_info),
                 ) {
                     log::warn!(
                         "SetupAPI disk interface {} detail query failed and was skipped: {}",
@@ -1318,18 +1414,25 @@ mod platform {
                     number,
                     query
                 );
-                interfaces.push(PresentDiskInterface {
-                    disk_number: number,
-                    device_path,
+                interfaces.push(PresentDiskInterfaceNode {
+                    interface: PresentDiskInterface {
+                        disk_number: number,
+                        device_path,
+                    },
+                    dev_inst: device_info.DevInst,
                 });
             }
             interfaces.sort_by(|left, right| {
-                left.disk_number
-                    .cmp(&right.disk_number)
-                    .then_with(|| left.device_path.cmp(&right.device_path))
+                left.interface
+                    .disk_number
+                    .cmp(&right.interface.disk_number)
+                    .then_with(|| left.interface.device_path.cmp(&right.interface.device_path))
+                    .then_with(|| left.dev_inst.cmp(&right.dev_inst))
             });
             interfaces.dedup_by(|left, right| {
-                left.disk_number == right.disk_number && left.device_path == right.device_path
+                left.interface.disk_number == right.interface.disk_number
+                    && left.interface.device_path == right.interface.device_path
+                    && left.dev_inst == right.dev_inst
             });
             if interfaces.is_empty() {
                 return Err(StorageError::new(
@@ -1348,6 +1451,20 @@ mod platform {
             log::warn!("SetupAPI present-disk interface set cleanup failed: {error}");
         }
         result
+    }
+
+    pub unsafe fn present_physical_disk_interfaces(
+    ) -> Result<Vec<PresentDiskInterface>, StorageError> {
+        present_physical_disk_interface_nodes().map(|nodes| {
+            let mut interfaces = nodes
+                .into_iter()
+                .map(|node| node.interface)
+                .collect::<Vec<_>>();
+            interfaces.dedup_by(|left, right| {
+                left.disk_number == right.disk_number && left.device_path == right.device_path
+            });
+            interfaces
+        })
     }
 
     pub unsafe fn present_physical_disk_numbers() -> Result<Vec<u32>, StorageError> {
@@ -2385,6 +2502,161 @@ mod platform {
             ));
         }
         normalize_letter(letter)
+    }
+
+    unsafe fn device_instance_id(dev_inst: u32) -> Result<String, StorageError> {
+        use windows::Win32::Devices::DeviceAndDriverInstallation::{
+            CM_Get_Device_IDW, CM_Get_Device_ID_Size, CR_SUCCESS,
+        };
+
+        // CM_Get_Device_ID_Size reports characters excluding the terminating NUL. Both CM calls
+        // require ulFlags=0 and are available since Windows 2000, so this remains compatible with
+        // Windows 7. Accept only exact CR_SUCCESS; CONFIGRET is not a Win32 last-error value.
+        let mut character_count = 0_u32;
+        let result = CM_Get_Device_ID_Size(&mut character_count, dev_inst, 0);
+        if result != CR_SUCCESS {
+            return Err(StorageError::new(
+                "read storage ancestor device instance ID",
+                format!(
+                    "CM_Get_Device_ID_Size returned CONFIGRET {:#010x}",
+                    result.0
+                ),
+            ));
+        }
+        if character_count == 0 || character_count > 32_767 {
+            return Err(StorageError::new(
+                "read storage ancestor device instance ID",
+                format!("CM_Get_Device_ID_Size returned invalid length {character_count}"),
+            ));
+        }
+        let buffer_length = character_count.checked_add(1).ok_or_else(|| {
+            StorageError::new(
+                "read storage ancestor device instance ID",
+                "device-instance ID length overflow",
+            )
+        })?;
+        let mut buffer = vec![0_u16; buffer_length as usize];
+        let result = CM_Get_Device_IDW(dev_inst, &mut buffer, 0);
+        if result != CR_SUCCESS {
+            return Err(StorageError::new(
+                "read storage ancestor device instance ID",
+                format!("CM_Get_Device_IDW returned CONFIGRET {:#010x}", result.0),
+            ));
+        }
+        let end = buffer.iter().position(|value| *value == 0).ok_or_else(|| {
+            StorageError::new(
+                "read storage ancestor device instance ID",
+                "CM_Get_Device_IDW returned no terminating NUL",
+            )
+        })?;
+        if end == 0 || end > character_count as usize {
+            return Err(StorageError::new(
+                "read storage ancestor device instance ID",
+                "CM_Get_Device_IDW returned an invalid string length",
+            ));
+        }
+        String::from_utf16(&buffer[..end]).map_err(|error| {
+            StorageError::new(
+                "read storage ancestor device instance ID",
+                format!("CM_Get_Device_IDW returned invalid UTF-16: {error}"),
+            )
+        })
+    }
+
+    pub unsafe fn storage_ancestor_instance_ids_for_drive(
+        drive_letter: char,
+    ) -> Result<Vec<String>, StorageError> {
+        use windows::Win32::Devices::DeviceAndDriverInstallation::{
+            CM_Get_Parent, CM_Locate_DevNodeW, CM_LOCATE_DEVNODE_NORMAL, CR_SUCCESS,
+        };
+
+        let letter = normalize_letter(drive_letter)?;
+        // IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS is available since Windows XP. Every extent is
+        // retained: mirrored/spanned volumes and multiple aliases must broaden the read-only PnP
+        // ancestry query, not be rejected or collapsed to a guessed single disk.
+        let extents = volume_extents_from_device_path(&format!(r"\\.\{letter}:"))?;
+        let disk_numbers = sort_dedup_physical_disk_numbers(
+            extents.iter().map(|extent| extent.DiskNumber).collect(),
+        );
+        let interfaces = present_physical_disk_interface_nodes()?;
+        let mut starting_devnodes = Vec::new();
+        for disk_number in disk_numbers {
+            let mut matching = interfaces
+                .iter()
+                .filter(|node| node.interface.disk_number == disk_number)
+                .map(|node| node.dev_inst)
+                .collect::<Vec<_>>();
+            matching.sort_unstable();
+            matching.dedup();
+            if matching.is_empty() {
+                return Err(StorageError::new(
+                    "resolve storage device ancestry",
+                    format!(
+                        "no present GUID_DEVINTERFACE_DISK interface maps to current disk {disk_number}"
+                    ),
+                ));
+            }
+            if matching.len() != 1 {
+                return Err(StorageError::new(
+                    "resolve storage device ancestry",
+                    format!(
+                        "current disk {disk_number} maps to {} distinct present disk devnodes",
+                        matching.len()
+                    ),
+                ));
+            }
+            starting_devnodes.extend(matching);
+        }
+
+        // Disk numbers can be reused after hot-plug or a controller reset. Re-read the same volume
+        // after binding every current disk interface and require the complete extent set to remain
+        // unchanged before any PnP ancestry is allowed to become topology proof. A mismatch is a
+        // read-only evidence failure; callers omit the critical manifest rather than guessing.
+        let rebound_extents = volume_extents_from_device_path(&format!(r"\\.\{letter}:"))?;
+        if !same_volume_extent_set(&extents, &rebound_extents) {
+            return Err(StorageError::new(
+                "resolve storage device ancestry",
+                "volume disk extents changed while binding current disk interfaces",
+            ));
+        }
+
+        // A NULL device ID with CM_LOCATE_DEVNODE_NORMAL returns the local machine's device-tree
+        // root. CM_Locate_DevNodeW and CM_Get_Parent are available since Windows 2000; ulFlags is
+        // zero for CM_Get_Parent. Root comparison gives an explicit termination condition instead
+        // of treating an implementation-specific terminal CONFIGRET as success.
+        let mut root_devnode = 0_u32;
+        let result =
+            CM_Locate_DevNodeW(&mut root_devnode, PCWSTR::null(), CM_LOCATE_DEVNODE_NORMAL);
+        if result != CR_SUCCESS {
+            return Err(StorageError::new(
+                "resolve storage device ancestry",
+                format!(
+                    "CM_Locate_DevNodeW(root) returned CONFIGRET {:#010x}",
+                    result.0
+                ),
+            ));
+        }
+
+        collect_storage_ancestor_instance_ids(
+            starting_devnodes,
+            root_devnode,
+            |dev_inst| {
+                let mut parent = 0_u32;
+                let result = CM_Get_Parent(&mut parent, dev_inst, 0);
+                if result == CR_SUCCESS {
+                    Ok(parent)
+                } else {
+                    Err(StorageError::new(
+                        "resolve storage device ancestry",
+                        format!(
+                            "CM_Get_Parent({dev_inst}) returned CONFIGRET {:#010x}",
+                            result.0
+                        ),
+                    ))
+                }
+            },
+            |dev_inst| device_instance_id(dev_inst),
+        )
     }
 
     pub fn assigned_drive_letter_mask() -> Result<u32, StorageError> {
@@ -9869,6 +10141,47 @@ pub fn current_windows_drive_letter() -> Result<char, StorageError> {
     platform::current_windows_drive_letter()
 }
 
+/// Resolve every present PnP devnode from all physical extents of a specified current drive
+/// letter through the local Configuration Manager device-tree root.
+///
+/// This is a read-only, current-session topology observation. Device-instance IDs and disk
+/// numbers must not be persisted as cross-reboot disk identity. The caller chooses the drive
+/// explicitly so an offline export cannot silently substitute the running WinPE volume.
+#[cfg(windows)]
+pub fn storage_ancestor_instance_ids_for_drive(
+    drive_letter: char,
+) -> Result<Vec<String>, StorageError> {
+    unsafe { platform::storage_ancestor_instance_ids_for_drive(drive_letter) }
+}
+
+/// Resolve the running Windows volume's current storage ancestry.
+///
+/// This convenience wrapper is only for online-current-system inventory. Offline Windows exports
+/// must use the explicit-drive boundary only when that current hardware topology is intentionally
+/// mapped to the offline image; packages from another Windows root are not ancestry evidence.
+#[cfg(windows)]
+pub fn current_windows_storage_ancestor_instance_ids() -> Result<Vec<String>, StorageError> {
+    storage_ancestor_instance_ids_for_drive(current_windows_drive_letter()?)
+}
+
+#[cfg(not(windows))]
+pub fn storage_ancestor_instance_ids_for_drive(
+    _drive_letter: char,
+) -> Result<Vec<String>, StorageError> {
+    Err(StorageError::new(
+        "resolve storage device ancestry",
+        "Windows storage APIs are unavailable",
+    ))
+}
+
+#[cfg(not(windows))]
+pub fn current_windows_storage_ancestor_instance_ids() -> Result<Vec<String>, StorageError> {
+    Err(StorageError::new(
+        "resolve storage device ancestry",
+        "Windows storage APIs are unavailable",
+    ))
+}
+
 #[cfg(windows)]
 pub fn drive_kind(drive_letter: char) -> Result<DriveKind, StorageError> {
     platform::drive_kind(drive_letter)
@@ -10152,6 +10465,68 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     use windows::core::HRESULT;
+
+    #[test]
+    fn storage_ancestry_deduplicates_aliases_and_converging_parents() {
+        let ids = collect_storage_ancestor_instance_ids(
+            [10, 11, 10],
+            1,
+            |node| match node {
+                10 | 11 => Ok(5),
+                5 => Ok(1),
+                _ => Err(StorageError::new("test parent", "unexpected devnode")),
+            },
+            |node| {
+                Ok(match node {
+                    10 => "SCSI\\DISK&VEN_A".to_owned(),
+                    11 => "scsi\\disk&ven_a".to_owned(),
+                    5 => "PCI\\VEN_1234&DEV_5678".to_owned(),
+                    1 => "HTREE\\ROOT\\0".to_owned(),
+                    _ => String::new(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            ids.iter()
+                .filter(|id| id.eq_ignore_ascii_case("SCSI\\DISK&VEN_A"))
+                .count(),
+            1
+        );
+        assert!(ids.iter().any(|id| id == "PCI\\VEN_1234&DEV_5678"));
+        assert!(!ids.iter().any(|id| id == "HTREE\\ROOT\\0"));
+    }
+
+    #[test]
+    fn storage_ancestry_rejects_cycles_and_parent_errors() {
+        let cycle = collect_storage_ancestor_instance_ids(
+            [3],
+            1,
+            |node| Ok(if node == 3 { 4 } else { 3 }),
+            |node| Ok(format!("NODE\\{node}")),
+        )
+        .unwrap_err();
+        assert!(cycle.to_string().contains("cycle"));
+
+        let failure = collect_storage_ancestor_instance_ids(
+            [3],
+            1,
+            |_node| Err(StorageError::new("CM_Get_Parent", "CONFIGRET 0x0000000d")),
+            |node| Ok(format!("NODE\\{node}")),
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("CONFIGRET"));
+
+        let too_deep = collect_storage_ancestor_instance_ids(
+            [MAX_STORAGE_ANCESTRY_DEPTH as u32 + 2],
+            0,
+            |node| Ok(node - 1),
+            |node| Ok(format!("NODE\\{node}")),
+        )
+        .unwrap_err();
+        assert!(too_deep.to_string().contains("exceeded"));
+    }
 
     #[test]
     fn storage_management_shrink_prefers_exact_desired_final_size() {

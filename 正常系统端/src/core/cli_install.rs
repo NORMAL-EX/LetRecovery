@@ -288,10 +288,20 @@ pub fn run_install(prepared: PreparedInstall) -> Result<Value> {
     let mut restart_scheduled = false;
     let mut warnings = Vec::<Value>::new();
     if prepared.intent.options.auto_reboot {
-        match lr_core::windows_shutdown::schedule_restart(
-            5,
-            "LetRecovery installation preparation completed; Windows will restart.",
-        ) {
+        let (restart_delay_seconds, force_apps_closed) =
+            restart_policy(prepared.intent.options.automation_shutdown_on_terminal);
+        let restart = if force_apps_closed {
+            lr_core::windows_shutdown::schedule_restart_for_automation(
+                restart_delay_seconds,
+                "LetRecovery installation preparation completed; Windows will restart.",
+            )
+        } else {
+            lr_core::windows_shutdown::schedule_restart(
+                restart_delay_seconds,
+                "LetRecovery installation preparation completed; Windows will restart.",
+            )
+        };
+        match restart {
             Ok(()) => restart_scheduled = true,
             Err(error) => warnings.push(json!({
                 "code": "restart_not_scheduled",
@@ -311,6 +321,18 @@ pub fn run_install(prepared: PreparedInstall) -> Result<Value> {
         "warnings": warnings,
         "event_count": event_count,
     }))
+}
+
+/// The public automation switch is deliberately opt-in and is used only for unattended disposable
+/// machines. Give its controller enough time to persist the handoff witness, then close blocking
+/// helper applications at the documented shutdown boundary. Interactive installs retain the
+/// shorter, non-forcing restart so user-authored application state is never discarded.
+const fn restart_policy(automation_shutdown_on_terminal: bool) -> (u32, bool) {
+    if automation_shutdown_on_terminal {
+        (15, true)
+    } else {
+        (5, false)
+    }
 }
 
 fn require_regular_file(path: &str, field: &str) -> Result<()> {
@@ -787,6 +809,12 @@ mod tests {
         assert!(prefs.format_partition);
         assert!(prefs.repair_boot);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn unattended_automation_restart_is_delayed_and_forcing_only_when_opted_in() {
+        assert_eq!(restart_policy(false), (5, false));
+        assert_eq!(restart_policy(true), (15, true));
     }
 
     fn dual_boot_source_partition() -> Partition {

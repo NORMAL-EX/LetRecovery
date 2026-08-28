@@ -91,9 +91,9 @@ pub fn inject_user_drivers_from_authenticated_paths(
     );
     let dism = Dism::new();
     let image_path = format!("{}\\", target_partition);
-    let failures =
+    let import_result =
         dism.add_preserved_driver_inf_files_offline_with_progress(&image_path, &inf_files, None)?;
-    let summary = lr_core::bounded_failure_summary::summarize_failures(&failures, 3);
+    let summary = lr_core::bounded_failure_summary::summarize_failures(&import_result.failures, 3);
     if summary.is_empty() {
         log::info!("[USER DRV] user_drivers/{} 注入成功", version);
     } else {

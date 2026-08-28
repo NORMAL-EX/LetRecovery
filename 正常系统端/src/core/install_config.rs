@@ -367,6 +367,9 @@ pub struct InstallConfig {
     pub canonical_target: Option<lr_core::install_handoff::CanonicalInstallTargetV2>,
     /// 镜像文件路径（相对于数据分区）
     pub image_path: String,
+    /// 正常端已经对本次精确字节内容完成完整镜像校验。该声明与镜像长度/SHA-256 一同
+    /// 进入认证交接；旧配置缺失时默认为 false，PE 必须自行完整校验。
+    pub source_image_verified: bool,
     /// 是否为GHO格式
     pub is_gho: bool,
     /// A private boot-WIM Wi-Fi profile is requested. Only its authenticated length/hash are
@@ -576,6 +579,55 @@ impl ConfigFileManager {
         ] {
             Self::validate_ini_value(field, value)?;
         }
+        if config.source_image_verified {
+            let single_wim_family = Path::new(&config.image_path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("wim") || extension.eq_ignore_ascii_case("esd")
+                });
+            if !single_wim_family || config.is_gho || config.is_xp || config.is_xp_i386 {
+                anyhow::bail!("SourceImageVerified is valid only for a one-file WIM/ESD handoff");
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_verified_source_manifest(
+        config: &InstallConfig,
+        source_artifacts: &[lr_core::handoff_manifest::ArtifactRecord],
+    ) -> Result<()> {
+        if !config.source_image_verified {
+            return Ok(());
+        }
+        let install_images = source_artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.role == lr_core::handoff_manifest::ArtifactRole::InstallImageSpan
+            })
+            .collect::<Vec<_>>();
+        if install_images.len() != 1 {
+            anyhow::bail!(
+                "SourceImageVerified requires exactly one manifest install-image identity"
+            );
+        }
+        let expected_relative = format!(
+            "{}\\{}",
+            Self::DATA_DIR,
+            config.image_path.replace('/', "\\")
+        );
+        let artifact = install_images[0];
+        if artifact.location != lr_core::handoff_manifest::ArtifactLocation::PublicData
+            || artifact.ordinal != 0
+            || !artifact
+                .relative_path
+                .eq_ignore_ascii_case(&expected_relative)
+            || artifact.length_bytes == 0
+        {
+            anyhow::bail!(
+                "SourceImageVerified manifest identity does not describe the configured WIM/ESD"
+            );
+        }
         Ok(())
     }
 
@@ -702,6 +754,7 @@ impl ConfigFileManager {
         Self::validate_ini_value("target_partition", target_partition)?;
         Self::validate_ini_value("data_partition", data_partition)?;
         Self::validate_install_ini_values(&config)?;
+        Self::validate_verified_source_manifest(&config, &source_artifacts)?;
 
         let data_locator_token = lr_core::handoff_auth::generate_locator_token()?;
         let target_locator_token = lr_core::handoff_auth::generate_locator_token()?;
@@ -1163,6 +1216,7 @@ impl ConfigFileManager {
 
     /// 序列化安装配置为INI格式
     fn serialize_install_config(config: &InstallConfig) -> Result<String> {
+        Self::validate_install_ini_values(config)?;
         // Cross-reboot installation discovery is token-only. Canonical disk inventory is kept in
         // normal-endpoint planning objects where it is useful, but is not serialized into the PE
         // install task and can never become a second target-selection gate.
@@ -1190,6 +1244,11 @@ impl ConfigFileManager {
         } else {
             String::new()
         };
+        let source_verification_binding = if config.source_image_verified {
+            "SourceImageVerified=true\r\n"
+        } else {
+            ""
+        };
         Ok(format!(
             r#"[Install]
 SessionId={}
@@ -1206,6 +1265,7 @@ VolumeIndex={}
 TargetPartition={}
 CustomInstallPlanJson={}
 ImagePath={}
+{}
 IsGho={}
 WimEngine={}
 IsXp={}
@@ -1267,6 +1327,7 @@ XpInjectNvmeDriver={}
             config.target_partition,
             custom_install_plan,
             config.image_path,
+            source_verification_binding,
             config.is_gho,
             config.wim_engine,
             config.is_xp,
@@ -1418,6 +1479,11 @@ Language={}
                     "CanonicalGptPartitionId" => canonical_gpt_id = Some(value.to_string()),
                     "CanonicalStorageIdSha256" => canonical_storage_id = Some(value.to_string()),
                     "ImagePath" => config.image_path = value.to_string(),
+                    "SourceImageVerified" => {
+                        config.source_image_verified = value.parse::<bool>().with_context(|| {
+                            format!("invalid SourceImageVerified boolean: {value}")
+                        })?
+                    }
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
                     "WimEngine" => config.wim_engine = value.parse().unwrap_or(0),
                     "IsXp" => config.is_xp = value.parse().unwrap_or(false),
@@ -1674,6 +1740,7 @@ mod tests {
         assert!(config.repair_boot);
         assert_eq!(config.boot_mode, 0);
         assert_eq!(config.boot_pca_mode, BootPcaMode::Auto);
+        assert!(!config.source_image_verified);
         assert!(!config.is_xp_i386);
         assert!(config.xp_source_arch.is_empty());
     }
@@ -1707,10 +1774,12 @@ mod tests {
     fn install_config_round_trips_boot_selection() {
         let source = InstallConfig {
             volume_index: 1,
+            image_path: "install.wim".to_string(),
             canonical_target: Some(canonical_test_target()),
             format_partition: false,
             repair_boot: false,
             automation_shutdown_on_terminal: true,
+            source_image_verified: true,
             boot_mode: 1,
             boot_pca_mode: BootPcaMode::Pca2023,
             pca_compat_package: "pca_compat\\package.wim".to_string(),
@@ -1718,8 +1787,6 @@ mod tests {
             pca_compat_image_index: 1,
             pca_compat_target_build: 19045,
             pca_compat_target_architecture: 9,
-            is_xp_i386: true,
-            xp_source_arch: "I386".to_string(),
             ..InstallConfig::default()
         };
 
@@ -1730,6 +1797,8 @@ mod tests {
         assert!(!parsed.repair_boot);
         assert!(parsed.automation_shutdown_on_terminal);
         assert!(serialized.contains("AutomationShutdownOnTerminal=true"));
+        assert!(parsed.source_image_verified);
+        assert!(serialized.contains("SourceImageVerified=true"));
         assert_eq!(parsed.boot_mode, 1);
         assert_eq!(parsed.boot_pca_mode, BootPcaMode::Pca2023);
         assert_eq!(parsed.pca_compat_package, "pca_compat\\package.wim");
@@ -1737,9 +1806,91 @@ mod tests {
         assert_eq!(parsed.pca_compat_image_index, 1);
         assert_eq!(parsed.pca_compat_target_build, 19045);
         assert_eq!(parsed.pca_compat_target_architecture, 9);
-        assert!(parsed.is_xp_i386);
-        assert_eq!(parsed.xp_source_arch, "I386");
+        assert!(!parsed.is_xp_i386);
+        assert!(parsed.xp_source_arch.is_empty());
         assert_eq!(parsed.canonical_target, None);
+    }
+
+    #[test]
+    fn legacy_pe_config_omits_the_optional_source_receipt_when_false() {
+        let serialized = ConfigFileManager::serialize_install_config(&InstallConfig {
+            volume_index: 1,
+            image_path: "install.wim".to_owned(),
+            source_image_verified: false,
+            ..InstallConfig::default()
+        })
+        .unwrap();
+        assert!(!serialized.contains("SourceImageVerified="));
+        assert!(
+            !ConfigFileManager::deserialize_install_config(&serialized)
+                .unwrap()
+                .source_image_verified
+        );
+    }
+
+    #[test]
+    fn source_verification_receipt_rejects_non_single_wim_combinations() {
+        for config in [
+            InstallConfig {
+                image_path: "install.swm".into(),
+                source_image_verified: true,
+                ..InstallConfig::default()
+            },
+            InstallConfig {
+                image_path: "backup.gho".into(),
+                source_image_verified: true,
+                is_gho: true,
+                ..InstallConfig::default()
+            },
+            InstallConfig {
+                image_path: "install.wim".into(),
+                source_image_verified: true,
+                is_xp: true,
+                ..InstallConfig::default()
+            },
+            InstallConfig {
+                image_path: "install.wim".into(),
+                source_image_verified: true,
+                is_xp_i386: true,
+                ..InstallConfig::default()
+            },
+        ] {
+            assert!(ConfigFileManager::serialize_install_config(&config).is_err());
+        }
+    }
+
+    #[test]
+    fn verified_source_signing_requires_the_exact_single_manifest_record() {
+        let config = InstallConfig {
+            image_path: "install.wim".into(),
+            source_image_verified: true,
+            ..InstallConfig::default()
+        };
+        let identity = lr_core::handoff_manifest::ArtifactRecord {
+            role: lr_core::handoff_manifest::ArtifactRole::InstallImageSpan,
+            location: lr_core::handoff_manifest::ArtifactLocation::PublicData,
+            ordinal: 0,
+            relative_path: "LetRecovery_Data\\install.wim".into(),
+            length_bytes: 123,
+            sha256: [9; 32],
+        };
+        ConfigFileManager::validate_verified_source_manifest(
+            &config,
+            std::slice::from_ref(&identity),
+        )
+        .unwrap();
+
+        let mut wrong_path = identity.clone();
+        wrong_path.relative_path = "LetRecovery_Data\\other.wim".into();
+        assert!(
+            ConfigFileManager::validate_verified_source_manifest(&config, &[wrong_path]).is_err()
+        );
+        assert!(ConfigFileManager::validate_verified_source_manifest(&config, &[]).is_err());
+        assert!(ConfigFileManager::validate_verified_source_manifest(
+            &config,
+            &[identity.clone(), identity],
+        )
+        .is_err());
     }
 
     #[test]

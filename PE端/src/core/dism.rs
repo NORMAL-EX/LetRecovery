@@ -26,6 +26,18 @@ pub struct Dism;
 
 const VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS: u8 = 2;
 
+/// A current ViaPE handoff hashes every locked public artifact against its authenticated manifest.
+/// Repeating full decompression in WinPE adds no new fact when the normal endpoint has also
+/// authenticated that those exact bytes passed full verification. Legacy handoffs keep the old
+/// behavior because the absent receipt defaults to false.
+pub(crate) fn requires_pe_image_verification(
+    source_image_verified: bool,
+    is_gho: bool,
+    is_xp_i386: bool,
+) -> bool {
+    !is_gho && !is_xp_i386 && !source_image_verified
+}
+
 fn should_retry_verify_error(error_code: i32, attempt: u8) -> bool {
     error_code == lr_core::wimlib::WIMLIB_ERR_NOMEM && attempt < VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS
 }
@@ -323,7 +335,7 @@ impl Dism {
         image_path: &str,
         inf_files: &[std::path::PathBuf],
         progress_tx: Option<Sender<DismProgress>>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<super::dism_exe::PreservedDriverImportResult> {
         let dism_exe =
             DismExe::new().map_err(|e| anyhow::anyhow!("{}", tr!("dism.exe 初始化失败: {}", e)))?;
         let (exe_tx, exe_rx) = std::sync::mpsc::channel::<DismExeProgress>();
@@ -413,7 +425,22 @@ impl Default for Dism {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_retry_verify_error, VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS};
+    use super::{
+        requires_pe_image_verification, should_retry_verify_error,
+        VERIFY_OUT_OF_MEMORY_MAX_ATTEMPTS,
+    };
+
+    #[test]
+    fn authenticated_normal_endpoint_receipt_stops_duplicate_pe_verification() {
+        assert!(!requires_pe_image_verification(true, false, false));
+        assert!(requires_pe_image_verification(false, false, false));
+    }
+
+    #[test]
+    fn non_wim_sources_never_enter_wimlib_verification() {
+        assert!(!requires_pe_image_verification(false, true, false));
+        assert!(!requires_pe_image_verification(false, false, true));
+    }
 
     #[test]
     fn retries_only_the_first_explicit_out_of_memory_failure() {

@@ -891,6 +891,9 @@ pub struct InstallConfig {
     pub custom_install_plan: lr_core::custom_install::CustomInstallPlan,
     /// 镜像文件路径（相对于数据分区）
     pub image_path: String,
+    /// Authenticated normal-endpoint receipt that the exact staged WIM/ESD/SWM byte stream
+    /// already passed full decompression/hash verification. Missing legacy fields remain false.
+    pub source_image_verified: bool,
     /// 是否为GHO格式
     pub is_gho: bool,
     /// The secret-bearing XML remains in the authenticated private boot WIM.
@@ -1561,6 +1564,21 @@ impl ConfigFileManager {
                 let images = count(ArtifactRole::InstallImageSpan);
                 let xp_files = count(ArtifactRole::XpSourceFile);
                 let administrator_secrets = count(ArtifactRole::ProtectedAdministratorSecret);
+                if config.source_image_verified {
+                    let supported_receipt = !config.is_gho
+                        && !config.is_xp_i386
+                        && Path::new(&config.image_path)
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| {
+                                matches!(extension.to_ascii_lowercase().as_str(), "wim" | "esd")
+                            });
+                    if !supported_receipt {
+                        bail!(
+                            "authenticated source verification receipt is limited to one-file WIM/ESD sources"
+                        );
+                    }
+                }
                 if config.builtin_administrator.enabled != (administrator_secrets == 1) {
                     bail!(
                         "protected Administrator manifest does not match the authenticated option"
@@ -1927,6 +1945,11 @@ impl ConfigFileManager {
                                 .context("parse authenticated custom installation plan")?
                     }
                     "ImagePath" => config.image_path = value.to_string(),
+                    "SourceImageVerified" => {
+                        config.source_image_verified = value.parse::<bool>().with_context(|| {
+                            format!("invalid SourceImageVerified boolean: {value}")
+                        })?
+                    }
                     "IsGho" => config.is_gho = value.parse().unwrap_or(false),
                     "MigrateWifi" => config.migrate_wifi = value.parse().unwrap_or(false),
                     "WifiProfileLength" => config.wifi_profile_length = value.parse().unwrap_or(0),
@@ -2103,11 +2126,20 @@ mod tests {
             artifacts,
         )
         .unwrap();
+        let mut invalid_receipt = config.clone();
+        invalid_receipt.source_image_verified = true;
         ConfigFileManager::validate_authenticated_manifest_semantics(
             &AuthenticatedOperationConfig::Install(config),
             &manifest,
         )
         .unwrap();
+        assert!(
+            ConfigFileManager::validate_authenticated_manifest_semantics(
+                &AuthenticatedOperationConfig::Install(invalid_receipt),
+                &manifest,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2127,6 +2159,7 @@ mod tests {
         assert!(!config.is_xp_i386);
         assert!(config.xp_source_arch.is_empty());
         assert!(!config.migrate_wifi);
+        assert!(!config.source_image_verified);
     }
 
     #[test]
@@ -2173,6 +2206,19 @@ mod tests {
         assert!(config.automation_shutdown_on_terminal);
         assert!(ConfigFileManager::deserialize_install_config(
             "[Install]\r\nAutomationShutdownOnTerminal=maybe\r\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reads_authenticated_source_verification_receipt_strictly() {
+        let config = ConfigFileManager::deserialize_install_config(
+            "[Install]\r\nVolumeIndex=1\r\nSourceImageVerified=true\r\n",
+        )
+        .unwrap();
+        assert!(config.source_image_verified);
+        assert!(ConfigFileManager::deserialize_install_config(
+            "[Install]\r\nSourceImageVerified=maybe\r\n"
         )
         .is_err());
     }

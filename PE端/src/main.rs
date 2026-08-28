@@ -372,7 +372,7 @@ where
 }
 
 #[cfg(feature = "ci-automation")]
-fn find_ci_install_fault_context_in_roots<I>(
+fn find_ci_install_context_in_roots<I>(
     roots: I,
     expected_session_id: &str,
 ) -> anyhow::Result<Option<CiRunContext>>
@@ -428,12 +428,10 @@ where
             .get("fault_injection")
             .and_then(serde_json::Value::as_str)
             .context("matching CI install record has no fault injection")?;
-        let fault_injection = if fault_name == "none"
-            && value
-                .get("preserve_personal_files")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        {
+        let fault_injection = if fault_name == "none" {
+            // A session-bound active record is also the durable identity for successful install
+            // matrices (including driver recovery). `none` is the explicit no-fault value, not an
+            // unknown fault name. Unique SessionId matching above remains the authentication gate.
             None
         } else {
             Some(CiFaultInjection::parse(fault_name)?)
@@ -501,17 +499,22 @@ pub(crate) fn register_ci_authenticated_install_context(session_id: &str) -> any
     let roots = lr_core::windows_storage::volume_guid_paths()?
         .into_iter()
         .map(std::path::PathBuf::from);
-    let Some(context) = find_ci_install_fault_context_in_roots(roots, session_id)? else {
+    let Some(context) = find_ci_install_context_in_roots(roots, session_id)? else {
         return Ok(());
     };
     if let Err(rejected) = CI_AUTHENTICATED_RUN_CONTEXT.set(context.clone()) {
         if CI_AUTHENTICATED_RUN_CONTEXT.get() != Some(&rejected) {
             anyhow::bail!("refusing to replace the authenticated CI run context");
         }
-    } else {
+    } else if let Some(fault) = context.fault_injection {
         log::warn!(
             "[CI AUTOMATION] armed session-bound install fault {:?} for run_id={}",
-            context.fault_injection,
+            fault,
+            context.run_id
+        );
+    } else {
+        log::info!(
+            "[CI AUTOMATION] bound authenticated successful install run_id={}",
             context.run_id
         );
     }
@@ -2515,7 +2518,7 @@ mod persistent_payload_tests {
 #[cfg(all(test, feature = "ci-automation"))]
 mod ci_automation_tests {
     use super::{
-        atomic_write_ci_file, find_ci_install_fault_context_in_roots, find_ci_run_context_in_roots,
+        atomic_write_ci_file, find_ci_install_context_in_roots, find_ci_run_context_in_roots,
         valid_ci_run_id, CiFaultInjection,
     };
 
@@ -2632,36 +2635,40 @@ mod ci_automation_tests {
                 .unwrap();
             };
         write_fault(first.path(), session_id, "after_target_format", false);
-        let selected =
-            find_ci_install_fault_context_in_roots(vec![first.path().to_owned()], session_id)
-                .unwrap()
-                .unwrap();
+        let selected = find_ci_install_context_in_roots(vec![first.path().to_owned()], session_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             selected.fault_injection,
             Some(CiFaultInjection::AfterTargetFormat)
         );
-        assert!(find_ci_install_fault_context_in_roots(
+        assert!(find_ci_install_context_in_roots(
             vec![first.path().to_owned()],
             "22222222222222222222222222222222"
         )
         .unwrap()
         .is_none());
         write_fault(second.path(), session_id, "after_target_format", false);
-        assert!(find_ci_install_fault_context_in_roots(
+        assert!(find_ci_install_context_in_roots(
             vec![first.path().to_owned(), second.path().to_owned()],
             session_id
         )
         .is_err());
         write_fault(second.path(), session_id, "unknown", false);
         assert!(
-            find_ci_install_fault_context_in_roots(vec![second.path().to_owned()], session_id)
-                .is_err()
+            find_ci_install_context_in_roots(vec![second.path().to_owned()], session_id).is_err()
         );
         write_fault(second.path(), session_id, "none", true);
         let preservation =
-            find_ci_install_fault_context_in_roots(vec![second.path().to_owned()], session_id)
+            find_ci_install_context_in_roots(vec![second.path().to_owned()], session_id)
                 .unwrap()
                 .unwrap();
         assert_eq!(preservation.fault_injection, None);
+        write_fault(second.path(), session_id, "none", false);
+        let ordinary_success =
+            find_ci_install_context_in_roots(vec![second.path().to_owned()], session_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(ordinary_success.fault_injection, None);
     }
 }

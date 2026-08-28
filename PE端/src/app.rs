@@ -52,6 +52,258 @@ fn should_reboot_after_completion_warning(
     automation_shutdown_on_terminal
 }
 
+fn missing_topology_storage_requirements<'a>(
+    requirements: &'a [lr_core::driver::StorageDriverRequirement],
+    candidates: &[lr_core::dism_driver_inventory::OfflineDriverCandidate],
+) -> Vec<&'a lr_core::driver::StorageDriverRequirement> {
+    requirements
+        .iter()
+        .filter(|requirement| requirement.is_topology_proven())
+        .filter(|requirement| {
+            !candidates.iter().any(|candidate| {
+                requirement.matches_candidate_id(&candidate.hardware_id)
+                    || requirement.matches_candidate_id(&candidate.compatible_ids)
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TargetInventoryCoverageMatch {
+    requirement_source_inf: String,
+    requirement_id_sha256: String,
+    candidate_published_name: String,
+    matched_id_sha256: String,
+}
+
+fn structured_log_inf_name(value: &str) -> String {
+    if !value.is_empty()
+        && value.len() <= 260
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && value.to_ascii_lowercase().ends_with(".inf")
+    {
+        value.to_owned()
+    } else {
+        "redacted.inf".to_owned()
+    }
+}
+
+fn target_inventory_coverage_matches(
+    requirements: &[lr_core::driver::StorageDriverRequirement],
+    candidates: &[lr_core::dism_driver_inventory::OfflineDriverCandidate],
+) -> Vec<TargetInventoryCoverageMatch> {
+    requirements
+        .iter()
+        .filter(|requirement| requirement.is_topology_proven())
+        .filter_map(|requirement| {
+            candidates.iter().find_map(|candidate| {
+                [
+                    candidate.hardware_id.as_str(),
+                    candidate.compatible_ids.as_str(),
+                ]
+                .into_iter()
+                .filter(|candidate_id| !candidate_id.is_empty())
+                .find_map(|candidate_id| {
+                    let requirement_id = requirement
+                        .hardware_ids
+                        .iter()
+                        .chain(requirement.compatible_ids.iter())
+                        .find(|requirement_id| requirement_id.eq_ignore_ascii_case(candidate_id))?;
+                    let requirement_id = requirement_id.to_ascii_lowercase();
+                    let matched_id = candidate_id.to_ascii_lowercase();
+                    Some(TargetInventoryCoverageMatch {
+                        requirement_source_inf: structured_log_inf_name(&requirement.source_inf),
+                        requirement_id_sha256: lr_core::hash::sha256_bytes(
+                            requirement_id.as_bytes(),
+                        ),
+                        candidate_published_name: structured_log_inf_name(
+                            &candidate.published_name,
+                        ),
+                        matched_id_sha256: lr_core::hash::sha256_bytes(matched_id.as_bytes()),
+                    })
+                })
+            })
+        })
+        .collect()
+}
+
+fn requirements_not_covered_by_successful_infs(
+    requirements: &[&lr_core::driver::StorageDriverRequirement],
+    successful_inf_files: &[std::path::PathBuf],
+) -> anyhow::Result<Vec<lr_core::driver::StorageDriverRequirement>> {
+    let mut unresolved = Vec::new();
+    for requirement in requirements {
+        let device_ids = requirement
+            .hardware_ids
+            .iter()
+            .chain(requirement.compatible_ids.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut covered = false;
+        for inf in successful_inf_files {
+            if lr_core::storage_driver_match::inf_file_matches_any_hardware_id(inf, &device_ids)? {
+                covered = true;
+                break;
+            }
+        }
+        if !covered {
+            unresolved.push((*requirement).clone());
+        }
+    }
+    Ok(unresolved)
+}
+
+fn enumerate_target_offline_driver_candidates(
+    image_root: &Path,
+    scratch_dir: &Path,
+    log_path: &Path,
+    requirements: &[lr_core::driver::StorageDriverRequirement],
+) -> anyhow::Result<lr_core::dism_driver_inventory::OfflineDriverInventory> {
+    use anyhow::Context as _;
+
+    match lr_core::dism_driver_inventory::enumerate_offline_driver_candidates(
+        image_root,
+        scratch_dir,
+        log_path,
+    ) {
+        Ok(mut inventory) => {
+            log::info!(
+                "[DRIVER TARGET INVENTORY] provider=DISM API candidates={} package_query_failures={} omitted={}",
+                inventory.candidates.len(),
+                inventory.package_query_failures.len(),
+                inventory.omitted_package_query_failures
+            );
+            let api_is_partial = !inventory.package_query_failures.is_empty()
+                || inventory.omitted_package_query_failures != 0;
+            let api_missing =
+                missing_topology_storage_requirements(requirements, &inventory.candidates);
+            if !api_is_partial || api_missing.is_empty() {
+                return Ok(inventory);
+            }
+
+            log::warn!(
+                "[DRIVER TARGET INVENTORY] DISM API inventory is partial and leaves {} real storage-path requirements unresolved; merging host dism.exe fallback",
+                api_missing.len()
+            );
+            let cli_result = crate::core::dism_exe::DismExe::new()
+                .context("locating host dism.exe for partial target driver inventory recovery")?
+                .enumerate_offline_driver_candidates_command_line(
+                    image_root.to_string_lossy().as_ref(),
+                    log_path,
+                );
+            match cli_result {
+                Ok(cli_inventory) => {
+                    inventory.candidates.extend(cli_inventory.candidates);
+                    inventory.candidates.sort_by(|left, right| {
+                        left.published_name
+                            .to_ascii_lowercase()
+                            .cmp(&right.published_name.to_ascii_lowercase())
+                            .then_with(|| {
+                                left.hardware_id
+                                    .to_ascii_lowercase()
+                                    .cmp(&right.hardware_id.to_ascii_lowercase())
+                            })
+                            .then_with(|| {
+                                left.compatible_ids
+                                    .to_ascii_lowercase()
+                                    .cmp(&right.compatible_ids.to_ascii_lowercase())
+                            })
+                            .then_with(|| left.architecture.cmp(&right.architecture))
+                    });
+                    inventory.candidates.dedup_by(|left, right| {
+                        left.published_name
+                            .eq_ignore_ascii_case(&right.published_name)
+                            && left.hardware_id.eq_ignore_ascii_case(&right.hardware_id)
+                            && left
+                                .compatible_ids
+                                .eq_ignore_ascii_case(&right.compatible_ids)
+                            && left.architecture == right.architecture
+                    });
+                    if cli_inventory.package_query_failures.is_empty()
+                        && cli_inventory.omitted_package_query_failures == 0
+                    {
+                        // The independent host command completed every published package, so it
+                        // closes the API's package-level uncertainty.
+                        inventory.package_query_failures.clear();
+                        inventory.omitted_package_query_failures = 0;
+                    } else {
+                        let available =
+                            32_usize.saturating_sub(inventory.package_query_failures.len());
+                        let cli_failure_count = cli_inventory.package_query_failures.len();
+                        inventory.package_query_failures.extend(
+                            cli_inventory
+                                .package_query_failures
+                                .into_iter()
+                                .take(available),
+                        );
+                        inventory.omitted_package_query_failures = inventory
+                            .omitted_package_query_failures
+                            .saturating_add(cli_inventory.omitted_package_query_failures)
+                            .saturating_add(cli_failure_count.saturating_sub(available));
+                    }
+                    log::info!(
+                        "[DRIVER TARGET INVENTORY] provider=DISM API+DISM.EXE candidates={} package_query_failures={} omitted={}",
+                        inventory.candidates.len(),
+                        inventory.package_query_failures.len(),
+                        inventory.omitted_package_query_failures
+                    );
+                    Ok(inventory)
+                }
+                Err(cli_error) => {
+                    let mut detail = format!("host dism.exe fallback failed: {cli_error:#}");
+                    if detail.chars().count() > 1_024 {
+                        detail = detail.chars().take(1_023).collect();
+                        detail.push('…');
+                    }
+                    if inventory.package_query_failures.len() < 32 {
+                        inventory.package_query_failures.push(
+                            lr_core::dism_driver_inventory::OfflineDriverPackageQueryFailure {
+                                published_name: "<DISM.EXE fallback>".to_owned(),
+                                hresult: u32::MAX,
+                                detail,
+                            },
+                        );
+                    } else {
+                        inventory.omitted_package_query_failures =
+                            inventory.omitted_package_query_failures.saturating_add(1);
+                    }
+                    Ok(inventory)
+                }
+            }
+        }
+        Err(api_error) => {
+            // Base Windows 10 PE commonly ships the authoritative dism.exe servicing surface but
+            // omits the optional DismApi.dll facade. Do not mix an ADK/newer DLL into that host.
+            // The invariant-English command-line report is Microsoft's supported read-only
+            // equivalent and retains the same exact published-name + applicable Hardware-ID rule.
+            log::warn!(
+                "[DRIVER TARGET INVENTORY] DISM API unavailable; using host dism.exe read-only fallback: {api_error:#}"
+            );
+            let dism = crate::core::dism_exe::DismExe::new()
+                .context("locating host dism.exe for target driver inventory fallback")?;
+            let inventory = dism
+                .enumerate_offline_driver_candidates_command_line(
+                    image_root.to_string_lossy().as_ref(),
+                    log_path,
+                )
+                .with_context(|| {
+                    format!(
+                        "DISM API inventory failed: {api_error:#}; host dism.exe fallback also failed"
+                    )
+                })?;
+            log::info!(
+                "[DRIVER TARGET INVENTORY] provider=DISM.EXE candidates={} package_query_failures={} omitted={}",
+                inventory.candidates.len(),
+                inventory.package_query_failures.len(),
+                inventory.omitted_package_query_failures
+            );
+            Ok(inventory)
+        }
+    }
+}
+
 pub(crate) struct WorkflowSession {
     /// 进度状态
     progress_state: Arc<Mutex<ProgressState>>,
@@ -925,7 +1177,11 @@ fn execute_install_workflow(
             fail_prewrite!(tr!("GHO 镜像预检失败: {}", error));
         }
         log::info!("[PE安装] GHO 镜像预检通过，尚未修改目标分区");
-    } else if !config.is_xp_i386 {
+    } else if crate::core::dism::requires_pe_image_verification(
+        config.source_image_verified,
+        config.is_gho,
+        config.is_xp_i386,
+    ) {
         let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::VerifyImage));
         let _ = tx.send(WorkerMessage::SetStatus(tr!(
             "正在校验系统镜像完整性（可能需要几分钟）..."
@@ -962,8 +1218,19 @@ fn execute_install_workflow(
         }
         log::info!("[PE安装] 镜像校验通过");
         let _ = tx.send(WorkerMessage::SetProgress(100));
+    } else if config.source_image_verified {
+        // Authentication already hashed the locked staged artifact against the HMAC-protected
+        // manifest. The normal endpoint verified that same byte stream before publishing the
+        // handoff, so a second full decompression in constrained WinPE would only add a duplicate
+        // failure point.
+        log::info!(
+            "[PE安装] 使用认证的正常端镜像校验结果；当前锁定镜像的长度与 SHA-256 已由交接清单回读确认"
+        );
+        log::info!(
+            "[IMAGE VERIFY] source=authenticated_normal_endpoint status=accepted artifact_binding=length_sha256"
+        );
     } else {
-        log::info!("[PE安装] GHO 镜像，跳过 wimlib 校验");
+        log::info!("[PE安装] XP/2003 目录源已完成结构校验，跳过 wimlib 校验");
     }
 
     // PCA/EFI validation only protects a later boot write. When the user
@@ -1494,6 +1761,10 @@ fn execute_install_workflow(
     let _ = tx.send(WorkerMessage::SetProgress(100));
 
     let mut completion_warnings = Vec::new();
+    // A boot-path coverage failure is discovered after the image has already been applied. Keep
+    // it pending while the workflow completes BCDBoot and the minimum offline-system setup; only
+    // then publish a terminal failure and preserve the authenticated staging data for recovery.
+    let mut critical_storage_failure: Option<String> = None;
     let account_inspection =
         crate::core::account_fix::inspect_offline_image_accounts(&target_partition, config.is_gho);
     log::info!(
@@ -1553,31 +1824,212 @@ fn execute_install_workflow(
 
         // 等待进度监控线程结束
         let _ = driver_progress_handle.join();
-        let optional_failures = match import_result {
-            Ok(failures) => failures,
+        let import_result = match import_result {
+            Ok(result) => result,
             Err(error) => {
-                log::error!("导入驱动失败，安装停止: {}", error);
-                let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
-                return;
+                let detail = format!("DISM 驱动导入基础设施失败: {error:#}");
+                log::error!("离线驱动导入无法继续；将先完成引导和最小系统配置: {detail}");
+                critical_storage_failure = Some(detail);
+                crate::core::dism_exe::PreservedDriverImportResult::default()
             }
         };
-        let failure_summary =
-            lr_core::bounded_failure_summary::summarize_failures(&optional_failures, 3);
-        if !failure_summary.is_empty() {
-            log::warn!("部分非启动存储驱动未能由标准 DISM 导入: {failure_summary}");
-        }
-        if let Err(error) = lr_core::driver::verify_offline_storage_driver_requirements(
-            Path::new(&apply_dir),
-            Path::new(&driver_path),
-        ) {
-            log::error!("启动存储驱动导入后验证失败，安装停止: {}", error);
-            let _ = tx.send(WorkerMessage::Failed(tr!("离线驱动导入失败: {}", error)));
-            return;
+        if import_result.failures.is_empty() {
+            if critical_storage_failure.is_none() {
+                // Standard DISM accepted the complete authenticated set. This is the stop
+                // condition; do not require a manifest or add a second mutable inventory gate.
+                log::info!("驱动导入完成：标准 DISM 已接受全部认证 INF");
+            }
         } else {
-            log::info!(
-                "驱动导入完成，启动存储驱动覆盖验证通过；跳过可选包 {} 个",
-                optional_failures.len()
-            );
+            let failure_summary =
+                lr_core::bounded_failure_summary::summarize_failures(&import_result.failures, 3);
+            // Package role is resolved below from the authenticated, topology-derived manifest.
+            // Do not call every isolated failure optional before that comparison has happened.
+            log::warn!("部分驱动包未能由标准 DISM 导入: {failure_summary}");
+            match lr_core::driver::load_storage_driver_requirements(Path::new(&driver_path)) {
+                Err(error) => {
+                    // The manifest is an authenticated artifact and its absence/corruption means we
+                    // cannot prove which rejected package, if any, carries the actual boot path. Do
+                    // not stop before BCDBoot after the old system has already been overwritten.
+                    let detail = format!("无法读取启动存储驱动清单: {error:#}");
+                    log::error!(
+                        "启动存储驱动覆盖暂时无法确认；将先完成引导和最小系统配置: {detail}"
+                    );
+                    critical_storage_failure = Some(detail);
+                }
+                Ok(requirements) => {
+                    let topology_requirements = requirements
+                        .iter()
+                        .filter(|requirement| requirement.is_topology_proven())
+                        .collect::<Vec<_>>();
+                    let legacy_unproven = requirements.len() - topology_requirements.len();
+                    if legacy_unproven != 0 {
+                        // Version-1 manifests were generated from every present HDC/SCSIAdapter and
+                        // therefore cannot safely promote an unrelated controller to a fatal gate.
+                        log::warn!(
+                        "读取到 {} 个旧版、无真实系统盘父链证明的存储驱动要求；仅作诊断，不作为本次致命门禁",
+                        legacy_unproven
+                    );
+                    }
+
+                    if topology_requirements.is_empty() {
+                        log::warn!(
+                        "{} 个驱动包被 DISM 拒绝，但清单中没有经当前系统盘父链证明的 OEM 启动存储要求；按可选包失败继续",
+                        import_result.failures.len()
+                    );
+                    } else {
+                        let unresolved_requirements =
+                            match requirements_not_covered_by_successful_infs(
+                                &topology_requirements,
+                                &import_result.successful_inf_files,
+                            ) {
+                                Ok(unresolved) => unresolved,
+                                Err(error) => {
+                                    // A correlation read failure must not erase DISM's successful
+                                    // imports. Fall back to target inventory for every proven device.
+                                    log::warn!(
+                                    "无法把已成功导入的精确 INF 与启动路径逐项关联，将改为查询目标库存: {error:#}"
+                                );
+                                    topology_requirements
+                                        .iter()
+                                        .map(|requirement| (*requirement).clone())
+                                        .collect()
+                                }
+                            };
+                        if unresolved_requirements.is_empty() {
+                            log::info!(
+                            "部分可选驱动包被拒绝，但承载全部 {} 个真实启动路径要求的精确 INF 已由 DISM 单包导入成功；无需二次库存门禁",
+                            topology_requirements.len()
+                        );
+                        } else {
+                            // Only an isolated-package failure justifies the extra readback. DISM's API
+                            // returns models applicable to the offline image (including inbox packages),
+                            // so one exact Hardware/Compatible-ID match proves that the target already
+                            // has a PnP candidate without requiring the source INF name or version.
+                            let scratch_dir = std::env::temp_dir();
+                            let inventory_log = scratch_dir.join(format!(
+                                "LetRecovery-DismApi-driver-inventory-{}.log",
+                                std::process::id()
+                            ));
+                            match enumerate_target_offline_driver_candidates(
+                                Path::new(&apply_dir),
+                                &scratch_dir,
+                                &inventory_log,
+                                &unresolved_requirements,
+                            ) {
+                                Err(error) => {
+                                    let detail = format!(
+                                "部分驱动包导入失败，且无法查询目标镜像已有驱动候选: {error:#}"
+                            );
+                                    log::error!(
+                                "启动存储驱动覆盖暂时无法确认；将先完成引导和最小系统配置: {detail}"
+                            );
+                                    critical_storage_failure = Some(detail);
+                                }
+                                Ok(inventory) => {
+                                    let missing = missing_topology_storage_requirements(
+                                        &unresolved_requirements,
+                                        &inventory.candidates,
+                                    )
+                                    .into_iter()
+                                    .map(|requirement| {
+                                        format!(
+                                            "{} ({}, device={})",
+                                            requirement.description,
+                                            requirement.source_inf,
+                                            requirement
+                                                .device_instance_id
+                                                .as_deref()
+                                                .unwrap_or("unknown")
+                                        )
+                                    })
+                                    .collect::<Vec<_>>();
+                                    if missing.is_empty() {
+                                        if !inventory.package_query_failures.is_empty()
+                                            || inventory.omitted_package_query_failures != 0
+                                        {
+                                            let query_summary =
+                                        lr_core::bounded_failure_summary::summarize_failures_by(
+                                            &inventory.package_query_failures,
+                                            3,
+                                            |failure| {
+                                                format!(
+                                                    "{}: {}",
+                                                    failure.published_name, failure.detail
+                                                )
+                                            },
+                                        );
+                                            log::warn!(
+                                        "目标镜像有部分无关驱动包无法读取详细模型，但全部真实启动路径设备均已找到适用候选，安装继续: {query_summary}; omitted={}",
+                                        inventory.omitted_package_query_failures
+                                    );
+                                        }
+                                        for coverage in target_inventory_coverage_matches(
+                                            &unresolved_requirements,
+                                            &inventory.candidates,
+                                        ) {
+                                            log::info!(
+                                                "[DRIVER COVERAGE MATCH] requirement_source_inf={} requirement_id_sha256={} candidate_published_name={} matched_id_sha256={}",
+                                                coverage.requirement_source_inf,
+                                                coverage.requirement_id_sha256,
+                                                coverage.candidate_published_name,
+                                                coverage.matched_id_sha256
+                                            );
+                                        }
+                                        log::info!(
+                                    "部分保留驱动包被拒绝，但 DISM 目标库存已找到剩余 {} 个真实启动路径设备的适用候选（可为 inbox、同包或其它版本）；安装继续",
+                                    unresolved_requirements.len()
+                                );
+                                        log::info!(
+                                            "[DRIVER COVERAGE] source=target_inventory status=accepted requirements={} candidate_scope=inbox_or_installed",
+                                            unresolved_requirements.len()
+                                        );
+                                    } else if !inventory.package_query_failures.is_empty()
+                                        || inventory.omitted_package_query_failures != 0
+                                    {
+                                        let missing_summary =
+                                            lr_core::bounded_failure_summary::summarize_failures(
+                                                &missing, 3,
+                                            );
+                                        let query_summary =
+                                            lr_core::bounded_failure_summary::summarize_failures_by(
+                                                &inventory.package_query_failures,
+                                                3,
+                                                |failure| {
+                                                    format!(
+                                                        "{}: {}",
+                                                        failure.published_name, failure.detail
+                                                    )
+                                                },
+                                            );
+                                        let detail = format!(
+                                    "仍有 {} 个真实启动路径设备未找到候选，但 DISM 无法读取部分目标包，覆盖状态只能判为未确认: missing={missing_summary}; query_failures={query_summary}; omitted={}",
+                                    missing.len(),
+                                    inventory.omitted_package_query_failures
+                                );
+                                        log::error!(
+                                    "启动存储驱动覆盖暂时无法确认；将先完成引导和最小系统配置: {detail}"
+                                );
+                                        critical_storage_failure = Some(detail);
+                                    } else {
+                                        let summary =
+                                            lr_core::bounded_failure_summary::summarize_failures(
+                                                &missing, 3,
+                                            );
+                                        let detail = format!(
+                                    "目标镜像缺少 {} 个真实启动路径设备的适用驱动候选: {summary}",
+                                    missing.len()
+                                );
+                                        log::error!(
+                                    "启动存储驱动覆盖未满足；将先完成引导和最小系统配置: {detail}"
+                                );
+                                        critical_storage_failure = Some(detail);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Optional CABs are selected from the same exact authenticated artifact set. Never scan
@@ -1946,6 +2398,21 @@ fn execute_install_workflow(
     }
 
     let _ = tx.send(WorkerMessage::SetProgress(100));
+
+    // A missing boot-storage candidate is a core-result failure, but returning at the import step
+    // would strand an already-applied image without BCDBoot. At this point image, boot and minimum
+    // offline setup have all had their normal chance to complete. Preserve staging, suppress
+    // automatic boot into an unconfirmed system, and publish the actual terminal failure.
+    if let Some(detail) = critical_storage_failure {
+        log::error!(
+            "[PE INSTALL] image/minimum setup and boot phase completed, but boot-storage coverage remains unconfirmed; authenticated staging is preserved: {detail}"
+        );
+        let _ = tx.send(WorkerMessage::Failed(tr!(
+            "系统镜像和引导阶段已完成，但启动存储驱动覆盖无法确认；已保留驱动与诊断材料并禁止自动重启。请修正驱动后重新安装或人工检查: {}",
+            detail
+        )));
+        return;
+    }
 
     // Step 8: 清理临时文件
     let _ = tx.send(WorkerMessage::SetInstallStep(InstallStep::Cleanup));
@@ -2580,6 +3047,173 @@ fn generate_win10_unattend_xml(
 #[cfg(test)]
 mod workflow_session_tests {
     use super::*;
+
+    fn storage_requirement(
+        hardware_ids: &[&str],
+        compatible_ids: &[&str],
+        topology_proven: bool,
+    ) -> lr_core::driver::StorageDriverRequirement {
+        lr_core::driver::StorageDriverRequirement {
+            description: "test storage controller".to_string(),
+            source_inf: "oem42.inf".to_string(),
+            hardware_ids: hardware_ids.iter().map(|id| (*id).to_string()).collect(),
+            compatible_ids: compatible_ids.iter().map(|id| (*id).to_string()).collect(),
+            device_instance_id: topology_proven.then(|| "PCI\\VEN_8086&DEV_A282\\TEST".to_string()),
+        }
+    }
+
+    fn offline_candidate(
+        hardware_id: &str,
+        compatible_ids: &str,
+        in_box: bool,
+    ) -> lr_core::dism_driver_inventory::OfflineDriverCandidate {
+        lr_core::dism_driver_inventory::OfflineDriverCandidate {
+            published_name: if in_box { "storahci.inf" } else { "oem7.inf" }.to_string(),
+            original_file_name: "controller.inf".to_string(),
+            hardware_id: hardware_id.to_string(),
+            compatible_ids: compatible_ids.to_string(),
+            architecture: 9,
+            in_box,
+            boot_critical: false,
+            signature: 0,
+        }
+    }
+
+    #[test]
+    fn target_inbox_candidate_covers_a_topology_requirement_by_compatible_id() {
+        let requirements = [storage_requirement(
+            &["PCI\\VEN_8086&DEV_A282&SUBSYS_00000000"],
+            &["PCI\\VEN_8086&DEV_A282"],
+            true,
+        )];
+        let candidates = [offline_candidate("pci\\ven_8086&dev_a282", "", true)];
+
+        assert!(missing_topology_storage_requirements(&requirements, &candidates).is_empty());
+    }
+
+    #[test]
+    fn target_other_oem_version_covers_a_topology_requirement_by_hardware_id() {
+        let requirements = [storage_requirement(
+            &["SCSI\\VEN_NVME&PROD_TEST"],
+            &[],
+            true,
+        )];
+        let candidates = [offline_candidate("scsi\\ven_nvme&prod_test", "", false)];
+
+        assert!(missing_topology_storage_requirements(&requirements, &candidates).is_empty());
+    }
+
+    #[test]
+    fn unrelated_target_candidate_does_not_hide_a_missing_topology_requirement() {
+        let requirements = [storage_requirement(&["PCI\\VEN_8086&DEV_1234"], &[], true)];
+        let candidates = [offline_candidate("PCI\\VEN_1234&DEV_ABCD", "", true)];
+
+        assert_eq!(
+            missing_topology_storage_requirements(&requirements, &candidates),
+            vec![&requirements[0]]
+        );
+    }
+
+    #[test]
+    fn target_compatible_only_candidate_covers_a_topology_requirement() {
+        let requirements = [storage_requirement(
+            &["PCI\\VEN_8086&DEV_A282&SUBSYS_00000000"],
+            &["PCI\\VEN_8086&DEV_A282"],
+            true,
+        )];
+        let candidates = [offline_candidate("", "pci\\ven_8086&dev_a282", true)];
+
+        assert!(missing_topology_storage_requirements(&requirements, &candidates).is_empty());
+    }
+
+    #[test]
+    fn target_inventory_match_evidence_binds_exact_ids_without_logging_them() {
+        let requirements = [storage_requirement(
+            &["PCI\\VEN_8086&DEV_A282&SUBSYS_00000000"],
+            &["PCI\\VEN_8086&DEV_A282"],
+            true,
+        )];
+        let candidates = [offline_candidate("", "pci\\ven_8086&dev_a282", true)];
+
+        let matches = target_inventory_coverage_matches(&requirements, &candidates);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].requirement_source_inf, "oem42.inf");
+        assert_eq!(matches[0].candidate_published_name, "storahci.inf");
+        assert_eq!(matches[0].requirement_id_sha256.len(), 64);
+        assert_eq!(
+            matches[0].requirement_id_sha256,
+            matches[0].matched_id_sha256
+        );
+        assert!(!matches[0].requirement_id_sha256.contains("ven_8086"));
+        assert_eq!(structured_log_inf_name("storahci.inf"), "storahci.inf");
+        assert_eq!(
+            structured_log_inf_name("unsafe\r\nline.inf"),
+            "redacted.inf"
+        );
+    }
+
+    #[test]
+    fn target_candidate_ids_are_not_prefix_matched() {
+        let requirements = [storage_requirement(
+            &["PCI\\VEN_8086&DEV_A282&SUBSYS_00000000&REV_01"],
+            &[],
+            true,
+        )];
+        let candidates = [offline_candidate("PCI\\VEN_8086&DEV_A282", "", true)];
+
+        assert_eq!(
+            missing_topology_storage_requirements(&requirements, &candidates),
+            vec![&requirements[0]]
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_requirement_without_topology_proof_is_never_fatal() {
+        let requirements = [storage_requirement(&["PCI\\VEN_8086&DEV_1234"], &[], false)];
+
+        assert!(missing_topology_storage_requirements(&requirements, &[]).is_empty());
+    }
+
+    #[test]
+    fn successful_exact_inf_is_authoritative_for_its_topology_requirement() {
+        let temporary = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "pe-successful-storage-inf",
+        )
+        .unwrap();
+        let storage_inf = temporary.path().join("controller.inf");
+        let optional_inf = temporary.path().join("optional.inf");
+        std::fs::write(
+            &storage_inf,
+            b"[Models]\r\n%Controller%=Install, PCI\\VEN_8086&DEV_A282\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &optional_inf,
+            b"[Models]\r\n%Printer%=Install, USBPRINT\\TEST\r\n",
+        )
+        .unwrap();
+        let requirement = storage_requirement(
+            &["PCI\\VEN_8086&DEV_A282&SUBSYS_00000000"],
+            &["PCI\\VEN_8086&DEV_A282"],
+            true,
+        );
+
+        assert!(requirements_not_covered_by_successful_infs(
+            &[&requirement],
+            std::slice::from_ref(&storage_inf),
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            requirements_not_covered_by_successful_infs(
+                &[&requirement],
+                std::slice::from_ref(&optional_inf),
+            )
+            .unwrap(),
+            vec![requirement]
+        );
+    }
 
     #[test]
     fn existing_account_mode_removes_only_new_install_account_and_first_logon_options() {

@@ -338,6 +338,12 @@ jobs:
           Write-Host "Using PE-side exe: $peExe"
           Copy-Item -Force $peExe $dst
           Write-Host "Replaced: $dst"
+          $capabilityPath = Join-Path $mount "Program Files\LetRecoveryPE\handoff-capabilities.txt"
+          [IO.File]::WriteAllBytes($capabilityPath, [Text.Encoding]::ASCII.GetBytes("source-image-verified-v1`r`n"))
+          if ([IO.File]::ReadAllText($capabilityPath, [Text.Encoding]::ASCII) -ne "source-image-verified-v1`r`n") {
+            throw "PE handoff capability marker readback mismatch"
+          }
+          Write-Host "Injected PE handoff capabilities: $capabilityPath"
           $offregSource = "assets\release\bin\offreg.dll"
           $offregDestination = Join-Path $mount "Program Files\LetRecoveryPE\offreg.dll"
           Copy-Item -LiteralPath $offregSource -Destination $offregDestination -Force
@@ -519,6 +525,10 @@ jobs:
                 (Get-FileHash -LiteralPath $offreg -Algorithm SHA256).Hash -ne
                   "BAEE13B111020107A3CCFE4BEC5FDD2CE6863991066201CA110E02B2DDD495E0") {
               throw "Final WIM Microsoft Offline Registry runtime does not match its release lock"
+            }
+            $capabilities = Join-Path $mount "Program Files\LetRecoveryPE\handoff-capabilities.txt"
+            if ([IO.File]::ReadAllText($capabilities, [Text.Encoding]::ASCII) -ne "source-image-verified-v1`r`n") {
+              throw "Final WIM handoff capability marker mismatch"
             }
           } finally {
             if ($mounted) {

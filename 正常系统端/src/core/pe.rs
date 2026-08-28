@@ -24,9 +24,85 @@ const HANDOFF_WIFI_WIM_PATH: &str = "\\LR_WifiProfile.xml";
 const HANDOFF_ADMINISTRATOR_WIM_PATH: &str =
     lr_core::unattend_account::PROTECTED_ADMINISTRATOR_SECRET_WIM_PATH;
 const HANDOFF_BITLOCKER_WIM_PATH: &str = lr_core::bl_passthrough::KEYS_WIM_PATH;
+const HANDOFF_CAPABILITIES_WIM_PATH: &str =
+    "\\Program Files\\LetRecoveryPE\\handoff-capabilities.txt";
+const SOURCE_IMAGE_VERIFIED_CAPABILITY: &str = "source-image-verified-v1";
 const JOURNAL_VERSION: &str = "LRPE4";
 const PRE_AUTH_JOURNAL_VERSION: &str = "LRPE3";
 const LEGACY_JOURNAL_VERSION: &str = "LRPE2";
+
+fn capability_text_contains(value: &[u8], capability: &str) -> bool {
+    std::str::from_utf8(value).is_ok_and(|text| {
+        text.lines()
+            .map(str::trim)
+            .any(|line| line.eq_ignore_ascii_case(capability))
+    })
+}
+
+/// Return whether this exact, already authenticated PE WIM advertises support for the optional
+/// source-verification receipt. Absence is deliberately a compatibility fallback, not an error:
+/// old/custom WIMs must continue receiving the legacy config and verify the image in PE.
+pub(crate) fn supports_source_image_verification_receipt(pe_path: &Path) -> bool {
+    if !pe_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("wim"))
+    {
+        return false;
+    }
+    let result = (|| -> Result<bool> {
+        let path = pe_path
+            .to_str()
+            .context("authenticated PE WIM path is not valid Unicode")?;
+        let verifier = lr_core::wimlib::Wimlib::new().map_err(anyhow::Error::msg)?;
+        let opened = verifier.open_wim(path).map_err(anyhow::Error::msg)?;
+        let info = opened
+            .get_info()
+            .context("read authenticated PE WIM boot index for capability detection")?;
+        if info.boot_index == 0 || info.boot_index > info.image_count {
+            anyhow::bail!(
+                "authenticated PE WIM has invalid boot index {} for {} images",
+                info.boot_index,
+                info.image_count
+            );
+        }
+        drop(opened);
+        let extraction = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "pe-capability",
+        )?;
+        lr_core::wimlib::WimlibManager::new()
+            .map_err(anyhow::Error::msg)?
+            .extract_paths(
+                path,
+                info.boot_index,
+                extraction.path().to_string_lossy().as_ref(),
+                &[HANDOFF_CAPABILITIES_WIM_PATH],
+            )
+            .map_err(anyhow::Error::msg)?;
+        let bytes = lr_core::scoped_temp_file::read_bounded_plain_file(
+            &extraction
+                .path()
+                .join("Program Files")
+                .join("LetRecoveryPE")
+                .join("handoff-capabilities.txt"),
+            4096,
+        )?;
+        Ok(capability_text_contains(
+            &bytes,
+            SOURCE_IMAGE_VERIFIED_CAPABILITY,
+        ))
+    })();
+    match result {
+        Ok(supported) => supported,
+        Err(error) => {
+            log::info!(
+                "[PE] source verification receipt capability absent or unreadable; using legacy PE verification: {error:#}"
+            );
+            false
+        }
+    }
+}
 
 struct SecurePeDirectory {
     path: PathBuf,
@@ -2277,6 +2353,26 @@ mod cache_policy_tests {
     const RAMDISK_GUID: &str = "{11111111-1111-1111-1111-111111111111}";
     const LOADER_GUID: &str = "{22222222-2222-2222-2222-222222222222}";
     const TEST_PERSISTENT_PE_DIR: &str = "C:\\LetRecovery_PE";
+
+    #[test]
+    fn handoff_capability_parser_requires_an_exact_line() {
+        assert!(capability_text_contains(
+            b"other-v1\r\nsource-image-verified-v1\r\n",
+            SOURCE_IMAGE_VERIFIED_CAPABILITY
+        ));
+        assert!(capability_text_contains(
+            b"  SOURCE-IMAGE-VERIFIED-V1  \n",
+            SOURCE_IMAGE_VERIFIED_CAPABILITY
+        ));
+        assert!(!capability_text_contains(
+            b"source-image-verified-v10\r\n",
+            SOURCE_IMAGE_VERIFIED_CAPABILITY
+        ));
+        assert!(!capability_text_contains(
+            &[0xff, 0xfe],
+            SOURCE_IMAGE_VERIFIED_CAPABILITY
+        ));
+    }
 
     #[cfg(feature = "ci-automation")]
     #[test]

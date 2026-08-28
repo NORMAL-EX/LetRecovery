@@ -282,6 +282,7 @@ fn field_rule(key: &str) -> Option<(&'static str, ValueKind)> {
         | "FormatPartition"
         | "PreservePersonalFiles"
         | "RepairBoot"
+        | "SourceImageVerified"
         | "IsGho"
         | "IsXp"
         | "IsXpI386"

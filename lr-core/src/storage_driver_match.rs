@@ -326,6 +326,30 @@ pub fn inf_tree_contains_hardware_id(root: &Path, hardware_id: &str) -> Result<b
     inf_tree_matches_any_hardware_id(root, &[hardware_id.to_owned()])
 }
 
+/// Returns whether one exact, regular INF file covers any supplied source-device ID.
+///
+/// This is used only after DISM has authoritatively accepted that exact authenticated package, so
+/// callers can correlate the successful package with a boot-path requirement without depending on
+/// a second target-inventory query. It does not replace DISM applicability or installation.
+pub fn inf_file_matches_any_hardware_id(path: &Path, hardware_ids: &[String]) -> Result<bool> {
+    let metadata = path
+        .symlink_metadata()
+        .with_context(|| format!("driver INF is unavailable: {}", path.display()))?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("inf"))
+    {
+        bail!("driver INF is not a regular INF file: {}", path.display());
+    }
+    let text = read_inf_text(path)?;
+    Ok(hardware_ids
+        .iter()
+        .any(|hardware_id| inf_contains_hardware_id(&text, hardware_id)))
+}
+
 /// Returns whether at least one regular INF below `root` covers any supplied
 /// hardware ID while reading each INF only once.
 pub fn inf_tree_matches_any_hardware_id(root: &Path, hardware_ids: &[String]) -> Result<bool> {
@@ -388,41 +412,30 @@ fn read_inf_text(path: &Path) -> Result<String> {
 
 fn inf_contains_hardware_id(inf_text: &str, hardware_id: &str) -> bool {
     let inf = inf_text.to_ascii_uppercase();
-    hardware_id_match_keys(hardware_id)
-        .iter()
-        .any(|key| contains_hardware_id_key(&inf, key))
+    let key = hardware_id.trim().to_ascii_uppercase();
+    !key.is_empty() && contains_complete_hardware_id(&inf, &key)
 }
 
-fn contains_hardware_id_key(inf: &str, key: &str) -> bool {
+fn contains_complete_hardware_id(inf: &str, key: &str) -> bool {
+    fn is_delimiter(byte: u8) -> bool {
+        matches!(
+            byte,
+            b'=' | b'"' | b'\'' | b',' | b';' | b' ' | b'\t' | b'\r' | b'\n'
+        )
+    }
+
     let mut offset = 0usize;
     while let Some(relative) = inf[offset..].find(key) {
         let start = offset + relative;
         let end = start + key.len();
-        let before_ok = start == 0 || !inf.as_bytes()[start - 1].is_ascii_alphanumeric();
-        let after_ok = end == inf.len()
-            || matches!(
-                inf.as_bytes()[end],
-                b'&' | b'"' | b'\'' | b',' | b';' | b' ' | b'\t' | b'\r' | b'\n'
-            );
+        let before_ok = start == 0 || is_delimiter(inf.as_bytes()[start - 1]);
+        let after_ok = end == inf.len() || is_delimiter(inf.as_bytes()[end]);
         if before_ok && after_ok {
             return true;
         }
         offset = end;
     }
     false
-}
-
-fn hardware_id_match_keys(hardware_id: &str) -> Vec<String> {
-    let normalized = hardware_id.trim().to_ascii_uppercase();
-    let mut keys = vec![normalized.clone()];
-    if let Some(device_pos) = normalized.find("&DEV_") {
-        let end = (device_pos + 9).min(normalized.len());
-        let base = normalized[..end].to_string();
-        if base != normalized {
-            keys.push(base);
-        }
-    }
-    keys
 }
 
 #[cfg(test)]
@@ -475,15 +488,25 @@ mod tests {
     }
 
     #[test]
-    fn inf_matching_accepts_a_broader_vendor_device_model() {
+    fn inf_matching_requires_one_complete_device_id() {
+        let exact = "PCI\\VEN_8086&DEV_A77F&SUBSYS_12341043&REV_01";
         let inf = "%Device%=Install, PCI\\VEN_8086&DEV_A77F\r\n";
+        assert!(!inf_contains_hardware_id(inf, exact));
         assert!(inf_contains_hardware_id(
-            inf,
-            "PCI\\VEN_8086&DEV_A77F&SUBSYS_12341043&REV_01"
+            "%Device%=Install, pci\\ven_8086&dev_a77f&subsys_12341043&rev_01\r\n",
+            exact
         ));
         assert!(!inf_contains_hardware_id(
             "%Device%=Install, PCI\\VEN_8086&DEV_A77F0\r\n",
-            "PCI\\VEN_8086&DEV_A77F&SUBSYS_12341043"
+            "PCI\\VEN_8086&DEV_A77F"
+        ));
+        assert!(!inf_contains_hardware_id(
+            "%Device%=Install, XPCI\\VEN_8086&DEV_A77F\r\n",
+            "PCI\\VEN_8086&DEV_A77F"
+        ));
+        assert!(!inf_contains_hardware_id(
+            "%Device%=Install, PCI\\VEN_8086&DEV_A77F&SUBSYS_12341043\r\n",
+            "PCI\\VEN_8086&DEV_A77F"
         ));
     }
 }

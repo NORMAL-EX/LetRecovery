@@ -149,6 +149,9 @@ pub struct VerifyResult {
     pub message: String,
     /// 额外信息（如镜像名称列表）
     pub details: Vec<String>,
+    /// True only when this invocation completed wimlib's full WIM/ESD verification.
+    /// A persistent-cache hit deliberately leaves this false, even when `status` is valid.
+    pub(crate) full_wimlib_verification_performed: bool,
 }
 
 impl Default for VerifyResult {
@@ -162,6 +165,7 @@ impl Default for VerifyResult {
             part_count: 0,
             message: String::new(),
             details: Vec::new(),
+            full_wimlib_verification_performed: false,
         }
     }
 }
@@ -267,6 +271,7 @@ pub struct ImageVerifier {
     /// 当前进度
     progress: Arc<AtomicU8>,
     reset_cancel_on_verify: bool,
+    use_persistent_verification_cache: bool,
 }
 
 impl ImageVerifier {
@@ -276,6 +281,7 @@ impl ImageVerifier {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(AtomicU8::new(0)),
             reset_cancel_on_verify: true,
+            use_persistent_verification_cache: true,
         }
     }
 
@@ -285,6 +291,19 @@ impl ImageVerifier {
             cancel_flag,
             progress: Arc::new(AtomicU8::new(0)),
             reset_cancel_on_verify: false,
+            use_persistent_verification_cache: true,
+        }
+    }
+
+    /// Creates a verifier for an authenticated handoff receipt. This always executes wimlib's
+    /// complete WIM/ESD verification and therefore cannot turn a persistent cache hit into fresh
+    /// verification evidence.
+    pub(crate) fn with_cancel_flag_without_persistent_cache(cancel_flag: Arc<AtomicBool>) -> Self {
+        Self {
+            cancel_flag,
+            progress: Arc::new(AtomicU8::new(0)),
+            reset_cancel_on_verify: false,
+            use_persistent_verification_cache: false,
         }
     }
 
@@ -383,40 +402,42 @@ impl ImageVerifier {
         let mut prepared_fingerprint = None;
         let mut fingerprint_worker = None;
         let mut cached_source_lock = None;
-        match image_verification_cache::probe(
-            Path::new(file_path),
-            &self.cancel_flag,
-            |completed, total| {
-                let percentage = if total == 0 {
-                    99
-                } else {
-                    (5 + completed.saturating_mul(94) / total).min(99) as u8
-                };
-                reporter.report(percentage, tr!("正在校验完整性..."), file_path);
-            },
-        ) {
-            Ok(CacheProbe::Hit(cached)) => {
-                cached_source_lock = Some(cached);
-            }
-            Ok(CacheProbe::Uncached(source)) => {
-                let cancel = Arc::clone(&self.cancel_flag);
-                fingerprint_worker =
-                    Some(thread::spawn(move || source.calculate(&cancel, |_, _| {})));
-            }
-            Ok(CacheProbe::Changed(fingerprint)) => {
-                prepared_fingerprint = Some(fingerprint);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                return VerifyResult {
-                    file_path: file_path.to_string(),
-                    image_type: ImageType::from_extension(file_path),
-                    status: VerifyStatus::Cancelled,
-                    message: tr!("校验已取消"),
-                    ..VerifyResult::default()
-                };
-            }
-            Err(error) => {
-                log::warn!("镜像校验指纹缓存不可用，将执行完整校验: {}", error);
+        if self.use_persistent_verification_cache {
+            match image_verification_cache::probe(
+                Path::new(file_path),
+                &self.cancel_flag,
+                |completed, total| {
+                    let percentage = if total == 0 {
+                        99
+                    } else {
+                        (5 + completed.saturating_mul(94) / total).min(99) as u8
+                    };
+                    reporter.report(percentage, tr!("正在校验完整性..."), file_path);
+                },
+            ) {
+                Ok(CacheProbe::Hit(cached)) => {
+                    cached_source_lock = Some(cached);
+                }
+                Ok(CacheProbe::Uncached(source)) => {
+                    let cancel = Arc::clone(&self.cancel_flag);
+                    fingerprint_worker =
+                        Some(thread::spawn(move || source.calculate(&cancel, |_, _| {})));
+                }
+                Ok(CacheProbe::Changed(fingerprint)) => {
+                    prepared_fingerprint = Some(fingerprint);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    return VerifyResult {
+                        file_path: file_path.to_string(),
+                        image_type: ImageType::from_extension(file_path),
+                        status: VerifyStatus::Cancelled,
+                        message: tr!("校验已取消"),
+                        ..VerifyResult::default()
+                    };
+                }
+                Err(error) => {
+                    log::warn!("镜像校验指纹缓存不可用，将执行完整校验: {}", error);
+                }
             }
         }
 
@@ -570,6 +591,7 @@ impl ImageVerifier {
             Ok(_) => {
                 result.status = VerifyStatus::Valid;
                 result.message = tr!("校验通过，共 {} 个镜像全部有效", image_count);
+                result.full_wimlib_verification_performed = true;
                 if let Some(fingerprint) = prepared_fingerprint {
                     if let Err(error) = fingerprint.store() {
                         log::warn!("无法保存已校验镜像指纹缓存: {}", error);
@@ -1138,6 +1160,16 @@ mod tests {
 
         let valid = VerifyResult::valid("test.wim", ImageType::Wim, "ok");
         assert_eq!(valid.status, VerifyStatus::Valid);
+        assert!(!valid.full_wimlib_verification_performed);
+    }
+
+    #[test]
+    fn handoff_verifier_disables_the_persistent_cache() {
+        let verifier = ImageVerifier::with_cancel_flag_without_persistent_cache(Arc::new(
+            AtomicBool::new(false),
+        ));
+        assert!(!verifier.use_persistent_verification_cache);
+        assert!(ImageVerifier::new().use_persistent_verification_cache);
     }
 
     #[test]

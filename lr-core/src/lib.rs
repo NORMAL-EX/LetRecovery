@@ -20,6 +20,7 @@ pub mod custom_install;
 pub mod data_staging;
 pub mod defender_removal;
 pub mod diskpart;
+pub mod dism_driver_inventory;
 pub mod download_integrity;
 pub mod driver;
 pub mod driver_trust;

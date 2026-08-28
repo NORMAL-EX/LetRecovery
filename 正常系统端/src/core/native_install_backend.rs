@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
+#[cfg(feature = "ci-automation")]
+use anyhow::Context;
 use lr_core::cached_artifact::CachedArtifactStatus;
 use lr_core::data_staging::StagingPayloadBudget;
 use lr_core::pca_compat::PreparedPcaCompatPackage;
@@ -30,10 +32,199 @@ use super::ui_state::{BootModeSelection, DriverAction};
 
 const UNSUPPORTED_PENDING: &str = "unsupported_pending";
 const PREINSTALLED_SOFTWARE_DOWNLOAD_ATTEMPTS: usize = 3;
+#[cfg(feature = "ci-automation")]
+const CI_EXISTING_TARGET_DRIVER_FIXTURE_BUDGET_BYTES: u64 = 128 * 1024;
 #[cfg(not(test))]
 const PREINSTALLED_SOFTWARE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 const PREINSTALLED_SOFTWARE_RETRY_DELAY: std::time::Duration = std::time::Duration::ZERO;
+
+#[cfg(feature = "ci-automation")]
+fn ci_existing_target_driver_scenario_run_id() -> Option<String> {
+    let value = std::env::var("LETRECOVERY_CI_DRIVER_SCENARIO").ok()?;
+    let run_id = value.strip_prefix("existing_target_candidate:")?;
+    (run_id.len() == 32
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| run_id.to_owned())
+}
+
+#[cfg(feature = "ci-automation")]
+fn ci_inf_model_id_is_safe(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 1024
+        && id.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'\\' | b'&' | b'_' | b'-' | b'{' | b'}' | b'.')
+        })
+}
+
+#[cfg(feature = "ci-automation")]
+fn select_ci_storage_fixture_device(
+    devices: Vec<lr_core::driver::StoragePathDevice>,
+) -> Option<(lr_core::driver::StoragePathDevice, String)> {
+    let mut candidates = devices
+        .into_iter()
+        .filter(lr_core::driver::StoragePathDevice::is_storage_controller)
+        .filter_map(|device| {
+            let model_id = device
+                .hardware_ids
+                .iter()
+                .chain(device.compatible_ids.iter())
+                .find(|id| ci_inf_model_id_is_safe(id))?
+                .clone();
+            Some((device, model_id))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.0
+            .instance_id
+            .to_ascii_lowercase()
+            .cmp(&right.0.instance_id.to_ascii_lowercase())
+    });
+    candidates.into_iter().next()
+}
+
+#[cfg(feature = "ci-automation")]
+fn stage_ci_existing_target_driver_fixture(
+    destination: &Path,
+    run_id: &str,
+) -> Result<(), anyhow::Error> {
+    let devices = lr_core::driver::list_current_windows_storage_path_devices()
+        .context("enumerate current Windows storage path for CI driver fixture")?;
+    let (device, model_id) = select_ci_storage_fixture_device(devices).ok_or_else(|| {
+        anyhow::anyhow!("no storage-path controller with an INF-safe PnP ID was found")
+    })?;
+
+    let storage_root = destination.join("lr-ci-rejected-storage");
+    let optional_root = destination.join("lr-ci-rejected-optional");
+    if storage_root.exists() || optional_root.exists() {
+        anyhow::bail!("CI driver fixture destination already exists");
+    }
+    std::fs::create_dir(&storage_root).context("create CI storage-driver fixture directory")?;
+    std::fs::create_dir(&optional_root).context("create CI optional-driver fixture directory")?;
+
+    let storage_inf = format!(
+        concat!(
+            "; LetRecovery disposable-VM CI fixture. It is deliberately unsigned and must be rejected.\r\n",
+            "; RunId={run_id}\r\n",
+            "[Version]\r\n",
+            "Signature=\"$WINDOWS NT$\"\r\n",
+            "Class=SCSIAdapter\r\n",
+            "ClassGuid={{4D36E97B-E325-11CE-BFC1-08002BE10318}}\r\n",
+            "Provider=%Provider%\r\n",
+            "DriverVer=08/28/2026,99.99.9999.0\r\n",
+            "CatalogFile=lrci_storage.cat\r\n\r\n",
+            "[Manufacturer]\r\n",
+            "%Provider%=Models,NTamd64\r\n\r\n",
+            "[Models.NTamd64]\r\n",
+            "%DeviceDesc%=Install,{model_id}\r\n\r\n",
+            "[Install.NT]\r\n",
+            "CopyFiles=DriverCopyFiles\r\n\r\n",
+            "[Install.NT.Services]\r\n",
+            "AddService=lrci_storage,0x00000002,Service\r\n\r\n",
+            "[Service]\r\n",
+            "DisplayName=%DeviceDesc%\r\n",
+            "ServiceType=1\r\n",
+            "StartType=0\r\n",
+            "ErrorControl=1\r\n",
+            "ServiceBinary=%12%\\lrci_storage.sys\r\n\r\n",
+            "[DestinationDirs]\r\n",
+            "DriverCopyFiles=12\r\n\r\n",
+            "[DriverCopyFiles]\r\n",
+            "lrci_storage.sys\r\n\r\n",
+            "[Strings]\r\n",
+            "Provider=\"LetRecovery CI\"\r\n",
+            "DeviceDesc=\"LetRecovery CI rejected storage candidate\"\r\n"
+        ),
+        run_id = run_id,
+        model_id = model_id,
+    );
+    let optional_inf = format!(
+        concat!(
+        "; LetRecovery disposable-VM CI fixture. It is deliberately unsigned, boot-start and unrelated.\r\n",
+        "; RunId={run_id}\r\n",
+        "[Version]\r\n",
+        "Signature=\"$WINDOWS NT$\"\r\n",
+        // Use a boot-storage class so x64 DISM deterministically enforces signing. The synthetic
+        // ROOT model is unrelated to every real controller and is deliberately absent from the
+        // topology-authenticated requirement manifest, so its rejection remains optional.
+        "Class=SCSIAdapter\r\n",
+        "ClassGuid={{4D36E97B-E325-11CE-BFC1-08002BE10318}}\r\n",
+        "Provider=%Provider%\r\n",
+        "DriverVer=08/28/2026,99.99.9999.0\r\n",
+        "CatalogFile=lrci_optional.cat\r\n\r\n",
+        "[Manufacturer]\r\n",
+        "%Provider%=Models,NTamd64\r\n\r\n",
+        "[Models.NTamd64]\r\n",
+        "%DeviceDesc%=Install,ROOT\\LETRECOVERY_CI_OPTIONAL_{run_id}\r\n\r\n",
+        "[Install.NT]\r\n",
+        "CopyFiles=DriverCopyFiles\r\n\r\n",
+        "[Install.NT.Services]\r\n",
+        "AddService=lrci_optional,0x00000002,Service\r\n\r\n",
+        "[Service]\r\n",
+        "DisplayName=%DeviceDesc%\r\n",
+        "ServiceType=1\r\n",
+        // Boot-start is intentional in this disposable fixture. Together with SCSIAdapter it makes
+        // x64 DISM deterministically reject the unsigned package. Its synthetic ROOT model is
+        // absent from the storage manifest, proving a rejected unrelated package remains non-fatal.
+        "StartType=0\r\n",
+        "ErrorControl=1\r\n",
+        "ServiceBinary=%12%\\lrci_optional.sys\r\n\r\n",
+        "[DestinationDirs]\r\n",
+        "DriverCopyFiles=12\r\n\r\n",
+        "[DriverCopyFiles]\r\n",
+        "lrci_optional.sys\r\n\r\n",
+        "[Strings]\r\n",
+        "Provider=\"LetRecovery CI\"\r\n",
+        "DeviceDesc=\"LetRecovery CI rejected optional package\"\r\n"
+    ),
+        run_id = run_id
+    );
+    std::fs::write(storage_root.join("lrci_storage.inf"), storage_inf)
+        .context("write CI storage-driver INF")?;
+    std::fs::write(
+        storage_root.join("lrci_storage.sys"),
+        b"LR-CI-NOT-A-SIGNED-DRIVER\r\n",
+    )
+    .context("write CI storage-driver payload")?;
+    std::fs::write(optional_root.join("lrci_optional.inf"), optional_inf)
+        .context("write CI optional-driver INF")?;
+    std::fs::write(
+        optional_root.join("lrci_optional.sys"),
+        b"LR-CI-NOT-A-SIGNED-DRIVER\r\n",
+    )
+    .context("write CI optional-driver payload")?;
+
+    let mut requirements = lr_core::driver::load_storage_driver_requirements(destination)
+        .context("load exported storage-driver manifest before CI fixture")?;
+    if !requirements.is_empty() {
+        anyhow::bail!(
+            "CI existing-target scenario requires an inbox-only baseline storage path, found {} pre-existing OEM requirements",
+            requirements.len()
+        );
+    }
+    requirements.push(lr_core::driver::StorageDriverRequirement {
+        description: format!(
+            "LetRecovery CI target-existing candidate: {}",
+            device.description
+        ),
+        source_inf: "lrci_storage.inf".to_owned(),
+        hardware_ids: device.hardware_ids,
+        compatible_ids: device.compatible_ids,
+        device_instance_id: Some(device.instance_id.clone()),
+    });
+    lr_core::driver::write_storage_driver_requirements(destination, &requirements)
+        .context("publish storage-driver manifest with CI target-existing requirement")?;
+    log::info!(
+        "[CI DRIVER SCENARIO] staged run_id={} storage_inf=lrci_storage.inf optional_inf=lrci_optional.inf device={} model_id={}",
+        run_id,
+        device.instance_id,
+        model_id
+    );
+    Ok(())
+}
 
 #[derive(Debug)]
 struct DownloadedSoftwareBatch {
@@ -424,6 +615,7 @@ pub struct ProductionInstallBackend {
     driver_backup: PathBuf,
     pe_path: Option<PathBuf>,
     pe_snapshot: Option<super::pe::LocalPeSnapshot>,
+    pe_supports_source_image_verification_receipt: bool,
     pe_display_name: Option<String>,
     data_partition: Option<String>,
     staging_payload_budget: Option<StagingPayloadBudget>,
@@ -438,6 +630,9 @@ pub struct ProductionInstallBackend {
     /// must contain only installers whose non-empty files were read back successfully.
     direct_staged_software: Option<Vec<lr_core::software_install::SelectedSoftwarePackage>>,
     staged_image_name: Option<String>,
+    /// Byte identity issued only by this run's uncached full wimlib verification plus copy and
+    /// staged readback. The corresponding deny-write/delete guard is held in `pe_source_lock`.
+    staged_source_image_receipt: Option<VerifiedStagedImageReceipt>,
     staged_xp_source_arch: Option<String>,
     bitlocker_decryption_volumes: Vec<char>,
     install_config_transaction: Option<super::install_config::InstallConfigTransaction>,
@@ -451,6 +646,11 @@ pub struct ProductionInstallBackend {
     pe_auxiliary_file_locks: Vec<lr_core::install_source_lock::LockedPlainArtifact>,
     staging_transaction: Option<super::disk::PreparedStagingTransaction>,
     dual_boot_transaction: Option<super::disk::PreparedDualBootTransaction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedStagedImageReceipt {
+    identity: lr_core::install_source_lock::LockedSourceArtifactIdentity,
 }
 
 /// Add the optional persistent data/staging volume to a UI-built dual-boot request. The normal
@@ -567,6 +767,7 @@ impl ProductionInstallBackend {
             driver_backup: std::env::temp_dir().join("LetRecovery_DriverBackup"),
             pe_path: None,
             pe_snapshot: None,
+            pe_supports_source_image_verification_receipt: false,
             pe_display_name: None,
             data_partition: None,
             staging_payload_budget: None,
@@ -575,6 +776,7 @@ impl ProductionInstallBackend {
             prepared_software_packages: None,
             direct_staged_software: None,
             staged_image_name: None,
+            staged_source_image_receipt: None,
             staged_xp_source_arch: None,
             bitlocker_decryption_volumes: Vec::new(),
             install_config_transaction: None,
@@ -601,6 +803,89 @@ impl ProductionInstallBackend {
             .is_some_and(|extension| {
                 extension.eq_ignore_ascii_case("wim") || extension.eq_ignore_ascii_case("esd")
             })
+    }
+
+    fn supports_authenticated_verify_receipt(path: &Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "wim" | "esd")
+            })
+    }
+
+    fn verification_result_can_issue_receipt(result: &super::image_verify::VerifyResult) -> bool {
+        result.status == super::image_verify::VerifyStatus::Valid
+            && result.full_wimlib_verification_performed
+    }
+
+    fn lock_published_verified_image(
+        &mut self,
+        destination: &Path,
+        expected_length: u64,
+        copied_sha256: &str,
+        staged_readback_sha256: &str,
+    ) -> Result<(), InstallBackendError> {
+        // This is deliberately the first operation after atomic publication. The guard denies
+        // write/delete sharing and remains owned by the backend through manifest publication.
+        let lock = lr_core::install_source_lock::LockedInstallSourceSet::acquire_pinned_original(
+            destination,
+        )
+        .map_err(|error| Self::error("lock_published_verified_image", error))?;
+        let identities = lock
+            .artifact_identities()
+            .map_err(|error| Self::error("identify_published_verified_image", error))?;
+        let copied_sha256 =
+            lr_core::install_handoff::decode_hex_array::<32>(copied_sha256, "copied image SHA-256")
+                .map_err(|error| Self::error("decode_copied_image_sha256", error))?;
+        let staged_readback_sha256 = lr_core::install_handoff::decode_hex_array::<32>(
+            staged_readback_sha256,
+            "staged image readback SHA-256",
+        )
+        .map_err(|error| Self::error("decode_staged_image_sha256", error))?;
+        let identity = identities.as_slice();
+        if identity.len() != 1
+            || identity[0].length_bytes != expected_length
+            || identity[0].sha256 != copied_sha256
+            || identity[0].sha256 != staged_readback_sha256
+        {
+            return Err(InstallBackendError::new(
+                "published_verified_image_identity_mismatch",
+                "the locked published image differs from copy-stream or staged-readback evidence",
+            ));
+        }
+        self.staged_source_image_receipt = Some(VerifiedStagedImageReceipt {
+            identity: identity[0].clone(),
+        });
+        self.pe_source_lock = Some(lock);
+        Ok(())
+    }
+
+    fn receipt_matches_manifest_identities(
+        receipt: Option<&VerifiedStagedImageReceipt>,
+        staged_path: &Path,
+        config: &super::install_config::InstallConfig,
+        identities: &[lr_core::install_source_lock::LockedSourceArtifactIdentity],
+    ) -> Result<bool, InstallBackendError> {
+        let Some(receipt) = receipt else {
+            return Ok(false);
+        };
+        if !Self::supports_authenticated_verify_receipt(staged_path)
+            || config.is_gho
+            || config.is_xp
+            || config.is_xp_i386
+        {
+            return Err(InstallBackendError::new(
+                "invalid_source_verification_receipt_combination",
+                "a source verification receipt is valid only for one-file WIM/ESD handoff",
+            ));
+        }
+        if identities != std::slice::from_ref(&receipt.identity) {
+            return Err(InstallBackendError::new(
+                "source_verification_receipt_identity_mismatch",
+                "manifest image identities do not exactly match the verification receipt",
+            ));
+        }
+        Ok(true)
     }
 
     fn source_verification_is_deferred_to_copy(intent: &StartInstallIntent) -> bool {
@@ -1433,6 +1718,12 @@ impl ProductionInstallBackend {
         let snapshot = super::pe::snapshot_local_pe(&verified_path, &pe.filename)
             .map_err(|error| Self::error("snapshot_local_pe", error))?;
         let snapshot_path = snapshot.path.clone();
+        self.pe_supports_source_image_verification_receipt =
+            super::pe::supports_source_image_verification_receipt(&snapshot_path);
+        log::info!(
+            "[PE] authenticated source verification receipt capability: {}",
+            self.pe_supports_source_image_verification_receipt
+        );
         self.pe_path = Some(snapshot_path);
         self.pe_snapshot = Some(snapshot);
         self.pe_display_name = Some(pe.display_name.clone());
@@ -1727,6 +2018,19 @@ impl ProductionInstallBackend {
         } else {
             0
         };
+        #[cfg(feature = "ci-automation")]
+        let exported_driver_bytes = if ci_existing_target_driver_scenario_run_id().is_some() {
+            exported_driver_bytes
+                .checked_add(CI_EXISTING_TARGET_DRIVER_FIXTURE_BUDGET_BYTES)
+                .ok_or_else(|| {
+                    InstallBackendError::new(
+                        "ci_driver_fixture_budget_overflow",
+                        "CI driver fixture capacity budget overflows u64",
+                    )
+                })?
+        } else {
+            exported_driver_bytes
+        };
         let pca_bytes = self
             .pca_package
             .as_ref()
@@ -2017,6 +2321,7 @@ impl ProductionInstallBackend {
         reporter: &mut dyn InstallExecutionReporter,
         cancellation: &dyn InstallCancellation,
     ) -> Result<(), InstallBackendError> {
+        self.staged_source_image_receipt = None;
         if intent.options.is_xp_i386 {
             return self.copy_xp_source(intent, reporter, cancellation);
         }
@@ -2106,8 +2411,10 @@ impl ProductionInstallBackend {
             let verify_cancel_for_worker = Arc::clone(&verify_cancel);
             let image = source_identity.to_string_lossy().into_owned();
             std::thread::spawn(move || {
-                let result = ImageVerifier::with_cancel_flag(verify_cancel_for_worker)
-                    .verify(&image, Some(progress_tx));
+                let result = ImageVerifier::with_cancel_flag_without_persistent_cache(
+                    verify_cancel_for_worker,
+                )
+                .verify(&image, Some(progress_tx));
                 let _ = result_tx.send(result);
             });
             verify_progress_rx = Some(progress_rx);
@@ -2194,7 +2501,7 @@ impl ProductionInstallBackend {
             }
         })?;
 
-        if let Some(result) = source_verification {
+        let full_wimlib_verification_performed = if let Some(result) = source_verification {
             use super::image_verify::VerifyStatus;
 
             if result.status == VerifyStatus::Cancelled || cancellation.is_cancelled() {
@@ -2209,7 +2516,16 @@ impl ProductionInstallBackend {
                     format!("{}: {}", result.status, result.message),
                 ));
             }
-        }
+            if !Self::verification_result_can_issue_receipt(&result) {
+                return Err(InstallBackendError::new(
+                    "fresh_full_source_verification_missing",
+                    "authenticated handoff requires a full uncached wimlib verification from this run",
+                ));
+            }
+            true
+        } else {
+            false
+        };
         drop(reader);
         if cancellation.is_cancelled() {
             return Err(InstallBackendError::new(
@@ -2279,9 +2595,23 @@ impl ProductionInstallBackend {
         if !fused_verify_copy {
             self.verify_staged_image(temporary.path(), reporter, cancellation, 82, 17)?;
         }
+        if fused_verify_copy && !full_wimlib_verification_performed {
+            return Err(InstallBackendError::new(
+                "fresh_full_source_verification_missing",
+                "WIM/ESD publication has no fresh full wimlib verification evidence",
+            ));
+        }
         temporary
             .persist_replace(&destination)
             .map_err(|error| Self::error("commit_staged_image", error))?;
+        if fused_verify_copy {
+            self.lock_published_verified_image(
+                &destination,
+                copied,
+                &copied_sha256,
+                &staged_sha256,
+            )?;
+        }
         Self::report(
             reporter,
             InstallExecutionPhase::CopySourceImage,
@@ -3093,6 +3423,19 @@ impl ProductionInstallBackend {
             self.pe_source_lock = Some(lock);
             identities
         };
+        let receipt_matches = Self::receipt_matches_manifest_identities(
+            self.staged_source_image_receipt.as_ref(),
+            &staged_root,
+            &config,
+            &identities,
+        )?;
+        config.source_image_verified =
+            receipt_matches && self.pe_supports_source_image_verification_receipt;
+        if receipt_matches && !config.source_image_verified {
+            log::info!(
+                "[IMAGE VERIFY] authenticated PE has no receipt capability; omitting the optional field and retaining legacy PE full verification"
+            );
+        }
         let role = if intent.options.is_xp_i386 {
             lr_core::handoff_manifest::ArtifactRole::XpSourceFile
         } else {
@@ -4499,6 +4842,11 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                         dism.export_drivers(&destination.to_string_lossy())
                     };
                     result.map_err(|error| Self::error("export_drivers_to_pe_data", error))?;
+                    #[cfg(feature = "ci-automation")]
+                    if let Some(run_id) = ci_existing_target_driver_scenario_run_id() {
+                        stage_ci_existing_target_driver_fixture(&destination, &run_id)
+                            .map_err(|error| Self::error("stage_ci_driver_fixture", error))?;
+                    }
                     let actual = lr_core::driver::measure_plain_tree_logical_bytes(&destination)
                         .map_err(|error| Self::error("measure_exported_drivers", error))?;
                     let planned = self
@@ -4559,6 +4907,145 @@ mod tests {
     use crate::core::native_install_controller::{InstallOptions, StartInstallIntent};
     use crate::core::ui_state::AdvancedOptionsData;
     use lr_core::boot_pca::BootPcaMode;
+
+    #[test]
+    fn authenticated_verification_receipt_is_limited_to_single_file_wim_family() {
+        assert!(
+            ProductionInstallBackend::supports_authenticated_verify_receipt(Path::new(
+                r"D:\install.WIM"
+            ))
+        );
+        assert!(
+            ProductionInstallBackend::supports_authenticated_verify_receipt(Path::new(
+                r"D:\install.esd"
+            ))
+        );
+        assert!(
+            !ProductionInstallBackend::supports_authenticated_verify_receipt(Path::new(
+                r"D:\install.swm"
+            ))
+        );
+        assert!(
+            !ProductionInstallBackend::supports_authenticated_verify_receipt(Path::new(
+                r"D:\backup.gho"
+            ))
+        );
+    }
+
+    #[test]
+    fn cached_valid_result_cannot_issue_a_handoff_receipt() {
+        let cached_valid = super::super::image_verify::VerifyResult {
+            status: super::super::image_verify::VerifyStatus::Valid,
+            full_wimlib_verification_performed: false,
+            ..super::super::image_verify::VerifyResult::default()
+        };
+        assert!(!ProductionInstallBackend::verification_result_can_issue_receipt(&cached_valid));
+
+        let fresh_full = super::super::image_verify::VerifyResult {
+            full_wimlib_verification_performed: true,
+            ..cached_valid
+        };
+        assert!(ProductionInstallBackend::verification_result_can_issue_receipt(&fresh_full));
+    }
+
+    #[test]
+    fn receipt_requires_exact_manifest_identity_and_legal_format() {
+        let identity = lr_core::install_source_lock::LockedSourceArtifactIdentity {
+            path: PathBuf::from(r"D:\LetRecovery_Data\install.wim"),
+            length_bytes: 123,
+            sha256: [7; 32],
+        };
+        let receipt = VerifiedStagedImageReceipt {
+            identity: identity.clone(),
+        };
+        let config = super::super::install_config::InstallConfig {
+            image_path: "install.wim".into(),
+            ..super::super::install_config::InstallConfig::default()
+        };
+        assert!(
+            ProductionInstallBackend::receipt_matches_manifest_identities(
+                Some(&receipt),
+                Path::new(r"D:\LetRecovery_Data\install.wim"),
+                &config,
+                std::slice::from_ref(&identity),
+            )
+            .unwrap()
+        );
+
+        let mut changed = identity.clone();
+        changed.sha256[0] ^= 1;
+        assert!(
+            ProductionInstallBackend::receipt_matches_manifest_identities(
+                Some(&receipt),
+                Path::new(r"D:\LetRecovery_Data\install.wim"),
+                &config,
+                &[changed],
+            )
+            .is_err()
+        );
+        assert!(
+            ProductionInstallBackend::receipt_matches_manifest_identities(
+                Some(&receipt),
+                Path::new(r"D:\LetRecovery_Data\install.swm"),
+                &config,
+                std::slice::from_ref(&identity),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_tamper_window_cannot_create_a_receipt() {
+        let temp = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-published-image-receipt-tamper",
+        )
+        .expect("create temp directory");
+        let image = temp.path().join("install.wim");
+        let expected = b"copy-stream bytes";
+        std::fs::write(&image, b"bytes changed before publication lock")
+            .expect("write tampered publication");
+        let expected_sha256 = lr_core::hash::sha256_bytes(expected);
+        let mut backend = ProductionInstallBackend::new(&intent(InstallMode::ViaPe));
+
+        let error = backend
+            .lock_published_verified_image(
+                &image,
+                expected.len() as u64,
+                &expected_sha256,
+                &expected_sha256,
+            )
+            .expect_err("changed bytes must not produce a verification receipt");
+        assert_eq!(error.code, "published_verified_image_identity_mismatch");
+        assert!(backend.staged_source_image_receipt.is_none());
+        assert!(backend.pe_source_lock.is_none());
+    }
+
+    #[cfg(feature = "ci-automation")]
+    #[test]
+    fn ci_driver_fixture_selects_a_deterministic_real_storage_controller_id() {
+        let device = |instance_id: &str, class: &str, hardware_id: &str| {
+            lr_core::driver::StoragePathDevice {
+                instance_id: instance_id.to_owned(),
+                description: instance_id.to_owned(),
+                device_class: class.to_owned(),
+                class_guid: String::new(),
+                hardware_ids: vec![hardware_id.to_owned()],
+                compatible_ids: Vec::new(),
+                bound_inf: Some("storvsc.inf".to_owned()),
+            }
+        };
+        let selected = select_ci_storage_fixture_device(vec![
+            device("z-controller", "SCSIAdapter", "VMBUS\\{BBBB-BBBB}"),
+            device("unrelated", "Net", "ROOT\\UNRELATED"),
+            device("a-controller", "SCSIAdapter", "VMBUS\\{AAAA-AAAA}"),
+            device("bad-id", "SCSIAdapter", "PCI\\VEN_1234,%Unsafe%"),
+        ])
+        .expect("one safe storage controller should be selected");
+        assert_eq!(selected.0.instance_id, "a-controller");
+        assert_eq!(selected.1, "VMBUS\\{AAAA-AAAA}");
+    }
 
     #[test]
     fn single_source_dual_boot_adds_staging_to_the_same_shrink_plan() {
@@ -4780,10 +5267,23 @@ mod tests {
         backend
             .copy_source_image(&install_intent, &mut reporter, &cancellation)
             .expect("copy and verify valid WIM");
+        assert!(backend.staged_source_image_receipt.is_some());
         assert_eq!(
             std::fs::read(&source_wim).expect("read source WIM"),
             std::fs::read(&destination).expect("read staged WIM")
         );
+
+        backend.pe_source_lock = None;
+        backend.staged_source_image_receipt = None;
+        let mut same_file_intent = install_intent.clone();
+        same_file_intent.image_path = destination.to_string_lossy().into_owned();
+        let mut same_file_backend = ProductionInstallBackend::new(&same_file_intent);
+        same_file_backend.data_partition = Some(temp.path().to_string_lossy().into_owned());
+        same_file_backend
+            .copy_source_image(&same_file_intent, &mut reporter, &cancellation)
+            .expect("verify an already-staged source without issuing a receipt");
+        assert!(same_file_backend.staged_source_image_receipt.is_none());
+        same_file_backend.pe_source_lock = None;
 
         std::fs::remove_file(&destination).expect("remove first staged result");
         let original_len = std::fs::metadata(&source_wim)

@@ -647,6 +647,9 @@ impl StartInstallIntent {
             target_partition: self.target_partition.clone(),
             custom_install_plan: self.options.custom_install_plan.clone(),
             image_path: staged_image_path.into(),
+            // Only the production staging backend may upgrade this after matching an internal
+            // byte-identity receipt to the manifest identities held under the same file lock.
+            source_image_verified: false,
             is_gho: self.is_gho,
             migrate_wifi: false,
             wifi_profile_length: 0,

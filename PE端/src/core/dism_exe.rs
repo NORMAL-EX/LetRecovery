@@ -115,18 +115,32 @@ fn is_dism_infrastructure_error(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreservedDriverImportResult {
+    /// Exact authenticated INF files that DISM accepted. When the initial batch succeeds this is
+    /// the complete input set; after isolation it contains only successful individual packages.
+    pub successful_inf_files: Vec<PathBuf>,
+    /// Bounded-by-input diagnostics for exact INF files rejected by a running DISM process.
+    pub failures: Vec<String>,
+}
+
 fn import_preserved_driver_infs_resilient<Batch, One>(
     inf_files: &[PathBuf],
     run_batch: Batch,
     mut run_one: One,
-) -> Result<Vec<String>>
+) -> Result<PreservedDriverImportResult>
 where
     Batch: FnOnce() -> Result<()>,
     One: FnMut(&Path) -> Result<()>,
 {
     validate_preserved_driver_inf_files(inf_files)?;
     match run_batch() {
-        Ok(()) => return Ok(Vec::new()),
+        Ok(()) => {
+            return Ok(PreservedDriverImportResult {
+                successful_inf_files: inf_files.to_vec(),
+                failures: Vec::new(),
+            })
+        }
         Err(error) if is_dism_infrastructure_error(&error) => {
             return Err(error).context("DISM infrastructure failed during driver batch import");
         }
@@ -136,7 +150,7 @@ where
         ),
     }
 
-    let mut failures = Vec::new();
+    let mut result = PreservedDriverImportResult::default();
     for inf in inf_files {
         // The authenticated set was checked immediately before the batch. If an artifact vanished
         // in between, that is a structural/integrity failure, not an optional compatibility result.
@@ -146,22 +160,30 @@ where
                 inf.display()
             );
         }
-        if let Err(error) = run_one(inf) {
-            if is_dism_infrastructure_error(&error) {
-                return Err(error).with_context(|| {
-                    format!(
-                        "DISM infrastructure failed while importing {}",
-                        inf.display()
-                    )
-                });
+        match run_one(inf) {
+            Ok(()) => result.successful_inf_files.push(inf.clone()),
+            Err(error) => {
+                if is_dism_infrastructure_error(&error) {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "DISM infrastructure failed while importing {}",
+                            inf.display()
+                        )
+                    });
+                }
+                // Whether a rejected package is optional is decided by the caller after comparing
+                // the authenticated boot-path manifest with the target image's DISM inventory.
+                // This layer only reports the exact package failure; labelling it optional here
+                // used to hide the distinction between an unrelated printer/network package and a
+                // real storage path.
+                result.failures.push(format!(
+                    "DISM rejected driver package {}: {error:#}",
+                    inf.display()
+                ));
             }
-            failures.push(format!(
-                "DISM rejected optional driver package {}: {error:#}",
-                inf.display()
-            ));
         }
     }
-    Ok(failures)
+    Ok(result)
 }
 
 fn field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
@@ -562,6 +584,9 @@ impl DismExe {
         args: &[&str],
         progress_tx: Option<Sender<DismExeProgress>>,
     ) -> Result<String> {
+        const MAX_DISM_STDOUT_BYTES: usize = 32 * 1024 * 1024;
+        const MAX_DISM_STDERR_BYTES: usize = 8 * 1024 * 1024;
+
         log::info!(
             "[DISM.EXE] 执行: {} {}",
             self.dism_path.display(),
@@ -581,12 +606,28 @@ impl DismExe {
 
         // 读取并解析 stdout
         let progress_tx_clone = progress_tx.clone();
-        let stdout_handle = std::thread::spawn(move || {
+        let stdout_handle = std::thread::spawn(move || -> Result<String> {
             let mut reader = BufReader::new(stdout);
             let mut output = String::new();
             let mut bytes = Vec::new();
+            let mut total_bytes = 0_usize;
 
-            while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
+            loop {
+                let read = reader
+                    .read_until(b'\n', &mut bytes)
+                    .context("读取 dism.exe stdout 失败")?;
+                if read == 0 {
+                    break;
+                }
+                total_bytes = total_bytes
+                    .checked_add(read)
+                    .ok_or_else(|| anyhow::anyhow!("dism.exe stdout 大小溢出"))?;
+                if total_bytes > MAX_DISM_STDOUT_BYTES {
+                    bail!(
+                        "dism.exe stdout 超过 {} 字节上限，拒绝把截断输出当成完整结果",
+                        MAX_DISM_STDOUT_BYTES
+                    );
+                }
                 while matches!(bytes.last(), Some(b'\r' | b'\n')) {
                     bytes.pop();
                 }
@@ -606,16 +647,32 @@ impl DismExe {
                 log::trace!("[DISM.EXE STDOUT] {}", decoded_line);
             }
 
-            output
+            Ok(output)
         });
 
         // 读取 stderr
-        let stderr_handle = std::thread::spawn(move || {
+        let stderr_handle = std::thread::spawn(move || -> Result<String> {
             let mut reader = BufReader::new(stderr);
             let mut error_output = String::new();
             let mut bytes = Vec::new();
+            let mut total_bytes = 0_usize;
 
-            while reader.read_until(b'\n', &mut bytes).unwrap_or(0) != 0 {
+            loop {
+                let read = reader
+                    .read_until(b'\n', &mut bytes)
+                    .context("读取 dism.exe stderr 失败")?;
+                if read == 0 {
+                    break;
+                }
+                total_bytes = total_bytes
+                    .checked_add(read)
+                    .ok_or_else(|| anyhow::anyhow!("dism.exe stderr 大小溢出"))?;
+                if total_bytes > MAX_DISM_STDERR_BYTES {
+                    bail!(
+                        "dism.exe stderr 超过 {} 字节上限，拒绝把截断输出当成完整结果",
+                        MAX_DISM_STDERR_BYTES
+                    );
+                }
                 while matches!(bytes.last(), Some(b'\r' | b'\n')) {
                     bytes.pop();
                 }
@@ -628,15 +685,22 @@ impl DismExe {
                 log::trace!("[DISM.EXE STDERR] {}", decoded_line);
             }
 
-            error_output
+            Ok(error_output)
         });
 
         // 等待进程完成
-        let status = child.wait().context(tr!("等待 dism.exe 完成失败"))?;
+        let status_result = child.wait().context(tr!("等待 dism.exe 完成失败"));
 
-        // 获取输出
-        let stdout_text = stdout_handle.join().unwrap_or_default();
-        let stderr_text = stderr_handle.join().unwrap_or_default();
+        // A successful exit is not sufficient if either pipe was truncated or its reader panicked.
+        // Inventory callers may otherwise mistake a valid-looking prefix for the complete target
+        // Driver Store and produce a false boot-storage failure.
+        let stdout_text = stdout_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("dism.exe stdout 读取线程异常终止"))??;
+        let stderr_text = stderr_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("dism.exe stderr 读取线程异常终止"))??;
+        let status = status_result?;
 
         // 发送完成进度
         if let Some(ref tx) = progress_tx {
@@ -700,6 +764,184 @@ impl DismExe {
                 }
             }
         }
+    }
+
+    fn normalized_offline_image_argument(image_path: &str) -> Result<String> {
+        if image_path.trim().is_empty() {
+            bail!("offline image path is empty");
+        }
+        let normalized = if image_path.ends_with('\\') {
+            image_path.to_owned()
+        } else {
+            format!("{image_path}\\")
+        };
+        Ok(format!("/Image:{normalized}"))
+    }
+
+    fn build_get_driver_info_arguments(
+        image_path: &str,
+        package: &lr_core::dism_driver_inventory::OfflineDriverPackageDescriptor,
+        scratch_dir: &str,
+        log_path: &Path,
+    ) -> Result<Vec<String>> {
+        if scratch_dir.trim().is_empty() {
+            bail!("DISM scratch directory is empty");
+        }
+        if !log_path.is_absolute() {
+            bail!(
+                "DISM inventory log path is not absolute: {}",
+                log_path.display()
+            );
+        }
+        let mut args = vec![
+            "/English".to_owned(),
+            Self::normalized_offline_image_argument(image_path)?,
+            "/Get-DriverInfo".to_owned(),
+            format!("/Driver:{}", package.published_name),
+        ];
+        args.extend([
+            "/Format:List".to_owned(),
+            format!("/ScratchDir:{scratch_dir}"),
+            format!("/LogPath:{}", log_path.display()),
+            "/LogLevel:2".to_owned(),
+        ]);
+        Ok(args)
+    }
+
+    /// Read-only command-line fallback for base WinPE images that include the supported DISM
+    /// servicing executable but omit the optional `DismApi.dll` facade.
+    ///
+    /// `/English` makes Microsoft's documented report field names invariant. `/Get-Drivers /All`
+    /// discovers both inbox and OEM published names, then one documented
+    /// `/Get-DriverInfo /Driver:<published-name>` command queries each package's image-applicable
+    /// models. Package failures remain bounded and isolated without first issuing a multi-`/Driver`
+    /// command that affected older host servicing stacks reject with error 87.
+    pub fn enumerate_offline_driver_candidates_command_line(
+        &self,
+        image_path: &str,
+        log_path: &Path,
+    ) -> Result<lr_core::dism_driver_inventory::OfflineDriverInventory> {
+        const MAX_TOTAL_CANDIDATES: usize = 262_144;
+        const MAX_RECORDED_FAILURES: usize = 32;
+        const MAX_FAILURE_CHARS: usize = 1_024;
+
+        let scratch_dir = Self::ensure_scratch_directory();
+        let image_arg = Self::normalized_offline_image_argument(image_path)?;
+        if !log_path.is_absolute() {
+            bail!(
+                "DISM inventory log path is not absolute: {}",
+                log_path.display()
+            );
+        }
+        let log_parent = log_path.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "DISM inventory log path has no parent: {}",
+                log_path.display()
+            )
+        })?;
+        if !log_parent.is_dir() {
+            bail!(
+                "DISM inventory log parent does not exist: {}",
+                log_parent.display()
+            );
+        }
+        let list_args = [
+            "/English".to_owned(),
+            image_arg,
+            "/Get-Drivers".to_owned(),
+            "/All".to_owned(),
+            "/Format:List".to_owned(),
+            format!("/ScratchDir:{scratch_dir}"),
+            format!("/LogPath:{}", log_path.display()),
+            "/LogLevel:2".to_owned(),
+        ];
+        let list_refs = list_args.iter().map(String::as_str).collect::<Vec<_>>();
+        let package_output = self
+            .execute_with_progress(&list_refs, None)
+            .context("DISM command-line /Get-Drivers /All inventory failed")?;
+        let packages =
+            lr_core::dism_driver_inventory::parse_dism_get_drivers_english(&package_output)
+                .context("parsing invariant-English DISM driver package inventory failed")?;
+
+        let mut inventory = lr_core::dism_driver_inventory::OfflineDriverInventory::default();
+        let record_failure =
+            |inventory: &mut lr_core::dism_driver_inventory::OfflineDriverInventory,
+             published_name: &str,
+             error: &anyhow::Error| {
+                let mut detail = format!("{error:#}");
+                if detail.chars().count() > MAX_FAILURE_CHARS {
+                    detail = detail.chars().take(MAX_FAILURE_CHARS - 1).collect();
+                    detail.push('…');
+                }
+                if inventory.package_query_failures.len() < MAX_RECORDED_FAILURES {
+                    inventory.package_query_failures.push(
+                        lr_core::dism_driver_inventory::OfflineDriverPackageQueryFailure {
+                            published_name: published_name.to_owned(),
+                            // The command-line surface reports a process exit code rather than the
+                            // API HRESULT. Keep an explicit diagnostic sentinel; coverage never
+                            // depends on this value.
+                            hresult: u32::MAX,
+                            detail,
+                        },
+                    );
+                } else {
+                    inventory.omitted_package_query_failures =
+                        inventory.omitted_package_query_failures.saturating_add(1);
+                }
+            };
+
+        for package in packages {
+            let package_result =
+                (|| -> Result<Vec<lr_core::dism_driver_inventory::OfflineDriverCandidate>> {
+                    let args = Self::build_get_driver_info_arguments(
+                        image_path,
+                        &package,
+                        &scratch_dir,
+                        log_path,
+                    )?;
+                    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+                    let output = self.execute_with_progress(&refs, None)?;
+                    lr_core::dism_driver_inventory::parse_dism_get_driver_info_english(
+                        &output, &package,
+                    )
+                })();
+            match package_result {
+                Ok(candidates) => inventory.candidates.extend(candidates),
+                Err(error) => record_failure(&mut inventory, &package.published_name, &error),
+            }
+            if inventory.candidates.len() > MAX_TOTAL_CANDIDATES {
+                bail!(
+                    "DISM command-line inventory exceeds {MAX_TOTAL_CANDIDATES} total driver models"
+                );
+            }
+        }
+
+        inventory.candidates.sort_by(|left, right| {
+            left.published_name
+                .to_ascii_lowercase()
+                .cmp(&right.published_name.to_ascii_lowercase())
+                .then_with(|| {
+                    left.hardware_id
+                        .to_ascii_lowercase()
+                        .cmp(&right.hardware_id.to_ascii_lowercase())
+                })
+                .then_with(|| {
+                    left.compatible_ids
+                        .to_ascii_lowercase()
+                        .cmp(&right.compatible_ids.to_ascii_lowercase())
+                })
+                .then_with(|| left.architecture.cmp(&right.architecture))
+        });
+        inventory.candidates.dedup_by(|left, right| {
+            left.published_name
+                .eq_ignore_ascii_case(&right.published_name)
+                && left.hardware_id.eq_ignore_ascii_case(&right.hardware_id)
+                && left
+                    .compatible_ids
+                    .eq_ignore_ascii_case(&right.compatible_ids)
+                && left.architecture == right.architecture
+        });
+        Ok(inventory)
     }
 
     /// 解析 DISM 输出中的进度信息
@@ -904,7 +1146,7 @@ impl DismExe {
         image_path: &str,
         inf_files: &[PathBuf],
         progress_tx: Option<Sender<DismExeProgress>>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<PreservedDriverImportResult> {
         import_preserved_driver_infs_resilient(
             inf_files,
             || self.add_driver_inf_files_offline(image_path, inf_files, progress_tx.clone()),
@@ -1280,6 +1522,39 @@ mod tests {
     }
 
     #[test]
+    fn target_inventory_detail_arguments_use_one_invariant_read_only_published_name() {
+        let package = lr_core::dism_driver_inventory::OfflineDriverPackageDescriptor {
+            published_name: "storvsc.inf".into(),
+            original_file_name: "storvsc.inf".into(),
+            class_name: "SCSIAdapter".into(),
+            in_box: true,
+        };
+        let args = DismExe::build_get_driver_info_arguments(
+            r"D:\",
+            &package,
+            r"X:\Windows\Temp",
+            Path::new(r"X:\Windows\Temp\driver-inventory.log"),
+        )
+        .unwrap();
+        assert_eq!(args[0], "/English");
+        assert_eq!(args[1], r"/Image:D:\");
+        assert_eq!(args[2], "/Get-DriverInfo");
+        assert_eq!(args[3], "/Driver:storvsc.inf");
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.starts_with("/Driver:"))
+                .count(),
+            1
+        );
+        assert!(args.iter().any(|arg| arg == "/Format:List"));
+        assert!(!args.iter().any(|arg| {
+            arg.eq_ignore_ascii_case("/Add-Driver")
+                || arg.eq_ignore_ascii_case("/ForceUnsigned")
+                || arg.eq_ignore_ascii_case("/Recurse")
+        }));
+    }
+
+    #[test]
     fn resilient_driver_import_stops_on_empty_or_structurally_invalid_authenticated_sets() {
         assert!(import_preserved_driver_infs_resilient(&[], || Ok(()), |_| Ok(())).is_err());
 
@@ -1303,7 +1578,7 @@ mod tests {
         let (_temporary, files) = driver_test_tree(&["printer.inf", "network.inf"]);
         let batch_runs = Cell::new(0_u32);
         let individual_runs = Cell::new(0_u32);
-        let failures = import_preserved_driver_infs_resilient(
+        let result = import_preserved_driver_infs_resilient(
             &files,
             || {
                 batch_runs.set(batch_runs.get() + 1);
@@ -1315,7 +1590,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(failures.is_empty());
+        assert!(result.failures.is_empty());
+        assert_eq!(result.successful_inf_files, files);
         assert_eq!(batch_runs.get(), 1);
         assert_eq!(individual_runs.get(), 0);
     }
@@ -1325,7 +1601,7 @@ mod tests {
         let (_temporary, files) =
             driver_test_tree(&["printer.inf", "bad-network.inf", "virtual-device.inf"]);
         let attempts = Cell::new(0_u32);
-        let failures = import_preserved_driver_infs_resilient(
+        let result = import_preserved_driver_infs_resilient(
             &files,
             || anyhow::bail!("DISM batch rejected one package"),
             |inf| {
@@ -1341,8 +1617,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attempts.get(), 3);
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("bad-network.inf"));
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.failures[0].contains("bad-network.inf"));
+        assert_eq!(result.successful_inf_files.len(), 2);
 
         let all_failures = import_preserved_driver_infs_resilient(
             &files,
@@ -1350,7 +1627,8 @@ mod tests {
             |_| anyhow::bail!("package is not applicable"),
         )
         .unwrap();
-        assert_eq!(all_failures.len(), files.len());
+        assert_eq!(all_failures.failures.len(), files.len());
+        assert!(all_failures.successful_inf_files.is_empty());
     }
 
     #[test]
