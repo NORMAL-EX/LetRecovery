@@ -65,17 +65,16 @@ LetRecovery 是具有管理员权限的 Windows 系统安装、备份和磁盘�
 - `lr-core/`：两端共享的核心策略、纯逻辑、Windows 适配和可测试命令边界。
 - `正常系统端/`：桌面环境主程序，负责系统安装、备份、在线下载、工具箱和写入 PE 启动配置。
 - `PE端/`：WinPE 中运行的安装、备份、扩容和离线系统处理程序。
-- `官网/`：React、TypeScript、Vite 官网和文档站。
 - `assets/`：发布包资源、语言文件、工具和内置运行时文件。
 - `docs/`：架构、安全、第三方二进制来源及用户文档。
 - `.github/ISSUE_TEMPLATE/`：问题与功能反馈表单；Bug 表单只要求用户描述现象、复现步骤、上传对应阶段日志和截图，不得再要求手工抄写日志已经自动记录的软件版本、源/目标系统、固件、Secure Boot、BitLocker、磁盘结构、所用 PE 和实体机/虚拟机线索。
-- `.github/workflows/`：PR、主分支和发布流水线；release 在替换 PE 原生 Win32 EXE 时必须同时从底包 WIM 删除旧 `opengl32.dll`，不得把已停用的 egui/glow 运行时重新带入发布包，并必须确保 WIM 中存在 `Users\Default\AppData\Local\Temp`，避免未显式指定 `/ScratchDir` 的 DISM 在 WinPE 中因默认 `%TEMP%` 目录缺失而以错误 3 失败；正常系统端的 `assets/release/bin/dprk_easter_egg.mp3` 必须经过大小和复制后 SHA-256 校验再同步到最终 `pkg/bin/`，不得注入 PE WIM；从外部底包生成正式或预发布包时必须由 `.github/scripts/normalize-release-config.ps1` 在 CI 中直接生成与 `AppConfig`、`InstallPrefs` 和可持久化高级选项默认值同步的确定性安全配置，不得依赖工作区或仓库根级 `config.json`，并以此重建整份 `pkg/config.json`；只能保留本次构建并重新计算的 `pe_cache` 元数据，严禁继承底包维护机的界面偏好、提示关闭状态、本地路径、账户选项或安装选项，并必须显式保持 `log_enabled=true`、`easy_mode_enabled=false`、`easy_mode_tip_dismissed=false`、`easy_mode_settings_tip_dismissed=false` 和 `enable_advanced_options=false`；重建必须原子替换并回读验证，最终 `LetRecovery.7z` 还必须重新解出 `config.json`，验证它与已审计 `pkg/config.json` 字节哈希一致且没有生成默认值以外的字段，任何缺失、解析失败、残留或回读不一致都必须阻断发布，离线安装器也只能从同一份已审计 `pkg/` 构建；正式或预发布 Release 必须在最终 `pkg/` 生成后使用固定 Inno Setup 6.7.1 构建离线安装器，完整校验后只上传 `LetRecovery.7z` 和 `LetRecovery-Setup-x64.exe` 两个资产。Release 创建前必须用本次标签更新工作区中的 `官网/version.json` 并完成官网 lint、类型检查和构建；只有 Release 创建成功后才允许仅提交该版本文件并推回实际发布分支，失败流程不得留下版本提交，版本提交必须防止递归触发 CI。最终 `pkg/`、7z、安装器和本地 H 盘解压包必须复用 `.github/scripts/assert-release-tree-clean.ps1`，拒绝运行日志、开发产物目录、调试中间文件和 reparse point。
+- `.github/workflows/`：PR、主分支和发布流水线；release 在替换 PE 原生 Win32 EXE 时必须同时从底包 WIM 删除旧 `opengl32.dll`，不得把已停用的 egui/glow 运行时重新带入发布包，并必须确保 WIM 中存在 `Users\Default\AppData\Local\Temp`，避免未显式指定 `/ScratchDir` 的 DISM 在 WinPE 中因默认 `%TEMP%` 目录缺失而以错误 3 失败；正常系统端的 `assets/release/bin/dprk_easter_egg.mp3` 必须经过大小和复制后 SHA-256 校验再同步到最终 `pkg/bin/`，不得注入 PE WIM；从外部底包生成正式或预发布包时必须由 `.github/scripts/normalize-release-config.ps1` 在 CI 中直接生成与 `AppConfig`、`InstallPrefs` 和可持久化高级选项默认值同步的确定性安全配置，不得依赖工作区或仓库根级 `config.json`，并以此重建整份 `pkg/config.json`；只能保留本次构建并重新计算的 `pe_cache` 元数据，严禁继承底包维护机的界面偏好、提示关闭状态、本地路径、账户选项或安装选项，并必须显式保持 `log_enabled=true`、`easy_mode_enabled=false`、`easy_mode_tip_dismissed=false`、`easy_mode_settings_tip_dismissed=false` 和 `enable_advanced_options=false`；重建必须原子替换并回读验证，最终 `LetRecovery.7z` 还必须重新解出 `config.json`，验证它与已审计 `pkg/config.json` 字节哈希一致且没有生成默认值以外的字段，任何缺失、解析失败、残留或回读不一致都必须阻断发布，离线安装器也只能从同一份已审计 `pkg/` 构建；正式或预发布 Release 必须在最终 `pkg/` 生成后使用固定 Inno Setup 6.7.1 构建离线安装器，完整校验后只上传 `LetRecovery.7z` 和 `LetRecovery-Setup-x64.exe` 两个资产。只有 Release 创建成功后，流水线才允许使用 `RELEASE_PAT` 检出私有仓库 `NORMAL-EX/letrecovery-website`，通过 `.github/scripts/update-website-version.ps1` 将本次标签规范化后写入其根目录 `version.json`，并只提交该文件到网站仓库 `main`；失败流程不得留下网站版本提交，版本提交必须防止递归触发 CI。最终 `pkg/`、7z、安装器和本地 H 盘解压包必须复用 `.github/scripts/assert-release-tree-clean.ps1`，拒绝运行日志、开发产物目录、调试中间文件和 reparse point。
   从底包进入最终 `pkg/` 的所有 `*.log` 都是旧运行实例的诊断材料，流水线必须在替换二进制后删除并再次枚举确认不存在；本地 ISO、7z 和安装器打包也必须执行同一检查，禁止把开发机、维护机或虚拟机日志分发给下一位用户。
 - `installer/`：基于 Inno Setup 6.7 现代动态主题的 x64 离线安装器工程，从完整 `pkg/` 生成支持静默安装和卸载的单文件 `LetRecovery-Setup-x64.exe`；CI 与本地构建必须复用 `build-installer.ps1` 的包结构、版本和输出校验，不能在工作流中复制另一套编译逻辑。
 
 发布配置归一化还必须显式保持 `automation_export_enabled=false` 和 `pe_maintenance_entry_enabled=false`；自动化导出与手动 PE 维护都是用户主动开启的高级入口，不得被底包、维护机偏好或旧 `config.json` 带入最终发布包。已删除的 `mica_enabled` 是可忽略的旧配置字段，当前 `AppConfig` 和归一化发布配置均不得再生成它。
 
-官网 Markdown 由 `官网/plugins/markdown.ts` 在构建期生成 HTML、标题和纯正文 `searchText`；`DocsSearch` 必须同时索引页面标题、描述、标题层级和正文。页头中的搜索组件使用始终渲染的 lazy/Suspense 边界，并通过 `active` 控制宽度和透明度，禁止按 `isDocs` 条件挂载，否则进入/离开文档页的动画会消失。官网中英文文档必须成对维护，并明确区分“正常系统端可在 Windows 7–11 x64 运行”与仅适用于 Windows 10/11 的目标系统功能；不得继续宣称当前原生 Win32 界面依赖已停用的 egui/glow、`opengl32.dll` 或临时开发诊断工具，也不得引用已停用的 v1/v2 在线目录、旧 Win7 手工驱动/0x7B 开关或已被参数化 Windows API 替代的命令行实现。官网关于页的版本只能来自受版本控制的 `官网/version.json`，普通构建和部署不得根据当前时间动态改变版本；`.github/scripts/update-website-version.ps1` 是 Release 标签规范化、原子写入和回读验证的唯一入口。
+官网源码由独立私有仓库 `NORMAL-EX/letrecovery-website` 维护，本仓库不得重新引入旧 `官网/` 目录或复制网站构建流程。网站显示版本只能来自该仓库根目录受版本控制的 `version.json`，普通构建和部署不得根据当前时间动态改变版本；本仓库的 `.github/scripts/update-website-version.ps1` 是 Release 标签规范化、原子写入和回读验证的唯一入口。
 
 依赖方向必须保持为：正常系统端和 PE 端可以依赖 `lr-core`，`lr-core` 不得反向依赖任一端。两端出现相同的纯逻辑、命令构建或 Windows API 适配时，应优先迁移到 `lr-core`，端内保留兼容再导出或很薄的环境适配。
 
@@ -255,15 +254,6 @@ cargo test -p LetRecovery --locked --features non-elevated-tests
 `non-elevated-tests` 只允许测试程序以非管理员清单启动，并跳过正常端启动时的管理员检测和 `runas` 自动提权，供 UI 迭代和纯逻辑测试使用；release 构建会拒绝该 feature。读取真实 Windows 安装或宿主磁盘状态的测试必须带原因标记 `#[ignore]`，只能在可丢弃 VM 中手动运行。
 
 `dev-build` 用于生成带正常管理员清单和 release 优化的可分发测试包；它只改变明确的构建身份与用户可见测试标识，不得跳过权限、安全校验或危险操作边界。正式发布构建必须省略该 feature。
-
-修改 `官网/` 时，从该目录运行：
-
-```text
-npm ci
-npm run lint
-npm run type-check
-npm run build
-```
 
 提交前还必须：
 

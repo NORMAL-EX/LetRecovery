@@ -85,7 +85,6 @@ LetRecovery/
 ├── lr-core/             # 两端共享的纯逻辑与 Windows 适配层
 ├── 正常系统端/          # Windows 桌面环境版本
 ├── PE端/                # WinPE 环境版本
-├── 官网/                # React/Vite 官网
 ├── assets/              # 发布时使用的语言和资源文件
 ├── docs/                # 设计与第三方二进制溯源文档
 ├── Cargo.toml           # Rust workspace
@@ -105,7 +104,6 @@ LetRecovery/
 | **aria2** | 高速下载引擎 |
 | **wimlib / WIMGAPI / DISM** | 系统镜像部署、捕获与驱动维护 |
 | **Ghost** | GHO 镜像恢复 |
-| **React / TypeScript / Vite** | 官网和文档站 |
 
 ---
 
@@ -115,7 +113,6 @@ LetRecovery/
 
 - Rust 1.88.0 与该工具链的 `rust-src` 组件（正常端 Win7 构建与 CI 固定使用该版本）
 - Visual Studio Build Tools 2022，并安装“使用 C++ 的桌面开发”和 Windows 10/11 SDK
-- Node.js 22 与 npm（仅构建官网时需要）
 - 完整发布打包还需要 7-Zip 与 Windows DISM/ADK 环境
 
 ### 构建步骤
@@ -132,12 +129,6 @@ powershell -ExecutionPolicy Bypass -File .github/scripts/build-win7-normal.ps1
 # PE 端仅运行在现代 WinPE，继续使用普通 Windows MSVC 目标单独构建
 cargo +1.88.0 build -p letrecovery-pe --release --locked --target x86_64-pc-windows-msvc
 
-# 构建官网
-cd 官网
-npm ci
-npm run lint
-npm run type-check
-npm run build
 ```
 
 > 不要用 `cargo build --workspace --release` 生成要在 Windows 7 上运行的正常端程序。该命令会使用宿主机的 `x86_64-pc-windows-msvc` 标准库，可能静态导入 Windows 8+ API。本地与 Release 必须统一通过 `build-win7-normal.ps1` 生成并验证 `target/x86_64-win7-windows-msvc/release/LetRecovery.exe`。
@@ -154,7 +145,7 @@ cargo test -p letrecovery-pe --locked --features non-elevated-tests
 cargo test -p LetRecovery --locked --features non-elevated-tests
 ```
 
-CI 会在 Pull Request 和 `main` push 上编译全部测试目标、运行确定性单元测试并构建官网。CI 不会执行真实格式化、分区、BCD、DISM 写盘或重启；这些流程必须在隔离虚拟机和专用测试盘上另行验证。内置 `libwim-15.dll` 的版本、许可证和哈希见 [第三方二进制清单](docs/THIRD_PARTY_BINARIES.md)。
+CI 会在 Pull Request 和 `main` push 上编译全部测试目标并运行确定性单元测试。官网由独立私有仓库维护；本仓库创建 Release 成功后会同步更新其 `version.json`。CI 不会执行真实格式化、分区、BCD、DISM 写盘或重启；这些流程必须在隔离虚拟机和专用测试盘上另行验证。内置 `libwim-15.dll` 的版本、许可证和哈希见 [第三方二进制清单](docs/THIRD_PARTY_BINARIES.md)。
 
 ---
 
@@ -189,7 +180,7 @@ CI 会在 Pull Request 和 `main` push 上编译全部测试目标、运行确�
 
 ## 🔗 相关链接
 
-- 🌐 **官网**: [sysre.cn](https://sysre.cn)
+- 🌐 **官网**: [letrecovery.net](https://letrecovery.net)
 - 📦 **发布页**: [GitHub Releases](https://github.com/NORMAL-EX/LetRecovery/releases)
 - 🐛 **问题反馈**: [GitHub Issues](https://github.com/NORMAL-EX/LetRecovery/issues)
 

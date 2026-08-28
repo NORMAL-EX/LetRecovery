@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $ReleaseTag,
 
-    [string] $VersionFile = (Join-Path $PSScriptRoot "..\..\官网\version.json")
+    [Parameter(Mandatory = $true)]
+    [string] $VersionFile
 )
 
 $ErrorActionPreference = "Stop"
