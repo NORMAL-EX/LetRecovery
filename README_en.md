@@ -20,6 +20,8 @@ English | [简体中文](README.md)
 
 > ⚠️ **Using this project in any manner that violates the [User Terms](USER_TERMS.md) is strictly prohibited.** The author reserves the right to pursue legal remedies for infringement, unauthorized distribution, unauthorized commercial customization, and other violations. Subject to applicable law and licenses already granted, the author also reserves the right to change the licensing of future versions or cease publishing their source code at any time.
 
+> 📢 **Maintenance transition:** The original author has started high school, and ongoing maintenance will be continued by [**hwyyds-skidder-team**](https://github.com/hwyyds-skidder-team). Existing authorship, licensing, and user terms remain unchanged.
+
 ## ✨ Features
 
 ### 🖥️ System Installation
@@ -179,11 +181,12 @@ Report security issues privately as described in [SECURITY.md](SECURITY.md). See
 
 ---
 
-## 👤 Author
+## 👥 Author and Maintainers
 
-**NORMAL-EX** (also known as dddffgg)
+- **Original author:** [NORMAL-EX](https://github.com/NORMAL-EX) (also known as dddffgg)
+- **Current maintenance team:** [hwyyds-skidder-team](https://github.com/hwyyds-skidder-team)
 
-- GitHub: [@NORMAL-EX](https://github.com/NORMAL-EX)
+Thanks to everyone who contributes code, testing, and feedback.
 
 ---
 

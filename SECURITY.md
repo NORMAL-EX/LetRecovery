@@ -9,6 +9,9 @@ these areas as potentially security-relevant.
 Security fixes target the latest release and the current `main` branch. Older
 release packages may not receive backports.
 
+Current maintenance is coordinated by
+[hwyyds-skidder-team](https://github.com/hwyyds-skidder-team).
+
 ## Reporting a vulnerability
 
 Use GitHub's private vulnerability reporting entry under the repository's

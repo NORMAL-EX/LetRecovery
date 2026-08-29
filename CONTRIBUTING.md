@@ -3,6 +3,10 @@
 LetRecovery is a high-privilege Windows disk tool. Compatibility, recovery,
 and prevention of wrong-disk writes take priority over refactoring speed.
 
+Ongoing project maintenance is coordinated by
+[hwyyds-skidder-team](https://github.com/hwyyds-skidder-team). Contributions
+continue to use this repository's issues and pull requests.
+
 ## Development environment
 
 - Rust 1.88 or newer; CI uses Rust 1.88.0.

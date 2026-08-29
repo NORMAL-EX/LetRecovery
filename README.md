@@ -20,6 +20,8 @@
 
 > ⚠️ **严禁将本项目用于任何违反[用户协议](USER_TERMS.md)的行为。** 对侵权、违规分发、未经授权的商业定制及其他违约使用，作者保留依法追究责任的权利；作者同时保留在适用法律及既有许可约束允许的范围内，随时调整后续版本授权方式或停止公开后续版本源代码的权利。
 
+> 📢 **维护交接：** 原作者现已进入高中阶段，后续日常维护将由 [**hwyyds-skidder-team**](https://github.com/hwyyds-skidder-team) 接替。项目原有作者署名、许可证和使用条款不因此改变。
+
 ## ✨ 功能特性
 
 ### 🖥️ 系统安装
@@ -170,11 +172,12 @@ CI 会在 Pull Request 和 `main` push 上编译全部测试目标并运行确�
 
 ---
 
-## 👤 作者
+## 👥 作者与维护团队
 
-**NORMAL-EX** (又称 dddffgg)
+- **原作者：** [NORMAL-EX](https://github.com/NORMAL-EX)（又称 dddffgg）
+- **当前维护团队：** [hwyyds-skidder-team](https://github.com/hwyyds-skidder-team)
 
-- GitHub: [@NORMAL-EX](https://github.com/NORMAL-EX)
+感谢所有参与测试、反馈与代码贡献的社区成员。
 
 ---
 
