@@ -277,6 +277,14 @@ Winlogon 启动的 gate 控制台在真实 VMware 中曾未被呈现，造成 Ex
 
 ## 测试边界
 
+2026-08-29 的 Windows 11 实机日志证明，`SetupGetInfDriverStoreLocationW` 对 73 个已发布 OEM INF 去重累计得到的 3,342,350,118 字节不是 DISM `/Online /Export-Driver` 最终树的大小上界；DISM 成功导出 89 个 INF 后实际普通文件树为 3,605,405,747 字节。旧代码在剩余 78.75 GiB 的数据卷上仍以 `exported_driver_size_exceeded_plan` 失败，属于把只读库存差异错误升级为安装停止。当前设计保留该无临时复制库存用于第一次选盘，但真实导出后用实际树替换同一预算中的驱动项，并以当前 `GetDiskFreeSpaceExW.lpFreeBytesAvailableToCaller` 权威可用字节证明尚未写入载荷加原固定 2 GiB 仍可容纳。权威可用空间查询失败时必须停止并保留底层 Win32 错误；查询成功时差异只记录诊断，空间足够继续，只有实际剩余空间小于剩余确定预算才以容量不足停止。
+
+同日可丢弃 Hyper-V RunId `b7d6425156af45e69e9de83f61294823` 动态证明了当前实现的替换语义：生产 OEM 预估为 64,776 字节，DISM 实际树和来宾独立枚举均为 67,093 字节，导出后 caller 可用空间 20,257,497,088 字节，尚未物化载荷加唯一 2 GiB 余量为 8,209,057,163 字节；安装、目标库存候选、首次启动和清理闭环全部通过。该一次固定 Win10/Win10 PE 虚拟机证据不能替代 Windows 11 实机样本，也不能证明所有真实 OEM 导出规模、物理控制器和磁盘空间组合。
+
+同一批日志还证明，关闭驱动导出后旧 `LetRecovery_Data\drivers` 目录仍被无条件加入 LRHM3，而驱动包中的零字节普通文件被统一 `length > 0` 门禁误报为 `handoff artifact length is outside its limit`。当前任务未请求驱动时必须忽略旧树，不能消费历史目录；请求的目录树允许零字节普通文件，并以空内容 SHA-256、拒写/拒删句柄和路径绑定正常认证。镜像、PCA、marker、secret 和安装器是否必须非空继续由其角色语义单独校验，不能再把承重对象规则泛化到任意文件树成员。
+
+固定 stale-disabled-driver Hyper-V 夹具随后取得两次连续动态通过：RunId `953368ec153e4683ab7531eebf77b8ba` 与 `beb4aac3c60641a296506a5892e9a38b` 均证明 `driver_action=none` 时，261 个残留文件（其中 258 个零字节）、422 UTF-16 单元长路径、目录外噪声和循环链接未进入本次认证 manifest，`PreservedDriver=0` 且本轮 fixture 任意角色命中数为 0，并完成 PE、Win10 首启、`LRTest10` 收尾、自然关机和 Hyper-V 清理。更早 RunId `02f9fdb97eea49b6868b149a07737af0` 已跨过同一 manifest/PE 边界，但新系统首启在 Hyper-V 画面停滞并经授权强制断电，因此仍保留为失败样本；随后两次成功只能说明该停滞未在相同产品输入下复现，不能把它从记录中删除或断言根因已经确定。这些结果只覆盖当前固定夹具，不代表任意损坏树、ACL、第三方过滤驱动、物理存储硬件或启用驱动导出/恢复的路径。
+
 Hyper-V 安装矩阵的宿主进程本身也是需要观测的测试对象。2026-08-24 的成功 Win11 运行在产品验证、证据 VHD 删除和检查点恢复均完成后，长生命周期 Windows PowerShell 仍保留约 3.86 GiB working set；较早 Win10 运行曾达到约 6.92 GiB。证据表明这是 `Restore-VMSnapshot` 后宿主 PowerShell 的退出/内存滞留，不是 LetRecovery 客体泄漏。基线恢复与收尾恢复因此都必须放进短生命周期 helper，并在 helper 退出后重新读取 VM `Off`、唯一授权检查点和有效 differencing VHD chain；主宿主只保留编排状态。
 
 2026-08-25 的个人文件成功分支进一步证明，只隔离检查点恢复仍不够：同一长生命周期宿主在只读挂载两个 VHD、运行 Storage CIM 和离线账户库存之后，已经完成证据复制却能在写 validation 前把 private bytes 从约 160 MiB 持续推到 15 GiB，系统提交率达到 97.6%。这不是测试客体或证据 JSON 体积造成的；对应 JSON 只有约 6–62 KiB。安装矩阵因此把 canonical 布局、只读 VHD 挂载、卷证据和离线账户库存全部移入 `-EvidenceCollectionChild` 短生命周期模式。child 必须先卸载全部 VHD，再原子发布带 RunId、布局数量、唯一系统匹配计数和 `all_vhds_dismounted=true` 的结果；父进程只消费普通 JSON，不接收 Storage CIM 对象。结果已经发布而 child 两秒仍不退出时，父进程可回收该精确 PID并记录 `exit_recovered`，但结果落盘前不得仅凭内存阈值终止。`Add-PartitionAccessPath`/`Remove-PartitionAccessPath` 还必须显式 `Out-Null`，count-only 函数调用方只接受唯一 `Int32`，避免任何 CIM 输出逃逸到整数比较或错误格式化。即使 VHD/Storage 已经隔离，累计约 1,000 个 Hyper-V/CIM 句柄的父进程在进入纯 JSON 后置条件时仍可能继续异常增长；同一批 6–62 KiB 证据在 fresh Windows PowerShell 中逐句回放仅约 36 MiB。因此后置条件现由独立 `-EvidenceValidationChild` 只读执行并原子发布相同 RunId 的 validation，父进程只核对其有界结果后立即进入 VM 收尾。

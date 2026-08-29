@@ -109,6 +109,20 @@ impl ArtifactRole {
                 | Self::ProtectedBitLockerSecret
         )
     }
+
+    /// Roles whose object is itself the payload must never authenticate an empty file. Driver and
+    /// XP source trees deliberately remain outside this set because a valid package tree may
+    /// contain empty ordinary members bound by SHA-256(empty).
+    const fn requires_nonempty_payload(self) -> bool {
+        matches!(
+            self,
+            Self::InstallImageSpan
+                | Self::PcaPackage
+                | Self::AutoPartitionMarker
+                | Self::ProtectedAdministratorSecret
+                | Self::ProtectedBitLockerSecret
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -147,7 +161,13 @@ pub struct ArtifactRecord {
 impl ArtifactRecord {
     fn validate(&self) -> Result<()> {
         validate_relative_path(&self.relative_path)?;
-        if self.length_bytes == 0 || self.length_bytes > HANDOFF_ARTIFACT_MAX_BYTES {
+        // Empty ordinary files are valid members of driver and XP source trees and still have a
+        // stable, nonzero SHA-256 identity. Payload-object roles are rejected here so PE cannot
+        // cross a destructive boundary with a semantically empty image, marker, package or secret.
+        if self.length_bytes == 0 && self.role.requires_nonempty_payload() {
+            bail!("handoff artifact role requires a nonempty payload");
+        }
+        if self.length_bytes > HANDOFF_ARTIFACT_MAX_BYTES {
             bail!("handoff artifact length is outside its limit");
         }
         if self.sha256 == [0; 32] {
@@ -868,6 +888,13 @@ mod tests {
 
     const DATA_TOKEN: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const TARGET_TOKEN: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const EMPTY_SHA256_HEX: &str =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn empty_sha256() -> [u8; 32] {
+        assert_eq!(crate::hash::sha256_bytes(&[]), EMPTY_SHA256_HEX);
+        crate::install_handoff::decode_hex_array::<32>(EMPTY_SHA256_HEX, "empty SHA-256").unwrap()
+    }
 
     fn target(offset: u64, length: u64) -> CanonicalInstallTargetV2 {
         CanonicalInstallTargetV2 {
@@ -1091,6 +1118,106 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn zero_length_ordinary_artifact_roles_roundtrip_with_real_empty_file_digest() {
+        let empty_digest = empty_sha256();
+        assert_ne!(empty_digest, [0; 32]);
+        let artifacts = [
+            (ArtifactRole::XpSourceFile, "xp\\I386\\empty.inf"),
+            (
+                ArtifactRole::PreservedDriver,
+                "drivers\\preserved\\empty.cat",
+            ),
+            (ArtifactRole::UserDriver, "drivers\\user\\empty.dll"),
+        ]
+        .into_iter()
+        .map(|(role, path)| {
+            let mut empty = artifact(path, 0);
+            empty.role = role;
+            empty.length_bytes = 0;
+            empty.sha256 = empty_digest;
+            empty
+        })
+        .collect::<Vec<_>>();
+        let manifest = HandoffManifest::new(
+            HandoffPurpose::Install,
+            "00112233445566778899aabbccddeeff",
+            DATA_TOKEN,
+            Some(TARGET_TOKEN.to_owned()),
+            None,
+            artifacts,
+        )
+        .unwrap();
+        let serialized = manifest.to_bytes().unwrap();
+        let parsed = HandoffManifest::parse(&serialized).unwrap();
+        assert_eq!(parsed, manifest);
+        for role in [
+            ArtifactRole::PreservedDriver,
+            ArtifactRole::UserDriver,
+            ArtifactRole::XpSourceFile,
+        ] {
+            let record = parsed
+                .artifacts
+                .iter()
+                .find(|record| record.role == role)
+                .unwrap();
+            assert_eq!(record.length_bytes, 0);
+            assert_eq!(record.sha256, empty_digest);
+        }
+    }
+
+    #[test]
+    fn zero_length_ordinary_artifact_roles_still_reject_all_zero_digest() {
+        for (role, path) in [
+            (
+                ArtifactRole::PreservedDriver,
+                "drivers\\preserved\\empty.inf",
+            ),
+            (ArtifactRole::UserDriver, "drivers\\user\\empty.inf"),
+            (ArtifactRole::XpSourceFile, "xp\\I386\\empty.inf"),
+        ] {
+            let mut empty = artifact(path, 0);
+            empty.role = role;
+            empty.length_bytes = 0;
+            empty.sha256 = [0; 32];
+            let error = empty.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("SHA-256 must not be all-zero"),
+                "{role:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_length_payload_object_roles_fail_before_consumer_write_boundaries() {
+        for (role, path) in [
+            (ArtifactRole::InstallImageSpan, "images\\install.wim"),
+            (ArtifactRole::PcaPackage, "pca\\pca.wim"),
+            (ArtifactRole::AutoPartitionMarker, "markers\\auto.marker"),
+            (
+                ArtifactRole::ProtectedAdministratorSecret,
+                "secrets\\administrator.bin",
+            ),
+            (
+                ArtifactRole::ProtectedBitLockerSecret,
+                "secrets\\bitlocker.bin",
+            ),
+        ] {
+            let mut empty = artifact(path, 0);
+            empty.role = role;
+            empty.length_bytes = 0;
+            empty.sha256 = empty_sha256();
+            if role.requires_protected_boot() {
+                empty.location = ArtifactLocation::ProtectedBoot;
+            }
+            let error = empty.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("requires a nonempty payload"),
+                "{role:?}: {error}"
+            );
+        }
     }
 
     #[test]

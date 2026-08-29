@@ -324,12 +324,13 @@ pub fn run_install(prepared: PreparedInstall) -> Result<Value> {
 }
 
 /// The public automation switch is deliberately opt-in and is used only for unattended disposable
-/// machines. Give its controller enough time to persist the handoff witness, then close blocking
-/// helper applications at the documented shutdown boundary. Interactive installs retain the
-/// shorter, non-forcing restart so user-authored application state is never discarded.
+/// machines. Give its controller enough time to persist the handoff and extreme-fixture witnesses,
+/// then close blocking helper applications at the documented shutdown boundary. Interactive
+/// installs retain the shorter, non-forcing restart so user-authored application state is never
+/// discarded.
 const fn restart_policy(automation_shutdown_on_terminal: bool) -> (u32, bool) {
     if automation_shutdown_on_terminal {
-        (15, true)
+        (60, true)
     } else {
         (5, false)
     }
@@ -814,7 +815,7 @@ mod tests {
     #[test]
     fn unattended_automation_restart_is_delayed_and_forcing_only_when_opted_in() {
         assert_eq!(restart_policy(false), (5, false));
-        assert_eq!(restart_policy(true), (15, true));
+        assert_eq!(restart_policy(true), (60, true));
     }
 
     fn dual_boot_source_partition() -> Partition {

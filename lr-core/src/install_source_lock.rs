@@ -56,7 +56,7 @@ pub struct LockedInstallTree {
 }
 
 /// One ordinary, non-reparse public artifact held deny-write/delete while its authenticated
-/// manifest is published.
+/// manifest is published. Empty files remain valid authenticated tree members.
 #[derive(Debug)]
 pub struct LockedPlainArtifact {
     identity: LockedSourceArtifactIdentity,
@@ -90,8 +90,8 @@ impl LockedPlainArtifact {
         let file = open_locked(&canonical)
             .map_err(|error| format!("lock public artifact {}: {error}", canonical.display()))?;
         let metadata = file.metadata().map_err(|error| error.to_string())?;
-        if !metadata.is_file() || metadata.len() == 0 {
-            return Err("public artifact must be a non-empty ordinary file".to_owned());
+        if !metadata.is_file() {
+            return Err("public artifact must be an ordinary file".to_owned());
         }
         let mut reader = file
             .try_clone()
@@ -1119,6 +1119,14 @@ impl LockedInstallTree {
 mod tests {
     use super::*;
 
+    const EMPTY_SHA256_HEX: &str =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn empty_sha256() -> [u8; 32] {
+        assert_eq!(crate::hash::sha256_bytes(&[]), EMPTY_SHA256_HEX);
+        crate::install_handoff::decode_hex_array::<32>(EMPTY_SHA256_HEX, "empty SHA-256").unwrap()
+    }
+
     #[test]
     fn single_source_is_enumerated_as_one_canonical_file() {
         let temp = crate::scoped_temp_file::ScopedTempDir::create_in(
@@ -1369,5 +1377,83 @@ mod tests {
         assert!(samples.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(guard.identity().length_bytes, bytes.len() as u64);
         guard.verify_binding_unchanged().unwrap();
+    }
+
+    #[test]
+    fn empty_plain_artifact_lock_identity_copy_and_relock_preserve_real_digest() {
+        let temp = crate::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-source-lock-empty-plain",
+        )
+        .unwrap();
+        let source = temp.path().join("empty.bin");
+        let destination = temp.path().join("snapshot.bin");
+        std::fs::write(&source, []).unwrap();
+        let guard = LockedPlainArtifact::acquire(&source).unwrap();
+        let expected_digest = empty_sha256();
+        assert_ne!(expected_digest, [0; 32]);
+        assert_eq!(guard.identity().length_bytes, 0);
+        assert_eq!(guard.identity().sha256, expected_digest);
+        assert!(std::fs::read(&source).unwrap().is_empty());
+        let mut output = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&destination)
+            .unwrap();
+        guard.copy_to_verified_writer(&mut output).unwrap();
+        drop(output);
+        assert_eq!(std::fs::metadata(&destination).unwrap().len(), 0);
+        assert!(std::fs::read(&destination).unwrap().is_empty());
+        guard.verify_unchanged().unwrap();
+
+        let copied = LockedPlainArtifact::acquire(&destination).unwrap();
+        assert_eq!(copied.identity().length_bytes, 0);
+        assert_eq!(copied.identity().sha256, expected_digest);
+        copied.verify_binding_unchanged().unwrap();
+    }
+
+    #[test]
+    fn empty_install_tree_file_lock_identity_copy_and_relock_preserve_real_digest() {
+        let temp = crate::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-source-lock-empty-tree",
+        )
+        .unwrap();
+        let source = temp.path().join("I386");
+        let empty_source = source.join("EMPTY.INF");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(&empty_source, []).unwrap();
+
+        let expected_digest = empty_sha256();
+        assert_ne!(expected_digest, [0; 32]);
+        let guard = LockedInstallTree::acquire(&source).unwrap();
+        let identities = guard.artifact_identities().unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].length_bytes, 0);
+        assert_eq!(identities[0].sha256, expected_digest);
+        assert!(guard.read_file(&identities[0].path).unwrap().is_empty());
+
+        let destination = temp.path().join("copied-I386");
+        let report = guard
+            .copy_tree(guard.selected_path(), &destination, false)
+            .unwrap();
+        assert_eq!(report.files_copied, 1);
+        assert!(report.errors.is_empty());
+        let copied_file = destination.join("EMPTY.INF");
+        assert_eq!(std::fs::metadata(&copied_file).unwrap().len(), 0);
+        assert!(std::fs::read(&copied_file).unwrap().is_empty());
+        guard.verify_unchanged().unwrap();
+
+        let copied = LockedInstallTree::acquire(&destination).unwrap();
+        let copied_identities = copied.artifact_identities().unwrap();
+        assert_eq!(copied_identities.len(), 1);
+        assert_eq!(copied_identities[0].length_bytes, 0);
+        assert_eq!(copied_identities[0].sha256, expected_digest);
+        assert!(copied
+            .read_file(&copied_identities[0].path)
+            .unwrap()
+            .is_empty());
+        copied.verify_unchanged().unwrap();
     }
 }

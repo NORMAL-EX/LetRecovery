@@ -1,5 +1,7 @@
 param(
-    [string]$Toolchain = '1.88.0'
+    [string]$Toolchain = '1.88.0',
+    [switch]$CiAutomation,
+    [string]$ReceiptPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,6 +10,7 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..\..'))
 $artifact = Join-Path $repositoryRoot 'target\x86_64-win7-windows-msvc\release\LetRecovery.exe'
 $toolchainArgument = "+$Toolchain"
+$featureArguments = if ($CiAutomation) { @('--features','ci-automation') } else { @() }
 
 if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'Cargo.toml') -PathType Leaf)) {
     throw "The repository root could not be resolved from $scriptRoot"
@@ -38,6 +41,7 @@ try {
         --release `
         --locked `
         --target x86_64-win7-windows-msvc `
+        @featureArguments `
         -Z build-std=std,panic_abort
     if ($LASTEXITCODE -ne 0) {
         throw 'The Windows 7 normal-endpoint build failed.'
@@ -52,7 +56,38 @@ try {
         throw 'The Windows 7 import-boundary verification failed.'
     }
 
-    Write-Host "Built and verified the Windows 7-11 normal endpoint: $artifact"
+    if (-not [string]::IsNullOrWhiteSpace($ReceiptPath)) {
+        $receipt = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $ReceiptPath))
+        $repositoryPrefix = $repositoryRoot.TrimEnd('\') + '\'
+        if (-not $receipt.StartsWith($repositoryPrefix,[StringComparison]::OrdinalIgnoreCase)) {
+            throw "The build receipt escaped the repository: $receipt"
+        }
+        $receiptParent = Split-Path -Parent $receipt
+        if (-not (Test-Path -LiteralPath $receiptParent -PathType Container)) {
+            New-Item -ItemType Directory -Path $receiptParent -Force | Out-Null
+        }
+        $temporary = Join-Path $receiptParent ('.normal-build-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            $value = [ordered]@{
+                schema_version = 1
+                artifact = [System.IO.Path]::GetFullPath($artifact)
+                artifact_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+                artifact_length = [uint64](Get-Item -LiteralPath $artifact).Length
+                target = 'x86_64-win7-windows-msvc'
+                toolchain = $Toolchain
+                feature = if ($CiAutomation) { 'ci-automation' } else { 'production' }
+                win7_imports_verified = $true
+                built_utc = [DateTime]::UtcNow.ToString('o')
+            }
+            [IO.File]::WriteAllText($temporary,(($value | ConvertTo-Json -Depth 4) + "`r`n"),[Text.UTF8Encoding]::new($false))
+            Move-Item -LiteralPath $temporary -Destination $receipt -Force
+        }
+        finally {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Write-Host "Built and verified the Windows 7-11 normal endpoint$(if($CiAutomation){' with ci-automation'}else{''}): $artifact"
 }
 finally {
     Pop-Location

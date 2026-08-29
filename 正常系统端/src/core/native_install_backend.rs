@@ -17,6 +17,8 @@ use std::sync::Arc;
 use anyhow::Context;
 use lr_core::cached_artifact::CachedArtifactStatus;
 use lr_core::data_staging::StagingPayloadBudget;
+#[cfg(any(feature = "ci-automation", test))]
+use lr_core::data_staging::STAGING_OPERATIONAL_HEADROOM_BYTES;
 use lr_core::pca_compat::PreparedPcaCompatPackage;
 
 use super::disk::{DiskManager, Partition, PartitionStyle};
@@ -33,7 +35,7 @@ use super::ui_state::{BootModeSelection, DriverAction};
 const UNSUPPORTED_PENDING: &str = "unsupported_pending";
 const PREINSTALLED_SOFTWARE_DOWNLOAD_ATTEMPTS: usize = 3;
 #[cfg(feature = "ci-automation")]
-const CI_EXISTING_TARGET_DRIVER_FIXTURE_BUDGET_BYTES: u64 = 128 * 1024;
+const CI_EXISTING_TARGET_DRIVER_FIXTURE_BUDGET_BYTES: u64 = 0;
 #[cfg(not(test))]
 const PREINSTALLED_SOFTWARE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
@@ -48,6 +50,168 @@ fn ci_existing_target_driver_scenario_run_id() -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
     .then(|| run_id.to_owned())
+}
+
+#[cfg(feature = "ci-automation")]
+fn ci_stale_disabled_driver_scenario_run_id() -> Option<String> {
+    let value = std::env::var("LETRECOVERY_CI_HANDOFF_SCENARIO").ok()?;
+    let run_id = value.strip_prefix("stale_disabled_driver:")?;
+    (run_id.len() == 32
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| run_id.to_owned())
+}
+
+#[cfg(feature = "ci-automation")]
+fn stage_ci_stale_disabled_driver_fixture(data_dir: &Path, run_id: &str) -> anyhow::Result<()> {
+    let root = data_dir.join("drivers");
+    std::fs::create_dir_all(&root).context("create CI stale disabled-driver directory")?;
+    let fixture_root = root.join(format!("lrci-stale-tree-{run_id}"));
+    std::fs::create_dir(&fixture_root).context("create CI run-scoped stale driver tree")?;
+    let fixture = fixture_root.join(format!("lrci-stale-empty-{run_id}.bin"));
+    std::fs::write(&fixture, []).context("write CI zero-byte stale driver artifact")?;
+    let empty_root = fixture_root.join("legacy-empty-set");
+    std::fs::create_dir(&empty_root).context("create CI stale empty-file set")?;
+    for index in 0..256_u16 {
+        std::fs::write(empty_root.join(format!("empty-{index:03}.bin")), [])
+            .context("write CI stale empty-file set member")?;
+    }
+    let mut deep_root = fixture_root.join("legacy-depth");
+    for level in 0..8_u8 {
+        deep_root = deep_root.join(format!("level-{level:02}-abcdefghijklmnop"));
+    }
+    std::fs::create_dir_all(&deep_root).context("create CI stale deep path")?;
+    let long_component = format!("{}.bin", "l".repeat(120));
+    let long_path = deep_root.join(&long_component);
+    std::fs::write(&long_path, []).context("write CI stale long-component file")?;
+    let long_path_utf16_units = long_path.to_string_lossy().encode_utf16().count();
+    if long_path_utf16_units <= 260 {
+        anyhow::bail!("CI stale long-path fixture did not exceed 260 UTF-16 code units");
+    }
+    std::fs::write(
+        fixture_root.join(format!("legacy-{run_id}.inf")),
+        b"; ignored historical driver package\r\n",
+    )
+    .context("write CI stale INF")?;
+    std::fs::write(
+        fixture_root.join(format!("legacy-{run_id}.sys")),
+        b"ignored historical driver payload\r\n",
+    )
+    .context("write CI stale SYS")?;
+    let large = fixture_root.join(format!("legacy-large-{run_id}.bin"));
+    let large_file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&large)
+        .context("create CI stale large logical file")?;
+    large_file
+        .set_len(64 * 1024 * 1024)
+        .context("size CI stale large logical file")?;
+    std::fs::write(
+        root.join(format!("unrelated-history-{run_id}.dat")),
+        b"unrelated stale directory noise must be tolerated\r\n",
+    )
+    .context("write CI unrelated stale driver noise")?;
+    #[cfg(windows)]
+    {
+        let cycle = root.join(format!("lrci-stale-cycle-{run_id}"));
+        std::os::windows::fs::symlink_dir(&root, &cycle)
+            .context("create CI stale driver reparse cycle")?;
+    }
+    #[cfg(not(windows))]
+    anyhow::bail!("CI stale disabled-driver reparse fixture requires Windows");
+    log::warn!(
+        "[CI HANDOFF REGRESSION] staged extreme stale disabled-driver tree run_id={} root={} file={} length=0 empty_set=256 long_component={} long_path_utf16_units={} large_logical_bytes={} sibling_noise=true reparse_cycle=true",
+        run_id,
+        fixture_root.display(),
+        fixture.display(),
+        long_component.len(),
+        long_path_utf16_units,
+        64 * 1024 * 1024
+    );
+    Ok(())
+}
+
+#[cfg(feature = "ci-automation")]
+fn write_ci_stale_driver_manifest_receipt(
+    run_id: &str,
+    manifest_artifact_count: usize,
+    preserved_driver_artifact_count: usize,
+    run_fixture_artifact_count_any_role: usize,
+) -> anyhow::Result<()> {
+    let path = PathBuf::from(
+        std::env::var_os("LETRECOVERY_CI_STALE_DRIVER_RECEIPT")
+            .ok_or_else(|| anyhow::anyhow!("CI stale-driver product receipt path is missing"))?,
+    );
+    write_ci_stale_driver_manifest_receipt_to(
+        &path,
+        run_id,
+        manifest_artifact_count,
+        preserved_driver_artifact_count,
+        run_fixture_artifact_count_any_role,
+    )
+}
+
+#[cfg(feature = "ci-automation")]
+fn write_ci_stale_driver_manifest_receipt_to(
+    path: &Path,
+    run_id: &str,
+    manifest_artifact_count: usize,
+    preserved_driver_artifact_count: usize,
+    run_fixture_artifact_count_any_role: usize,
+) -> anyhow::Result<()> {
+    if path.file_name().and_then(|name| name.to_str())
+        != Some("stale-disabled-driver-product-receipt.json")
+    {
+        anyhow::bail!("CI stale-driver product receipt has an unexpected filename");
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("CI stale-driver product receipt has no parent"))?;
+    let parent_metadata =
+        std::fs::symlink_metadata(parent).context("inspect CI stale-driver receipt parent")?;
+    if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+        anyhow::bail!("CI stale-driver product receipt parent is not an ordinary directory");
+    }
+    if preserved_driver_artifact_count != 0 || run_fixture_artifact_count_any_role != 0 {
+        anyhow::bail!(
+            "disabled-driver handoff unexpectedly contains stale artifacts: preserved={} run_fixture_any_role={}",
+            preserved_driver_artifact_count,
+            run_fixture_artifact_count_any_role
+        );
+    }
+    let bytes = format!(
+        concat!(
+            "{{\r\n",
+            "  \"schema_version\": 1,\r\n",
+            "  \"run_id\": \"{}\",\r\n",
+            "  \"driver_export_requested\": false,\r\n",
+            "  \"driver_action_mode\": 0,\r\n",
+            "  \"restore_drivers\": false,\r\n",
+            "  \"drivers_directory_skipped\": true,\r\n",
+            "  \"manifest_artifact_count\": {},\r\n",
+            "  \"preserved_driver_artifact_count\": {},\r\n",
+            "  \"run_fixture_artifact_count_any_role\": {}\r\n",
+            "}}\r\n"
+        ),
+        run_id,
+        manifest_artifact_count,
+        preserved_driver_artifact_count,
+        run_fixture_artifact_count_any_role
+    );
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .context("create CI stale-driver product receipt")?;
+    output
+        .write_all(bytes.as_bytes())
+        .context("write CI stale-driver product receipt")?;
+    output
+        .sync_all()
+        .context("flush CI stale-driver product receipt")?;
+    Ok(())
 }
 
 #[cfg(feature = "ci-automation")]
@@ -600,6 +764,143 @@ fn automatic_driver_export_has_payload(driver_root: &Path) -> anyhow::Result<boo
         );
     }
     Ok(false)
+}
+
+fn should_include_preserved_driver_tree(
+    export_requested: bool,
+    driver_action_mode: u8,
+    restore_drivers: bool,
+) -> bool {
+    export_requested && (driver_action_mode != 0 || restore_drivers)
+}
+
+/// Replaces the Driver Store preflight inventory with DISM's authoritative materialized result and
+/// proves that the selected volume still has room for every unmaterialized payload plus the same
+/// fixed 2 GiB operational headroom. A larger DISM tree is not itself an error; insufficient
+/// current capacity is.
+fn reconcile_exported_driver_budget(
+    budget: &mut StagingPayloadBudget,
+    actual_driver_bytes: u64,
+    current_free_bytes: u64,
+) -> Result<(u64, u64), InstallBackendError> {
+    let planned_driver_bytes = budget.exported_driver_bytes;
+    let mut reconciled = *budget;
+    reconciled.exported_driver_bytes = actual_driver_bytes;
+    let materialized_payload_bytes = actual_driver_bytes
+        .checked_add(reconciled.pca_bytes)
+        .ok_or_else(|| {
+            InstallBackendError::new(
+                "staging_materialized_size_overflow",
+                "materialized PCA and driver bytes overflow u64",
+            )
+        })?;
+    let remaining_required_bytes = reconciled
+        .remaining_required_bytes_after(materialized_payload_bytes)
+        .ok_or_else(|| {
+            InstallBackendError::new(
+                "staging_remaining_size_invalid",
+                "reconciled staging budget cannot represent the remaining payload",
+            )
+        })?;
+    if current_free_bytes < remaining_required_bytes {
+        return Err(InstallBackendError::new(
+            "staging_capacity_after_driver_export",
+            format!(
+                "DISM materialized {actual_driver_bytes} driver bytes (preflight {planned_driver_bytes}); the selected volume now has {current_free_bytes} free bytes but {remaining_required_bytes} bytes are still required for the remaining payload and fixed 2 GiB operational headroom"
+            ),
+        ));
+    }
+    *budget = reconciled;
+    Ok((planned_driver_bytes, remaining_required_bytes))
+}
+
+#[cfg(feature = "ci-automation")]
+fn write_ci_driver_budget_receipt(
+    run_id: &str,
+    planned_driver_bytes: u64,
+    actual_driver_bytes: u64,
+    current_free_bytes: u64,
+    remaining_required_bytes: u64,
+    reconciled_budget: StagingPayloadBudget,
+) -> anyhow::Result<()> {
+    let path = PathBuf::from(
+        std::env::var_os("LETRECOVERY_CI_DRIVER_BUDGET_RECEIPT")
+            .ok_or_else(|| anyhow::anyhow!("CI driver budget receipt path is missing"))?,
+    );
+    write_ci_driver_budget_receipt_to(
+        &path,
+        run_id,
+        planned_driver_bytes,
+        actual_driver_bytes,
+        current_free_bytes,
+        remaining_required_bytes,
+        reconciled_budget,
+    )
+}
+
+#[cfg(feature = "ci-automation")]
+fn write_ci_driver_budget_receipt_to(
+    path: &Path,
+    run_id: &str,
+    planned_driver_bytes: u64,
+    actual_driver_bytes: u64,
+    current_free_bytes: u64,
+    remaining_required_bytes: u64,
+    reconciled_budget: StagingPayloadBudget,
+) -> anyhow::Result<()> {
+    if path.file_name().and_then(|name| name.to_str()) != Some("driver-budget-reconciliation.json")
+    {
+        anyhow::bail!("CI driver budget receipt has an unexpected filename");
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("CI driver budget receipt has no parent"))?;
+    let parent_metadata =
+        std::fs::symlink_metadata(parent).context("inspect CI driver budget receipt parent")?;
+    if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+        anyhow::bail!("CI driver budget receipt parent is not an ordinary directory");
+    }
+    let bytes = format!(
+        concat!(
+            "{{\r\n",
+            "  \"schema_version\": 2,\r\n",
+            "  \"run_id\": \"{}\",\r\n",
+            "  \"planned_driver_bytes\": {},\r\n",
+            "  \"actual_driver_bytes\": {},\r\n",
+            "  \"current_free_bytes\": {},\r\n",
+            "  \"remaining_required_bytes\": {},\r\n",
+            "  \"image_bytes\": {},\r\n",
+            "  \"materialized_pca_bytes\": {},\r\n",
+            "  \"user_driver_bytes\": {},\r\n",
+            "  \"uefiseven_bytes\": {},\r\n",
+            "  \"preinstalled_software_bytes\": {},\r\n",
+            "  \"operational_headroom_bytes\": {}\r\n",
+            "}}\r\n"
+        ),
+        run_id,
+        planned_driver_bytes,
+        actual_driver_bytes,
+        current_free_bytes,
+        remaining_required_bytes,
+        reconciled_budget.image_bytes,
+        reconciled_budget.pca_bytes,
+        reconciled_budget.user_driver_bytes,
+        reconciled_budget.uefiseven_bytes,
+        reconciled_budget.preinstalled_software_bytes,
+        STAGING_OPERATIONAL_HEADROOM_BYTES
+    );
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .context("create CI driver budget receipt")?;
+    output
+        .write_all(bytes.as_bytes())
+        .context("write CI driver budget receipt")?;
+    output
+        .sync_all()
+        .context("flush CI driver budget receipt")?;
+    Ok(())
 }
 
 /// Stateful backend used for one executor run.
@@ -2020,6 +2321,10 @@ impl ProductionInstallBackend {
         };
         #[cfg(feature = "ci-automation")]
         let exported_driver_bytes = if ci_existing_target_driver_scenario_run_id().is_some() {
+            // The existing-target VM lane intentionally adds its authenticated fixture only after
+            // DISM completes. Keeping the fixture out of preflight proves the production
+            // reconciliation path with actual > planned instead of allowing the test to bypass
+            // the real-world failure mode.
             exported_driver_bytes
                 .checked_add(CI_EXISTING_TARGET_DRIVER_FIXTURE_BUDGET_BYTES)
                 .ok_or_else(|| {
@@ -3461,6 +3766,17 @@ impl ProductionInstallBackend {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let data_dir = PathBuf::from(self.data_dir()?);
+        #[cfg(feature = "ci-automation")]
+        if let Some(run_id) = ci_stale_disabled_driver_scenario_run_id() {
+            if intent.options.export_drivers {
+                return Err(InstallBackendError::new(
+                    "ci_stale_driver_scenario_mismatch",
+                    "CI stale disabled-driver scenario requires driver export to be disabled",
+                ));
+            }
+            stage_ci_stale_disabled_driver_fixture(&data_dir, &run_id)
+                .map_err(|error| Self::error("stage_ci_stale_disabled_driver_fixture", error))?;
+        }
         if !config.pca_compat_package.is_empty() {
             let lock = lr_core::install_source_lock::LockedPlainArtifact::acquire(
                 &data_dir.join(&config.pca_compat_package),
@@ -3477,6 +3793,11 @@ impl ProductionInstallBackend {
             );
             self.pe_auxiliary_file_locks.push(lock);
         }
+        let include_preserved_drivers = should_include_preserved_driver_tree(
+            intent.options.export_drivers,
+            config.driver_action_mode,
+            config.restore_drivers,
+        );
         for (relative, role) in [
             (
                 "drivers",
@@ -3495,6 +3816,14 @@ impl ProductionInstallBackend {
                 lr_core::handoff_manifest::ArtifactRole::PreinstalledSoftware,
             ),
         ] {
+            if relative == "drivers" && !include_preserved_drivers {
+                if data_dir.join(relative).exists() {
+                    log::info!(
+                        "[PE HANDOFF] ignoring stale preserved-driver directory because the current task has no driver payload"
+                    );
+                }
+                continue;
+            }
             let root = data_dir.join(relative);
             if !root.is_dir() {
                 continue;
@@ -3533,6 +3862,38 @@ impl ProductionInstallBackend {
             }
             self.pe_auxiliary_tree_locks.push(lock);
         }
+        #[cfg(feature = "ci-automation")]
+        let ci_stale_driver_manifest_receipt =
+            if let Some(run_id) = ci_stale_disabled_driver_scenario_run_id() {
+                if intent.options.export_drivers
+                    || config.driver_action_mode != 0
+                    || config.restore_drivers
+                    || include_preserved_drivers
+                {
+                    return Err(InstallBackendError::new(
+                    "ci_stale_driver_scenario_mismatch",
+                    "CI stale disabled-driver scenario did not retain the disabled driver policy",
+                ));
+                }
+                let preserved_driver_artifact_count = source_artifacts
+                    .iter()
+                    .filter(|artifact| {
+                        artifact.role == lr_core::handoff_manifest::ArtifactRole::PreservedDriver
+                    })
+                    .count();
+                let run_fixture_artifact_count_any_role = source_artifacts
+                    .iter()
+                    .filter(|artifact| artifact.relative_path.contains(&run_id))
+                    .count();
+                Some((
+                    run_id,
+                    source_artifacts.len(),
+                    preserved_driver_artifact_count,
+                    run_fixture_artifact_count_any_role,
+                ))
+            } else {
+                None
+            };
         let private_wifi_profile = intent
             .options
             .advanced_options
@@ -3552,6 +3913,11 @@ impl ProductionInstallBackend {
                 auto_staging_source_length_before_bytes,
             )
             .map_err(|error| Self::error("write_pe_install_config", error))?;
+        #[cfg(feature = "ci-automation")]
+        if let Some((run_id, total, preserved, run_fixture)) = ci_stale_driver_manifest_receipt {
+            write_ci_stale_driver_manifest_receipt(&run_id, total, preserved, run_fixture)
+                .map_err(|error| Self::error("write_ci_stale_driver_manifest_receipt", error))?;
+        }
         self.handoff_auth_key = Some(auth_key);
         self.install_config_transaction = Some(transaction);
         Ok(())
@@ -4849,29 +5215,38 @@ impl InstallExecutionBackend for ProductionInstallBackend {
                     }
                     let actual = lr_core::driver::measure_plain_tree_logical_bytes(&destination)
                         .map_err(|error| Self::error("measure_exported_drivers", error))?;
-                    let planned = self
-                        .staging_payload_budget
-                        .as_ref()
-                        .ok_or_else(|| {
+                    let current_free = DiskManager::current_directory_free_bytes(&destination)
+                        .map_err(|error| Self::error("recheck_driver_export_capacity", error))?;
+                    let reconciled_budget =
+                        self.staging_payload_budget.as_mut().ok_or_else(|| {
                             InstallBackendError::new(
                                 "staging_budget_missing",
                                 "data capacity budget is missing before driver export",
                             )
-                        })?
-                        .exported_driver_bytes;
-                    if actual > planned {
-                        return Err(InstallBackendError::new(
-                            "exported_driver_size_exceeded_plan",
-                            format!(
-                                "driver export grew after capacity planning: planned {planned} bytes, actual {actual} bytes"
-                            ),
-                        ));
+                        })?;
+                    let (planned, remaining_required) =
+                        reconcile_exported_driver_budget(reconciled_budget, actual, current_free)?;
+                    #[cfg(feature = "ci-automation")]
+                    let reconciled_budget = *reconciled_budget;
+                    #[cfg(feature = "ci-automation")]
+                    if let Some(run_id) = ci_existing_target_driver_scenario_run_id() {
+                        write_ci_driver_budget_receipt(
+                            &run_id,
+                            planned,
+                            actual,
+                            current_free,
+                            remaining_required,
+                            reconciled_budget,
+                        )
+                        .map_err(|error| Self::error("write_ci_driver_budget_receipt", error))?;
                     }
                     if actual != planned {
                         log::warn!(
-                            "[DATA CAPACITY] driver export used fewer bytes than the full Driver Store estimate: planned={}, actual={}",
+                            "[DATA CAPACITY] reconciled Driver Store preflight to authoritative DISM export: planned={}, actual={}, current_free={}, remaining_required={}",
                             planned,
-                            actual
+                            actual,
+                            current_free,
+                            remaining_required
                         );
                     }
                     Ok(())
@@ -5672,6 +6047,213 @@ mod tests {
                 .is_none(),
             "empty optional trees must not become manifest artifacts or fatal errors"
         );
+    }
+
+    #[test]
+    fn zero_byte_file_remains_an_authenticated_auxiliary_tree_member() {
+        let root = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-zero-byte-auxiliary-tree",
+        )
+        .expect("create auxiliary tree");
+        std::fs::write(root.path().join("empty.dll"), []).expect("write empty ordinary file");
+        let lock = lr_core::install_source_lock::LockedInstallTree::acquire(root.path())
+            .expect("lock auxiliary tree");
+        let (_, artifacts) = capture_nonempty_auxiliary_tree(lock)
+            .expect("capture auxiliary tree")
+            .expect("a zero-byte file is still a real artifact");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].length_bytes, 0);
+    }
+
+    #[test]
+    fn disabled_driver_task_never_includes_a_stale_driver_tree() {
+        assert!(!should_include_preserved_driver_tree(false, 0, false));
+        assert!(!should_include_preserved_driver_tree(false, 2, true));
+        assert!(!should_include_preserved_driver_tree(true, 0, false));
+        assert!(should_include_preserved_driver_tree(true, 1, false));
+        assert!(should_include_preserved_driver_tree(true, 2, true));
+    }
+
+    #[test]
+    fn dism_export_rebases_one_budget_and_preserves_full_headroom() {
+        let gib = 1024_u64 * 1024 * 1024;
+        let mut budget = StagingPayloadBudget {
+            image_bytes: 5 * gib,
+            exported_driver_bytes: 3 * gib,
+            pca_bytes: 100,
+            user_driver_bytes: 200,
+            uefiseven_bytes: 300,
+            preinstalled_software_bytes: 400,
+        };
+        let actual = 3 * gib + 263_055_629;
+        let expected_remaining = 7 * gib + 900;
+        let (planned, remaining) =
+            reconcile_exported_driver_budget(&mut budget, actual, expected_remaining).unwrap();
+        assert_eq!(planned, 3 * gib);
+        assert_eq!(remaining, expected_remaining);
+        assert_eq!(budget.exported_driver_bytes, actual);
+
+        let mut insufficient = budget;
+        let before_failure = insufficient;
+        let error =
+            reconcile_exported_driver_budget(&mut insufficient, actual, expected_remaining - 1)
+                .unwrap_err();
+        assert_eq!(error.code, "staging_capacity_after_driver_export");
+        assert_eq!(insufficient, before_failure);
+    }
+
+    #[test]
+    fn dism_export_reconciliation_covers_smaller_equal_zero_and_overflow_edges() {
+        let base = StagingPayloadBudget {
+            image_bytes: 10,
+            exported_driver_bytes: 100,
+            pca_bytes: 20,
+            user_driver_bytes: 30,
+            uefiseven_bytes: 40,
+            preinstalled_software_bytes: 50,
+        };
+        let remaining = STAGING_OPERATIONAL_HEADROOM_BYTES + 10 + 30 + 40 + 50;
+        for actual in [50_u64, 100] {
+            let mut budget = base;
+            let (planned, observed_remaining) =
+                reconcile_exported_driver_budget(&mut budget, actual, remaining).unwrap();
+            assert_eq!(planned, 100);
+            assert_eq!(observed_remaining, remaining);
+            assert_eq!(budget.exported_driver_bytes, actual);
+        }
+
+        let mut zero = StagingPayloadBudget::default();
+        assert_eq!(
+            reconcile_exported_driver_budget(&mut zero, 0, STAGING_OPERATIONAL_HEADROOM_BYTES)
+                .unwrap(),
+            (0, STAGING_OPERATIONAL_HEADROOM_BYTES)
+        );
+
+        let mut materialized_overflow = StagingPayloadBudget {
+            pca_bytes: u64::MAX,
+            ..StagingPayloadBudget::default()
+        };
+        let unchanged = materialized_overflow;
+        let error =
+            reconcile_exported_driver_budget(&mut materialized_overflow, 1, u64::MAX).unwrap_err();
+        assert_eq!(error.code, "staging_materialized_size_overflow");
+        assert_eq!(materialized_overflow, unchanged);
+
+        let mut total_overflow = StagingPayloadBudget {
+            image_bytes: u64::MAX,
+            ..StagingPayloadBudget::default()
+        };
+        let unchanged = total_overflow;
+        let error = reconcile_exported_driver_budget(&mut total_overflow, 0, u64::MAX).unwrap_err();
+        assert_eq!(error.code, "staging_remaining_size_invalid");
+        assert_eq!(total_overflow, unchanged);
+    }
+
+    #[cfg(feature = "ci-automation")]
+    #[test]
+    fn ci_driver_budget_receipt_is_create_new_run_bound_and_exact() {
+        let temp = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-ci-driver-budget-receipt",
+        )
+        .expect("create receipt directory");
+        let path = temp.path().join("driver-budget-reconciliation.json");
+        let budget = StagingPayloadBudget {
+            image_bytes: 4,
+            exported_driver_bytes: 67_108_864,
+            pca_bytes: 5,
+            user_driver_bytes: 6,
+            uefiseven_bytes: 7,
+            preinstalled_software_bytes: 8,
+        };
+        let remaining = 4 + 6 + 7 + 8 + STAGING_OPERATIONAL_HEADROOM_BYTES;
+        write_ci_driver_budget_receipt_to(
+            &path,
+            "00112233445566778899aabbccddeeff",
+            0,
+            67_108_864,
+            9_000_000_000,
+            remaining,
+            budget,
+        )
+        .expect("write receipt");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read receipt"))
+                .expect("parse receipt");
+        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["run_id"], "00112233445566778899aabbccddeeff");
+        assert_eq!(value["planned_driver_bytes"], 0);
+        assert_eq!(value["actual_driver_bytes"], 67_108_864_u64);
+        assert_eq!(value["current_free_bytes"], 9_000_000_000_u64);
+        assert_eq!(value["remaining_required_bytes"], remaining);
+        assert_eq!(value["image_bytes"], 4);
+        assert_eq!(value["materialized_pca_bytes"], 5);
+        assert_eq!(value["user_driver_bytes"], 6);
+        assert_eq!(value["uefiseven_bytes"], 7);
+        assert_eq!(value["preinstalled_software_bytes"], 8);
+        assert_eq!(
+            value["operational_headroom_bytes"],
+            STAGING_OPERATIONAL_HEADROOM_BYTES
+        );
+        assert!(write_ci_driver_budget_receipt_to(
+            &path,
+            "00112233445566778899aabbccddeeff",
+            0,
+            1,
+            2,
+            1,
+            budget,
+        )
+        .is_err());
+    }
+
+    #[cfg(feature = "ci-automation")]
+    #[test]
+    fn ci_stale_driver_product_receipt_proves_manifest_exclusion() {
+        let temp = lr_core::scoped_temp_file::ScopedTempDir::create_in(
+            &std::env::temp_dir(),
+            "lr-ci-stale-driver-product-receipt",
+        )
+        .expect("create receipt directory");
+        let path = temp
+            .path()
+            .join("stale-disabled-driver-product-receipt.json");
+        write_ci_stale_driver_manifest_receipt_to(
+            &path,
+            "00112233445566778899aabbccddeeff",
+            3,
+            0,
+            0,
+        )
+        .expect("write stale-driver product receipt");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read receipt"))
+                .expect("parse receipt");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["run_id"], "00112233445566778899aabbccddeeff");
+        assert_eq!(value["drivers_directory_skipped"], true);
+        assert_eq!(value["manifest_artifact_count"], 3);
+        assert_eq!(value["preserved_driver_artifact_count"], 0);
+        assert_eq!(value["run_fixture_artifact_count_any_role"], 0);
+        assert!(write_ci_stale_driver_manifest_receipt_to(
+            &temp.path().join("unexpected.json"),
+            "00112233445566778899aabbccddeeff",
+            3,
+            0,
+            0,
+        )
+        .is_err());
+        let rejected = temp.path().join("rejected");
+        std::fs::create_dir(&rejected).expect("create rejected receipt directory");
+        assert!(write_ci_stale_driver_manifest_receipt_to(
+            &rejected.join("stale-disabled-driver-product-receipt.json"),
+            "00112233445566778899aabbccddeeff",
+            3,
+            1,
+            0,
+        )
+        .is_err());
     }
 
     #[test]

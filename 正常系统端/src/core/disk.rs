@@ -8,6 +8,9 @@ use lr_core::data_staging::{
 use std::path::Path;
 
 #[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
+#[cfg(windows)]
 use windows::{
     core::PCWSTR,
     Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
@@ -1467,6 +1470,38 @@ impl DiskManager {
             .ok()
             .map(|_| (free_bytes_available, total_bytes))
         }
+    }
+
+    /// Returns the bytes currently available to this process at an existing directory.
+    ///
+    /// This is the quota-aware `lpFreeBytesAvailableToCaller` value from
+    /// `GetDiskFreeSpaceExW`, not an inventory cached before staging writes. Query the actual
+    /// staging directory so a drive-letter rebind cannot silently redirect this fatal capacity
+    /// check. Unlike the display-only inventory helper above, this boundary preserves the
+    /// underlying Win32 error for diagnostics.
+    #[cfg(windows)]
+    pub fn current_directory_free_bytes(path: &Path) -> Result<u64> {
+        let mut wide_path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if wide_path.is_empty() || wide_path.contains(&0) {
+            anyhow::bail!("free-space query path is empty or contains a NUL");
+        }
+        wide_path.push(0);
+        let mut free_bytes_available = 0_u64;
+        unsafe {
+            GetDiskFreeSpaceExW(
+                PCWSTR(wide_path.as_ptr()),
+                Some(&mut free_bytes_available),
+                None,
+                None,
+            )
+        }
+        .with_context(|| format!("GetDiskFreeSpaceExW failed for {}", path.display()))?;
+        Ok(free_bytes_available)
+    }
+
+    #[cfg(not(windows))]
+    pub fn current_directory_free_bytes(_path: &Path) -> Result<u64> {
+        anyhow::bail!("current directory free-space query requires Windows")
     }
 
     #[cfg(windows)]

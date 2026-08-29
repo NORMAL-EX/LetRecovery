@@ -8,11 +8,14 @@ const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 pub const STAGING_OPERATIONAL_HEADROOM_BYTES: u64 = 2 * GIB;
 
-/// Exact logical bytes that the ViaPE preparation workflow will persist on its data volume.
+/// Logical-byte budget for the ViaPE preparation workflow's data volume.
 ///
-/// The caller measures every component from its existing source. No component is copied merely
-/// to discover its size. The fixed 2 GiB headroom is added once by [`required_staging_bytes`] for
-/// filesystem allocation rounding, the bounded handoff log/config, and transactional metadata.
+/// The caller measures every component from its existing source. A producer such as DISM may
+/// legally materialize a different package tree than its read-only Driver Store inventory; after
+/// that required producer runs, the caller replaces the provisional component with the observed
+/// logical bytes and rechecks the same budget. No component is copied merely to discover its size.
+/// The fixed 2 GiB headroom is added once by [`required_staging_bytes`] for filesystem allocation
+/// rounding, the bounded handoff log/config, and transactional metadata.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StagingPayloadBudget {
     pub image_bytes: u64,
@@ -36,6 +39,15 @@ impl StagingPayloadBudget {
 
     pub fn required_bytes(self) -> Option<u64> {
         required_staging_bytes(self.payload_bytes()?)
+    }
+
+    /// Remaining free bytes required after `materialized_payload_bytes` from this same budget are
+    /// already present on the selected volume. This preserves the one fixed operational headroom
+    /// instead of silently consuming it when an authoritative producer exceeds its preflight
+    /// inventory.
+    pub fn remaining_required_bytes_after(self, materialized_payload_bytes: u64) -> Option<u64> {
+        self.required_bytes()?
+            .checked_sub(materialized_payload_bytes)
     }
 }
 
@@ -254,6 +266,11 @@ mod tests {
         };
         assert_eq!(budget.payload_bytes(), Some(gib(13) + 232 * MIB));
         assert_eq!(budget.required_bytes(), Some(gib(15) + 232 * MIB));
+        assert_eq!(
+            budget.remaining_required_bytes_after(gib(4) + 128 * MIB),
+            Some(gib(11) + 104 * MIB)
+        );
+        assert_eq!(budget.remaining_required_bytes_after(gib(16)), None);
     }
 
     #[test]
