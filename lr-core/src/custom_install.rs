@@ -134,18 +134,13 @@ pub struct DualBootPlan {
     pub data_length_bytes: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", content = "plan", rename_all = "snake_case")]
 pub enum CustomInstallPlan {
+    #[default]
     ReinstallPartition,
     RepartitionAllDisks(RepartitionAllDisksPlan),
     DualBoot(DualBootPlan),
-}
-
-impl Default for CustomInstallPlan {
-    fn default() -> Self {
-        Self::ReinstallPartition
-    }
 }
 
 impl CustomInstallPlan {

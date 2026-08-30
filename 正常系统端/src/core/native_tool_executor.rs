@@ -253,7 +253,12 @@ impl NativeToolExecutor {
             let percentage = if file_size == 0 {
                 100
             } else {
-                ((read.min(file_size) * 100 / file_size).min(100)) as u8
+                (read
+                    .min(file_size)
+                    .saturating_mul(100)
+                    .checked_div(file_size)
+                    .unwrap_or(0)
+                    .min(100)) as u8
             };
             reporter.report(ToolExecutionEvent::Progress {
                 percentage,

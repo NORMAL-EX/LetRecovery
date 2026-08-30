@@ -2738,7 +2738,11 @@ impl ProductionInstallBackend {
             copy_progress = if total == 0 {
                 100
             } else {
-                ((copied.saturating_mul(100) / total).min(100)) as u8
+                (copied
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .unwrap_or(0)
+                    .min(100)) as u8
             };
             if let Some(progress_rx) = verify_progress_rx.as_ref() {
                 while let Ok(progress) = progress_rx.try_recv() {
@@ -2874,7 +2878,11 @@ impl ProductionInstallBackend {
             let percentage = if total == 0 {
                 66_u8.saturating_add(staged_hash_span as u8)
             } else {
-                66 + ((hashed.saturating_mul(staged_hash_span) / total).min(staged_hash_span)) as u8
+                66 + (hashed
+                    .saturating_mul(staged_hash_span)
+                    .checked_div(total)
+                    .unwrap_or(0)
+                    .min(staged_hash_span)) as u8
             };
             Self::report(
                 reporter,
@@ -3008,7 +3016,11 @@ impl ProductionInstallBackend {
                     let percentage = if total == 0 {
                         90
                     } else {
-                        ((aggregate.saturating_mul(90) / total).min(90)) as u8
+                        (aggregate
+                            .saturating_mul(90)
+                            .checked_div(total)
+                            .unwrap_or(0)
+                            .min(90)) as u8
                     };
                     Self::report(
                         reporter,
@@ -3263,7 +3275,11 @@ impl ProductionInstallBackend {
                 let percentage = if total == 0 {
                     100
                 } else {
-                    ((copied.saturating_mul(100) / total).min(100)) as u8
+                    (copied
+                        .saturating_mul(100)
+                        .checked_div(total)
+                        .unwrap_or(0)
+                        .min(100)) as u8
                 };
                 Self::report(
                     reporter,

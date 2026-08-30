@@ -399,7 +399,7 @@ impl LogManager {
                 Some((path, modified))
             })
             .collect();
-        files.sort_by(|left, right| right.1.cmp(&left.1));
+        files.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         files
             .into_iter()
             .take(limit)

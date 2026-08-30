@@ -410,7 +410,8 @@ impl ImageVerifier {
                     let percentage = if total == 0 {
                         99
                     } else {
-                        (5 + completed.saturating_mul(94) / total).min(99) as u8
+                        (5 + completed.saturating_mul(94).checked_div(total).unwrap_or(0)).min(99)
+                            as u8
                     };
                     reporter.report(percentage, tr!("正在校验完整性..."), file_path);
                 },

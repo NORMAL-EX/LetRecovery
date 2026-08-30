@@ -49,7 +49,7 @@ mod tests {
     fn import_slot_targets_the_ole32_forwarder() {
         assert_eq!(
             CO_TASK_MEM_FREE_IMPORT as usize,
-            co_task_mem_free_ole32 as usize
+            co_task_mem_free_ole32 as *const () as usize
         );
     }
 }

@@ -872,7 +872,10 @@ pub unsafe fn draw_progress(
     let filled = if total == 0 {
         0
     } else {
-        ((inner_width as u64).saturating_mul(completed.min(total)) / total) as i32
+        (inner_width as u64)
+            .saturating_mul(completed.min(total))
+            .checked_div(total)
+            .unwrap_or(0) as i32
     };
     let color = match role {
         ProgressRole::Normal | ProgressRole::Success => palette.progress,

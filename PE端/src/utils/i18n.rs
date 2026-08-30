@@ -337,7 +337,6 @@ macro_rules! tr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tr;
 
     fn placeholders(text: &str) -> Vec<String> {
         let mut placeholders = Vec::new();
