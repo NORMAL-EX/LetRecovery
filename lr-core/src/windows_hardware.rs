@@ -68,15 +68,16 @@ pub struct MachineIdentity {
 
 /// Executes one CPUID leaf through the architecture intrinsic.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[allow(unused_unsafe)]
 pub fn cpuid(leaf: u32, subleaf: u32) -> Option<CpuIdRegisters> {
     #[cfg(target_arch = "x86")]
     use std::arch::x86::__cpuid_count;
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::__cpuid_count;
 
-    // CPUID is available on supported Windows x86/x64 processors. The intrinsic does not
+    // SAFETY: CPUID is available on supported Windows x86/x64 processors. The intrinsic does not
     // dereference pointers or mutate memory; unsupported leaves return architectural defaults.
-    let value = __cpuid_count(leaf, subleaf);
+    let value = unsafe { __cpuid_count(leaf, subleaf) };
     Some(CpuIdRegisters {
         eax: value.eax,
         ebx: value.ebx,
