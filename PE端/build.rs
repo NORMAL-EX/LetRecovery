@@ -41,7 +41,7 @@ fn main() {
                 "LetRecovery PE安装助手"
             },
         );
-        res.set("LegalCopyright", "Copyright © 2026 NORMAL-EX");
+        res.set("LegalCopyright", "© 2026-present Cloud-PE Dev.");
         res.set("ProductVersion", &numeric_version);
         res.set("FileVersion", &numeric_version);
 

@@ -26,7 +26,7 @@ AppPublisher=NORMAL-EX
 AppPublisherURL=https://letrecovery.net/
 AppSupportURL=https://letrecovery.net/
 AppUpdatesURL=https://letrecovery.net/
-AppCopyright=Copyright (C) 2026 NORMAL-EX
+AppCopyright=© 2026-present Cloud-PE Dev.
 DefaultDirName={autopf}\LetRecovery
 DefaultGroupName=LetRecovery
 DisableProgramGroupPage=yes
@@ -64,7 +64,7 @@ VersionInfoCompany=NORMAL-EX
 VersionInfoDescription=LetRecovery offline installer
 VersionInfoProductName=LetRecovery
 VersionInfoProductVersion={#AppDisplayVersion}
-VersionInfoCopyright=Copyright (C) 2026 NORMAL-EX
+VersionInfoCopyright=© 2026-present Cloud-PE Dev.
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "languages\ChineseSimplified.isl"; LicenseFile: "LICENSE.zh-CN.txt"; InfoBeforeFile: "NOTICE.zh-CN.txt"

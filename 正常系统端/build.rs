@@ -58,7 +58,7 @@ fn main() {
         // 设置程序信息
         res.set("ProductName", "LetRecovery");
         res.set("FileDescription", "Windows系统一键重装工具");
-        res.set("LegalCopyright", "Copyright © 2026 NORMAL-EX");
+        res.set("LegalCopyright", "© 2026-present Cloud-PE Dev.");
         res.set("ProductVersion", &numeric_version);
         res.set("FileVersion", &numeric_version);
 

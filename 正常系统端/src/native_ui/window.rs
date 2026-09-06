@@ -5847,6 +5847,9 @@ impl NativeWindow {
     }
 
     unsafe fn update_backup_primary_state(&self) {
+        if self.page != Page::Backup {
+            return;
+        }
         let (Some(handles), Some(page)) = (&self.handles, &self.backup_page) else {
             return;
         };

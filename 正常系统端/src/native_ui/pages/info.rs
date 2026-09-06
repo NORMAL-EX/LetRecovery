@@ -955,14 +955,14 @@ impl AboutPage {
         let settings_help = child(
             parent,
             w!("STATIC"),
-            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n自动化导出会在安装和备份页显示生成按钮；镜像引擎同时用于正常系统端和 PE 端。"),
+            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n自动化导出会在安装和备份页显示生成按钮。"),
             0,
             5_257,
         )?;
         let credits = child(
             parent,
             w!("STATIC"),
-            &crate::tr!("© 2026-present Cloud-PE Dev.  © 2026-present NORMAL-EX.\r\nPE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
+            &crate::tr!("© 2026-present Cloud-PE Dev. (NORMAL-EX & hwyyds)\r\nPE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
             0,
             5_258,
         )?;
@@ -1129,11 +1129,11 @@ impl AboutPage {
         set_text(self.download_threads_label, &crate::tr!("下载线程:"));
         set_text(
             self.settings_help,
-            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n自动化导出会在安装和备份页显示生成按钮；镜像引擎同时用于正常系统端和 PE 端。"),
+            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n自动化导出会在安装和备份页显示生成按钮。"),
         );
         set_text(
             self.credits,
-            &crate::tr!("© 2026-present Cloud-PE Dev.  © 2026-present NORMAL-EX.\r\nPE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
+            &crate::tr!("© 2026-present Cloud-PE Dev. (NORMAL-EX & hwyyds)\r\nPE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
         );
         let link_labels = [
             crate::tr!("项目主页"),
