@@ -13,40 +13,106 @@ pub struct CapturedWifiProfile {
     pub xml: String,
 }
 
-#[cfg(not(feature = "non-elevated-tests"))]
+#[cfg(any(test, not(feature = "non-elevated-tests")))]
+#[cfg_attr(feature = "non-elevated-tests", allow(dead_code))]
 mod native {
     use std::ffi::c_void;
     use std::slice;
 
     use anyhow::{bail, Context};
-    use windows::core::{PCWSTR, PWSTR};
+    use libloading::Library;
+    use windows::core::{GUID, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
     use windows::Win32::NetworkManagement::WiFi::{
-        wlan_interface_state_connected, wlan_intf_opcode_current_connection, WlanCloseHandle,
-        WlanEnumInterfaces, WlanFreeMemory, WlanGetProfile, WlanOpenHandle, WlanQueryInterface,
-        WLAN_API_VERSION_2_0, WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO,
-        WLAN_INTERFACE_INFO_LIST, WLAN_PROFILE_GET_PLAINTEXT_KEY,
+        wlan_interface_state_connected, wlan_intf_opcode_current_connection, WLAN_API_VERSION_2_0,
+        WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO, WLAN_INTERFACE_INFO_LIST,
+        WLAN_INTF_OPCODE, WLAN_OPCODE_VALUE_TYPE, WLAN_PROFILE_GET_PLAINTEXT_KEY,
     };
 
     use super::CapturedWifiProfile;
 
-    struct WlanClient(HANDLE);
+    type OpenHandle = unsafe extern "system" fn(u32, *const c_void, *mut u32, *mut HANDLE) -> u32;
+    type CloseHandle = unsafe extern "system" fn(HANDLE, *const c_void) -> u32;
+    type EnumInterfaces =
+        unsafe extern "system" fn(HANDLE, *const c_void, *mut *mut WLAN_INTERFACE_INFO_LIST) -> u32;
+    type FreeMemory = unsafe extern "system" fn(*const c_void);
+    type QueryInterface = unsafe extern "system" fn(
+        HANDLE,
+        *const GUID,
+        WLAN_INTF_OPCODE,
+        *const c_void,
+        *mut u32,
+        *mut *mut c_void,
+        *mut WLAN_OPCODE_VALUE_TYPE,
+    ) -> u32;
+    type GetProfile = unsafe extern "system" fn(
+        HANDLE,
+        *const GUID,
+        PCWSTR,
+        *const c_void,
+        *mut PWSTR,
+        *mut u32,
+        *mut u32,
+    ) -> u32;
 
-    impl Drop for WlanClient {
-        fn drop(&mut self) {
+    struct WlanApi {
+        open: OpenHandle,
+        close: CloseHandle,
+        enumerate: EnumInterfaces,
+        free: FreeMemory,
+        query: QueryInterface,
+        profile: GetProfile,
+        _library: Library,
+    }
+
+    impl WlanApi {
+        fn load() -> anyhow::Result<Self> {
+            let mut directory = vec![0u16; 32768];
+            let length = unsafe {
+                windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut directory))
+            } as usize;
+            if length == 0 || length >= directory.len() {
+                bail!("Cannot locate Windows system directory for optional Wi-Fi support");
+            }
+            let path = std::path::PathBuf::from(String::from_utf16(&directory[..length])?)
+                .join("wlanapi.dll");
+            Self::load_from(&path)
+        }
+
+        fn load_from(path: &std::path::Path) -> anyhow::Result<Self> {
             unsafe {
-                let _ = WlanCloseHandle(self.0, None);
+                let library = Library::new(path)
+                    .context("Wi-Fi migration unavailable: cannot load wlanapi.dll")?;
+                Ok(Self {
+                    open: *library.get(b"WlanOpenHandle\0")?,
+                    close: *library.get(b"WlanCloseHandle\0")?,
+                    enumerate: *library.get(b"WlanEnumInterfaces\0")?,
+                    free: *library.get(b"WlanFreeMemory\0")?,
+                    query: *library.get(b"WlanQueryInterface\0")?,
+                    profile: *library.get(b"WlanGetProfile\0")?,
+                    _library: library,
+                })
             }
         }
     }
 
-    struct WlanMemory(*mut c_void);
+    struct WlanClient(HANDLE, WlanApi);
 
-    impl Drop for WlanMemory {
+    impl Drop for WlanClient {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = (self.1.close)(self.0, std::ptr::null());
+            }
+        }
+    }
+
+    struct WlanMemory<'api>(*mut c_void, &'api WlanApi);
+
+    impl Drop for WlanMemory<'_> {
         fn drop(&mut self) {
             if !self.0.is_null() {
                 unsafe {
-                    WlanFreeMemory(self.0);
+                    (self.1.free)(self.0);
                 }
             }
         }
@@ -60,12 +126,13 @@ mod native {
     }
 
     fn open_client() -> anyhow::Result<WlanClient> {
+        let api = WlanApi::load()?;
         let mut negotiated_version = 0_u32;
         let mut handle = HANDLE::default();
         let status = unsafe {
-            WlanOpenHandle(
+            (api.open)(
                 WLAN_API_VERSION_2_0,
-                None,
+                std::ptr::null(),
                 &mut negotiated_version,
                 &mut handle,
             )
@@ -76,16 +143,16 @@ mod native {
         if handle.is_invalid() {
             bail!("WlanOpenHandle returned an invalid handle");
         }
-        Ok(WlanClient(handle))
+        Ok(WlanClient(handle, api))
     }
 
     fn connected_interfaces(client: &WlanClient) -> anyhow::Result<Vec<WLAN_INTERFACE_INFO>> {
         let mut raw = std::ptr::null_mut::<WLAN_INTERFACE_INFO_LIST>();
-        let status = unsafe { WlanEnumInterfaces(client.0, None, &mut raw) };
+        let status = unsafe { (client.1.enumerate)(client.0, std::ptr::null(), &mut raw) };
         if status != ERROR_SUCCESS.0 {
             return Err(status_error("WlanEnumInterfaces", status));
         }
-        let memory = WlanMemory(raw.cast::<c_void>());
+        let memory = WlanMemory(raw.cast::<c_void>(), &client.1);
         if memory.0.is_null() {
             bail!("WlanEnumInterfaces returned a null list");
         }
@@ -99,20 +166,20 @@ mod native {
             .collect())
     }
 
-    unsafe fn connection_attributes(
-        client: &WlanClient,
+    unsafe fn connection_attributes<'api>(
+        client: &'api WlanClient,
         interface: &WLAN_INTERFACE_INFO,
-    ) -> anyhow::Result<(WlanMemory, WLAN_CONNECTION_ATTRIBUTES)> {
+    ) -> anyhow::Result<(WlanMemory<'api>, WLAN_CONNECTION_ATTRIBUTES)> {
         let mut size = 0_u32;
         let mut raw = std::ptr::null_mut::<c_void>();
-        let status = WlanQueryInterface(
+        let status = (client.1.query)(
             client.0,
             &interface.InterfaceGuid,
             wlan_intf_opcode_current_connection,
-            None,
+            std::ptr::null(),
             &mut size,
             &mut raw,
-            None,
+            std::ptr::null_mut(),
         );
         if status != ERROR_SUCCESS.0 {
             return Err(status_error(
@@ -120,7 +187,7 @@ mod native {
                 status,
             ));
         }
-        let memory = WlanMemory(raw);
+        let memory = WlanMemory(raw, &client.1);
         if memory.0.is_null() || size < std::mem::size_of::<WLAN_CONNECTION_ATTRIBUTES>() as u32 {
             bail!("WlanQueryInterface returned invalid connection attributes");
         }
@@ -136,7 +203,10 @@ mod native {
     }
 
     pub fn connected_wifi_available() -> anyhow::Result<bool> {
-        let client = open_client()?;
+        let client = match open_client() {
+            Ok(client) => client,
+            Err(_) => return Ok(false),
+        };
         Ok(!connected_interfaces(&client)?.is_empty())
     }
 
@@ -171,14 +241,14 @@ mod native {
         let mut flags = WLAN_PROFILE_GET_PLAINTEXT_KEY;
         let mut granted_access = 0_u32;
         let status = unsafe {
-            WlanGetProfile(
+            (client.1.profile)(
                 client.0,
                 &interface.InterfaceGuid,
                 PCWSTR(profile_name_wide.as_ptr()),
-                None,
+                std::ptr::null(),
                 &mut xml_pointer,
-                Some(&mut flags),
-                Some(&mut granted_access),
+                &mut flags,
+                &mut granted_access,
             )
         };
         if status != ERROR_SUCCESS.0 {
@@ -187,7 +257,7 @@ mod native {
                 status,
             ));
         }
-        let xml_memory = WlanMemory(xml_pointer.0.cast::<c_void>());
+        let xml_memory = WlanMemory(xml_pointer.0.cast::<c_void>(), &client.1);
         if xml_memory.0.is_null() {
             bail!("WlanGetProfile returned null profile XML");
         }
@@ -198,6 +268,19 @@ mod native {
         }
         super::validate_portable_profile_xml(&xml)?;
         Ok(CapturedWifiProfile { ssid, xml })
+    }
+
+    #[cfg(test)]
+    mod loading_tests {
+        use super::WlanApi;
+
+        #[test]
+        fn missing_optional_library_returns_an_error_without_opening_a_wlan_session() {
+            let directory =
+                std::env::temp_dir().join(format!("lr-wlan-missing-{}", std::process::id()));
+            assert!(!directory.exists());
+            assert!(WlanApi::load_from(&directory.join("wlanapi.dll")).is_err());
+        }
     }
 }
 

@@ -78,6 +78,10 @@ LetRecovery 是具有管理员权限的 Windows 系统安装、备份和磁盘�
 
 依赖方向必须保持为：正常系统端和 PE 端可以依赖 `lr-core`，`lr-core` 不得反向依赖任一端。两端出现相同的纯逻辑、命令构建或 Windows API 适配时，应优先迁移到 `lr-core`，端内保留兼容再导出或很薄的环境适配。
 
+## 可选 WLAN 运行时
+
+`正常系统端/src/core/native_wifi.rs` 必须动态加载系统目录中的 `wlanapi.dll` 和六个 WLAN 导出，禁止恢复 EXE 的静态 WLAN 导入。WePE 缺少 DLL、导出或 WLAN 服务时禁用 Wi-Fi 迁移，程序其它功能继续可用。客户端拥有模块，WLAN 分配内存借用模块生命周期，先释放内存和关闭句柄再卸载。职责目录中的接口枚举和 profile 捕获职责不变；接口契约、调用链及生产导入表验收见 `docs/WLAN_OPTIONAL_RUNTIME.md`。
+
 ## BitLocker 交接不可倒退
 
 - 正常系统端的 ViaPE 安装和 ViaPE 备份必须在当前会话收集 Windows 已持有的 48 位 RecoveryPassword，并通过同一份 LRBL1 受认证私有启动 WIM 载荷透传给 PE；没有密钥时可按既有 best-effort 语义记录有界 warning，但不得因所谓“安全”删除、禁用或绕过这条透传能力。
