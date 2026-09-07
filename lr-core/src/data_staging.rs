@@ -49,6 +49,13 @@ impl StagingPayloadBudget {
         self.required_bytes()?
             .checked_sub(materialized_payload_bytes)
     }
+
+    /// Remaining payload after `materialized_payload_bytes` is already present on the selected
+    /// volume. The fixed headroom is allocated with the partition and is not required again after
+    /// a producer materializes part of the payload.
+    pub fn remaining_payload_bytes_after(self, materialized_payload_bytes: u64) -> Option<u64> {
+        self.payload_bytes()?.checked_sub(materialized_payload_bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,6 +276,10 @@ mod tests {
         assert_eq!(
             budget.remaining_required_bytes_after(gib(4) + 128 * MIB),
             Some(gib(11) + 104 * MIB)
+        );
+        assert_eq!(
+            budget.remaining_payload_bytes_after(gib(4) + 128 * MIB),
+            Some(gib(9) + 104 * MIB)
         );
         assert_eq!(budget.remaining_required_bytes_after(gib(16)), None);
     }

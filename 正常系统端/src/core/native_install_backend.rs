@@ -775,9 +775,10 @@ fn should_include_preserved_driver_tree(
 }
 
 /// Replaces the Driver Store preflight inventory with DISM's authoritative materialized result and
-/// proves that the selected volume still has room for every unmaterialized payload plus the same
-/// fixed 2 GiB operational headroom. A larger DISM tree is not itself an error; insufficient
-/// current capacity is.
+/// proves that the selected volume still has room for every unmaterialized payload. The fixed 2 GiB
+/// headroom was allocated with the partition and may be consumed by filesystem overhead; requiring
+/// it again here would double-count it and reject valid formatted volumes. A larger DISM tree is
+/// not itself an error; insufficient current capacity is.
 fn reconcile_exported_driver_budget(
     budget: &mut StagingPayloadBudget,
     actual_driver_bytes: u64,
@@ -802,11 +803,19 @@ fn reconcile_exported_driver_budget(
                 "reconciled staging budget cannot represent the remaining payload",
             )
         })?;
-    if current_free_bytes < remaining_required_bytes {
+    let remaining_payload_bytes = reconciled
+        .remaining_payload_bytes_after(materialized_payload_bytes)
+        .ok_or_else(|| {
+            InstallBackendError::new(
+                "staging_remaining_size_invalid",
+                "reconciled staging budget cannot represent the remaining payload",
+            )
+        })?;
+    if current_free_bytes < remaining_payload_bytes {
         return Err(InstallBackendError::new(
             "staging_capacity_after_driver_export",
             format!(
-                "DISM materialized {actual_driver_bytes} driver bytes (preflight {planned_driver_bytes}); the selected volume now has {current_free_bytes} free bytes but {remaining_required_bytes} bytes are still required for the remaining payload and fixed 2 GiB operational headroom"
+                "DISM materialized {actual_driver_bytes} driver bytes (preflight {planned_driver_bytes}); the selected volume now has {current_free_bytes} free bytes but {remaining_payload_bytes} bytes are still required for the remaining payload (the fixed 2 GiB headroom was already allocated with the volume)"
             ),
         ));
     }
@@ -6092,7 +6101,7 @@ mod tests {
     }
 
     #[test]
-    fn dism_export_rebases_one_budget_and_preserves_full_headroom() {
+    fn dism_export_rebases_one_budget_without_double_counting_headroom() {
         let gib = 1024_u64 * 1024 * 1024;
         let mut budget = StagingPayloadBudget {
             image_bytes: 5 * gib,
@@ -6104,8 +6113,9 @@ mod tests {
         };
         let actual = 3 * gib + 263_055_629;
         let expected_remaining = 7 * gib + 900;
+        let remaining_payload = 5 * gib + 1000;
         let (planned, remaining) =
-            reconcile_exported_driver_budget(&mut budget, actual, expected_remaining).unwrap();
+            reconcile_exported_driver_budget(&mut budget, actual, remaining_payload).unwrap();
         assert_eq!(planned, 3 * gib);
         assert_eq!(remaining, expected_remaining);
         assert_eq!(budget.exported_driver_bytes, actual);
@@ -6113,7 +6123,7 @@ mod tests {
         let mut insufficient = budget;
         let before_failure = insufficient;
         let error =
-            reconcile_exported_driver_budget(&mut insufficient, actual, expected_remaining - 1)
+            reconcile_exported_driver_budget(&mut insufficient, actual, remaining_payload - 1)
                 .unwrap_err();
         assert_eq!(error.code, "staging_capacity_after_driver_export");
         assert_eq!(insufficient, before_failure);
@@ -6129,13 +6139,14 @@ mod tests {
             uefiseven_bytes: 40,
             preinstalled_software_bytes: 50,
         };
-        let remaining = STAGING_OPERATIONAL_HEADROOM_BYTES + 10 + 30 + 40 + 50;
+        let remaining = 10 + 30 + 40 + 50;
+        let diagnostic_remaining = STAGING_OPERATIONAL_HEADROOM_BYTES + remaining;
         for actual in [50_u64, 100] {
             let mut budget = base;
             let (planned, observed_remaining) =
                 reconcile_exported_driver_budget(&mut budget, actual, remaining).unwrap();
             assert_eq!(planned, 100);
-            assert_eq!(observed_remaining, remaining);
+            assert_eq!(observed_remaining, diagnostic_remaining);
             assert_eq!(budget.exported_driver_bytes, actual);
         }
 
