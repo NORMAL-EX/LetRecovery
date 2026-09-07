@@ -992,8 +992,9 @@ mod tests {
 
     #[test]
     fn secrets_and_case_insensitive_duplicates_fail_closed() {
-        let mut secret = artifact("private\\answer.xml", 0);
-        secret.role = ArtifactRole::CustomUnattend;
+        let mut secret = artifact(crate::bl_passthrough::KEYS_FILE_NAME, 0);
+        secret.role = ArtifactRole::ProtectedBitLockerSecret;
+        secret.location = ArtifactLocation::ProtectedBoot;
         let install = HandoffManifest::new(
             HandoffPurpose::Install,
             "00112233445566778899aabbccddeeff",
