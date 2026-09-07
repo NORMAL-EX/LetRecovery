@@ -6149,7 +6149,10 @@ mod tests {
         };
         let actual = 3 * gib + 263_055_629;
         let expected_remaining = 7 * gib + 900;
-        let remaining_payload = 5 * gib + 1000;
+        let remaining_payload = budget.image_bytes
+            + budget.user_driver_bytes
+            + budget.uefiseven_bytes
+            + budget.preinstalled_software_bytes;
         let (planned, remaining) =
             reconcile_exported_driver_budget(&mut budget, actual, remaining_payload).unwrap();
         assert_eq!(planned, 3 * gib);

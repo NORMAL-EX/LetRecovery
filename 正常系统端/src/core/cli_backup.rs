@@ -575,6 +575,24 @@ mod tests {
             VolumeStatus::EncryptedUnlocked,
             VolumeStatus::NotEncrypted,
         )
+        .is_ok());
+        assert!(validate_bitlocker_for_mode(
+            BackupLaunchMode::ViaPe,
+            VolumeStatus::EncryptedLocked,
+            VolumeStatus::EncryptedLocked,
+        )
+        .is_ok());
+        assert!(validate_bitlocker_for_mode(
+            BackupLaunchMode::Direct,
+            VolumeStatus::EncryptedLocked,
+            VolumeStatus::NotEncrypted,
+        )
+        .is_err());
+        assert!(validate_bitlocker_for_mode(
+            BackupLaunchMode::ViaPe,
+            VolumeStatus::Unknown,
+            VolumeStatus::NotEncrypted,
+        )
         .is_err());
         assert!(validate_bitlocker_for_mode(
             BackupLaunchMode::ViaPe,
