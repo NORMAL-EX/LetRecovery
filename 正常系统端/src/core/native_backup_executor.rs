@@ -108,6 +108,7 @@ struct AuthorizedDirectBackupIntent {
 struct AuthorizedPeBackupIntent {
     intent: PeBackupPreparationIntent,
     authorization: crate::core::native_backup_controller::DirectBackupStableAuthorization,
+    requires_bitlocker_secret: bool,
 }
 
 /// Receiver and cooperative cancellation handle owned by the native UI.
@@ -183,11 +184,17 @@ fn authorize_backup_intent(
         )
     };
     if is_via_pe {
-        if source_status != VolumeStatus::NotEncrypted
-            || destination_status != VolumeStatus::NotEncrypted
-        {
+        let via_pe_allowed = |status| {
+            matches!(
+                status,
+                VolumeStatus::NotEncrypted
+                    | VolumeStatus::EncryptedUnlocked
+                    | VolumeStatus::EncryptedLocked
+            )
+        };
+        if !via_pe_allowed(source_status) || !via_pe_allowed(destination_status) {
             return Err(format!(
-                "ViaPE backup requires unencrypted source and destination volumes (source={source_status:?}, destination={destination_status:?}); recovery secrets are never handed off"
+                "ViaPE backup requires a known source and destination BitLocker state (source={source_status:?}, destination={destination_status:?})"
             ));
         }
     } else if !allowed_direct(source_status) || !allowed_direct(destination_status) {
@@ -279,6 +286,8 @@ fn authorize_backup_intent(
             AuthorizedBackupLaunchIntent::ViaPe(AuthorizedPeBackupIntent {
                 intent,
                 authorization,
+                requires_bitlocker_secret: source_status != VolumeStatus::NotEncrypted
+                    || destination_status != VolumeStatus::NotEncrypted,
             })
         }
     })
@@ -800,7 +809,11 @@ fn run_pe_handoff(
     cancel_requested: &AtomicBool,
     messages: &Sender<BackupWorkerMessage>,
 ) -> Result<(), BackupRunError> {
-    let intent = authorized.intent;
+    let AuthorizedPeBackupIntent {
+        intent,
+        authorization,
+        requires_bitlocker_secret,
+    } = authorized;
     send_progress(messages, 10, &crate::tr!("正在验证 PE 环境"));
     let pe_snapshot = require_verified_cached_pe(&intent.pe).map_err(BackupRunError::Failed)?;
     stop_before_next_stage(cancel_requested)?;
@@ -811,13 +824,22 @@ fn run_pe_handoff(
         strict_bitlocker_status(&bound.source_root).map_err(BackupRunError::Failed)?;
     let destination_status =
         strict_bitlocker_status(&bound.destination_root).map_err(BackupRunError::Failed)?;
-    if source_status != crate::core::bitlocker::VolumeStatus::NotEncrypted
-        || destination_status != crate::core::bitlocker::VolumeStatus::NotEncrypted
-    {
-        return Err(BackupRunError::Failed(
-            "ViaPE backup volumes must remain unencrypted immediately before handoff".to_owned(),
-        ));
+    let known_via_pe_status = |status| {
+        matches!(
+            status,
+            crate::core::bitlocker::VolumeStatus::NotEncrypted
+                | crate::core::bitlocker::VolumeStatus::EncryptedUnlocked
+                | crate::core::bitlocker::VolumeStatus::EncryptedLocked
+        )
+    };
+    if !known_via_pe_status(source_status) || !known_via_pe_status(destination_status) {
+        return Err(BackupRunError::Failed(format!(
+            "ViaPE backup volume BitLocker state changed to an unsupported state (source={source_status:?}, destination={destination_status:?})"
+        )));
     }
+    let requires_bitlocker_secret = requires_bitlocker_secret
+        || source_status != crate::core::bitlocker::VolumeStatus::NotEncrypted
+        || destination_status != crate::core::bitlocker::VolumeStatus::NotEncrypted;
     let destination_letter =
         lr_core::windows_storage::path_drive_letter(Path::new(&intent.config.save_path))
             .ok_or_else(|| {
@@ -826,7 +848,7 @@ fn run_pe_handoff(
     let current_destination = lr_core::windows_storage::stable_volume_identity(destination_letter)
         .map_err(|error| BackupRunError::Failed(format!("recheck backup data volume: {error}")))?;
     if !lr_core::windows_storage::same_stable_volume_identity(
-        authorized.authorization.destination,
+        authorization.destination,
         current_destination,
     ) {
         return Err(BackupRunError::Failed(
@@ -840,10 +862,8 @@ fn run_pe_handoff(
         lr_core::windows_storage::stable_volume_identity(source_letter).map_err(|error| {
             BackupRunError::Failed(format!("recheck backup source volume: {error}"))
         })?;
-    if !lr_core::windows_storage::same_stable_volume_identity(
-        authorized.authorization.source,
-        current_source,
-    ) {
+    if !lr_core::windows_storage::same_stable_volume_identity(authorization.source, current_source)
+    {
         return Err(BackupRunError::Failed(
             "backup source drive letter changed before authenticated handoff".to_owned(),
         ));
@@ -853,13 +873,21 @@ fn run_pe_handoff(
     let handoff_auth_key = lr_core::handoff_auth::SessionAuthKey::generate().map_err(|error| {
         BackupRunError::Failed(format!("generate authenticated PE handoff key: {error}"))
     })?;
-    let mut transaction = ConfigFileManager::write_backup_config_transactional(
-        &intent.config.source_partition,
-        &data_partition,
-        &intent.config,
-        &handoff_auth_key,
-    )
-    .map_err(|error| BackupRunError::Failed(format!("备份配置写入失败: {error}")))?;
+    let bitlocker_secret = crate::core::install_config::collect_bitlocker_secret_best_effort();
+    if requires_bitlocker_secret && bitlocker_secret.is_none() {
+        return Err(BackupRunError::Failed(
+            "ViaPE backup needs a Windows-held BitLocker recovery password for an encrypted source or destination volume, but none was available".to_owned(),
+        ));
+    }
+    let mut transaction =
+        ConfigFileManager::write_backup_config_transactional_with_bitlocker_secret(
+            &intent.config.source_partition,
+            &data_partition,
+            &intent.config,
+            &handoff_auth_key,
+            bitlocker_secret,
+        )
+        .map_err(|error| BackupRunError::Failed(format!("备份配置写入失败: {error}")))?;
 
     if let Err(cancelled) = stop_before_next_stage(cancel_requested) {
         if let Err(error) = transaction.rollback() {
@@ -881,6 +909,7 @@ fn run_pe_handoff(
     let manifest_bytes = transaction.take_boot_manifest_bytes().map_err(|error| {
         BackupRunError::Failed(format!("take authenticated backup manifest: {error}"))
     })?;
+    let bitlocker_secret = transaction.take_bitlocker_secret();
     let payload = crate::core::pe::HandoffBootPayload::new(
         handoff_auth_key,
         lr_core::handoff_auth::HandoffPurpose::Backup,
@@ -893,6 +922,12 @@ fn run_pe_handoff(
     .map_err(|error| {
         BackupRunError::Failed(format!("build authenticated backup boot payload: {error}"))
     })?;
+    let payload = match bitlocker_secret {
+        Some(secret) => payload.with_bitlocker_secret(secret).map_err(|error| {
+            BackupRunError::Failed(format!("bind protected BitLocker boot secret: {error}"))
+        })?,
+        None => payload,
+    };
     if let Err(error) = crate::core::pe::PeManager::new()
         .boot_to_pe_for_backup(
             &pe_snapshot.path.to_string_lossy(),

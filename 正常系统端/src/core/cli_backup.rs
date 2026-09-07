@@ -237,13 +237,10 @@ fn validate_bitlocker_for_mode(
             "direct backup BitLocker state is not safe (source={source:?}, destination={destination:?})"
         )),
         BackupLaunchMode::ViaPe
-            if source == VolumeStatus::NotEncrypted
-                && destination == VolumeStatus::NotEncrypted =>
-        {
-            Ok(())
-        }
+            if matches!(source, VolumeStatus::NotEncrypted | VolumeStatus::EncryptedUnlocked | VolumeStatus::EncryptedLocked)
+                && matches!(destination, VolumeStatus::NotEncrypted | VolumeStatus::EncryptedUnlocked | VolumeStatus::EncryptedLocked) => Ok(()),
         BackupLaunchMode::ViaPe => Err(anyhow!(
-            "ViaPE backup requires unencrypted source and destination volumes (source={source:?}, destination={destination:?}); recovery secrets are never handed off"
+            "ViaPE backup BitLocker state is unknown (source={source:?}, destination={destination:?})"
         )),
     }
 }

@@ -11586,19 +11586,23 @@ impl NativeWindow {
             }
             _ => {}
         }
-        let bitlocker = match partition.map(|partition| partition.bitlocker_status) {
-            Some(crate::core::bitlocker::VolumeStatus::EncryptedLocked) => {
-                BitLockerRequirement::UnlockRequired
+        let bitlocker = if intent.mode == InstallMode::ViaPe {
+            BitLockerRequirement::Ready
+        } else {
+            match partition.map(|partition| partition.bitlocker_status) {
+                Some(crate::core::bitlocker::VolumeStatus::EncryptedLocked) => {
+                    BitLockerRequirement::UnlockRequired
+                }
+                Some(crate::core::bitlocker::VolumeStatus::Decrypting) => {
+                    BitLockerRequirement::AwaitDecryption
+                }
+                Some(crate::core::bitlocker::VolumeStatus::EncryptedUnlocked)
+                    if target_recovery_key_unavailable(&intent.target_partition) =>
+                {
+                    BitLockerRequirement::AwaitDecryption
+                }
+                _ => BitLockerRequirement::Ready,
             }
-            Some(crate::core::bitlocker::VolumeStatus::Decrypting) => {
-                BitLockerRequirement::AwaitDecryption
-            }
-            Some(crate::core::bitlocker::VolumeStatus::EncryptedUnlocked)
-                if target_recovery_key_unavailable(&intent.target_partition) =>
-            {
-                BitLockerRequirement::AwaitDecryption
-            }
-            _ => BitLockerRequirement::Ready,
         };
         let context = InstallExecutionContext {
             stable_target: Some(expected_target),

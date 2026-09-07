@@ -87,7 +87,7 @@ pub enum HandoffPurpose {
     Install,
     Backup,
     Expand,
-    /// Authenticated, non-deployment PE boot used only for interactive maintenance.
+    /// Authenticated PE boot used for install, backup, expansion, or interactive maintenance.
     Maintenance,
 }
 

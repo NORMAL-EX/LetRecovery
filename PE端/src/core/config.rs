@@ -223,11 +223,15 @@ impl AuthenticatedOperationGuard {
             })
             .collect::<Vec<_>>();
         if let [record] = bitlocker_records.as_slice() {
-            if guard.capsule.purpose() != lr_core::handoff_auth::HandoffPurpose::Maintenance
-                || record.location != lr_core::handoff_manifest::ArtifactLocation::ProtectedBoot
+            if !matches!(
+                guard.capsule.purpose(),
+                lr_core::handoff_auth::HandoffPurpose::Install
+                    | lr_core::handoff_auth::HandoffPurpose::Backup
+                    | lr_core::handoff_auth::HandoffPurpose::Maintenance
+            ) || record.location != lr_core::handoff_manifest::ArtifactLocation::ProtectedBoot
                 || record.relative_path != lr_core::bl_passthrough::KEYS_FILE_NAME
             {
-                bail!("protected BitLocker secret has an invalid maintenance binding");
+                bail!("protected BitLocker secret has an invalid PE handoff binding");
             }
             let secret = LockedBootPayloadFile::open(
                 Path::new(HANDOFF_BITLOCKER_PATH),
@@ -243,7 +247,7 @@ impl AuthenticatedOperationGuard {
             lr_core::bl_passthrough::parse_keys(&secret.bytes).map_err(anyhow::Error::msg)?;
             guard.bitlocker_secret = Some(secret);
         } else if !bitlocker_records.is_empty() {
-            bail!("maintenance handoff has more than one protected BitLocker secret");
+            bail!("PE handoff has more than one protected BitLocker secret");
         }
         Ok(guard)
     }
@@ -1550,6 +1554,7 @@ impl ConfigFileManager {
                     ArtifactRole::PreinstalledSoftware,
                     ArtifactRole::AutoPartitionMarker,
                     ArtifactRole::ProtectedAdministratorSecret,
+                    ArtifactRole::ProtectedBitLockerSecret,
                 ];
                 if let Some(record) = manifest
                     .artifacts
@@ -1711,8 +1716,15 @@ impl ConfigFileManager {
                 if handoff.session_id != manifest.session_id {
                     bail!("backup config session does not match authenticated manifest");
                 }
-                if !manifest.artifacts.is_empty() {
-                    bail!("create-only PE backup does not consume public base-image artifacts");
+                if manifest
+                    .artifacts
+                    .iter()
+                    .any(|record| record.role != ArtifactRole::ProtectedBitLockerSecret)
+                {
+                    bail!("create-only PE backup contains an unsupported public artifact");
+                }
+                if count(ArtifactRole::ProtectedBitLockerSecret) > 1 {
+                    bail!("backup handoff has more than one protected BitLocker secret");
                 }
             }
             AuthenticatedOperationConfig::Expand(config) => {

@@ -547,12 +547,16 @@ fn execution_context(
     intent: &StartInstallIntent,
     partition: &Partition,
 ) -> InstallExecutionContext {
-    let bitlocker = match partition.bitlocker_status {
-        VolumeStatus::EncryptedLocked => BitLockerRequirement::UnlockRequired,
-        VolumeStatus::Decrypting | VolumeStatus::EncryptedUnlocked => {
-            BitLockerRequirement::AwaitDecryption
+    let bitlocker = if intent.mode == super::native_install_controller::InstallMode::ViaPe {
+        BitLockerRequirement::Ready
+    } else {
+        match partition.bitlocker_status {
+            VolumeStatus::EncryptedLocked => BitLockerRequirement::UnlockRequired,
+            VolumeStatus::Decrypting | VolumeStatus::EncryptedUnlocked => {
+                BitLockerRequirement::AwaitDecryption
+            }
+            _ => BitLockerRequirement::Ready,
         }
-        _ => BitLockerRequirement::Ready,
     };
     InstallExecutionContext {
         stable_target: Some(StableTargetIdentity {

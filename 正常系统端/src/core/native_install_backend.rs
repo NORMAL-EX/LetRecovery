@@ -1497,6 +1497,19 @@ impl ProductionInstallBackend {
         let manager = super::bitlocker::BitLockerManager::new();
         match manager.get_status(letter) {
             super::bitlocker::VolumeStatus::NotEncrypted => Ok(()),
+            super::bitlocker::VolumeStatus::EncryptedLocked
+                if intent.mode == InstallMode::ViaPe =>
+            {
+                if manager.get_recovery_key(&drive).is_ok() {
+                    log::info!("[NATIVE INSTALL] ViaPE target {drive} will use authenticated BitLocker recovery passthrough");
+                    Ok(())
+                } else {
+                    Err(InstallBackendError::new(
+                        "bitlocker_recovery_key_unavailable",
+                        format!("{drive} is locked and no Windows-held recovery password is available for ViaPE handoff"),
+                    ))
+                }
+            }
             super::bitlocker::VolumeStatus::EncryptedLocked => Err(InstallBackendError::new(
                 "bitlocker_target_locked",
                 format!("{drive} is locked; unlock it before installation"),
@@ -1509,9 +1522,19 @@ impl ProductionInstallBackend {
                 "bitlocker_target_encrypting",
                 format!("{drive} is currently encrypting"),
             )),
+            super::bitlocker::VolumeStatus::Decrypting if intent.mode == InstallMode::ViaPe => {
+                log::info!("[NATIVE INSTALL] ViaPE target {drive} remains BitLocker-protected; PE will use the authenticated recovery bundle");
+                Ok(())
+            }
             super::bitlocker::VolumeStatus::Decrypting => {
                 self.begin_bitlocker_fallback_decryption()?;
                 self.await_bitlocker_fallback_decryption(reporter, cancellation)
+            }
+            super::bitlocker::VolumeStatus::EncryptedUnlocked
+                if intent.mode == InstallMode::ViaPe =>
+            {
+                log::info!("[NATIVE INSTALL] ViaPE target {drive} remains BitLocker-protected; PE will use the authenticated recovery bundle");
+                Ok(())
             }
             super::bitlocker::VolumeStatus::EncryptedUnlocked => {
                 if manager.get_recovery_key(&drive).is_ok() {
@@ -2095,6 +2118,10 @@ impl ProductionInstallBackend {
             .install_config_transaction
             .as_mut()
             .and_then(|transaction| transaction.take_protected_administrator_secret());
+        let protected_bitlocker_secret = self
+            .install_config_transaction
+            .as_mut()
+            .and_then(|transaction| transaction.take_protected_bitlocker_secret());
         let payload = super::pe::HandoffBootPayload::new(
             auth_key,
             lr_core::handoff_auth::HandoffPurpose::Install,
@@ -2109,6 +2136,12 @@ impl ProductionInstallBackend {
             Some(secret) => payload
                 .with_administrator_secret(secret)
                 .map_err(|error| Self::error("bind_protected_administrator_boot_secret", error))?,
+            None => payload,
+        };
+        let payload = match protected_bitlocker_secret {
+            Some(secret) => payload
+                .with_bitlocker_secret(secret)
+                .map_err(|error| Self::error("bind_protected_bitlocker_boot_secret", error))?,
             None => payload,
         };
         let result = super::pe::PeManager::new()
@@ -3928,7 +3961,9 @@ impl ProductionInstallBackend {
             .staging_transaction
             .as_ref()
             .map(super::disk::PreparedStagingTransaction::source_length_before_bytes);
-        let transaction = super::install_config::ConfigFileManager::write_install_config_transactional_with_private_wifi(
+        let protected_bitlocker_secret =
+            super::install_config::collect_bitlocker_secret_best_effort();
+        let transaction = super::install_config::ConfigFileManager::write_install_config_transactional_with_private_payloads(
                 &effective_target,
                 self.data_partition()?,
                 &config,
@@ -3936,6 +3971,7 @@ impl ProductionInstallBackend {
                 source_artifacts,
                 private_wifi_profile,
                 auto_staging_source_length_before_bytes,
+                protected_bitlocker_secret,
             )
             .map_err(|error| Self::error("write_pe_install_config", error))?;
         #[cfg(feature = "ci-automation")]

@@ -173,9 +173,9 @@ PE 纯逻辑回归还显式把正常端记录的 DiskNumber、磁盘 GUID 和几
 
 发布目录或受管理缓存中已经存在的 `LetRecovery_PE.wim` 属于用户可定制的本地输入，不得再用下载目录声明的 MD5/SHA-256 或旧大小做运行时门禁。目录哈希只在网络下载 PE WIM 时验证；进入安装、备份、扩容或维护任务后，只保留本次私有复制过程中“源流、私有副本和回读字节一致”的会话内检查，防止复制过程本身得到混合快照，而不要求它等于发布时的旧字节。
 
-BitLocker 恢复密码是可选的受保护启动载荷。正常端只从当前有盘符卷读取系统已经持有的 48 位 RecoveryPassword，去重后写入有大小上限、严格规范化的 `LRBL1` 数据体；公开 config 和 manifest 只保存本次 secret 的长度与 SHA-256，明文只进入 SYSTEM/Administrators 私有的本次启动 WIM。PE 必须先完成 LRHC1 和 LRHM3 认证，再以拒绝 write/delete sharing 的固定 `X:` 文件句柄读取并复核 secret，禁止恢复旧的未认证 JSON、卷标或跨启动磁盘指纹。单卷取不到密码、密码不匹配、FVE 状态查询失败或 `manage-bde -unlock <drive> -recoverypassword <key>` 失败只做有界 warning 并继续维护；不得调用 `manage-bde -off`、移除/暂停保护器或把“进入维护环境”扩大成彻底解密。
+BitLocker 恢复密码是 Install、Backup、Maintenance 共用的受保护启动载荷。正常端只从当前有盘符卷读取系统已经持有的 48 位 RecoveryPassword，去重后写入有大小上限、严格规范化的 `LRBL1` 数据体；正常端的 ViaPE 安装和 ViaPE 备份不得以“安全”为由删除这条透传能力；公开 config 和 manifest 只保存本次 secret 的长度与 SHA-256，明文只进入 SYSTEM/Administrators 私有的本次启动 WIM。PE 必须先完成 LRHC1 和 LRHM3 认证，再以拒绝 write/delete sharing 的固定 `X:` 文件句柄读取并复核 secret，禁止恢复旧的未认证 JSON、卷标或跨启动磁盘指纹。单卷取不到密码、密码不匹配、FVE 状态查询失败或 `manage-bde -unlock <drive> -recoverypassword <key>` 失败只做有界 warning 并继续对应任务；不得调用 `manage-bde -off`、移除/暂停保护器或把“进入维护环境”扩大成彻底解密。
 
-维护 purpose 在自动解锁后不构造安装任务，不进入 LetRecovery PE 进度窗口；进程隐藏驻留以维持现有 PE shell 生命周期，用户直接使用 PE 桌面。密钥不得写日志，命令执行器也不得记录带 secret 的参数。是否能看到并操作完整 PE 桌面、锁定数据卷能否按恢复密码自动解锁，仍需用包含 BitLocker 数据盘的可丢弃虚拟机跨重启验证。
+维护 purpose 在自动解锁后不构造安装任务；Install 和 Backup purpose 在自动解锁后继续各自的认证任务，不进入 LetRecovery PE 进度窗口；进程隐藏驻留以维持现有 PE shell 生命周期，用户直接使用 PE 桌面。密钥不得写日志，命令执行器也不得记录带 secret 的参数。是否能看到并操作完整 PE 桌面、锁定数据卷能否按恢复密码自动解锁，仍需用包含 BitLocker 数据盘的可丢弃虚拟机跨重启验证。
 
 ## 离线镜像账户分类
 

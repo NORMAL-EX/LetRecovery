@@ -1002,7 +1002,7 @@ fn detect_ui_language(guard: &core::config::AuthenticatedOperationGuard) -> Stri
     language.unwrap_or_default()
 }
 
-fn unlock_maintenance_volumes_best_effort(
+fn unlock_handoff_volumes_best_effort(
     guard: &core::config::AuthenticatedOperationGuard,
 ) -> anyhow::Result<(usize, usize)> {
     use lr_core::command::CommandExecutor as _;
@@ -1015,7 +1015,7 @@ fn unlock_maintenance_volumes_best_effort(
     let mask = match lr_core::windows_storage::assigned_drive_letter_mask() {
         Ok(mask) => mask,
         Err(error) => {
-            log::warn!("[PE MAINTENANCE] 无法枚举盘符，已跳过 BitLocker 解锁: {error}");
+            log::warn!("[PE HANDOFF] 无法枚举盘符，已跳过 BitLocker 解锁: {error}");
             return Ok((0, 0));
         }
     };
@@ -1047,9 +1047,7 @@ fn unlock_maintenance_volumes_best_effort(
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    log::warn!(
-                        "[PE MAINTENANCE] manage-bde 无法启动，停止后续自动解锁尝试: {error}"
-                    );
+                    log::warn!("[PE HANDOFF] manage-bde 无法启动，停止后续自动解锁尝试: {error}");
                     guard.verify_unchanged()?;
                     return Ok((attempted_volumes, unlocked_volumes));
                 }
@@ -1567,15 +1565,16 @@ fn main() -> anyhow::Result<()> {
         }
     );
 
+    match unlock_handoff_volumes_best_effort(&authenticated_handoff) {
+        Ok((attempted, unlocked)) => log::info!(
+            "[PE HANDOFF] BitLocker 自动解锁完成: purpose={:?}, enumerated_volumes={attempted}, accepted_unlocks={unlocked}",
+            authenticated_handoff.purpose()
+        ),
+        Err(error) => log::warn!(
+            "[PE HANDOFF] BitLocker 自动解锁材料不可用，继续交接: {error:#}"
+        ),
+    }
     if authenticated_handoff.purpose() == lr_core::handoff_auth::HandoffPurpose::Maintenance {
-        match unlock_maintenance_volumes_best_effort(&authenticated_handoff) {
-            Ok((attempted, unlocked)) => log::info!(
-                "[PE MAINTENANCE] BitLocker 自动解锁完成: enumerated_volumes={attempted}, accepted_unlocks={unlocked}"
-            ),
-            Err(error) => log::warn!(
-                "[PE MAINTENANCE] BitLocker 自动解锁材料不可用，维护环境继续: {error:#}"
-            ),
-        }
         remain_in_hidden_pe_maintenance();
     }
     let authenticated_operation = authenticated_handoff

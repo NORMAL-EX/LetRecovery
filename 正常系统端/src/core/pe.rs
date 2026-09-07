@@ -571,8 +571,13 @@ impl HandoffBootPayload {
         use lr_core::handoff_manifest::{ArtifactLocation, ArtifactRole};
 
         lr_core::bl_passthrough::parse_keys(&bytes).map_err(anyhow::Error::msg)?;
-        if self.capsule.purpose() != lr_core::handoff_auth::HandoffPurpose::Maintenance {
-            anyhow::bail!("BitLocker recovery material is valid only for PE maintenance");
+        if !matches!(
+            self.capsule.purpose(),
+            lr_core::handoff_auth::HandoffPurpose::Install
+                | lr_core::handoff_auth::HandoffPurpose::Backup
+                | lr_core::handoff_auth::HandoffPurpose::Maintenance
+        ) {
+            anyhow::bail!("BitLocker recovery material is not valid for this PE handoff");
         }
         let manifest = lr_core::handoff_manifest::HandoffManifest::parse(&self.manifest_bytes)?;
         let records = manifest
@@ -581,7 +586,7 @@ impl HandoffBootPayload {
             .filter(|record| record.role == ArtifactRole::ProtectedBitLockerSecret)
             .collect::<Vec<_>>();
         let [record] = records.as_slice() else {
-            anyhow::bail!("maintenance manifest must bind exactly one BitLocker secret artifact");
+            anyhow::bail!("PE manifest must bind exactly one BitLocker secret artifact");
         };
         let actual_sha256 = lr_core::install_handoff::decode_hex_array::<32>(
             &lr_core::hash::sha256_bytes(&bytes),
@@ -592,7 +597,7 @@ impl HandoffBootPayload {
             || record.length_bytes != bytes.len() as u64
             || record.sha256 != actual_sha256
         {
-            anyhow::bail!("protected BitLocker secret does not match its maintenance manifest");
+            anyhow::bail!("protected BitLocker secret does not match its PE handoff manifest");
         }
         self.bitlocker_secret = Some(bytes);
         Ok(self)
@@ -1238,7 +1243,7 @@ enum PeBootPurpose {
 
 impl PeBootPurpose {
     const fn may_inject_bitlocker_recovery_material(self) -> bool {
-        matches!(self, Self::Maintenance)
+        matches!(self, Self::Install | Self::Backup | Self::Maintenance)
     }
 }
 
@@ -1839,12 +1844,10 @@ impl PeManager {
         log::info!("[PE] 复制 WIM 到 {}", target_wim);
         copy_file_atomic(directory, Path::new(wim_path), &record.wim_path)?;
 
-        // The private authoritative handoff is injected last. Recovery passwords may exist only
-        // for the dedicated maintenance purpose and are manifest-bound inside this private WIM.
+        // The private authoritative handoff is injected last. Recovery passwords are
+        // manifest-bound inside this private WIM for every handoff that can need PE access.
         if purpose.may_inject_bitlocker_recovery_material() {
-            log::info!(
-                "[PE] authenticated maintenance boot may carry a protected BitLocker secret"
-            );
+            log::info!("[PE] authenticated handoff may carry a protected BitLocker secret");
         }
         if let Some(payload) = authenticated_handoff {
             inject_authenticated_handoff(directory, Path::new(&target_wim), payload)
@@ -2405,9 +2408,9 @@ mod cache_policy_tests {
     }
 
     #[test]
-    fn only_maintenance_boot_policy_allows_recovery_material_injection() {
-        assert!(!PeBootPurpose::Install.may_inject_bitlocker_recovery_material());
-        assert!(!PeBootPurpose::Backup.may_inject_bitlocker_recovery_material());
+    fn every_authenticated_task_boot_policy_allows_recovery_material_injection() {
+        assert!(PeBootPurpose::Install.may_inject_bitlocker_recovery_material());
+        assert!(PeBootPurpose::Backup.may_inject_bitlocker_recovery_material());
         assert!(PeBootPurpose::Maintenance.may_inject_bitlocker_recovery_material());
     }
 

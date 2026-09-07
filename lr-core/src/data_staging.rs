@@ -54,7 +54,8 @@ impl StagingPayloadBudget {
     /// volume. The fixed headroom is allocated with the partition and is not required again after
     /// a producer materializes part of the payload.
     pub fn remaining_payload_bytes_after(self, materialized_payload_bytes: u64) -> Option<u64> {
-        self.payload_bytes()?.checked_sub(materialized_payload_bytes)
+        self.payload_bytes()?
+            .checked_sub(materialized_payload_bytes)
     }
 }
 

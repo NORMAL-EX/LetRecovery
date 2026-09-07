@@ -463,7 +463,7 @@ impl BitLockerManager {
         let mask = match lr_core::windows_storage::assigned_drive_letter_mask() {
             Ok(mask) => mask,
             Err(error) => {
-                log::warn!("[PE MAINTENANCE] 无法枚举盘符，跳过 BitLocker 密钥收集: {error}");
+                log::warn!("[PE HANDOFF] 无法枚举盘符，跳过 BitLocker 密钥收集: {error}");
                 return Vec::new();
             }
         };
@@ -477,12 +477,12 @@ impl BitLockerManager {
                 Ok(key) if !keys.contains(&key) => keys.push(key),
                 Ok(_) => {}
                 Err(error) => log::info!(
-                    "[PE MAINTENANCE] 卷 {letter}: 没有可获取的数字恢复密码，已跳过: {error}"
+                    "[PE HANDOFF] 卷 {letter}: 没有可获取的数字恢复密码，已跳过: {error}"
                 ),
             }
         }
         log::info!(
-            "[PE MAINTENANCE] BitLocker 数字恢复密码收集完成: count={}",
+            "[PE HANDOFF] BitLocker 数字恢复密码收集完成: count={}",
             keys.len()
         );
         keys

@@ -162,34 +162,27 @@ fn rebind_backup_paths(config: &BackupConfig) -> Result<ReboundBackupPaths> {
         handoff.destination.partition_offset_bytes,
     )
     .context("resolve destination volume GUID")?;
-    require_not_encrypted(&source_root).context("source BitLocker gate")?;
-    require_not_encrypted(&destination_root).context("destination BitLocker gate")?;
+    require_accessible_volume(&source_root).context("source BitLocker access gate")?;
+    require_accessible_volume(&destination_root).context("destination BitLocker access gate")?;
     Ok(ReboundBackupPaths {
         source_root,
         target: PathBuf::from(&destination_root).join(&handoff.destination_relative_path),
     })
 }
 
-fn require_not_encrypted(path: &str) -> Result<()> {
-    use lr_core::fveapi::{FveError, FveProtectionStatus, FveVolumeStatus};
+fn require_accessible_volume(path: &str) -> Result<()> {
+    use lr_core::fveapi::{FveError, FveLockStatus};
 
     let api = lr_core::fveapi::FveApi::instance()
         .map_err(|error| anyhow::anyhow!("load BitLocker status API: {error}"))?;
     match api.get_status_by_path(path) {
-        Ok(info)
-            if info.volume_status == FveVolumeStatus::FullyDecrypted
-                && info.protection_status == FveProtectionStatus::Off =>
-        {
-            Ok(())
-        }
+        Ok(info) if info.lock_status != FveLockStatus::Locked => Ok(()),
         Err(FveError::NotEncrypted) | Err(FveError::NotBitLockerVolume) => Ok(()),
         Ok(info) => anyhow::bail!(
-            "volume is not provably unencrypted (conversion={:?}, protection={:?}, lock={:?})",
-            info.volume_status,
-            info.protection_status,
+            "volume remains inaccessible after BitLocker handoff unlock (status={:?})",
             info.lock_status
         ),
-        Err(error) => anyhow::bail!("cannot prove volume is unencrypted: {error}"),
+        Err(error) => anyhow::bail!("cannot verify BitLocker volume accessibility: {error}"),
     }
 }
 

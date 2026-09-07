@@ -627,11 +627,11 @@ fn validate_role_matrix(
 ) -> Result<()> {
     for (role, records) in roles {
         let allowed = match purpose {
-            HandoffPurpose::Install => !matches!(
+            HandoffPurpose::Install => !matches!(role, ArtifactRole::BackupBaseImage),
+            HandoffPurpose::Backup => matches!(
                 role,
                 ArtifactRole::BackupBaseImage | ArtifactRole::ProtectedBitLockerSecret
             ),
-            HandoffPurpose::Backup => *role == ArtifactRole::BackupBaseImage,
             HandoffPurpose::Expand => false,
             HandoffPurpose::Maintenance => *role == ArtifactRole::ProtectedBitLockerSecret,
         };
@@ -685,13 +685,11 @@ fn validate_role_matrix(
             bail!("installation handoff cannot mix image spans with an XP source tree");
         }
     }
-    if purpose == HandoffPurpose::Maintenance {
-        let secret_count = roles
-            .get(&ArtifactRole::ProtectedBitLockerSecret)
-            .map_or(0, Vec::len);
-        if secret_count > 1 {
-            bail!("maintenance handoff has more than one protected BitLocker secret artifact");
-        }
+    let secret_count = roles
+        .get(&ArtifactRole::ProtectedBitLockerSecret)
+        .map_or(0, Vec::len);
+    if secret_count > 1 {
+        bail!("handoff has more than one protected BitLocker secret artifact");
     }
     Ok(())
 }
@@ -996,15 +994,29 @@ mod tests {
     fn secrets_and_case_insensitive_duplicates_fail_closed() {
         let mut secret = artifact("private\\answer.xml", 0);
         secret.role = ArtifactRole::CustomUnattend;
-        assert!(HandoffManifest::new(
+        let install = HandoffManifest::new(
             HandoffPurpose::Install,
             "00112233445566778899aabbccddeeff",
             DATA_TOKEN,
             Some(TARGET_TOKEN.to_owned()),
             None,
+            vec![artifact("images\\install.wim", 0), secret.clone()],
+        )
+        .unwrap();
+        assert!(install
+            .artifacts
+            .iter()
+            .any(|record| record.role == ArtifactRole::ProtectedBitLockerSecret));
+        let backup = HandoffManifest::new(
+            HandoffPurpose::Backup,
+            "00112233445566778899aabbccddeeff",
+            DATA_TOKEN,
+            None,
+            None,
             vec![secret],
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(backup.artifacts.len(), 1);
         assert!(HandoffManifest::new(
             HandoffPurpose::Install,
             "00112233445566778899aabbccddeeff",

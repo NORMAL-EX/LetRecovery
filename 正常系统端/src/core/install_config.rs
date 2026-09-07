@@ -14,6 +14,22 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
+pub(crate) fn collect_bitlocker_secret_best_effort() -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    let keys = crate::core::bitlocker::BitLockerManager::new().collect_recovery_keys_best_effort();
+    if keys.is_empty() {
+        return None;
+    }
+    match lr_core::bl_passthrough::serialize_keys(&keys) {
+        Ok(secret) => Some(secret),
+        Err(error) => {
+            log::warn!(
+                "[PE HANDOFF] BitLocker recovery-password bundle could not be serialized: {error}"
+            );
+            None
+        }
+    }
+}
+
 fn read_optional_bounded_plain_file(
     path: &Path,
     maximum_bytes: u64,
@@ -38,6 +54,7 @@ pub struct BackupConfigTransaction {
     marker_pins: lr_core::scoped_temp_file::PinnedDirectoryAncestors,
     boot_config_bytes: Option<Vec<u8>>,
     boot_manifest_bytes: Option<Vec<u8>>,
+    bitlocker_secret: Option<zeroize::Zeroizing<Vec<u8>>>,
 }
 
 /// Exact files changed while preparing a PE install handoff.
@@ -60,6 +77,7 @@ pub struct InstallConfigTransaction {
     boot_manifest_bytes: Option<Vec<u8>>,
     private_wifi_profile: Option<Vec<u8>>,
     protected_administrator_secret: Option<zeroize::Zeroizing<Vec<u8>>>,
+    protected_bitlocker_secret: Option<zeroize::Zeroizing<Vec<u8>>>,
 }
 
 /// Exact files changed while preparing a PE expansion handoff.
@@ -107,6 +125,9 @@ impl BackupConfigTransaction {
             .take()
             .context("backup authenticated boot manifest was already consumed")
     }
+    pub(crate) fn take_bitlocker_secret(&mut self) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+        self.bitlocker_secret.take()
+    }
     pub fn rollback(self) -> Result<()> {
         self.marker_pins
             .verify_unchanged()
@@ -138,6 +159,11 @@ impl InstallConfigTransaction {
         &mut self,
     ) -> Option<zeroize::Zeroizing<Vec<u8>>> {
         self.protected_administrator_secret.take()
+    }
+    pub(crate) fn take_protected_bitlocker_secret(
+        &mut self,
+    ) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+        self.protected_bitlocker_secret.take()
     }
     pub fn session_id(&self) -> &str {
         &self.session_id
@@ -693,10 +719,32 @@ impl ConfigFileManager {
         target_partition: &str,
         data_partition: &str,
         config: &InstallConfig,
+        auth_key: &lr_core::handoff_auth::SessionAuthKey,
+        source_artifacts: Vec<lr_core::handoff_manifest::ArtifactRecord>,
+        private_wifi_profile: Option<&[u8]>,
+        auto_staging_source_length_before_bytes: Option<u64>,
+    ) -> Result<InstallConfigTransaction> {
+        Self::write_install_config_transactional_with_private_payloads(
+            target_partition,
+            data_partition,
+            config,
+            auth_key,
+            source_artifacts,
+            private_wifi_profile,
+            auto_staging_source_length_before_bytes,
+            None,
+        )
+    }
+
+    pub(crate) fn write_install_config_transactional_with_private_payloads(
+        target_partition: &str,
+        data_partition: &str,
+        config: &InstallConfig,
         _auth_key: &lr_core::handoff_auth::SessionAuthKey,
         mut source_artifacts: Vec<lr_core::handoff_manifest::ArtifactRecord>,
         private_wifi_profile: Option<&[u8]>,
         auto_staging_source_length_before_bytes: Option<u64>,
+        protected_bitlocker_secret: Option<zeroize::Zeroizing<Vec<u8>>>,
     ) -> Result<InstallConfigTransaction> {
         let mut config = config.clone();
         if config.session_id.trim().is_empty() {
@@ -721,6 +769,19 @@ impl ConfigFileManager {
             anyhow::bail!(
                 "ViaPE custom unattend requires a protected boot artifact and is temporarily fail-closed"
             );
+        }
+        if let Some(secret) = &protected_bitlocker_secret {
+            source_artifacts.push(lr_core::handoff_manifest::ArtifactRecord {
+                role: lr_core::handoff_manifest::ArtifactRole::ProtectedBitLockerSecret,
+                location: lr_core::handoff_manifest::ArtifactLocation::ProtectedBoot,
+                ordinal: 0,
+                relative_path: lr_core::bl_passthrough::KEYS_FILE_NAME.to_owned(),
+                length_bytes: secret.len() as u64,
+                sha256: lr_core::install_handoff::decode_hex_array::<32>(
+                    &lr_core::hash::sha256_bytes(secret),
+                    "protected BitLocker secret SHA-256",
+                )?,
+            });
         }
         let protected_administrator_secret = if config.builtin_administrator.enabled {
             config
@@ -824,6 +885,7 @@ impl ConfigFileManager {
             boot_manifest_bytes: None,
             private_wifi_profile,
             protected_administrator_secret,
+            protected_bitlocker_secret,
         };
         if let Err(error) = write_atomic_file(&target_marker_path, &target_marker_bytes) {
             if let Err(rollback) = transaction.rollback() {
@@ -1118,7 +1180,23 @@ impl ConfigFileManager {
         source_partition: &str,
         data_partition: &str,
         config: &BackupConfig,
+        auth_key: &lr_core::handoff_auth::SessionAuthKey,
+    ) -> Result<BackupConfigTransaction> {
+        Self::write_backup_config_transactional_with_bitlocker_secret(
+            source_partition,
+            data_partition,
+            config,
+            auth_key,
+            None,
+        )
+    }
+
+    pub(crate) fn write_backup_config_transactional_with_bitlocker_secret(
+        source_partition: &str,
+        data_partition: &str,
+        config: &BackupConfig,
         _auth_key: &lr_core::handoff_auth::SessionAuthKey,
+        bitlocker_secret: Option<zeroize::Zeroizing<Vec<u8>>>,
     ) -> Result<BackupConfigTransaction> {
         Self::validate_ini_value("source_partition", source_partition)?;
         Self::validate_ini_value("data_partition", data_partition)?;
@@ -1138,13 +1216,27 @@ impl ConfigFileManager {
             .context("backup handoff has no LRBK2 authorization")?;
         lr_core::handoff_auth::validate_session_id(&handoff.session_id)?;
         let data_locator_token = lr_core::handoff_auth::generate_locator_token()?;
+        let artifacts = match bitlocker_secret.as_ref() {
+            Some(secret) => vec![lr_core::handoff_manifest::ArtifactRecord {
+                role: lr_core::handoff_manifest::ArtifactRole::ProtectedBitLockerSecret,
+                location: lr_core::handoff_manifest::ArtifactLocation::ProtectedBoot,
+                ordinal: 0,
+                relative_path: lr_core::bl_passthrough::KEYS_FILE_NAME.to_owned(),
+                length_bytes: secret.len() as u64,
+                sha256: lr_core::install_handoff::decode_hex_array::<32>(
+                    &lr_core::hash::sha256_bytes(secret),
+                    "protected BitLocker secret SHA-256",
+                )?,
+            }],
+            None => Vec::new(),
+        };
         let manifest = lr_core::handoff_manifest::HandoffManifest::new(
             lr_core::handoff_auth::HandoffPurpose::Backup,
             handoff.session_id.clone(),
             data_locator_token.as_str(),
             None,
             None,
-            Vec::new(),
+            artifacts,
         )?
         .to_bytes()?;
         let manifest_binding = lr_core::handoff_manifest::ManifestBinding::new(&manifest)?;
@@ -1185,6 +1277,7 @@ impl ConfigFileManager {
             marker_pins,
             boot_config_bytes: Some(content.as_bytes().to_vec()),
             boot_manifest_bytes: Some(manifest),
+            bitlocker_secret,
         };
 
         transaction.marker_pins.verify_unchanged()?;
