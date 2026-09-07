@@ -736,6 +736,10 @@ impl ConfigFileManager {
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Keep owned BitLocker secret custody explicit alongside the existing transactional inputs"
+    )]
     pub(crate) fn write_install_config_transactional_with_private_payloads(
         target_partition: &str,
         data_partition: &str,
