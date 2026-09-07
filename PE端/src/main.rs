@@ -1005,8 +1005,6 @@ fn detect_ui_language(guard: &core::config::AuthenticatedOperationGuard) -> Stri
 fn unlock_handoff_volumes_best_effort(
     guard: &core::config::AuthenticatedOperationGuard,
 ) -> anyhow::Result<(usize, usize)> {
-    use lr_core::command::CommandExecutor as _;
-
     guard.verify_unchanged()?;
     let Some(secret) = guard.protected_bitlocker_secret_bytes() else {
         return Ok((0, 0));
@@ -1019,7 +1017,14 @@ fn unlock_handoff_volumes_best_effort(
             return Ok((0, 0));
         }
     };
-    let executor = lr_core::command::SystemCommandExecutor;
+    let api = match lr_core::fveapi::FveApi::instance() {
+        Ok(api) => api,
+        Err(error) => {
+            log::warn!("[PE HANDOFF] FVEAPI 不可用，已跳过 BitLocker 自动解锁: {error}");
+            guard.verify_unchanged()?;
+            return Ok((0, 0));
+        }
+    };
     let mut attempted_volumes = 0usize;
     let mut unlocked_volumes = 0usize;
     for index in 0..26_u32 {
@@ -1031,31 +1036,55 @@ fn unlock_handoff_volumes_best_effort(
             continue;
         }
         attempted_volumes += 1;
+        let handle = match api.open_volume(&drive) {
+            Ok(handle) => handle,
+            Err(error) => {
+                log::warn!("[PE HANDOFF] FVEAPI 无法打开卷 {drive}，继续其它卷: {error}");
+                continue;
+            }
+        };
+        let mut last_error = None;
         for key in keys.iter() {
-            // Microsoft documents this exact command as an unlock operation. It does not disable
-            // protectors and does not start decryption; secret-bearing arguments are never logged.
-            let request = lr_core::command::CommandRequest::new("manage-bde.exe").args([
-                "-unlock",
-                drive.as_str(),
-                "-recoverypassword",
-                key.as_str(),
-            ]);
-            match executor.execute(&request) {
-                Ok(outcome) if outcome.succeeded() => {
+            match handle.unlock_with_recovery_key(key) {
+                Ok(()) => {
                     unlocked_volumes += 1;
+                    last_error = None;
+                    log::info!("[PE HANDOFF] FVEAPI 已解锁卷 {drive}");
                     break;
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    log::warn!("[PE HANDOFF] manage-bde 无法启动，停止后续自动解锁尝试: {error}");
-                    guard.verify_unchanged()?;
-                    return Ok((attempted_volumes, unlocked_volumes));
-                }
+                Err(error) => last_error = Some(error),
             }
+        }
+        if let Some(error) = last_error {
+            log::warn!("[PE HANDOFF] FVEAPI 未能用本次恢复密码解锁卷 {drive}，继续其它卷: {error}");
         }
     }
     guard.verify_unchanged()?;
     Ok((attempted_volumes, unlocked_volumes))
+}
+
+#[test]
+fn handoff_unlock_uses_shared_fveapi_without_command_dependency() {
+    let source = include_str!("main.rs");
+    let implementation = source
+        .split_once("fn unlock_handoff_volumes_best_effort(")
+        .unwrap()
+        .1
+        .split_once("#[test]")
+        .unwrap()
+        .0;
+    assert!(implementation.contains("lr_core::fveapi::FveApi::instance()"));
+    assert!(implementation.contains("api.open_volume(&drive)"));
+    assert!(implementation.contains("handle.unlock_with_recovery_key(key)"));
+    for forbidden in [
+        "CommandRequest",
+        "SystemCommandExecutor",
+        "manage-bde",
+        "start_decryption",
+        "decrypt_unlocked_volume",
+    ] {
+        assert!(!implementation.contains(forbidden), "{forbidden}");
+    }
 }
 
 fn maintenance_volume_may_need_unlock(drive: &str) -> bool {
