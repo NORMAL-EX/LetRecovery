@@ -496,12 +496,59 @@ fn stage_desktop_log_contents(
 fn read_verified_staged_desktop_log(data_directory: &Path, session_id: &str) -> Result<Vec<u8>> {
     let directory = session_handoff_directory(data_directory, session_id)?;
     let manifest_path = directory.join(DESKTOP_MANIFEST_FILE);
-    reject_existing_reparse_ancestors(&manifest_path)?;
-    let manifest: DesktopLogManifest = serde_json::from_slice(&read_strict_bounded_regular_file(
-        &manifest_path,
-        MAX_MANIFEST_BYTES,
-    )?)
-    .context("parse desktop log manifest")?;
+    let manifest = match read_strict_bounded_regular_file(&manifest_path, MAX_MANIFEST_BYTES) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<DesktopLogManifest>(&bytes)
+                .context("parse desktop log manifest")?,
+        ),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    // The blob is published before the manifest. If a crash or an older PE binary interrupts
+    // that final commit, recover only a session-local content-addressed blob. The filename and
+    // a fresh SHA-256 check are both required; arbitrary normal.log files are never accepted.
+    if manifest.is_none() {
+        reject_existing_reparse_ancestors(&directory)?;
+        let entries = fs::read_dir(&directory).with_context(|| {
+            format!(
+                "read desktop log handoff directory: {}",
+                directory.display()
+            )
+        })?;
+        let mut candidate = None;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(hex) = name
+                .strip_prefix("normal-")
+                .and_then(|v| v.strip_suffix(".log"))
+            else {
+                continue;
+            };
+            if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            if candidate.is_some() {
+                bail!(
+                    "desktop log handoff has multiple content-addressed blobs without a manifest"
+                );
+            }
+            let path = entry.path();
+            let bytes = read_strict_bounded_regular_file(&path, MAX_STAGE_LOG_BYTES)?;
+            if sha256_hex(&bytes) != hex.to_ascii_lowercase() {
+                bail!("content-addressed desktop log blob hash does not match its filename");
+            }
+            candidate = Some(bytes);
+        }
+        return candidate.ok_or_else(|| anyhow::anyhow!("desktop log manifest is missing"));
+    }
+    let manifest = manifest.expect("manifest checked above");
     if !matches!(
         manifest.schema,
         LOG_HANDOFF_SCHEMA | LEGACY_LOG_HANDOFF_SCHEMA
@@ -833,6 +880,31 @@ mod tests {
         );
         let copied = copy_desktop_log_to_pe(&data, &root.join("pe"), "session-blob").unwrap();
         assert_eq!(fs::read_to_string(copied).unwrap(), "second generation\r\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_manifest_recovers_single_hash_bound_blob() {
+        let root = temp_directory("missing-manifest");
+        let source = root.join("source.log");
+        let data = root.join("data");
+        let pe = root.join("pe");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &source,
+            "normal endpoint survived manifest interruption\r\n",
+        )
+        .unwrap();
+        let manifest = stage_desktop_log(&source, &data, "session-recover", "test").unwrap();
+        fs::remove_file(
+            session_handoff_directory(&data, "session-recover")
+                .unwrap()
+                .join(DESKTOP_MANIFEST_FILE),
+        )
+        .unwrap();
+        let copied = copy_desktop_log_to_pe(&data, &pe, "session-recover").unwrap();
+        assert_eq!(fs::read(copied).unwrap(), fs::read(source).unwrap());
+        assert!(manifest.blob_file.starts_with("normal-"));
         fs::remove_dir_all(root).unwrap();
     }
 }

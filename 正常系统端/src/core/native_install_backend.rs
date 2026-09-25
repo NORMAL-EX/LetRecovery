@@ -2214,14 +2214,26 @@ impl ProductionInstallBackend {
             log::info!(
                 "[INSTALL LOG] PE 配置与启动事务已提交，开始截取重启前正常端日志: session={session_id}"
             );
-            let staged = crate::utils::logger::LogManager::flush_barrier().and_then(|snapshot| {
-                lr_core::install_log_handoff::stage_desktop_log_from_file(
-                    snapshot.file(),
-                    &data_directory,
-                    &session_id,
-                    env!("BUILD_VERSION"),
-                )
-            });
+            let mut staged = Err(anyhow::anyhow!("log handoff was not attempted"));
+            for attempt in 1..=3 {
+                staged = crate::utils::logger::LogManager::flush_barrier().and_then(|snapshot| {
+                    lr_core::install_log_handoff::stage_desktop_log_from_file(
+                        snapshot.file(),
+                        &data_directory,
+                        &session_id,
+                        env!("BUILD_VERSION"),
+                    )
+                });
+                if staged.is_ok() {
+                    break;
+                }
+                if let Err(error) = &staged {
+                    log::warn!(
+                        "[INSTALL LOG] 正常端日志暂存尝试失败: attempt={attempt}/3 error={error:#}"
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             match staged {
                 Ok(manifest) => log::info!(
                     "[INSTALL LOG] 正常端日志已暂存到 PE 数据分区: session={}, bytes={}, sha256={}",
