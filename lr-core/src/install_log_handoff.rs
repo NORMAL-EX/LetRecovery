@@ -294,18 +294,17 @@ fn atomic_publish_diagnostic(directory: &Path, name: &str, contents: &[u8]) -> R
 }
 
 fn enforce_or_warn_acl(path: &Path, required: bool, context: &str) -> Result<()> {
-    if let Err(error) = restrict_log_acl(path) {
-        if required {
-            return Err(error).with_context(|| format!("{context}: {}", path.display()));
-        }
-        log::warn!(
-            "[INSTALL LOG] diagnostic ACL hardening failed for {}; the sanitized log is still published: {error:#}",
-            path.display()
-        );
+    if !required {
+        // Final install logs are sanitized diagnostics, not authorization artifacts. Keep the
+        // inherited ACL from ProgramData so the interactive user can inspect them after setup.
+        // Applying SYSTEM/Administrators-only custody here makes an unelevated Explorer token
+        // report Access denied even though installation has completed.
+        let _ = (path, context);
+        return Ok(());
     }
+    restrict_log_acl(path).with_context(|| format!("{context}: {}", path.display()))?;
     Ok(())
 }
-
 fn atomic_publish_with_acl(
     directory: &Path,
     name: &str,

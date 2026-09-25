@@ -2241,9 +2241,17 @@ impl ProductionInstallBackend {
                     manifest.bytes,
                     manifest.sha256
                 ),
-                Err(error) => log::warn!(
-                    "[INSTALL LOG] 正常端日志暂存失败；安装交接继续，不弹出提示: {error:#}"
-                ),
+                Err(error) => {
+                    // ReadyToReboot is consumed by the UI as permission to restart immediately.
+                    // Do not publish it while only an empty session directory or an unverified
+                    // partial blob exists; PE requires the committed manifest as its handoff point.
+                    return Err(Self::error(
+                        "stage_normal_endpoint_log_before_reboot",
+                        format!(
+                            "normal-endpoint log handoff did not complete before reboot; restart is blocked until the log is staged: {error:#}"
+                        ),
+                    ));
+                }
             }
         }
         Ok(())

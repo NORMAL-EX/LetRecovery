@@ -314,10 +314,13 @@ Hyper-V 安装矩阵的宿主进程本身也是需要观测的测试对象。202
 - `Resize` 的 desired 字节值直接成功；`4097` 且回读未变后按非整 MiB `SizeMin` 有界重试；其它返回码、首次调用后范围变化、查询结果不能满足 minimum 或返回相同失败目标时都不得二次写入。
 - 个人文件保留必须覆盖：所有目录搬移成功后真实删除旧系统且保留未知顶层数据；后续搬移失败时逆序恢复；删除句柄拒绝 delete sharing 时保留个人文件根并返回不可逆 partial state；`.lnk` 目标在原 `C:` 与 PE 当前已认证离线目标盘符的 `Users` 内、外、其它盘、UNC、环境变量和带 `..` 的分类，以及真实 `IShellLinkW` round-trip；首登只以权威 `IMAGE_STATE_COMPLETE` 判断 Setup 完成、瞬态 OOBE DWORD 缺失不阻断，并丢弃大小写任意的普通 `desktop.ini` 而不覆盖新 Known Folder 元数据。
 
-## 仍需虚拟机验证
+
+2026-09-25 的 Hyper-V 安装矩阵复测 `ebaa3bf3c29c403f87af6941b576204b` 在来宾启动前置阶段明确失败：来宾扫描到 0 个 `sources\install.wim/install.esd`，因此没有生成 `install-plan.json`，也没有进入 PE 或日志交接阶段。复核发现本轮传入的是 343,801,856 字节的 LetRecovery 产品 ISO，而授权检查点原本绑定的 Windows 安装 ISO 为 `E:\镜像\26100.3037.250123-2219.GE_RELEASE_SVC_PROD3_CLIENTPRO_OEMRET_X64FRE_ZH-CN.ISO`（8,896,845,824 字节）。这属于测试介质选择错误，不能当作产品安装或正常端日志交接失败；代码级 `lr-core` 安装日志中继回归已通过 10 项测试。宿主脚本后续应在启动 VM 前对 ISO 内容做只读安装源检查，并在缺少 `sources\install.wim` 或 `sources\install.esd` 时直接给出有界诊断，避免消耗一轮必然失败的来宾回归。## 仍需虚拟机验证
 
 - GPT/MBR 全盘重装（含同盘暂存与非整 MiB 尾隙）；
 - 双系统完整工作流在禁用/删除 `defragsvc` 的精简系统上的用户可见诊断（底层两套 provider 及 canonical extent 已完成独立 VM 实测）；
 - VDS 实际 Shrink 与 create 返回范围和请求略有差异的设备；
 - 安装完成后的暂存删除/扩展 warning 终态及双系统启动菜单。
 - 正常端启用维护入口后的真实 BCD 重启、PE 桌面可用且 LetRecovery_PE 任务窗口不出现，以及有/无可获取恢复密码时 BitLocker 卷分别自动解锁或保持锁定且不启动解密。
+
+同日新的授权 RunId 5b7f227966c4de58171749519b46f02 已证明介质挂载、来宾启动、证据采集和清理链路均正常，但夹具把 Win11 期望版次写成 ProfessionalCountrySpecific，实际 26100 ISO 只提供 Professional，来宾因此在生成 install-plan.json 前停止。宿主最终回读为 VM Off、检查点恢复、DVD/网络恢复、证据 VHD 删除全部成功。矩阵已将 Win11 期望版次修正为实际介质中的 Professional，下一轮必须使用新的 RunId。
