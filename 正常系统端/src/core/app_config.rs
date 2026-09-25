@@ -37,6 +37,10 @@ pub struct AppConfig {
     #[serde(default = "default_automatic_feedback_mode")]
     pub automatic_feedback_mode: String,
 
+    /// 临时测试注入：仅用于本地验证自动反馈，发布配置不得启用。
+    #[serde(default, skip_serializing)]
+    pub test_fault_stage: String,
+
     /// 日志保留天数（默认7天）
     #[serde(default = "default_log_retention_days")]
     pub log_retention_days: u32,
@@ -123,6 +127,7 @@ impl Default for AppConfig {
             easy_mode_settings_tip_dismissed: false,
             log_enabled: true, // 日志默认启用
             automatic_feedback_mode: default_automatic_feedback_mode(),
+            test_fault_stage: String::new(),
             log_retention_days: 7,           // 默认保留7天
             language: String::from("zh-CN"), // 默认简体中文
             pe_cache: crate::download::config::PeCache::default(),

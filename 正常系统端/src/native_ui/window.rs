@@ -47,6 +47,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
+const TEST_FAULT_TIMER: usize = 0x4c52;
+
 use super::controls::{
     begin_layout_batch, center_single_line_edit_in_row, child, draw_indeterminate_ring,
     draw_inno_button, move_layout_window as MoveWindow, wide, ButtonRole,
@@ -14112,6 +14114,9 @@ unsafe extern "system" fn window_proc(
                 state.request_auto_image_discovery(hwnd);
                 #[cfg(not(feature = "non-elevated-tests"))]
                 state.handle_download_intent(hwnd, DownloadIntent::RefreshCatalogue);
+                if state.app_config.test_fault_stage.eq_ignore_ascii_case("normal") {
+                    let _ = SetTimer(hwnd, TEST_FAULT_TIMER, 1500, None);
+                }
             }
             LRESULT(0)
         }
@@ -14167,6 +14172,14 @@ unsafe extern "system" fn window_proc(
                     return LRESULT(0);
                 }
                 state.layout(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TEST_FAULT_TIMER => {
+            let _ = KillTimer(hwnd, TEST_FAULT_TIMER);
+            if let Some(state) = state {
+                log::error!("[TEST_FAULT] configured normal-stage failure for automatic feedback validation");
+                state.show_terminal_error_log_prompt(hwnd);
             }
             LRESULT(0)
         }
