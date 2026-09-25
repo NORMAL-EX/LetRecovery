@@ -2491,5 +2491,8 @@
     "保留个人文件前目标分区物理身份已变化，安装已停止: {}": "Die Identität der Zielpartition hat sich vor dem Beibehalten persönlicher Dateien geändert; die Installation wurde beendet: {}",
     "保留个人文件失败，已恢复所有已移动目录且尚未删除旧系统: {}": "Das Beibehalten persönlicher Dateien ist fehlgeschlagen; alle verschobenen Ordner wurden wiederhergestellt und das alte System nicht gelöscht: {}",
     "保留个人文件任务已进入部分完成状态，禁止自动回退；保留目录位于 {}。错误: {}": "Das Beibehalten persönlicher Dateien ist teilweise abgeschlossen und kann nicht automatisch zurückgesetzt werden. Beibehaltene Dateien befinden sich unter {}. Fehler: {}"
-  }
+  },
+    "驱动备份完成": "Treibersicherung abgeschlossen",
+    "离线系统驱动备份完成": "Offline-Treibersicherung abgeschlossen",
+    "驱动还原完成": "Treiberwiederherstellung abgeschlossen"
 }

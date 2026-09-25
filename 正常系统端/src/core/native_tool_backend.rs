@@ -454,7 +454,7 @@ impl NativeToolBackend {
                     validate_nonempty_path(directory)?;
                     legacy_driver::export_drivers_online(directory)
                         .map_err(NativeToolBackendError::Execution)?;
-                    Ok(completed("drivers backed up"))
+                    Ok(completed(&crate::tr!("驱动备份完成")))
                 }
                 (
                     NativeToolBackendRoute::BackupDriversOffline,
@@ -468,7 +468,7 @@ impl NativeToolBackend {
                     validate_nonempty_path(directory)?;
                     legacy_driver::export_drivers_offline(target, directory)
                         .map_err(NativeToolBackendError::Execution)?;
-                    Ok(completed("offline drivers backed up"))
+                    Ok(completed(&crate::tr!("离线系统驱动备份完成")))
                 }
                 (
                     NativeToolBackendRoute::RestoreDriversOffline,
@@ -482,7 +482,7 @@ impl NativeToolBackend {
                     validate_directory(directory)?;
                     legacy_driver::import_drivers_offline(target, directory)
                         .map_err(NativeToolBackendError::Execution)?;
-                    Ok(completed("drivers restored"))
+                    Ok(completed(&crate::tr!("驱动还原完成")))
                 }
                 (
                     NativeToolBackendRoute::ManageBitLocker,

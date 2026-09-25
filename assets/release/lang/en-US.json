@@ -2500,5 +2500,8 @@
     "保留个人文件前目标分区物理身份已变化，安装已停止: {}": "The target partition identity changed before preserving personal files; installation stopped: {}",
     "保留个人文件失败，已恢复所有已移动目录且尚未删除旧系统: {}": "Personal-file preservation failed; all moved directories were restored and the old system was not deleted: {}",
     "保留个人文件任务已进入部分完成状态，禁止自动回退；保留目录位于 {}。错误: {}": "Personal-file preservation is partially complete and cannot be rolled back automatically. Preserved files are at {}. Error: {}"
-  }
+  },
+    "驱动备份完成": "Driver backup complete",
+    "离线系统驱动备份完成": "Offline Windows driver backup complete",
+    "驱动还原完成": "Driver restore complete"
 }

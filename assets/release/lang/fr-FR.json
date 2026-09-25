@@ -2491,5 +2491,8 @@
     "保留个人文件前目标分区物理身份已变化，安装已停止: {}": "L’identité de la partition cible a changé avant la conservation des fichiers personnels ; l’installation a été arrêtée : {}",
     "保留个人文件失败，已恢复所有已移动目录且尚未删除旧系统: {}": "La conservation des fichiers personnels a échoué ; tous les dossiers déplacés ont été restaurés et l’ancien système n’a pas été supprimé : {}",
     "保留个人文件任务已进入部分完成状态，禁止自动回退；保留目录位于 {}。错误: {}": "La conservation des fichiers personnels est partiellement terminée et ne peut pas être annulée automatiquement. Les fichiers conservés se trouvent dans {}. Erreur : {}"
-  }
+  },
+    "驱动备份完成": "Sauvegarde des pilotes terminée",
+    "离线系统驱动备份完成": "Sauvegarde des pilotes Windows hors ligne terminée",
+    "驱动还原完成": "Restauration des pilotes terminée"
 }
