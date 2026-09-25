@@ -33,6 +33,10 @@ pub struct AppConfig {
     #[serde(default = "default_log_enabled")]
     pub log_enabled: bool,
 
+    /// 自动反馈模式：disabled、normal、normal_and_pe（默认 normal_and_pe）
+    #[serde(default = "default_automatic_feedback_mode")]
+    pub automatic_feedback_mode: String,
+
     /// 日志保留天数（默认7天）
     #[serde(default = "default_log_retention_days")]
     pub log_retention_days: u32,
@@ -82,6 +86,10 @@ fn default_log_enabled() -> bool {
 }
 
 /// 日志默认保留7天
+fn default_automatic_feedback_mode() -> String {
+    String::from("normal_and_pe")
+}
+
 fn default_log_retention_days() -> u32 {
     7
 }
@@ -113,7 +121,8 @@ impl Default for AppConfig {
             easy_mode_enabled: false,
             easy_mode_tip_dismissed: false,
             easy_mode_settings_tip_dismissed: false,
-            log_enabled: true,               // 日志默认启用
+            log_enabled: true, // 日志默认启用
+            automatic_feedback_mode: default_automatic_feedback_mode(),
             log_retention_days: 7,           // 默认保留7天
             language: String::from("zh-CN"), // 默认简体中文
             pe_cache: crate::download::config::PeCache::default(),
@@ -238,6 +247,12 @@ impl AppConfig {
     }
 
     fn normalized(mut self) -> Self {
+        if !matches!(
+            self.automatic_feedback_mode.as_str(),
+            "disabled" | "normal" | "normal_and_pe"
+        ) {
+            self.automatic_feedback_mode = default_automatic_feedback_mode();
+        }
         self.download_threads = normalize_download_threads(self.download_threads);
         // The removed global Advanced Mode and DiskPart switches remain readable for compatibility
         // but can never be re-enabled. Supported installation advanced options keep their ordinary
@@ -266,6 +281,23 @@ impl AppConfig {
     }
 
     /// 设置日志记录状态并保存
+    pub fn automatic_feedback_mode(&self) -> &str {
+        self.automatic_feedback_mode.as_str()
+    }
+
+    pub fn set_automatic_feedback_mode(&mut self, mode: &str) {
+        self.automatic_feedback_mode = match mode {
+            "disabled" | "normal" | "normal_and_pe" => mode.to_owned(),
+            _ => default_automatic_feedback_mode(),
+        };
+        let _ = self.save();
+    }
+
+    pub fn automatic_feedback_enabled(&self) -> bool { self.automatic_feedback_mode != "disabled" }
+    pub fn set_automatic_feedback_enabled(&mut self, enabled: bool) {
+        self.automatic_feedback_mode = if enabled { default_automatic_feedback_mode() } else { "disabled".to_string() };
+    }
+
     pub fn set_log_enabled(&mut self, enabled: bool) {
         self.log_enabled = enabled;
         // 更新运行时状态
@@ -331,9 +363,25 @@ mod tests {
         let config: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.download_threads, 16);
         assert!(!config.automation_export_enabled);
+        assert_eq!(config.automatic_feedback_mode, "normal_and_pe");
     }
 
     #[test]
+    #[test]
+    fn automatic_feedback_mode_accepts_only_three_states() {
+        let absent: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.normalized().automatic_feedback_mode, "normal_and_pe");
+        let invalid: AppConfig =
+            serde_json::from_str(r#"{"automatic_feedback_mode":"secret"}"#).unwrap();
+        assert_eq!(
+            invalid.normalized().automatic_feedback_mode,
+            "normal_and_pe"
+        );
+        let normal: AppConfig =
+            serde_json::from_str(r#"{"automatic_feedback_mode":"normal"}"#).unwrap();
+        assert_eq!(normal.normalized().automatic_feedback_mode, "normal");
+    }
+
     fn download_threads_are_normalized_to_supported_tiers() {
         assert_eq!(normalize_download_threads(0), 8);
         assert_eq!(normalize_download_threads(8), 8);

@@ -28,6 +28,7 @@ pub mod encoding;
 pub mod first_logon;
 pub mod format_command;
 pub mod fveapi;
+pub mod feedback;
 pub mod handoff_auth;
 pub mod handoff_manifest;
 pub mod hash;

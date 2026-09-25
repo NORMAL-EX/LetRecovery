@@ -4207,6 +4207,7 @@ impl NativeWindow {
                 easy_mode_available: !self.is_pe_environment,
                 log_enabled: self.app_config.log_enabled,
                 automation_export_enabled: self.app_config.automation_export_enabled,
+                automatic_feedback_enabled: self.app_config.automatic_feedback_enabled(),
                 wim_engine: self.app_config.wim_engine,
                 download_threads: self.app_config.download_threads,
             },
@@ -13282,6 +13283,21 @@ impl NativeWindow {
             }
         };
         let log_path = snapshot.path().to_path_buf();
+        if self.app_config.automatic_feedback_enabled() {
+            if let Ok(log) = std::fs::read_to_string(&log_path) {
+                match crate::core::feedback_client::upload_log(&log, "normal") {
+                    Ok(ticket) => {
+                        self.show_information(
+                            hwnd,
+                            crate::tr!("自动反馈成功"),
+                            crate::tr!("错误日志已安全上传。Ticket ID：{}", ticket),
+                        );
+                        return;
+                    }
+                    Err(error) => log::warn!("[FEEDBACK] 自动反馈失败，保留手动日志流程: {error:#}"),
+                }
+            }
+        }
         let content = crate::tr!(
             "操作已停止。请将下面的日志文件提供给开发者，以便定位并解决问题。\r\n\r\n日志文件：{}",
             log_path.display()
@@ -15091,6 +15107,13 @@ unsafe extern "system" fn window_proc(
                                 state.app_config.set_automation_export_enabled(enabled);
                                 page.set_automation_export_enabled(enabled);
                                 state.layout_page_switch_chrome(hwnd);
+                            }
+                        }
+                        Some(InfoIntent::ToggleAutomaticFeedback) => {
+                            if let Some(page) = &state.about_page {
+                                let enabled = page.automatic_feedback_enabled();
+                                state.app_config.set_automatic_feedback_enabled(enabled);
+                                let _ = state.app_config.save();
                             }
                         }
                         Some(InfoIntent::SelectWimEngine) => {

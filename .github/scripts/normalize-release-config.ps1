@@ -56,6 +56,7 @@ function New-ReleaseTemplate {
         easy_mode_tip_dismissed = $false
         easy_mode_settings_tip_dismissed = $false
         log_enabled = $true
+        automatic_feedback_mode = "normal_and_pe"
         log_retention_days = 7
         language = "zh-CN"
         pe_cache = [pscustomobject][ordered]@{
@@ -138,6 +139,11 @@ function Assert-ReleaseTemplate {
     if ($null -eq $logEnabled -or $logEnabled.Value -ne $true) {
         throw "Release template must explicitly set log_enabled to true"
     }
+    $feedbackMode = $Template.PSObject.Properties["automatic_feedback_mode"]
+    if ($null -eq $feedbackMode -or [string]$feedbackMode.Value -notin @("disabled", "normal", "normal_and_pe")) {
+        throw "Release template must set automatic_feedback_mode to disabled, normal, or normal_and_pe"
+    }
+
     if ($null -eq $Template.PSObject.Properties["install_prefs"] -or $null -eq $Template.install_prefs) {
         throw "Release template is missing install_prefs"
     }
@@ -238,3 +244,4 @@ try {
         Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
     }
 }
+

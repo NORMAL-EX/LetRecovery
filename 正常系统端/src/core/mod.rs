@@ -1,4 +1,5 @@
 pub mod advanced_options;
+pub mod feedback_client;
 pub mod app_config;
 mod appx_legacy_impl;
 pub mod automation_export;

@@ -45,6 +45,7 @@ const ID_ABOUT_REFRESH_LANGUAGES: u16 = 5_251;
 const ID_ABOUT_LOGGING: u16 = 5_252;
 const ID_ABOUT_WIM_ENGINE: u16 = 5_253;
 const ID_ABOUT_AUTOMATION_EXPORT: u16 = 5_254;
+const ID_ABOUT_AUTOMATIC_FEEDBACK: u16 = 5_261;
 const ID_ABOUT_DOWNLOAD_THREADS: u16 = 5_259;
 const DOWNLOAD_THREAD_OPTIONS: [u8; 3] = [8, 16, 32];
 // Unlike SS_LEFT (zero), this stock STATIC style never wraps a single-line settings label.  A
@@ -71,6 +72,7 @@ pub enum InfoIntent {
     ToggleEasyMode,
     ToggleLogging,
     ToggleAutomationExport,
+    ToggleAutomaticFeedback,
     SelectWimEngine,
     SelectDownloadThreads,
     OpenLogDirectory,
@@ -134,6 +136,7 @@ pub struct AboutLabels<'a> {
     pub easy_mode_available: bool,
     pub log_enabled: bool,
     pub automation_export_enabled: bool,
+    pub automatic_feedback_enabled: bool,
     pub wim_engine: u8,
     pub download_threads: u8,
 }
@@ -815,6 +818,7 @@ pub struct AboutPage {
     pub easy_mode: HWND,
     pub logging: HWND,
     pub automation_export: HWND,
+    pub automatic_feedback: HWND,
     pub wim_engine_label: HWND,
     pub wim_engine: HWND,
     pub download_threads_label: HWND,
@@ -901,6 +905,14 @@ impl AboutPage {
             ID_ABOUT_AUTOMATION_EXPORT,
         )?;
         set_checked(automation_export, labels.automation_export_enabled);
+        let automatic_feedback = child(
+            parent,
+            w!("BUTTON"),
+            &crate::tr!("自动反馈错误日志"),
+            BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
+            ID_ABOUT_AUTOMATIC_FEEDBACK,
+        )?;
+        set_checked(automatic_feedback, labels.automatic_feedback_enabled);
         let wim_engine_label = child(
             parent,
             w!("STATIC"),
@@ -1003,6 +1015,7 @@ impl AboutPage {
             easy_mode,
             logging,
             automation_export,
+            automatic_feedback,
             wim_engine_label,
             wim_engine,
             download_threads_label,
@@ -1026,6 +1039,7 @@ impl AboutPage {
             ID_ABOUT_REFRESH_LANGUAGES => return Some(InfoIntent::RefreshLanguages),
             ID_ABOUT_LOGGING => return Some(InfoIntent::ToggleLogging),
             ID_ABOUT_AUTOMATION_EXPORT => return Some(InfoIntent::ToggleAutomationExport),
+            ID_ABOUT_AUTOMATIC_FEEDBACK => return Some(InfoIntent::ToggleAutomaticFeedback),
             ID_ABOUT_WIM_ENGINE => return Some(InfoIntent::SelectWimEngine),
             ID_ABOUT_DOWNLOAD_THREADS => return Some(InfoIntent::SelectDownloadThreads),
             _ => {}
@@ -1057,6 +1071,9 @@ impl AboutPage {
     pub unsafe fn set_automation_export_enabled(&self, enabled: bool) {
         set_checked(self.automation_export, enabled);
     }
+
+    pub unsafe fn automatic_feedback_enabled(&self) -> bool { is_checked(self.automatic_feedback) }
+    pub unsafe fn set_automatic_feedback_enabled(&self, enabled: bool) { set_checked(self.automatic_feedback, enabled); }
 
     pub unsafe fn set_logging_enabled(&self, enabled: bool) {
         set_checked(self.logging, enabled);
