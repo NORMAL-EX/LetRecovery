@@ -520,22 +520,21 @@ impl NativeBitLockerManageDialog {
         let locked = self.state.selected_status() == Some(VolumeStatus::EncryptedLocked);
         let unlocked = self.state.selected_status() == Some(VolumeStatus::EncryptedUnlocked);
         if locked {
-            for (label, control) in [(self.controls.credential_label, self.controls.credential)] {
-                move_control(
-                    label,
-                    0,
-                    y + ((metrics.field_height - metrics.label_height) / 2).max(0),
-                    label_width,
-                    metrics.label_height,
-                );
-                let control_height = if control == self.controls.method {
-                    scale(220, dpi)
-                } else {
-                    metrics.field_height
-                };
-                move_control(control, value_x, y, value_width, control_height);
-                y += metrics.field_height + metrics.control_gap;
-            }
+            let (label, control) = (self.controls.credential_label, self.controls.credential);
+            move_control(
+                label,
+                0,
+                y + ((metrics.field_height - metrics.label_height) / 2).max(0),
+                label_width,
+                metrics.label_height,
+            );
+            let control_height = if control == self.controls.method {
+                scale(220, dpi)
+            } else {
+                metrics.field_height
+            };
+            move_control(control, value_x, y, value_width, control_height);
+            y += metrics.field_height + metrics.control_gap;
         }
         let recovery_visible = self.state.recovery_key.is_some();
         if unlocked && !recovery_visible {

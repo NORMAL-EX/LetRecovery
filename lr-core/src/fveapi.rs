@@ -768,7 +768,9 @@ mod imp {
         if !reported_locked || !volume_filesystem_readable(drive) {
             return status;
         }
-        log::info!("[BITLOCKER] {drive} 的文件系统可以正常读取，按未锁定处理（FVE 报告的锁定状态不可靠）");
+        log::info!(
+            "[BITLOCKER] {drive} 的文件系统可以正常读取，按未锁定处理（FVE 报告的锁定状态不可靠）"
+        );
         match status {
             Ok(mut info) => {
                 info.lock_status = FveLockStatus::Unlocked;

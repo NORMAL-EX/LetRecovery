@@ -1034,7 +1034,9 @@ impl WimlibManager {
                 target_dir,
                 index,
                 progress_tx,
-                cancel, 0);
+                cancel,
+                0,
+            );
         }
         self.apply_image_internal(image_file, None, target_dir, index, progress_tx, cancel, 0)
     }
@@ -1055,9 +1057,13 @@ impl WimlibManager {
             target_dir,
             index,
             progress_tx,
-            None, 0)
+            None,
+            0,
+        )
     }
 
+    // 镜像路径、可选卷名、目标目录、索引、进度、取消标志和解压选项各自独立，合并成结构体只会多一层转手。
+    #[allow(clippy::too_many_arguments)]
     fn apply_image_internal(
         &self,
         image_file: &str,
@@ -1104,7 +1110,8 @@ impl WimlibManager {
         }
 
         let wtarget = to_wide(target_dir);
-        let rc = unsafe { (self.extract_image)(wim, index as c_int, wtarget.as_ptr(), extract_flags) };
+        let rc =
+            unsafe { (self.extract_image)(wim, index as c_int, wtarget.as_ptr(), extract_flags) };
         unsafe { (self.free_wim)(wim) };
         drop(ctx);
 

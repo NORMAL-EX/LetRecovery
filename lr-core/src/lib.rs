@@ -7,14 +7,15 @@
 //! 后续计划收纳：镜像元数据类型 + XML 解析、wimlib FFI 封装等
 //! （见仓库 TESTING.md）。
 
+pub mod apply_capacity;
 pub mod backup_atomic_publish;
-pub mod branding;
 pub mod backup_handoff;
 pub mod backup_image_catalog;
 pub mod bl_passthrough;
 pub mod boot;
 pub mod boot_pca;
 pub mod bounded_failure_summary;
+pub mod branding;
 pub mod cached_artifact;
 pub mod command;
 pub mod custom_install;
@@ -26,9 +27,7 @@ pub mod download_integrity;
 pub mod driver;
 pub mod driver_trust;
 pub mod encoding;
-pub mod apply_capacity;
 pub mod feedback;
-pub mod install_stats;
 pub mod first_logon;
 pub mod format_command;
 pub mod fveapi;
@@ -39,6 +38,7 @@ pub mod image_meta;
 pub mod install_handoff;
 pub mod install_log_handoff;
 pub mod install_source_lock;
+pub mod install_stats;
 pub mod offline_appx;
 pub mod offline_international;
 pub mod offline_update_control;

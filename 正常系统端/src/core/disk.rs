@@ -2140,6 +2140,11 @@ impl DiskManager {
         Ok(transaction)
     }
 
+    /// 自动暂存时目标分区缩小后必须保留的最小容量（由安装流程按镜像展开大小设置，0 表示不限制）。
+    pub(super) fn set_target_shrink_floor(bytes: u64) {
+        TARGET_SHRINK_FLOOR.store(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 查找可用的数据分区（排除指定分区、光驱，检查空间）
     ///
     /// # Arguments
@@ -2154,11 +2159,6 @@ impl DiskManager {
     ///   PE 交接提交点的事务，现有分区则为 `None`
     /// * `Ok(None)` - 没有找到可用分区，且无法自动创建
     /// * `Err` - 发生错误
-    /// 自动暂存时目标分区缩小后必须保留的最小容量（由安装流程按镜像展开大小设置，0 表示不限制）。
-    pub(super) fn set_target_shrink_floor(bytes: u64) {
-        TARGET_SHRINK_FLOOR.store(bytes, std::sync::atomic::Ordering::Relaxed);
-    }
-
     pub(super) fn find_suitable_data_partition(
         exclude_partition: &str,
         payload_size_bytes: u64,

@@ -26,7 +26,6 @@ pub struct AppConfig {
     #[serde(default, deserialize_with = "deserialize_ui_mode")]
     pub ui_mode: UiMode,
 
-
     /// 已同意的用户协议版本。小于 [`CURRENT_TERMS_VERSION`] 时启动会先显示欢迎页。
     #[serde(default)]
     pub accepted_terms_version: u32,

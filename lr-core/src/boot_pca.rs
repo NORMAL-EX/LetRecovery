@@ -1930,7 +1930,11 @@ mod windows_impl {
             .as_ref()
             .err()
             .is_some_and(|error| is_legacy_bios_error(&error.to_string()));
-        let secure_boot = if legacy_bios { Some(false) } else { secure_boot };
+        let secure_boot = if legacy_bios {
+            Some(false)
+        } else {
+            secure_boot
+        };
         let mut errors = Vec::new();
         if legacy_bios {
             log::info!("[BOOT PCA] 固件不支持 UEFI 变量（Legacy BIOS），按 Secure Boot 关闭处理");

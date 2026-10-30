@@ -399,6 +399,8 @@ pub enum TaskAuthenticationProgress {
     Finalizing,
 }
 
+// 每个任务只构造一次并整体移动，安装配置较大也不影响；装箱只会让三个分支的用法不一致。
+#[allow(clippy::large_enum_variant)]
 pub enum AuthenticatedOperationConfig {
     Install(InstallConfig),
     Backup(BackupConfig),

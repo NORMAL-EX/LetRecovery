@@ -1099,7 +1099,6 @@ impl AboutPage {
         set_checked(self.automatic_feedback, enabled);
     }
 
-
     pub unsafe fn set_logging_enabled(&self, enabled: bool) {
         set_checked(self.logging, enabled);
         let _ = EnableWindow(

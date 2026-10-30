@@ -1649,7 +1649,9 @@ fn verify_system_administrators_handle_custody(
     // 机器上必然失败。所有者允许是当前进程用户，主组不参与访问控制，不再检查。
     fn current_process_user_sid() -> Option<Vec<u8>> {
         use windows::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows::Win32::Security::{GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+        use windows::Win32::Security::{
+            GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        };
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
         unsafe {
             let mut token = HANDLE::default();
@@ -2139,7 +2141,9 @@ mod interactive_acl_tests {
         let file = create_protected_interactive_file_new(&path).unwrap();
         let error = verify_system_administrators_file_custody(&file).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(error.to_string().contains("owner/group"));
+        // 所有者是当前进程用户本身是允许的（组策略“对象创建者”为默认所有者的机器），这里被拒绝的
+        // 原因是 DACL 多了一条给该用户的访问项：保管对象只能有 SYSTEM 和 Administrators 两条。
+        assert!(error.to_string().contains("DACL"), "{error}");
         drop(file);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(directory).unwrap();

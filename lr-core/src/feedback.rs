@@ -92,7 +92,8 @@ pub fn sanitize_line(line: &str) -> Option<String> {
     )
     .replace_all(&text, "$1$2[已隐去]");
     let text = pattern(&BEARER, r"(?i)bearer\s+\S+").replace_all(&text, "Bearer [已隐去]");
-    let text = pattern(&EMAIL, r"(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}").replace_all(&text, "[邮箱]");
+    let text = pattern(&EMAIL, r"(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
+        .replace_all(&text, "[邮箱]");
     let mut out = prefix(&text, MAX_LINE_BYTES).to_string();
     if out.len() < text.len() {
         out.push('…');
@@ -107,7 +108,11 @@ pub fn fingerprint(line: &str) -> String {
     static HEX: OnceLock<regex::Regex> = OnceLock::new();
     static NUMBER: OnceLock<regex::Regex> = OnceLock::new();
     static DRIVE: OnceLock<regex::Regex> = OnceLock::new();
-    let text = pattern(&LOCATION, r"^\S+Z\s+(?:ERROR|WARN)\s+\S+:\s+\S+\.rs:\d+:\s*").replace(line, "");
+    let text = pattern(
+        &LOCATION,
+        r"^\S+Z\s+(?:ERROR|WARN)\s+\S+:\s+\S+\.rs:\d+:\s*",
+    )
+    .replace(line, "");
     let text = pattern(
         &GUID,
         r"\{?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}?",
@@ -117,7 +122,11 @@ pub fn fingerprint(line: &str) -> String {
     let text = pattern(&NUMBER, r"\d{5,}").replace_all(&text, "<n>");
     let text = pattern(&DRIVE, r"\b[A-Za-z]:\\").replace_all(&text, "?:\\");
     let digest = Sha256::digest(text.trim().as_bytes());
-    digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn keep_last(lines: &mut Vec<String>, limit: usize) {
@@ -131,10 +140,14 @@ pub fn build_report(log: &str, client_version: &str, stage: &str) -> Option<Feed
     let lines: Vec<&str> = log.lines().collect();
     let start = lines
         .iter()
-        .rposition(|line| line.contains("LetRecovery 启动中") || line.contains("[诊断环境] 软件版本"))
+        .rposition(|line| {
+            line.contains("LetRecovery 启动中") || line.contains("[诊断环境] 软件版本")
+        })
         .unwrap_or(0);
     let session = &lines[start..];
-    let terminal = session.iter().rposition(|line| level(line) == Level::Error)?;
+    let terminal = session
+        .iter()
+        .rposition(|line| level(line) == Level::Error)?;
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut environment = Vec::new();
@@ -161,7 +174,8 @@ pub fn build_report(log: &str, client_version: &str, stage: &str) -> Option<Feed
     keep_last(&mut errors, MAX_ERRORS);
     keep_last(&mut warnings, MAX_WARNINGS);
     keep_last(&mut context, MAX_CONTEXT);
-    while context.iter().map(String::len).sum::<usize>() > MAX_CONTEXT_BYTES && !context.is_empty() {
+    while context.iter().map(String::len).sum::<usize>() > MAX_CONTEXT_BYTES && !context.is_empty()
+    {
         context.remove(0);
     }
     let fingerprint = fingerprint(errors.last()?);
@@ -231,6 +245,8 @@ mod tests {
 
     #[test]
     fn logs_without_errors_produce_no_report() {
-        assert!(build_report("2026-10-29T01:00:00Z  INFO a: b.rs:1: ok\n", "v1", "normal").is_none());
+        assert!(
+            build_report("2026-10-29T01:00:00Z  INFO a: b.rs:1: ok\n", "v1", "normal").is_none()
+        );
     }
 }

@@ -5,6 +5,7 @@
 //!     工作量证明，防止接口被刷；同时登记本次安装的随机编号和令牌的 SHA-256。
 //!   - `failed`：正常端在安装失败或被取消时发送，凭令牌结束这次安装。
 //!   - `succeeded`：新系统首次登录后，由首次登录脚本在后台等网络可用时发送，凭令牌结束这次安装。
+//!
 //! 服务端把超过 1 天还没有结束事件的安装记为失败。上报内容只有客户端版本、安装方式
 //! （`direct` / `via_pe`）、运行环境（`windows` / `pe`）、每份程序一次的随机客户端编号和每次
 //! 安装的随机编号，不包含任何硬件、账户或文件信息。
@@ -85,7 +86,10 @@ impl OutcomeReport {
 }
 
 fn is_lower_hex(value: &str, length: usize) -> bool {
-    value.len() == length && value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -193,8 +197,19 @@ mod tests {
     fn start_reports_verify_and_tampering_fails() {
         let ticket = InstallTicket::generate().unwrap();
         assert!(ticket.is_valid());
-        let challenge = Challenge { challenge: "1761700000.0011223344556677.abcdef".into(), difficulty: 12 };
-        let report = solve_start(&challenge, "v2026.10.29", "via_pe", "windows", &"a".repeat(32), &ticket).unwrap();
+        let challenge = Challenge {
+            challenge: "1761700000.0011223344556677.abcdef".into(),
+            difficulty: 12,
+        };
+        let report = solve_start(
+            &challenge,
+            "v2026.10.29",
+            "via_pe",
+            "windows",
+            &"a".repeat(32),
+            &ticket,
+        )
+        .unwrap();
         assert!(verify_start(&report, 12));
         assert_eq!(report.token_hash.len(), 64);
         let mut forged = report.clone();

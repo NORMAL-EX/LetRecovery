@@ -17,7 +17,9 @@ pub enum ApplyPlan {
     Normal,
     CompactXpress4k,
     CompactLzx,
-    TooSmall { required_bytes: u64 },
+    TooSmall {
+        required_bytes: u64,
+    },
 }
 
 /// 格式化后的可用空间：扣除 NTFS 自身元数据（约 1.5%）和 256 MiB。
@@ -88,13 +90,28 @@ mod tests {
 
     #[test]
     fn chooses_the_least_compression_that_fits() {
-        assert_eq!(plan(20 * GIB, 6 * GIB, false, 100 * GIB, true), ApplyPlan::Normal);
+        assert_eq!(
+            plan(20 * GIB, 6 * GIB, false, 100 * GIB, true),
+            ApplyPlan::Normal
+        );
         // 78 GB 的备份展开 120 GB，目标 110 GB：XPRESS4K 估算 86 GB 可以装下。
-        assert_eq!(plan(120 * GIB, 78 * GIB, false, 110 * GIB, true), ApplyPlan::CompactXpress4k);
+        assert_eq!(
+            plan(120 * GIB, 78 * GIB, false, 110 * GIB, true),
+            ApplyPlan::CompactXpress4k
+        );
         // 镜像文件 60 GB、目标 85 GB：XPRESS 估算 86 GB 装不下，LZX 估算约 69 GB 可以。
-        assert_eq!(plan(120 * GIB, 60 * GIB, false, 85 * GIB, true), ApplyPlan::CompactLzx);
-        assert!(matches!(plan(120 * GIB, 60 * GIB, false, 60 * GIB, true), ApplyPlan::TooSmall { .. }));
-        assert!(matches!(plan(120 * GIB, 78 * GIB, false, 110 * GIB, false), ApplyPlan::TooSmall { .. }));
+        assert_eq!(
+            plan(120 * GIB, 60 * GIB, false, 85 * GIB, true),
+            ApplyPlan::CompactLzx
+        );
+        assert!(matches!(
+            plan(120 * GIB, 60 * GIB, false, 60 * GIB, true),
+            ApplyPlan::TooSmall { .. }
+        ));
+        assert!(matches!(
+            plan(120 * GIB, 78 * GIB, false, 110 * GIB, false),
+            ApplyPlan::TooSmall { .. }
+        ));
         assert_eq!(plan(0, 0, false, 100 * GIB, true), ApplyPlan::Unknown);
     }
 }

@@ -315,7 +315,7 @@ impl NativeInstallState {
             ));
             let on_target = |path: &std::path::Path| {
                 lr_core::windows_storage::path_drive_letter(path)
-                    .zip(target_letter.clone())
+                    .zip(target_letter)
                     .is_some_and(|(left, right)| left.eq_ignore_ascii_case(&right))
             };
             if on_target(std::path::Path::new(&image_path))
@@ -323,7 +323,8 @@ impl NativeInstallState {
             {
                 return Err(InstallValidationError::ImageOnTargetVolume);
             }
-            if on_target(&crate::utils::path::get_exe_dir()) {
+            // 单元测试的可执行文件位置随运行机器变化（GitHub 的 Windows 机器在 D:），不能参与纯逻辑判断。
+            if !cfg!(test) && on_target(&crate::utils::path::get_exe_dir()) {
                 return Err(InstallValidationError::ProgramOnTargetVolume);
             }
         }
@@ -894,11 +895,12 @@ mod tests {
     #[test]
     fn mounted_iso_backing_path_survives_state_to_intent_validation() {
         let mut state = base_state();
-        state.image_path = r"E:\sources\install.wim".into();
+        // 挂载盘符不能与测试目标分区 E: 相同：镜像就在要格式化的分区上会被提前拦下。
+        state.image_path = r"G:\sources\install.wim".into();
         state.image_backing_path = r"F:\images\windows.iso".into();
 
         let intent = state.start_intent().unwrap();
-        assert_eq!(intent.image_path, r"E:\sources\install.wim");
+        assert_eq!(intent.image_path, r"G:\sources\install.wim");
         assert_eq!(intent.image_backing_path, r"F:\images\windows.iso");
     }
 
@@ -915,12 +917,31 @@ mod tests {
     }
 
     #[test]
-    fn normal_windows_allows_image_on_target_volume_for_direct_install() {
+    fn normal_windows_rejects_image_on_target_volume_for_direct_install() {
+        // 直接安装会先格式化目标分区，镜像在这个分区上就会被一起删掉，所以点击安装前就要拦下。
         let mut state = base_state();
         state.is_pe_environment = false;
         state.image_path = r"C:\sources\install.wim".into();
         state.target.as_mut().unwrap().partition = "C:".into();
-        assert!(state.start_intent().is_ok());
+        assert_eq!(
+            state.start_intent().unwrap_err(),
+            InstallValidationError::ImageOnTargetVolume
+        );
+    }
+
+    #[test]
+    fn current_system_target_keeps_an_image_on_the_same_volume() {
+        // 重装当前系统走 PE，镜像先暂存到其它位置，不受“镜像在目标分区上”的直接安装限制。
+        let mut state = base_state();
+        state.is_pe_environment = false;
+        state.image_path = r"C:\sources\install.wim".into();
+        let target = state.target.as_mut().unwrap();
+        target.partition = "C:".into();
+        target.is_current_system = true;
+        assert_ne!(
+            state.start_intent().err(),
+            Some(InstallValidationError::ImageOnTargetVolume)
+        );
     }
 
     #[test]
