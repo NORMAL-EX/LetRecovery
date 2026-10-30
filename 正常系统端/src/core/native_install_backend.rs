@@ -973,6 +973,7 @@ pub struct ProductionInstallBackend {
     pe_path: Option<PathBuf>,
     pe_snapshot: Option<super::pe::LocalPeSnapshot>,
     pe_supports_source_image_verification_receipt: bool,
+    pe_supports_install_report: bool,
     pe_display_name: Option<String>,
     data_partition: Option<String>,
     staging_payload_budget: Option<StagingPayloadBudget>,
@@ -1210,6 +1211,7 @@ impl ProductionInstallBackend {
             pe_path: None,
             pe_snapshot: None,
             pe_supports_source_image_verification_receipt: false,
+            pe_supports_install_report: false,
             pe_display_name: None,
             data_partition: None,
             staging_payload_budget: None,
@@ -1243,7 +1245,9 @@ impl ProductionInstallBackend {
     }
 
     fn error(code: &'static str, error: impl std::fmt::Display) -> InstallBackendError {
-        InstallBackendError::new(code, error.to_string())
+        // `{:#}` keeps the whole anyhow cause chain. `to_string()` kept only the outermost context
+        // (e.g. "validate manifest-bound installation handoff") and hid the actual cause in logs.
+        InstallBackendError::new(code, format!("{error:#}"))
     }
 
     fn supports_fused_verify_copy(path: &Path) -> bool {
@@ -2347,6 +2351,11 @@ impl ProductionInstallBackend {
         log::info!(
             "[PE] authenticated source verification receipt capability: {}",
             self.pe_supports_source_image_verification_receipt
+        );
+        self.pe_supports_install_report = super::pe::supports_install_report(&snapshot_path);
+        log::info!(
+            "[PE] install statistics ticket capability: {}",
+            self.pe_supports_install_report
         );
         self.pe_path = Some(snapshot_path);
         self.pe_snapshot = Some(snapshot);
@@ -5721,6 +5730,21 @@ impl ProductionInstallBackend {
             config.pe_network_payload_sha256 = network.payload_sha256();
             pe_network_payload = network.into_boot_payload();
         }
+        // The optional statistics ticket enters the authenticated INI only when the selected PE WIM
+        // declares install-report-v1. Older, customized and third-party WIMs validate the INI
+        // strictly and would reject the unknown field only after the reboot into PE.
+        let install_report =
+            crate::core::install_stats::current_ticket().filter(|ticket| ticket.is_valid());
+        if install_report.is_some() && !self.pe_supports_install_report {
+            log::info!(
+                "[INSTALL STATS] 所选 PE 没有声明 install-report-v1，本次不把成功上报凭据交给 PE（安装照常进行）"
+            );
+        }
+        config.install_report = if self.pe_supports_install_report {
+            install_report
+        } else {
+            None
+        };
         let mut transaction = super::install_config::ConfigFileManager::write_install_config_transactional_with_private_payloads(
                 &effective_target,
                 self.data_partition()?,

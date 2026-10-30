@@ -728,6 +728,8 @@ impl StartInstallIntent {
             automatic_feedback_mode: crate::core::app_config::AppConfig::load()
                 .automatic_feedback_mode()
                 .to_owned(),
+            // Filled by the PE backend only after the selected WIM declares install-report-v1.
+            install_report: None,
             remove_shortcut_arrow: advanced.remove_shortcut_arrow,
             restore_classic_context_menu: advanced.restore_classic_context_menu,
             bypass_nro: advanced.bypass_nro,

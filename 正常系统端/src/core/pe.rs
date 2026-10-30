@@ -123,6 +123,14 @@ pub(crate) fn supports_pe_network_payload(pe_path: &Path) -> bool {
     read_pe_capabilities(pe_path).is_ok_and(|bytes| capability_text_contains(&bytes, capability))
 }
 
+/// Whether the PE helper inside this WIM declares that it accepts the optional install-statistics
+/// ticket (`InstallReport=`) in the authenticated install configuration. Absence keeps the legacy
+/// configuration: the installation proceeds and only the first-logon "succeeded" report is lost.
+pub(crate) fn supports_install_report(pe_path: &Path) -> bool {
+    let capability = lr_core::install_stats::PE_INSTALL_REPORT_CAPABILITY;
+    read_pe_capabilities(pe_path).is_ok_and(|bytes| capability_text_contains(&bytes, capability))
+}
+
 /// Root identity recorded in the LRPE4 journal. WinPE treats it as diagnostics only, so a
 /// filtered storage stack (hardware-ID spoofer) falls back to volume-level evidence instead of
 /// blocking the PE handoff.
@@ -3005,6 +3013,21 @@ mod cache_policy_tests {
         assert!(!capability_text_contains(
             &[0xff, 0xfe],
             SOURCE_IMAGE_VERIFIED_CAPABILITY
+        ));
+    }
+
+    #[test]
+    fn install_report_capability_is_absent_from_older_pe_images() {
+        let capability = lr_core::install_stats::PE_INSTALL_REPORT_CAPABILITY;
+        // Exact marker written by release CI before the statistics ticket existed: such a PE
+        // rejects `InstallReport=`, so the normal endpoint must omit the line for it.
+        assert!(!capability_text_contains(
+            b"source-image-verified-v1\r\nscattered-staging-v1\r\npe-network-v1\r\n",
+            capability
+        ));
+        assert!(capability_text_contains(
+            b"source-image-verified-v1\r\nscattered-staging-v1\r\npe-network-v1\r\ninstall-report-v1\r\n",
+            capability
         ));
     }
 

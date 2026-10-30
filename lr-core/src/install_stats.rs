@@ -16,6 +16,10 @@ use sha2::{Digest, Sha256};
 pub const PROTOCOL: u16 = 2;
 /// 新系统 `LetRecovery_Scripts` 中暂存的成功上报凭据，首次登录脚本读取后立即删除。
 pub const TICKET_FILE_NAME: &str = "install-report.json";
+/// PE WIM 在 `handoff-capabilities.txt` 中写有这一行，表示其中的 LetRecoveryPE 认识认证安装配置里的
+/// `InstallReport=<编号>:<令牌>`。正常端只在确认该能力后才写这一行：旧版、定制或第三方 WIM 的严格
+/// 解析器会拒绝名单外的字段，导致重启进 PE 后才安装失败。
+pub const PE_INSTALL_REPORT_CAPABILITY: &str = "install-report-v1";
 /// 客户端接受的难度范围；服务端要求更高时按上限计算，避免被异常响应拖住。
 pub const MIN_DIFFICULTY: u32 = 12;
 pub const MAX_DIFFICULTY: u32 = 24;
@@ -43,6 +47,22 @@ impl InstallTicket {
 
     pub fn is_valid(&self) -> bool {
         is_lower_hex(&self.install_id, 32) && is_lower_hex(&self.token, 64)
+    }
+
+    /// 解析认证安装配置中的 `InstallReport=<编号>:<令牌>`。格式不对时返回 `None`：统计凭据只影响
+    /// 新系统首次登录后的“成功”上报，绝不能让安装失败。
+    pub fn from_config_value(value: &str) -> Option<Self> {
+        let (install_id, token) = value.trim().split_once(':')?;
+        let ticket = Self {
+            install_id: install_id.to_owned(),
+            token: token.to_owned(),
+        };
+        ticket.is_valid().then_some(ticket)
+    }
+
+    /// 写入认证安装配置的 `InstallReport` 值，与 [`Self::from_config_value`] 互为逆操作。
+    pub fn config_value(&self) -> String {
+        format!("{}:{}", self.install_id, self.token)
     }
 
     pub fn token_hash(&self) -> String {
@@ -192,6 +212,20 @@ pub fn random_hex(bytes: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_value_round_trips_and_rejects_malformed_tickets() {
+        let ticket = super::InstallTicket::generate().unwrap();
+        assert_eq!(
+            super::InstallTicket::from_config_value(&ticket.config_value()),
+            Some(ticket.clone())
+        );
+        for malformed in ["", ":", "broken", "ABCDEF:0123", &ticket.install_id] {
+            assert_eq!(super::InstallTicket::from_config_value(malformed), None);
+        }
+        let upper = ticket.config_value().to_ascii_uppercase();
+        assert_eq!(super::InstallTicket::from_config_value(&upper), None);
+    }
 
     #[test]
     fn start_reports_verify_and_tampering_fails() {

@@ -339,7 +339,7 @@ jobs:
           Copy-Item -Force $peExe $dst
           Write-Host "Replaced: $dst"
           $capabilityPath = Join-Path $mount "Program Files\LetRecoveryPE\handoff-capabilities.txt"
-          $capabilityText = "source-image-verified-v1`r`nscattered-staging-v1`r`npe-network-v1`r`n"
+          $capabilityText = "source-image-verified-v1`r`nscattered-staging-v1`r`npe-network-v1`r`ninstall-report-v1`r`n"
           [IO.File]::WriteAllBytes($capabilityPath, [Text.Encoding]::ASCII.GetBytes($capabilityText))
           if ([IO.File]::ReadAllText($capabilityPath, [Text.Encoding]::ASCII) -ne $capabilityText) {
             throw "PE handoff capability marker readback mismatch"
@@ -528,7 +528,7 @@ jobs:
               throw "Final WIM Microsoft Offline Registry runtime does not match its release lock"
             }
             $capabilities = Join-Path $mount "Program Files\LetRecoveryPE\handoff-capabilities.txt"
-            $expectedCapabilities = "source-image-verified-v1`r`nscattered-staging-v1`r`npe-network-v1`r`n"
+            $expectedCapabilities = "source-image-verified-v1`r`nscattered-staging-v1`r`npe-network-v1`r`ninstall-report-v1`r`n"
             if ([IO.File]::ReadAllText($capabilities, [Text.Encoding]::ASCII) -ne $expectedCapabilities) {
               throw "Final WIM handoff capability marker mismatch"
             }

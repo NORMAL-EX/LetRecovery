@@ -310,6 +310,10 @@ fn field_rule(key: &str) -> Option<(&'static str, ValueKind)> {
         | "Language"
         | "AutomaticFeedbackMode"
         | "CustomInstallPlanJson" => ("Install", ValueKind::Text),
+        // Optional anonymous install-statistics ticket (`<install id>:<token>`). Only the
+        // first-logon "succeeded" report depends on it, so this gate accepts any text and both
+        // parsers skip a malformed ticket instead of failing the installation.
+        "InstallReport" => ("Install", ValueKind::Text),
         "Unattended"
         | "RestoreDrivers"
         | "AutoReboot"
@@ -560,6 +564,18 @@ mod tests {
         assert!(validate_install_handoff_ini("[Install]\nImageChunkedLength=-1\n").is_err());
         assert!(validate_install_handoff_ini("[Install]\nImageChunkedSha256=abc\n").is_err());
         assert!(validate_install_handoff_ini("[Instal]\nFormatPartiton=false\n").is_err());
+    }
+
+    #[test]
+    fn install_report_ticket_is_a_known_install_field() {
+        // Regression for v2026.10.30: the normal endpoint serialized this field while it was
+        // missing here, so every PE installation with statistics enabled failed before reboot.
+        let line = format!("InstallReport={}:{}", "0".repeat(32), "a".repeat(64));
+        validate_install_handoff_ini(&format!("[Install]\nVolumeIndex=1\n{line}\n")).unwrap();
+        // Telemetry must never block an installation; the parsers ignore a malformed ticket.
+        validate_install_handoff_ini("[Install]\nVolumeIndex=1\nInstallReport=broken\n").unwrap();
+        assert!(validate_install_handoff_ini(&format!("[Install]\n{line}\n{line}\n")).is_err());
+        assert!(validate_install_handoff_ini(&format!("[Advanced]\n{line}\n")).is_err());
     }
 
     #[test]

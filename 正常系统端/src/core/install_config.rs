@@ -434,6 +434,9 @@ pub struct InstallConfig {
     pub pe_network_payload_sha256: String,
     /// Authenticated automatic feedback policy (disabled, normal, normal_and_pe).
     pub automatic_feedback_mode: String,
+    /// 匿名安装统计的成功上报凭据。只有所选 PE 声明 `install-report-v1` 时才由安装后端填入，
+    /// 序列化为 `InstallReport=<编号>:<令牌>`；为空时整行省略，旧版 PE 照常安装。
+    pub install_report: Option<lr_core::install_stats::InstallTicket>,
 
     // 高级选项
     /// 移除快捷方式小箭头
@@ -1401,15 +1404,15 @@ impl ConfigFileManager {
         } else {
             String::new()
         };
-        // 安装成功上报凭据：PE 把它暂存到新系统，首次登录后由后台脚本发送“成功”。
-        // 旧版 PE 会忽略这个键（未知键不报错），只是不会上报成功，服务端 1 天后按失败计。
-        if let Some(ticket) =
-            crate::core::install_stats::current_ticket().filter(|ticket| ticket.is_valid())
+        // 安装成功上报凭据：PE 把它暂存到新系统，首次登录后由后台脚本发送“成功”。两端的严格语法
+        // 校验都会拒绝名单外的字段（旧版 PE 并不会忽略未知键），所以安装后端只在所选 PE 声明了
+        // install-report-v1 时才填入凭据；为空时整行省略，安装照常进行，服务端 1 天后按失败计。
+        if let Some(ticket) = config
+            .install_report
+            .as_ref()
+            .filter(|ticket| ticket.is_valid())
         {
-            wifi_binding.push_str(&format!(
-                "InstallReport={}:{}\r\n",
-                ticket.install_id, ticket.token
-            ));
+            wifi_binding.push_str(&format!("InstallReport={}\r\n", ticket.config_value()));
         }
         if config.pe_network_payload_length > 0 {
             let sha256 = config.pe_network_payload_sha256.trim().to_ascii_lowercase();
@@ -1645,6 +1648,13 @@ Language={}
                     "RestoreDrivers" => config.restore_drivers = value.parse().unwrap_or(false),
                     "DriverActionMode" => config.driver_action_mode = value.parse().unwrap_or(0),
                     "AutoReboot" => config.auto_reboot = value.parse().unwrap_or(false),
+                    "InstallReport" => {
+                        config.install_report =
+                            lr_core::install_stats::InstallTicket::from_config_value(value);
+                        if config.install_report.is_none() {
+                            log::warn!("[INSTALL STATS] 安装配置中的成功上报凭据格式不对，已忽略（不影响安装）");
+                        }
+                    }
                     "AutomationShutdownOnTerminal" => {
                         config.automation_shutdown_on_terminal =
                             value.parse().with_context(|| {
@@ -2048,6 +2058,42 @@ mod tests {
         assert!(!parsed.is_xp_i386);
         assert!(parsed.xp_source_arch.is_empty());
         assert_eq!(parsed.canonical_target, None);
+    }
+
+    #[test]
+    fn install_report_ticket_passes_the_strict_handoff_validator() {
+        // Regression for v2026.10.30: this exact serialized line was missing from the shared field
+        // list, so the self-check in write_install_config_transactional failed every PE install.
+        let ticket = lr_core::install_stats::InstallTicket {
+            install_id: "0123456789abcdef0123456789abcdef".to_owned(),
+            token: "f".repeat(64),
+        };
+        let source = InstallConfig {
+            volume_index: 1,
+            image_path: "install.wim".to_owned(),
+            install_report: Some(ticket.clone()),
+            ..InstallConfig::default()
+        };
+        let serialized = ConfigFileManager::serialize_install_config(&source).unwrap();
+        assert!(serialized.contains(&format!("InstallReport={}\r\n", ticket.config_value())));
+        lr_core::install_handoff::validate_install_handoff_ini(&serialized).unwrap();
+        let parsed = ConfigFileManager::deserialize_install_config(&serialized).unwrap();
+        assert_eq!(parsed.install_report, Some(ticket));
+
+        // A PE without install-report-v1 gets no ticket: the line is omitted entirely.
+        let legacy = ConfigFileManager::serialize_install_config(&InstallConfig {
+            install_report: None,
+            ..source
+        })
+        .unwrap();
+        assert!(!legacy.contains("InstallReport="));
+        lr_core::install_handoff::validate_install_handoff_ini(&legacy).unwrap();
+        assert_eq!(
+            ConfigFileManager::deserialize_install_config(&legacy)
+                .unwrap()
+                .install_report,
+            None
+        );
     }
 
     #[test]

@@ -2095,15 +2095,13 @@ impl ConfigFileManager {
                     }
                     "AutoReboot" => config.auto_reboot = value.parse().unwrap_or(false),
                     "InstallReport" => {
-                        let (install_id, token) = value
-                            .split_once(':')
-                            .with_context(|| "invalid InstallReport value".to_string())?;
-                        let ticket = lr_core::install_stats::InstallTicket {
-                            install_id: install_id.to_string(),
-                            token: token.to_string(),
-                        };
-                        anyhow::ensure!(ticket.is_valid(), "invalid InstallReport value");
-                        config.install_report = Some(ticket);
+                        // Optional statistics ticket: a malformed value only loses the
+                        // first-logon "succeeded" report and must not fail the installation.
+                        config.install_report =
+                            lr_core::install_stats::InstallTicket::from_config_value(value);
+                        if config.install_report.is_none() {
+                            log::warn!("[INSTALL STATS] 安装配置中的成功上报凭据格式不对，跳过首次登录后的成功上报（不影响安装）");
+                        }
                     }
                     "AutomationShutdownOnTerminal" => {
                         config.automation_shutdown_on_terminal =
@@ -2368,6 +2366,26 @@ mod tests {
         assert!(config.xp_source_arch.is_empty());
         assert!(!config.migrate_wifi);
         assert!(!config.source_image_verified);
+    }
+
+    #[test]
+    fn install_report_ticket_is_optional_and_never_blocks_the_install() {
+        let config = ConfigFileManager::deserialize_install_config(&format!(
+            "[Install]\r\nVolumeIndex=1\r\nInstallReport={}:{}\r\n",
+            "a".repeat(32),
+            "b".repeat(64)
+        ))
+        .unwrap();
+        let ticket = config.install_report.expect("a valid ticket must be kept");
+        assert_eq!(ticket.install_id, "a".repeat(32));
+        assert_eq!(ticket.token, "b".repeat(64));
+        for malformed in ["broken", "ABC:DEF", ":"] {
+            let config = ConfigFileManager::deserialize_install_config(&format!(
+                "[Install]\r\nVolumeIndex=1\r\nInstallReport={malformed}\r\n"
+            ))
+            .unwrap();
+            assert!(config.install_report.is_none());
+        }
     }
 
     #[test]
