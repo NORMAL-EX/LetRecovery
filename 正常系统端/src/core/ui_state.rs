@@ -59,9 +59,10 @@ pub struct AdvancedOptionsData {
     /// not persisted because a later catalogue may reuse neither the URL nor the silent command.
     #[serde(skip)]
     pub preinstalled_software: Vec<SelectedSoftwarePackage>,
-    /// User preference for the separate VMware Tools option. The runtime catalogue and positive
-    /// VMware detection still gate visibility and execution, so a stale preference cannot install
-    /// a server package on non-VMware hardware.
+    /// Separate VMware Tools option. Unchecked by default and never persisted, so users opt in
+    /// for each session. The runtime catalogue and positive VMware detection still gate visibility
+    /// and execution, so it can never install a server package on non-VMware hardware.
+    #[serde(skip)]
     pub install_vmware_tools: bool,
     pub migrate_wifi: bool,
     #[serde(skip)]
@@ -207,7 +208,7 @@ impl Default for AdvancedOptionsData {
             disable_device_encryption: true,
             remove_uwp_apps: false,
             preinstalled_software: Vec::new(),
-            install_vmware_tools: true,
+            install_vmware_tools: false,
             // This is an intent default only. `apply_runtime_defaults` immediately captures the
             // current connected profile into session-only fields, or clears the intent when no
             // connected Wi-Fi profile can be read.

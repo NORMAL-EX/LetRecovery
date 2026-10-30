@@ -1655,7 +1655,7 @@ fn validate_persistent_pe_payload(path: &std::path::Path, extension: &str) -> an
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow::anyhow!("PE payload parent name is invalid"))?;
-    if !path.is_absolute() || !parent_name.eq_ignore_ascii_case("LetRecovery_PE") {
+    if !path.is_absolute() || !parent_name.eq_ignore_ascii_case(lr_core::branding::PE_DIR_NAME) {
         anyhow::bail!("PE payload path is outside the persistent PE directory");
     }
     let name = path
@@ -2018,7 +2018,7 @@ fn persistent_record_matches_running(
 }
 
 fn persistent_pe_root_for_volume(volume_guid_root: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(volume_guid_root).join("LetRecovery_PE")
+    std::path::PathBuf::from(volume_guid_root).join(lr_core::branding::PE_DIR_NAME)
 }
 
 fn remove_empty_private_pe_root(root: &std::path::Path) -> anyhow::Result<bool> {
@@ -2330,7 +2330,7 @@ mod persistent_payload_tests {
 
     #[test]
     fn removed_pe_cli_is_case_insensitive_and_requires_exact_arity() {
-        let program = "LetRecoveryPE.exe".to_owned();
+        let program = lr_core::branding::PE_EXE_NAME.to_owned();
         for argument in ["/PEINSTALL", "--Pe-Install", "/pebackup", "--PE-BACKUP"] {
             assert!(is_removed_pe_cli_invocation(&[
                 program.clone(),

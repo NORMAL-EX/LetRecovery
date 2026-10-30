@@ -47,6 +47,7 @@ const LAUNCHER: &str = r#"@echo off
 setlocal EnableExtensions EnableDelayedExpansion
 set "lr_script=%SystemDrive%\LetRecovery_Scripts\first-logon-finalize.ps1"
 if /i "%~1"=="cleanup" goto :cleanup_after_restore
+if /i "%~1"=="sweep" goto :sweep
 set "lr_log_dir=%ProgramData%\LetRecovery\Logs"
 if not exist "%lr_log_dir%" md "%lr_log_dir%"
 if not exist "%lr_log_dir%" (
@@ -79,21 +80,33 @@ if not "!lr_ec!"=="0" (
 if /i "%~1"=="restore" goto :cleanup_after_restore
 if exist "%SystemDrive%\LetRecovery_Scripts\builtin-administrator-transition.pending" (
   echo Built-in Administrator transition: staging preserved for the final account logon 2>nul >>"%lr_log%"
+  call :register_sweep
   exit /b 0
 )
 if exist "%SystemDrive%\LetRecovery_Scripts\personal-restore.pending" (
   echo Personal files restore: pre-Explorer gate retained; staging cleanup deferred 2>nul >>"%lr_log%"
+  call :register_sweep
   exit /b 0
 )
+rem 个人文件已在 Explorer 之前恢复并验证过新 Shell 时，门禁状态文件仍然存在，但已经没有需要
+rem 等待的工作；旧逻辑只看状态文件就无限期推迟清理，暂存目录和启动脚本因此一直残留。
+set "lr_defer_shell=0"
 if exist "%SystemDrive%\LetRecovery_Scripts\personal-restore-shell-gate.state" (
+  if not exist "%SystemDrive%\LetRecovery_Scripts\personal-restore.completed" set "lr_defer_shell=1"
+  if not exist "%SystemDrive%\LetRecovery_Scripts\personal-restore-shell-verified.receipt" set "lr_defer_shell=1"
+)
+if "!lr_defer_shell!"=="1" (
   echo Personal files restore: staging retained until the verified Explorer Shell takes over 2>nul >>"%lr_log%"
+  call :register_sweep
   exit /b 0
 )
 if exist "%SystemDrive%\LetRecovery_Scripts" rd /s /q "%SystemDrive%\LetRecovery_Scripts"
 if exist "%SystemDrive%\LetRecovery_Scripts" (
   echo LETRECOVERY_FIRST_LOGON_CLEANUP_FAILURE 1>&2
+  call :register_sweep
   exit /b 3
 )
+call :clean_pe_payload
 echo First-logon staging cleanup: completed 2>nul >>"%lr_log%"
 (goto) 2>nul & del /f /q "%~f0"
 exit /b 0
@@ -106,6 +119,7 @@ if exist "%SystemDrive%\LetRecovery_Scripts" rd /s /q "%SystemDrive%\LetRecovery
 if exist "%SystemDrive%\LetRecovery_Scripts" (
   if !lr_cleanup_attempt! GEQ 120 (
     echo LETRECOVERY_FIRST_LOGON_CLEANUP_FAILURE 1>&2
+    call :register_sweep
     exit /b 3
   )
   if exist "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" (
@@ -118,6 +132,35 @@ if exist "%SystemDrive%\LetRecovery_Scripts" (
   )
   goto :retry_cleanup_after_restore
 )
+call :clean_pe_payload
+schtasks /delete /tn "LetRecoveryCleanup" /f >nul 2>&1
+(goto) 2>nul & del /f /q "%~f0" >nul 2>&1
+
+:register_sweep
+rem 首次登录的工作还没结束（个人文件恢复、内置管理员切换）或清理失败时，登记一个 SYSTEM 计划任务，
+rem 每 5 分钟检查一次；工作结束后由它清理暂存目录、PE 私有目录和本脚本，最后删除任务本身。
+rem 这样不必等下一次登录，也不受当前用户权限或辅助程序仍在运行的影响。
+schtasks /create /tn "LetRecoveryCleanup" /ru SYSTEM /rl HIGHEST /sc minute /mo 5 /f /tr "%SystemDrive%\LetRecovery-first-logon.cmd sweep" >nul 2>&1
+exit /b 0
+
+:clean_pe_payload
+rem 旧系统里正常端交接用的临时文件（可能含 BitLocker 恢复密钥）不能留在新系统上。
+if exist "%SystemDrive%\LetRecovery_PE" (
+  del /f /q "%SystemDrive%\LetRecovery_PE\handoff-*" >nul 2>&1
+  rd "%SystemDrive%\LetRecovery_PE" >nul 2>&1
+)
+exit /b 0
+
+:sweep
+if exist "%SystemDrive%\LetRecovery_Scripts\builtin-administrator-transition.pending" exit /b 0
+if exist "%SystemDrive%\LetRecovery_Scripts\personal-restore.pending" exit /b 0
+if exist "%SystemDrive%\LetRecovery_Scripts\personal-restore.failed" goto :sweep_clean
+if exist "%SystemDrive%\LetRecovery_Scripts\personal-restore-shell-gate.state" if not exist "%SystemDrive%\LetRecovery_Scripts\personal-restore.completed" exit /b 0
+:sweep_clean
+if exist "%SystemDrive%\LetRecovery_Scripts" rd /s /q "%SystemDrive%\LetRecovery_Scripts" >nul 2>&1
+if exist "%SystemDrive%\LetRecovery_Scripts" exit /b 0
+call :clean_pe_payload
+schtasks /delete /tn "LetRecoveryCleanup" /f >nul 2>&1
 (goto) 2>nul & del /f /q "%~f0" >nul 2>&1
 "#;
 
@@ -617,6 +660,44 @@ namespace LetRecovery {
   $finalExitCode = 3
 } finally {
   [System.IO.File]::AppendAllText($logPath, "First-logon staging cleanup: deferred until the PowerShell process exits`r`n")
+  # 匿名安装统计：新系统已进入桌面。只在不再需要重启时启动一个隐藏的后台 PowerShell，
+  # 等网络可用后发送“安装成功”（最多等 6 小时）。凭据文件读取后立即删除，上报脚本只存在于
+  # 内存（-EncodedCommand），不会在系统里留下任何文件或计划任务。
+  if (-not $builtinTransitionScheduled -and -not $personalRestoreRestartScheduled) {
+    try {
+      $lrReportPath = Join-Path $PSScriptRoot 'install-report.json'
+      if (Test-Path -LiteralPath $lrReportPath) {
+        $lrReport = [System.IO.File]::ReadAllText($lrReportPath) | ConvertFrom-Json
+        Remove-Item -LiteralPath $lrReportPath -Force -ErrorAction SilentlyContinue
+        if ([string]$lrReport.install_id -match '^[0-9a-f]{32}$' -and [string]$lrReport.token -match '^[0-9a-f]{64}$') {
+          $lrReporter = @'
+$ErrorActionPreference = 'SilentlyContinue'
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
+$body = '{"protocol":2,"event":"succeeded","install_id":"__LR_INSTALL_ID__","token":"__LR_INSTALL_TOKEN__","reason":"desktop"}'
+$deadline = (Get-Date).AddHours(6)
+while ((Get-Date) -lt $deadline) {
+  try {
+    $response = Invoke-RestMethod -Method Post -Uri 'https://api.cloud-pe.cn/v1/install' -ContentType 'application/json' -Body $body -TimeoutSec 20
+    if ($response.ok) { break }
+  } catch {
+    $code = 0
+    try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+    if ($code -ge 400 -and $code -lt 500 -and $code -ne 429) { break }
+  }
+  Start-Sleep -Seconds 60
+}
+'@
+          $lrReporter = $lrReporter.Replace('__LR_INSTALL_ID__', [string]$lrReport.install_id).Replace('__LR_INSTALL_TOKEN__', [string]$lrReport.token)
+          $lrEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($lrReporter))
+          $lrPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          Start-Process -FilePath $lrPowerShell -ArgumentList @('-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-EncodedCommand',$lrEncoded) -WindowStyle Hidden
+          [System.IO.File]::AppendAllText($logPath, "Install report: background success reporter started`r`n")
+        }
+      }
+    } catch {
+      [System.IO.File]::AppendAllText($logPath, ('Install report: skipped: {0}`r`n' -f $_.Exception.Message))
+    }
+  }
   if (-not $builtinTransitionScheduled -and -not $personalRestoreRestartScheduled -and $automationShutdownOnTerminal -and ([string]::IsNullOrWhiteSpace($personalRestoreSessionId) -or $PersonalRestoreAtShell -or [System.IO.File]::Exists($personalRestoreShellReleased))) {
     try {
       if (-not ('LetRecovery.AutomationPower' -as [type])) {
@@ -3438,6 +3519,24 @@ fn verify_staged_software(
         }
     }
     Ok(())
+}
+
+/// 暂存匿名安装统计的成功上报凭据。首次登录脚本读取后立即删除，并在后台等网络可用时上报。
+pub fn stage_install_report(
+    target_partition: &str,
+    ticket: &crate::install_stats::InstallTicket,
+) -> Result<PathBuf> {
+    anyhow::ensure!(ticket.is_valid(), "install report ticket is invalid");
+    let root = if target_partition.ends_with('\\') {
+        target_partition.to_string()
+    } else {
+        format!("{target_partition}\\")
+    };
+    let directory = Path::new(&root).join("LetRecovery_Scripts");
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join(crate::install_stats::TICKET_FILE_NAME);
+    std::fs::write(&path, serde_json::to_vec(ticket)?)?;
+    Ok(path)
 }
 
 pub fn stage_wifi_profile(target_partition: &str, bytes: &[u8]) -> Result<PathBuf> {

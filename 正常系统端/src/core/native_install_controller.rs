@@ -97,6 +97,8 @@ pub enum InstallValidationError {
     ImageNotReady,
     MissingImageVolume,
     ImageOnTargetVolumeInPe,
+    ImageOnTargetVolume,
+    ProgramOnTargetVolume,
     UnsupportedImageArchitecture,
     MissingTargetPartition,
     UnstableTargetIdentity,
@@ -132,6 +134,12 @@ pub enum InstallValidationError {
 impl std::fmt::Display for InstallValidationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
+            Self::ImageOnTargetVolume => crate::tr!(
+                "系统镜像就在要安装的分区上，格式化时会被一起删除。请把镜像移到其它分区或 U 盘，或者换一个安装分区。"
+            ),
+            Self::ProgramOnTargetVolume => crate::tr!(
+                "LetRecovery 正在从要安装的分区上运行，这个分区会被格式化。请把 LetRecovery 移到其它分区后再运行。"
+            ),
             Self::MissingImage => crate::tr!("请选择系统镜像。"),
             Self::ImageNotReady => crate::tr!("系统镜像仍在读取，请稍候。"),
             Self::MissingImageVolume => crate::tr!("请选择要安装的镜像卷。"),
@@ -297,6 +305,26 @@ impl NativeInstallState {
                 .is_some_and(|(image, target)| image.eq_ignore_ascii_case(&target))
             {
                 return Err(InstallValidationError::ImageOnTargetVolumeInPe);
+            }
+        }
+        // 直接安装到非当前系统分区时会先格式化目标分区。镜像或正在运行的程序就在目标分区上时，
+        // 旧流程要走到“格式化目标”阶段才失败；现在在点击安装前说明原因。
+        if !self.is_pe_environment && !target.is_current_system {
+            let target_letter = lr_core::windows_storage::path_drive_letter(std::path::Path::new(
+                &target.partition,
+            ));
+            let on_target = |path: &std::path::Path| {
+                lr_core::windows_storage::path_drive_letter(path)
+                    .zip(target_letter.clone())
+                    .is_some_and(|(left, right)| left.eq_ignore_ascii_case(&right))
+            };
+            if on_target(std::path::Path::new(&image_path))
+                || on_target(std::path::Path::new(&self.image_path))
+            {
+                return Err(InstallValidationError::ImageOnTargetVolume);
+            }
+            if on_target(&crate::utils::path::get_exe_dir()) {
+                return Err(InstallValidationError::ProgramOnTargetVolume);
             }
         }
         // Only the exact volume extent is mandatory. Filter drivers (hardware-ID spoofers) can

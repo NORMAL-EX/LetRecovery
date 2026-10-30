@@ -258,7 +258,7 @@ mod tests {
         OnlinePE {
             download_url: "https://example.invalid/pe.wim".to_owned(),
             display_name: "LetRecovery PE".to_owned(),
-            filename: "LetRecovery_PE.wim".to_owned(),
+            filename: lr_core::branding::PE_WIM_NAME.to_owned(),
             md5: None,
             sha256: Some("00".repeat(32)),
         }

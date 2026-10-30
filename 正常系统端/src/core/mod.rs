@@ -24,6 +24,7 @@ pub mod hardware_inspector;
 mod image_verification_cache;
 pub mod image_verify;
 pub mod install_config;
+pub mod install_stats;
 pub mod iso;
 pub mod native_appx;
 pub(crate) mod native_appx_legacy;

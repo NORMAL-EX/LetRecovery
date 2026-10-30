@@ -938,6 +938,8 @@ pub struct InstallConfig {
     pub auto_reboot: bool,
     /// Authenticated disposable-VM automation policy from the normal endpoint CLI.
     pub automation_shutdown_on_terminal: bool,
+    /// 匿名安装统计的成功上报凭据（关闭统计或旧版正常端时为空）。
+    pub install_report: Option<lr_core::install_stats::InstallTicket>,
     /// 在释放镜像前格式化目标分区。
     pub format_partition: bool,
     /// Preserve six local personal directories, then delete the old system tree without format.
@@ -2090,6 +2092,17 @@ impl ConfigFileManager {
                         config.driver_action_mode = DriverActionMode::from_u8(mode_value);
                     }
                     "AutoReboot" => config.auto_reboot = value.parse().unwrap_or(false),
+                    "InstallReport" => {
+                        let (install_id, token) = value
+                            .split_once(':')
+                            .with_context(|| "invalid InstallReport value".to_string())?;
+                        let ticket = lr_core::install_stats::InstallTicket {
+                            install_id: install_id.to_string(),
+                            token: token.to_string(),
+                        };
+                        anyhow::ensure!(ticket.is_valid(), "invalid InstallReport value");
+                        config.install_report = Some(ticket);
+                    }
                     "AutomationShutdownOnTerminal" => {
                         config.automation_shutdown_on_terminal =
                             value.parse().with_context(|| {

@@ -8,6 +8,7 @@
 //! （见仓库 TESTING.md）。
 
 pub mod backup_atomic_publish;
+pub mod branding;
 pub mod backup_handoff;
 pub mod backup_image_catalog;
 pub mod bl_passthrough;
@@ -25,7 +26,9 @@ pub mod download_integrity;
 pub mod driver;
 pub mod driver_trust;
 pub mod encoding;
+pub mod apply_capacity;
 pub mod feedback;
+pub mod install_stats;
 pub mod first_logon;
 pub mod format_command;
 pub mod fveapi;

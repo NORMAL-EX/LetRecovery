@@ -256,6 +256,10 @@ pub fn translate(text: &str) -> String {
 }
 
 fn translate_internal(manager: &I18nManager, text: &str) -> String {
+    lr_core::branding::rebrand(translate_internal_unbranded(manager, text))
+}
+
+fn translate_internal_unbranded(manager: &I18nManager, text: &str) -> String {
     if is_dprk_easter_egg_language(&manager.current_language) {
         return DPRK_EASTER_EGG_SLOGAN.to_string();
     }

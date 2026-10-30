@@ -1,4 +1,31 @@
+fn brand(name: &str, default: &str) -> String {
+    println!("cargo:rerun-if-env-changed={name}");
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_owned())
+}
+
+/// Windows file versions need four numbers; take the digits of a custom version such as
+/// "2.1.0" or "v3.4" and keep the date-based value when there are none.
+fn branded_numeric_version(custom: &str, fallback: &str) -> String {
+    let parts: Vec<u16> = custom
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .take(4)
+        .collect();
+    if parts.is_empty() {
+        return fallback.to_owned();
+    }
+    (0..4)
+        .map(|index| parts.get(index).copied().unwrap_or(0).to_string())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=LR_BRAND_VERSION");
     let profile = std::env::var("PROFILE").unwrap_or_default();
     let target = std::env::var("TARGET").unwrap_or_default();
     if profile == "release" && target != "x86_64-win7-windows-msvc" {
@@ -29,9 +56,16 @@ fn main() {
 
     // 按编译日期自动生成版本号（无需每次手动改版本）
     let (y, m, d) = build_date();
-    let display_version = format!("v{}.{:02}.{:02}", y, m, d); // 如 v2026.06.07
-    let numeric_version = format!("{}.{}.{}.0", y, m, d); // winres 需要 n.n.n.n
-                                                          // 注入到编译环境，供代码用 env!("BUILD_VERSION") 读取
+    let mut display_version = format!("v{}.{:02}.{:02}", y, m, d); // 如 v2026.06.07
+    let mut numeric_version = format!("{}.{}.{}.0", y, m, d); // winres 需要 n.n.n.n
+    if let Some(custom) = std::env::var("LR_BRAND_VERSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        display_version = custom.trim().to_owned();
+        numeric_version = branded_numeric_version(&display_version, &numeric_version);
+    }
+    // 注入到编译环境，供代码用 env!("BUILD_VERSION") 读取
     println!("cargo:rustc-env=BUILD_VERSION={}", display_version);
 
     // 仅在 Windows 上设置资源
@@ -56,9 +90,19 @@ fn main() {
         );
 
         // 设置程序信息
-        res.set("ProductName", "LetRecovery");
-        res.set("FileDescription", "Windows系统一键重装工具");
-        res.set("LegalCopyright", "© 2026-present Cloud-PE Dev.");
+        // 定制版（LetRecovery 定制服务）通过 LR_BRAND_* 环境变量改写文件属性；官方构建不设置。
+        res.set(
+            "ProductName",
+            &brand("LR_BRAND_PRODUCT_NAME", "LetRecovery"),
+        );
+        res.set(
+            "FileDescription",
+            &brand("LR_BRAND_FILE_DESCRIPTION", "Windows系统一键重装工具"),
+        );
+        res.set(
+            "LegalCopyright",
+            &brand("LR_BRAND_COPYRIGHT", "© 2026-present Cloud-PE Dev."),
+        );
         res.set("ProductVersion", &numeric_version);
         res.set("FileVersion", &numeric_version);
 

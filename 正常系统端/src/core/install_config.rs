@@ -1401,6 +1401,16 @@ impl ConfigFileManager {
         } else {
             String::new()
         };
+        // 安装成功上报凭据：PE 把它暂存到新系统，首次登录后由后台脚本发送“成功”。
+        // 旧版 PE 会忽略这个键（未知键不报错），只是不会上报成功，服务端 1 天后按失败计。
+        if let Some(ticket) =
+            crate::core::install_stats::current_ticket().filter(|ticket| ticket.is_valid())
+        {
+            wifi_binding.push_str(&format!(
+                "InstallReport={}:{}\r\n",
+                ticket.install_id, ticket.token
+            ));
+        }
         if config.pe_network_payload_length > 0 {
             let sha256 = config.pe_network_payload_sha256.trim().to_ascii_lowercase();
             if config.pe_network_payload_length > lr_core::pe_network::PAYLOAD_MAX_BYTES

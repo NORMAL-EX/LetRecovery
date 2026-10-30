@@ -1140,7 +1140,7 @@ fn report_line_count(report: &str) -> usize {
 
 /// Dedicated row commands must use the same owner-drawn Inno button path as dialog commands.
 /// Their command routing remains content-owned so activating Browse never hides the dialog.
-fn content_command_button_style() -> i32 {
+pub(crate) fn content_command_button_style() -> i32 {
     BS_OWNERDRAW | WS_TABSTOP.0 as i32
 }
 

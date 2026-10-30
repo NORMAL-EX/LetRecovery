@@ -1736,7 +1736,7 @@ mod platform {
             Err(poisoned) => poisoned.into_inner(),
         };
         if warned_disks.insert(disk_number) {
-            log::warn!(
+            log::info!(
                 "physical disk {disk_number} exposes no optional StorageIdAssocDevice identifier; replacement detection continues with same-handle capacity, GPT/MBR partition-table token and exact extents"
             );
         } else {

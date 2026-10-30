@@ -636,17 +636,10 @@ pub fn publish_combined_install_log(
         None => combined.extend_from_slice(b"[not available]\r\n"),
     }
     let directory = target_root.join("LetRecovery").join("Logs");
-    let latest = atomic_publish_diagnostic(&directory, "LetRecovery-install.log", &combined)?;
-    if let Err(error) = atomic_publish_diagnostic(
-        &directory,
-        &format!("LetRecovery-install-{session_id}.log"),
-        &combined,
-    ) {
-        log::warn!(
-            "[INSTALL LOG] session-named diagnostic copy failed after the stable log was published: {error:#}"
-        );
-    }
-    Ok(latest)
+    // 只发布一份合并日志。旧版本还会写一份内容完全相同的 LetRecovery-install-<会话>.log，
+    // 会话号已经写在日志正文里，不需要再复制一份。
+    let _ = session_id;
+    atomic_publish_diagnostic(&directory, "LetRecovery-install.log", &combined)
 }
 
 #[cfg(test)]
@@ -785,11 +778,11 @@ mod tests {
             output.file_name().and_then(|name| name.to_str()),
             Some("LetRecovery-install.log")
         );
-        assert!(output
+        assert!(!output
             .parent()
             .unwrap()
             .join("LetRecovery-install-session-3.log")
-            .is_file());
+            .exists());
         let text = fs::read_to_string(output).unwrap();
         assert!(text.contains("normal endpoint"));
         assert!(text.contains("WinPE"));

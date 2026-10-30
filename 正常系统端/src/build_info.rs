@@ -39,12 +39,33 @@ pub fn description() -> String {
 }
 
 pub fn display_version() -> String {
+    if let Some(version) = lr_core::branding::VERSION {
+        return version.to_owned();
+    }
     if crate::utils::i18n::is_dprk_easter_egg_language(&crate::utils::i18n::current_language()) {
         crate::tr!(env!("BUILD_VERSION"))
     } else if DEV {
         crate::tr!("{}（测试版）", env!("BUILD_VERSION"))
     } else {
         env!("BUILD_VERSION").to_owned()
+    }
+}
+
+/// About-page credit line: the build's copyright plus the licence notice of customised builds.
+pub fn credits() -> String {
+    use lr_core::branding::{Edition, COPYRIGHT, EDITION};
+    let base = if lr_core::branding::is_customized() {
+        COPYRIGHT.to_owned()
+    } else {
+        crate::tr!("© 2026-present Cloud-PE Dev. (NORMAL-EX & hwyyds)")
+    };
+    match EDITION {
+        Edition::Nonprofit => format!("{base}\r\n{}", crate::tr!("由 LetRecovery Team 友情定制")),
+        Edition::Personal => format!(
+            "{base}\r\n{}",
+            crate::tr!("仅供个人使用，严禁用于任何商业用途")
+        ),
+        Edition::Official | Edition::Commercial => base,
     }
 }
 

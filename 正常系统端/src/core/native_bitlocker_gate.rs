@@ -130,8 +130,8 @@ pub fn validate_credential(
     }
 }
 
-/// Preserve the legacy install ordering: the selected target first, followed by every other
-/// locked data volume. X: is the PE runtime volume and is never offered for unlock.
+/// Install only needs access to its selected target volume (same policy as backup). Unrelated
+/// locked volumes are never written and must not block the operation or prompt for credentials.
 pub fn plan_install_locked_volumes(
     target: &str,
     volumes: &[BitLockerVolumeSnapshot],
@@ -147,16 +147,7 @@ pub fn plan_install_locked_volumes(
     }
 
     for volume in volumes {
-        let drive = canonical_drive(&volume.drive)?;
-        if drive == "X:" || !volume.status.needs_unlock() {
-            continue;
-        }
-        if !locked
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(&drive))
-        {
-            locked.push(drive);
-        }
+        canonical_drive(&volume.drive)?;
     }
     Ok(locked)
 }
@@ -210,6 +201,35 @@ fn canonical_drive(drive: &str) -> Result<String, NativeBitLockerGateError> {
     Ok(format!("{}:", (bytes[0] as char).to_ascii_uppercase()))
 }
 
+/// 解锁时不再让用户选择“密码”还是“恢复密钥”，按输入内容自动判断：
+/// 只由数字、空格和连字符组成且恰好 48 位数字时按恢复密钥处理；同样只含数字和分隔符但位数
+/// 不对，几乎一定是抄错了恢复密钥，直接提示而不是拿它去试密码；其它输入一律按密码处理。
+pub fn classify_unlock_secret(secret: &str) -> Result<(BitLockerCredentialKind, String), String> {
+    if secret.is_empty() {
+        return Err(crate::tr!("请输入 BitLocker 解锁密码或恢复密钥"));
+    }
+    // 密码原样使用（首尾空格也可能是密码的一部分），只在识别恢复密钥时去掉首尾空白。
+    let trimmed = secret.trim();
+    let key_characters_only = !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c.is_whitespace());
+    let digits = trimmed.chars().filter(char::is_ascii_digit).count();
+    let has_separator = trimmed.chars().any(|c| c == '-' || c.is_whitespace());
+    if key_characters_only && digits == 48 {
+        let formatted = lr_core::fveapi::format_recovery_key(trimmed).map_err(|_| {
+            crate::tr!("恢复密钥应为 48 位数字（8 组，每组 6 位），请核对后重新输入")
+        })?;
+        return Ok((BitLockerCredentialKind::RecoveryKey, formatted));
+    }
+    if key_characters_only && has_separator {
+        return Err(crate::tr!(
+            "恢复密钥应为 48 位数字（8 组，每组 6 位），请核对后重新输入"
+        ));
+    }
+    Ok((BitLockerCredentialKind::Password, secret.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,18 +253,43 @@ mod tests {
     }
 
     #[test]
-    fn install_puts_target_first_excludes_x_and_deduplicates() {
+    fn install_only_plans_its_locked_target() {
         let volumes = vec![
             volume("D:", VolumeStatus::EncryptedLocked),
-            volume("c:", VolumeStatus::EncryptedLocked),
             volume("C:", VolumeStatus::EncryptedLocked),
             volume("X:", VolumeStatus::EncryptedLocked),
             volume("E:", VolumeStatus::EncryptedUnlocked),
         ];
         assert_eq!(
             plan_install_locked_volumes("c:", &volumes).unwrap(),
-            vec!["C:", "D:"]
+            vec!["C:"]
         );
+        assert!(plan_install_locked_volumes("E:", &volumes)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn unlock_secret_kind_is_detected_from_the_input() {
+        let key = "111111-222222-333333-444444-555555-666666-777777-888888";
+        assert_eq!(
+            classify_unlock_secret(key).unwrap().0,
+            BitLockerCredentialKind::RecoveryKey
+        );
+        assert_eq!(
+            classify_unlock_secret(&key.replace('-', " ")).unwrap().0,
+            BitLockerCredentialKind::RecoveryKey
+        );
+        assert_eq!(
+            classify_unlock_secret(" pass word ").unwrap(),
+            (BitLockerCredentialKind::Password, " pass word ".to_string())
+        );
+        assert_eq!(
+            classify_unlock_secret("12345678").unwrap().0,
+            BitLockerCredentialKind::Password
+        );
+        assert!(classify_unlock_secret("111111-222222").is_err());
+        assert!(classify_unlock_secret("").is_err());
     }
 
     #[test]

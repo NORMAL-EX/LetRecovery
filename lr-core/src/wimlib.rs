@@ -49,6 +49,29 @@ use crate::image_meta::{parse_image_info_from_xml, ImageInfo, WimProgress};
 // 常量（严格对照 wimlib.h）
 // ============================================================================
 
+/// WOF 紧凑文件的压缩算法（wimlib.h 的 WIMLIB_EXTRACT_FLAG_COMPACT_*）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactMode {
+    Xpress4k,
+    Lzx,
+}
+
+impl CompactMode {
+    pub const fn extract_flag(self) -> c_int {
+        match self {
+            Self::Xpress4k => 0x0100_0000,
+            Self::Lzx => 0x0800_0000,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Xpress4k => "XPRESS4K",
+            Self::Lzx => "LZX",
+        }
+    }
+}
+
 /// 进度消息类型
 mod progress_msg {
     pub const EXTRACT_STREAMS: i32 = 4;
@@ -958,6 +981,31 @@ impl WimlibManager {
         Ok(wim)
     }
 
+    /// 以 WOF 紧凑文件释放镜像（“压缩释放”，需要 Windows 10 及以上的目标系统）。
+    pub fn apply_image_compact(
+        &self,
+        image_file: &str,
+        exact_resource_files: Option<&[PathBuf]>,
+        target_dir: &str,
+        index: u32,
+        mode: CompactMode,
+        progress_tx: Option<Sender<WimProgress>>,
+    ) -> Result<(), String> {
+        let resources = match exact_resource_files {
+            Some(files) if image_file.to_ascii_lowercase().ends_with(".swm") => Some(files),
+            _ => None,
+        };
+        self.apply_image_internal(
+            image_file,
+            resources,
+            target_dir,
+            index,
+            progress_tx,
+            None,
+            mode.extract_flag(),
+        )
+    }
+
     /// 释放/应用镜像到目录（与 wimgapi::WimManager::apply_image 等价）
     pub fn apply_image(
         &self,
@@ -986,10 +1034,9 @@ impl WimlibManager {
                 target_dir,
                 index,
                 progress_tx,
-                cancel,
-            );
+                cancel, 0);
         }
-        self.apply_image_internal(image_file, None, target_dir, index, progress_tx, cancel)
+        self.apply_image_internal(image_file, None, target_dir, index, progress_tx, cancel, 0)
     }
 
     /// Apply a split WIM using only an authenticated, ordered list of exact resource files.
@@ -1008,8 +1055,7 @@ impl WimlibManager {
             target_dir,
             index,
             progress_tx,
-            None,
-        )
+            None, 0)
     }
 
     fn apply_image_internal(
@@ -1020,6 +1066,7 @@ impl WimlibManager {
         index: u32,
         progress_tx: Option<Sender<WimProgress>>,
         cancel: Option<Arc<AtomicBool>>,
+        extract_flags: c_int,
     ) -> Result<(), String> {
         if cancel
             .as_ref()
@@ -1057,7 +1104,7 @@ impl WimlibManager {
         }
 
         let wtarget = to_wide(target_dir);
-        let rc = unsafe { (self.extract_image)(wim, index as c_int, wtarget.as_ptr(), 0) };
+        let rc = unsafe { (self.extract_image)(wim, index as c_int, wtarget.as_ptr(), extract_flags) };
         unsafe { (self.free_wim)(wim) };
         drop(ctx);
 

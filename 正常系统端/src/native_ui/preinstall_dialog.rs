@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 
 use lr_core::software_install::{validate_selected_packages, SelectedSoftwarePackage};
-use windows::core::{w, PWSTR};
+use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::Controls::{
     LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW,
@@ -16,8 +16,9 @@ use windows::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_CHECKBOXES, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
     LVS_EX_INFOTIP, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, MoveWindow, SendMessageW, WS_BORDER, WS_TABSTOP, WS_VSCROLL,
+    GetClientRect, MoveWindow, SendMessageW, SetWindowTextW, WS_BORDER, WS_TABSTOP, WS_VSCROLL,
 };
 
 use super::controls::{child, wide};
@@ -30,6 +31,7 @@ use crate::download::config::SoftwareCategory;
 
 pub const ID_PREINSTALL_CATEGORY: u16 = 65_000;
 const ID_PREINSTALL_LIST: u16 = 65_001;
+pub const ID_PREINSTALL_AUTO_SELECT: u16 = 65_002;
 
 const LVM_SETITEMSTATE: u32 = 0x102B;
 const LVIS_STATEIMAGEMASK: u32 = 0xF000;
@@ -49,6 +51,10 @@ pub struct NativePreinstallDialog {
     active_category: usize,
     category_list: HWND,
     package_list: HWND,
+    auto_select: HWND,
+    /// 目标系统已安装、且在本次目录中的软件。只作为“自动勾选”按钮的建议，打开时不自动勾选。
+    suggested_ids: BTreeSet<String>,
+    auto_select_state: Cell<u8>,
     selection_write_in_progress: Cell<bool>,
 }
 
@@ -57,6 +63,7 @@ impl NativePreinstallDialog {
         owner: HWND,
         categories: Vec<SoftwareCategory>,
         selected: &[SelectedSoftwarePackage],
+        suggested: &[SelectedSoftwarePackage],
     ) -> windows::core::Result<Self> {
         let shell = DialogShell::create(
             owner,
@@ -74,6 +81,13 @@ impl NativePreinstallDialog {
                     cancel: Some(crate::tr!("取消")),
                 },
             },
+        )?;
+        let auto_select = child(
+            shell.content(),
+            w!("BUTTON"),
+            &crate::tr!("自动勾选"),
+            super::tool_dialogs::content_command_button_style(),
+            ID_PREINSTALL_AUTO_SELECT,
         )?;
         let category_list = child(
             shell.content(),
@@ -120,11 +134,18 @@ impl NativePreinstallDialog {
             active_category: 0,
             category_list,
             package_list,
+            auto_select,
+            suggested_ids: suggested
+                .iter()
+                .map(|package| package.id.to_ascii_lowercase())
+                .collect(),
+            auto_select_state: Cell::new(u8::MAX),
             selection_write_in_progress: Cell::new(false),
         };
         dialog.populate_categories();
         dialog.apply_theme();
         dialog.render_active_category();
+        dialog.update_auto_select_button();
         dialog.layout();
         Ok(dialog)
     }
@@ -182,6 +203,7 @@ impl NativePreinstallDialog {
             return;
         }
         self.sync_active_selection();
+        self.update_auto_select_button();
     }
 
     pub unsafe fn show_modeless(&mut self) {
@@ -219,12 +241,33 @@ impl NativePreinstallDialog {
         let _ = GetClientRect(self.shell.content(), &mut rect);
         let width = rect.right.max(0);
         let height = rect.bottom.max(0);
+        // “自动勾选”按钮在两个列表下方靠左，和底部的“确定 / 取消”在同一行视线上。
+        let button_height = metrics.button_height;
+        let button_width =
+            super::layout::fitted_button_width(self.auto_select, dpi, scale(120, dpi)).min(width);
+        let top = 0;
+        let height = (height - button_height - metrics.control_gap).max(0);
+        let _ = MoveWindow(
+            self.auto_select,
+            0,
+            height + metrics.control_gap,
+            button_width,
+            button_height,
+            true,
+        );
         let category_width = scale(180, dpi).min((width / 3).max(scale(120, dpi)));
-        let _ = MoveWindow(self.category_list, 0, 0, category_width, height, true);
+        let _ = MoveWindow(self.category_list, 0, top, category_width, height, true);
         set_single_column_width(self.category_list);
         let package_x = category_width + metrics.control_gap;
         let package_width = (width - package_x).max(0);
-        let _ = MoveWindow(self.package_list, package_x, 0, package_width, height, true);
+        let _ = MoveWindow(
+            self.package_list,
+            package_x,
+            top,
+            package_width,
+            height,
+            true,
+        );
         let checkbox_column_width = scale(36, dpi).min(package_width);
         let _ = SendMessageW(
             self.package_list,
@@ -300,6 +343,49 @@ impl NativePreinstallDialog {
 
     fn selected_packages(&self) -> Vec<SelectedSoftwarePackage> {
         selected_packages_for_ids(&self.categories, &self.selected_ids)
+    }
+
+    /// 列表下方的按钮：第一次按勾上检测到的已装软件，再按一次取消这些勾选。
+    pub unsafe fn toggle_auto_select(&mut self) {
+        if self.suggested_ids.is_empty() {
+            return;
+        }
+        self.sync_active_selection();
+        if self.auto_select_applied() {
+            for id in &self.suggested_ids {
+                self.selected_ids.remove(id);
+            }
+        } else {
+            self.selected_ids.extend(self.suggested_ids.iter().cloned());
+        }
+        self.render_active_category();
+        self.update_auto_select_button();
+    }
+
+    fn auto_select_applied(&self) -> bool {
+        !self.suggested_ids.is_empty() && self.suggested_ids.is_subset(&self.selected_ids)
+    }
+
+    unsafe fn update_auto_select_button(&self) {
+        let state = if self.suggested_ids.is_empty() {
+            0
+        } else if self.auto_select_applied() {
+            2
+        } else {
+            1
+        };
+        if self.auto_select_state.replace(state) == state {
+            return;
+        }
+        let label = match state {
+            0 => crate::tr!("自动勾选（没有检测到已装软件）"),
+            2 => crate::tr!("取消自动勾选"),
+            _ => crate::tr!("自动勾选已装的 {} 个软件", self.suggested_ids.len()),
+        };
+        let text = wide(&label);
+        let _ = SetWindowTextW(self.auto_select, PCWSTR(text.as_ptr()));
+        let _ = EnableWindow(self.auto_select, state != 0);
+        self.layout();
     }
 
     unsafe fn apply_theme(&self) {

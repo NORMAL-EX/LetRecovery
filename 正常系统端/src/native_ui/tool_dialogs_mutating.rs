@@ -1255,19 +1255,12 @@ fn bitlocker_credential(state: &MutatingToolState) -> Result<Option<BitLockerCre
     if state.bitlocker_action != BitLockerAction::Unlock {
         return Ok(None);
     }
-    let value = state.credential.trim();
-    if value.is_empty() {
-        return Err(crate::tr!("解锁 BitLocker 时必须填写密码或恢复密钥"));
-    }
-    match state.bitlocker_unlock_method {
-        BitLockerUnlockMethod::Password => {
-            Ok(Some(BitLockerCredential::Password(value.to_string())))
+    // 不再让用户选择“密码 / 恢复密钥”，由输入内容自动判断。
+    match crate::core::native_bitlocker_gate::classify_unlock_secret(&state.credential)? {
+        (crate::core::native_bitlocker_gate::BitLockerCredentialKind::RecoveryKey, key) => {
+            Ok(Some(BitLockerCredential::RecoveryKey(key)))
         }
-        BitLockerUnlockMethod::RecoveryKey => {
-            let formatted = lr_core::fveapi::format_recovery_key(value)
-                .map_err(|_| crate::tr!("BitLocker 恢复密钥必须是 8 组、每组 6 位数字"))?;
-            Ok(Some(BitLockerCredential::RecoveryKey(formatted)))
-        }
+        (_, password) => Ok(Some(BitLockerCredential::Password(password))),
     }
 }
 
@@ -1419,6 +1412,9 @@ unsafe fn create_controls(
     if kind != MutatingToolKind::ManageBitLocker {
         let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(controls.extra_label, SW_HIDE);
         let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(controls.extra_input, SW_HIDE);
+    } else {
+        // 解锁方式由输入内容自动识别，不再显示“使用恢复密钥解锁”勾选框。
+        let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(controls.option, SW_HIDE);
     }
     Ok(controls)
 }

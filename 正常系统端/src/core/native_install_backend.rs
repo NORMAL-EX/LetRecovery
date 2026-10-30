@@ -438,8 +438,23 @@ fn strip_prefix_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> 
 }
 
 fn enumerate_staged_image_set(source: &Path) -> Result<StagedImageSet, String> {
-    let source = std::fs::canonicalize(source)
-        .map_err(|error| format!("canonicalize split image source: {error}"))?;
+    // ImDisk/虚拟光驱等卷上 GetFinalPathNameByHandle 可能返回“函数不正确”，文件本身却能正常读取。
+    // 规范化失败但文件确实存在时退回绝对路径继续，只有文件不存在才报错。
+    let source = match std::fs::canonicalize(source) {
+        Ok(path) => path,
+        Err(error) => {
+            let absolute = std::path::absolute(source).unwrap_or_else(|_| source.to_path_buf());
+            if absolute.is_file() {
+                log::warn!(
+                    "[NATIVE INSTALL] canonicalize split image source failed ({error}); using {}",
+                    absolute.display()
+                );
+                absolute
+            } else {
+                return Err(format!("canonicalize split image source: {error}"));
+            }
+        }
+    };
     let source = source.as_path();
     let source_name = source
         .file_name()
@@ -1515,10 +1530,11 @@ impl ProductionInstallBackend {
                     ));
                 }
                 super::bitlocker::VolumeStatus::Unknown => {
-                    return Err(InstallBackendError::new(
-                        "bitlocker_status_unknown",
-                        format!("cannot determine BitLocker status for {drive}"),
-                    ));
+                    // 读不到 BitLocker 状态（家庭版缺组件、精简系统、虚拟盘）不代表卷被锁定。
+                    // 这里不写入该卷，记录警告继续；真正锁定的卷在后续访问时会明确失败。
+                    log::warn!(
+                        "[NATIVE INSTALL] cannot determine BitLocker status for {drive}; continuing"
+                    );
                 }
             }
         }
@@ -1645,10 +1661,20 @@ impl ProductionInstallBackend {
                 "bitlocker_target_locked",
                 format!("{drive} is locked; unlock it before installation"),
             )),
-            super::bitlocker::VolumeStatus::Unknown => Err(InstallBackendError::new(
-                "bitlocker_status_unknown",
-                format!("cannot determine BitLocker status for {drive}"),
-            )),
+            super::bitlocker::VolumeStatus::Unknown => {
+                // 状态未知但文件系统可以读取，说明卷没有被锁定，可以继续。读不到时才停止。
+                if std::path::Path::new(&format!("{}\\", drive.trim_end_matches('\\'))).is_dir() {
+                    log::warn!(
+                        "[NATIVE INSTALL] cannot determine BitLocker status for {drive}, but the volume is readable; continuing"
+                    );
+                    Ok(())
+                } else {
+                    Err(InstallBackendError::new(
+                        "bitlocker_status_unknown",
+                        format!("cannot determine BitLocker status for {drive} and the volume is not readable"),
+                    ))
+                }
+            }
             super::bitlocker::VolumeStatus::Encrypting => Err(InstallBackendError::new(
                 "bitlocker_target_encrypting",
                 format!("{drive} is currently encrypting"),
@@ -1740,7 +1766,7 @@ impl ProductionInstallBackend {
             reporter.report(InstallExecutionEvent::Progress {
                 phase: progress_phase,
                 percentage,
-                detail: format!("正在下载 {}", package.name),
+                detail: crate::tr!("正在下载 {}", package.name),
             });
             let path = destination.join(&package.filename);
             let mut final_result = None;
@@ -1799,7 +1825,7 @@ impl ProductionInstallBackend {
                             reporter.report(InstallExecutionEvent::Progress {
                                 phase: progress_phase,
                                 percentage,
-                                detail: format!("正在下载 {}", package.name),
+                                detail: crate::tr!("正在下载 {}", package.name),
                             });
                         }
                     }
@@ -2012,8 +2038,18 @@ impl ProductionInstallBackend {
         for package in packages {
             let source = prepared.path().join(&package.filename);
             let target = destination.join(&package.filename);
-            let source_metadata = std::fs::symlink_metadata(&source)
-                .map_err(|error| Self::error("inspect_prepared_software", error))?;
+            let source_metadata = match std::fs::symlink_metadata(&source) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // 预装软件是可选组件：某个安装包没下载下来只跳过它，不让整次安装失败。
+                    log::warn!(
+                        "[PREINSTALL] 预装软件 {} 不存在，已跳过: {error}",
+                        package.filename
+                    );
+                    continue;
+                }
+                Err(error) => return Err(Self::error("inspect_prepared_software", error)),
+            };
             if !source_metadata.is_file()
                 || source_metadata.file_type().is_symlink()
                 || source_metadata.len() == 0
@@ -2095,8 +2131,18 @@ impl ProductionInstallBackend {
         let mut total = 0_u64;
         for package in &packages {
             let source = prepared.join(&package.filename);
-            let source_metadata = std::fs::symlink_metadata(&source)
-                .map_err(|error| Self::error("inspect_prepared_software", error))?;
+            let source_metadata = match std::fs::symlink_metadata(&source) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // 预装软件是可选组件：某个安装包没下载下来只跳过它，不让整次安装失败。
+                    log::warn!(
+                        "[PREINSTALL] 预装软件 {} 不存在，已跳过: {error}",
+                        package.filename
+                    );
+                    continue;
+                }
+                Err(error) => return Err(Self::error("inspect_prepared_software", error)),
+            };
             if !source_metadata.is_file()
                 || source_metadata.file_type().is_symlink()
                 || source_metadata.len() == 0
@@ -2813,12 +2859,16 @@ impl ProductionInstallBackend {
             );
             return self.select_scattered_staging(intent, budget, payload_bytes);
         }
-        let selected = match DiskManager::find_suitable_data_partition(
+        let shrink_floor = Self::check_target_capacity(intent)?;
+        DiskManager::set_target_shrink_floor(shrink_floor);
+        let selection = DiskManager::find_suitable_data_partition(
             &intent.target_partition,
             payload_bytes,
             allow_target_shrink,
             force_target_shrink,
-        ) {
+        );
+        DiskManager::set_target_shrink_floor(0);
+        let selected = match selection {
             Ok(selected) => selected,
             Err(error) if scatter_allowed => {
                 log::warn!(
@@ -2914,6 +2964,67 @@ impl ProductionInstallBackend {
     }
 
     /// Bytes the selected image occupies after it is applied, or 0 when unknown.
+    /// 目标分区容量预检（规则见 `lr_core::apply_capacity`）。镜像展开后即使压缩释放也装不下时，
+    /// 在改动任何分区之前停止；返回自动暂存时目标分区缩小后必须保留的容量。
+    fn check_target_capacity(intent: &StartInstallIntent) -> Result<u64, InstallBackendError> {
+        if intent.is_gho || intent.options.is_xp_i386 {
+            return Ok(0);
+        }
+        let info = lr_core::wimlib::WimlibManager::new()
+            .and_then(|manager| manager.get_image_info(&intent.image_path))
+            .ok()
+            .and_then(|images| {
+                images
+                    .into_iter()
+                    .find(|image| image.index == intent.volume_index)
+            });
+        let Some(info) = info else {
+            return Ok(0);
+        };
+        let expanded = info.size_bytes.saturating_sub(info.hard_link_bytes);
+        let compact_supported = info
+            .build
+            .is_some_and(|build| build >= lr_core::apply_capacity::MIN_COMPACT_BUILD);
+        let image_bytes = std::fs::metadata(&intent.image_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let solid = intent.image_path.to_ascii_lowercase().ends_with(".esd");
+        let partition = intent.target_partition_size_bytes;
+        let plan = lr_core::apply_capacity::plan(
+            expanded,
+            image_bytes,
+            solid,
+            partition,
+            compact_supported,
+        );
+        log::info!(
+            "[CAPACITY] target={} partition={} expanded={} image_file={} compact_supported={} plan={:?}",
+            intent.target_partition,
+            partition,
+            expanded,
+            image_bytes,
+            compact_supported,
+            plan
+        );
+        use lr_core::apply_capacity::ApplyPlan;
+        match plan {
+            ApplyPlan::TooSmall { required_bytes } => Err(InstallBackendError::new(
+                "target_too_small",
+                crate::tr!(
+                    "这个镜像展开后至少需要约 {} GB（已按压缩释放估算），目标分区 {} 只有 {} GB。请换一个更大的分区，或先扩大该分区再安装。尚未改动任何分区。",
+                    lr_core::apply_capacity::gib(required_bytes),
+                    intent.target_partition,
+                    lr_core::apply_capacity::gib(partition)
+                ),
+            )),
+            // 普通释放能装下：缩卷暂存后也必须能装下，不能把它逼到只能压缩释放。
+            ApplyPlan::Normal => Ok(expanded.saturating_add(lr_core::apply_capacity::ALLOWANCE_BYTES)),
+            // 已经需要压缩释放：目标分区一字节都不能再让给暂存。
+            ApplyPlan::CompactXpress4k | ApplyPlan::CompactLzx => Ok(u64::MAX),
+            ApplyPlan::Unknown => Ok(0),
+        }
+    }
+
     fn expanded_image_bytes(intent: &StartInstallIntent) -> u64 {
         let result = lr_core::wimlib::WimlibManager::new()
             .and_then(|manager| manager.get_image_info(&intent.image_path))
@@ -6711,6 +6822,14 @@ impl ProductionInstallBackend {
             log::warn!(
                 "[NATIVE INSTALL] first-logon account helper staging failed; only the defaultuser0 cleanup is skipped: {error:#}"
             );
+        }
+        if let Some(ticket) = crate::core::install_stats::current_ticket() {
+            match lr_core::first_logon::stage_install_report(&self.target, &ticket) {
+                Ok(_) => log::info!("[INSTALL STATS] staged the first-logon success report"),
+                Err(error) => log::warn!(
+                    "[INSTALL STATS] could not stage the first-logon success report: {error:#}"
+                ),
+            }
         }
         let ntdll = Path::new(&self.target)
             .join("Windows")

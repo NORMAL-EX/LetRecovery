@@ -181,14 +181,14 @@ impl Dism {
         }
     }
 
-    /// 应用系统镜像 (WIM/ESD)
-    /// 使用 wimlib (libwim-15.dll) 实现
-    pub fn apply_image_with_exact_swm_resources(
+    /// 按容量规划选择的方式释放：`None` 为普通释放，`Some` 为 WOF 紧凑文件。
+    pub fn apply_image_with_mode(
         &self,
         image_file: &str,
         exact_resource_files: &[PathBuf],
         apply_dir: &str,
         index: u32,
+        compact: Option<lr_core::wimlib::CompactMode>,
         progress_tx: Option<Sender<DismProgress>>,
     ) -> Result<()> {
         self.apply_image_internal(
@@ -197,6 +197,7 @@ impl Dism {
             apply_dir,
             index,
             progress_tx,
+            compact,
         )
     }
 
@@ -207,6 +208,7 @@ impl Dism {
         apply_dir: &str,
         index: u32,
         progress_tx: Option<Sender<DismProgress>>,
+        compact: Option<lr_core::wimlib::CompactMode>,
     ) -> Result<()> {
         log::info!("[Dism] 应用镜像: {} -> {}", image_file, apply_dir);
 
@@ -230,16 +232,31 @@ impl Dism {
         });
 
         // 应用镜像
-        let result = match exact_resource_files {
-            Some(resources) if image_file.to_ascii_lowercase().ends_with(".swm") => wim_manager
-                .apply_image_with_exact_swm_resources(
+        let result = if let Some(mode) = compact {
+            // 紧凑释放只由内置 libwim 支持（wimgapi 没有对应参数）。
+            match lr_core::wimlib::WimlibManager::new() {
+                Ok(manager) => manager.apply_image_compact(
                     image_file,
-                    resources,
+                    exact_resource_files,
                     apply_dir,
                     index,
+                    mode,
                     Some(wim_tx),
                 ),
-            _ => wim_manager.apply_image(image_file, apply_dir, index, Some(wim_tx)),
+                Err(error) => Err(error.to_string()),
+            }
+        } else {
+            match exact_resource_files {
+                Some(resources) if image_file.to_ascii_lowercase().ends_with(".swm") => wim_manager
+                    .apply_image_with_exact_swm_resources(
+                        image_file,
+                        resources,
+                        apply_dir,
+                        index,
+                        Some(wim_tx),
+                    ),
+                _ => wim_manager.apply_image(image_file, apply_dir, index, Some(wim_tx)),
+            }
         };
 
         // 等待转发线程结束

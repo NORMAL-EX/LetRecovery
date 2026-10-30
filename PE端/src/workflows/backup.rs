@@ -126,7 +126,7 @@ fn run_backup_workflow(
 }
 
 fn require_private_pe_payload_absent_from_source(source_root: &str) -> Result<()> {
-    let path = PathBuf::from(source_root).join("LetRecovery_PE");
+    let path = PathBuf::from(source_root).join(lr_core::branding::PE_DIR_NAME);
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error)

@@ -6,7 +6,7 @@
 //! image-engine preferences. Link and settings controls emit intents; this
 //! module never starts a browser or opens filesystem locations.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -134,6 +134,7 @@ pub struct AboutLabels<'a> {
     pub easy_mode: &'a str,
     pub easy_mode_enabled: bool,
     pub easy_mode_available: bool,
+    pub mode: crate::core::app_config::UiMode,
     pub log_enabled: bool,
     pub automation_export_enabled: bool,
     pub automatic_feedback_enabled: bool,
@@ -827,6 +828,7 @@ pub struct AboutPage {
     pub language: HWND,
     pub refresh_languages: HWND,
     pub easy_mode: HWND,
+    pub mode_label: HWND,
     pub logging: HWND,
     pub automation_export: HWND,
     pub automatic_feedback: HWND,
@@ -838,6 +840,7 @@ pub struct AboutPage {
     pub credits: HWND,
     pub link_buttons: [HWND; 3],
     pub action_buttons: [HWND; 1],
+    advanced: Cell<bool>,
     font: HFONT,
     languages: RefCell<Vec<crate::utils::i18n::LanguageInfo>>,
 }
@@ -879,39 +882,32 @@ impl AboutPage {
             CBS_DROPDOWNLIST | WS_TABSTOP.0 as i32,
             ID_ABOUT_LANGUAGE,
         )?;
-        let refresh_languages = child(
+        // 语言列表在启动和切换语言时自动刷新，不再单独提供“刷新”按钮。
+        let refresh_languages = HWND::default();
+        let _ = (labels.easy_mode, labels.easy_mode_enabled);
+        let mode_label = child(
             parent,
-            w!("BUTTON"),
-            &crate::tr!("刷新"),
-            BS_OWNERDRAW | WS_TABSTOP.0 as i32,
-            ID_ABOUT_REFRESH_LANGUAGES,
+            w!("STATIC"),
+            &crate::tr!("使用模式:"),
+            SS_LEFTNOWORDWRAP_STYLE,
+            5_262,
         )?;
+        // 原来的“启用小白模式”勾选框改为三档使用模式：小白 / 正常 / 高级。
         let easy_mode = child(
             parent,
-            w!("BUTTON"),
-            labels.easy_mode,
-            BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
+            w!("COMBOBOX"),
+            "",
+            CBS_DROPDOWNLIST | WS_TABSTOP.0 as i32,
             ID_ABOUT_EASY_MODE,
         )?;
-        let _ = SendMessageW(
-            easy_mode,
-            0x00F1,
-            WPARAM(usize::from(labels.easy_mode_enabled)),
-            LPARAM(0),
-        );
+        fill_mode_combo(easy_mode, labels.mode);
         let _ = EnableWindow(easy_mode, labels.easy_mode_available);
-        let logging = child(
-            parent,
-            w!("BUTTON"),
-            &crate::tr!("启用日志记录"),
-            BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
-            ID_ABOUT_LOGGING,
-        )?;
-        set_checked(logging, labels.log_enabled);
+        // 日志始终开启（排查问题必需），不再提供开关。
+        let logging = HWND::default();
         let automation_export = child(
             parent,
             w!("BUTTON"),
-            &crate::tr!("显示自动化配置导出（高级）"),
+            &crate::tr!("显示“导出自动化配置”按钮"),
             BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
             ID_ABOUT_AUTOMATION_EXPORT,
         )?;
@@ -919,7 +915,7 @@ impl AboutPage {
         let automatic_feedback = child(
             parent,
             w!("BUTTON"),
-            &crate::tr!("自动反馈错误日志"),
+            &crate::tr!("发送匿名统计"),
             BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
             ID_ABOUT_AUTOMATIC_FEEDBACK,
         )?;
@@ -978,14 +974,14 @@ impl AboutPage {
         let settings_help = child(
             parent,
             w!("STATIC"),
-            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n自动化导出会在安装和备份页显示生成按钮。"),
+            &crate::tr!("错误报告只包含出错原因和电脑环境；安装统计只有版本号和安装方式。都不包含你的文件、账户和密码。"),
             0,
             5_257,
         )?;
         let credits = child(
             parent,
             w!("STATIC"),
-            &crate::tr!("© 2026-present Cloud-PE Dev. (NORMAL-EX & hwyyds)\r\nPE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
+            &crate::build_info::credits(),
             0,
             5_258,
         )?;
@@ -1015,6 +1011,13 @@ impl AboutPage {
             labels.log_enabled,
         );
 
+        for (control, (name, _)) in link_buttons
+            .into_iter()
+            .zip(lr_core::branding::promotions())
+        {
+            set_text(control, &name);
+        }
+
         let page = Self {
             product_name,
             version_label,
@@ -1024,6 +1027,7 @@ impl AboutPage {
             language,
             refresh_languages,
             easy_mode,
+            mode_label,
             logging,
             automation_export,
             automatic_feedback,
@@ -1035,6 +1039,7 @@ impl AboutPage {
             credits,
             link_buttons,
             action_buttons,
+            advanced: Cell::new(labels.mode == crate::core::app_config::UiMode::Advanced),
             font,
             languages: RefCell::new(Vec::new()),
         };
@@ -1067,8 +1072,12 @@ impl AboutPage {
         AboutLink::ALL.get(index).copied().map(InfoIntent::OpenLink)
     }
 
+    pub unsafe fn selected_mode(&self) -> crate::core::app_config::UiMode {
+        mode_from_index(SendMessageW(self.easy_mode, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0)
+    }
+
     pub unsafe fn easy_mode_enabled(&self) -> bool {
-        is_checked(self.easy_mode)
+        self.selected_mode() == crate::core::app_config::UiMode::Beginner
     }
 
     pub unsafe fn logging_enabled(&self) -> bool {
@@ -1090,6 +1099,7 @@ impl AboutPage {
         set_checked(self.automatic_feedback, enabled);
     }
 
+
     pub unsafe fn set_logging_enabled(&self, enabled: bool) {
         set_checked(self.logging, enabled);
         let _ = EnableWindow(
@@ -1098,9 +1108,18 @@ impl AboutPage {
         );
     }
 
-    pub unsafe fn set_easy_mode_state(&self, enabled: bool, available: bool) {
-        set_checked(self.easy_mode, enabled);
+    /// 同步使用模式下拉框。高级设置（WIM 引擎、下载线程、自动化导出）只在高级模式下显示；
+    /// 调用方随后重新布局并刷新页面可见性。
+    pub unsafe fn set_mode_state(&self, mode: crate::core::app_config::UiMode, available: bool) {
+        let _ = SendMessageW(
+            self.easy_mode,
+            CB_SETCURSEL,
+            WPARAM(mode_index(mode)),
+            LPARAM(0),
+        );
         let _ = EnableWindow(self.easy_mode, available);
+        self.advanced
+            .set(mode == crate::core::app_config::UiMode::Advanced);
     }
 
     pub unsafe fn selected_wim_engine(&self) -> u8 {
@@ -1151,30 +1170,34 @@ impl AboutPage {
         set_text(self.description, &crate::build_info::description());
         set_text(self.language_label, &crate::tr!("界面语言:"));
         set_text(self.refresh_languages, &crate::tr!("刷新"));
-        set_text(self.easy_mode, &crate::tr!("启用小白模式"));
+        set_text(self.mode_label, &crate::tr!("使用模式:"));
         set_text(self.logging, &crate::tr!("启用日志记录"));
         set_text(
             self.automation_export,
-            &crate::tr!("显示自动化配置导出（高级）"),
+            &crate::tr!("显示“导出自动化配置”按钮"),
         );
-        set_text(self.automatic_feedback, &crate::tr!("自动反馈错误日志"));
+        set_text(self.automatic_feedback, &crate::tr!("发送匿名统计"));
         set_text(self.wim_engine_label, &crate::tr!("WIM 引擎:"));
         set_text(self.download_threads_label, &crate::tr!("下载线程:"));
         set_text(
             self.settings_help,
-            &crate::tr!("小白模式提供简化的系统重装界面；日志开关在下次启动时完全生效。\r\n自动化导出会在安装和备份页显示生成按钮。"),
+            &crate::tr!("错误报告只包含出错原因和电脑环境；安装统计只有版本号和安装方式。都不包含你的文件、账户和密码。"),
         );
-        set_text(
-            self.credits,
-            &crate::tr!("© 2026-present Cloud-PE Dev. (NORMAL-EX & hwyyds)\r\nPE 下载服务由 Cloud-PE 云盘提供；感谢 电脑病毒爱好者 提供 WinPE。"),
-        );
+        set_text(self.credits, &crate::build_info::credits());
         let link_labels = [
             crate::tr!("项目主页"),
             crate::tr!("问题反馈"),
-            crate::tr!("开源许可"),
+            crate::tr!("许可协议"),
         ];
         for (control, label) in self.link_buttons.into_iter().zip(link_labels) {
             set_text(control, &label);
+        }
+        for (control, (name, _)) in self
+            .link_buttons
+            .into_iter()
+            .zip(lr_core::branding::promotions())
+        {
+            set_text(control, &name);
         }
         for (control, action) in self.action_buttons.into_iter().zip(AboutAction::ALL) {
             set_text(control, &action.label());
@@ -1189,7 +1212,9 @@ impl AboutPage {
             WPARAM(selected_engine as usize),
             LPARAM(0),
         );
-        self.set_easy_mode_state(self.easy_mode_enabled(), easy_mode_available);
+        let mode = self.selected_mode();
+        fill_mode_combo(self.easy_mode, mode);
+        self.set_mode_state(mode, easy_mode_available);
         self.refresh_language_choices();
     }
 
@@ -1227,24 +1252,32 @@ impl AboutPage {
             width,
             dpi,
         );
-        let refresh_width =
-            crate::native_ui::layout::fitted_button_width(self.refresh_languages, dpi, s(76))
-                .min(width / 3);
-        // Keep the selector close to its actual longest item instead of stretching it
-        // across the page. The remaining space is intentionally left after Refresh.
-        let language_width = (width - label_width - refresh_width - gap)
-            .min(s(280))
-            .max(0);
+        // 界面语言和使用模式上下两行排列，共用同一列标签宽度，避免右侧大片留白。
+        let label_width = label_width.max(
+            measure_text(self.mode_label, self.font, &crate::tr!("使用模式:"), None).width + s(8),
+        );
+        // Every drop-down list is exactly as wide as its own longest item in the current font
+        // and DPI (plus the closed-field text inset and the arrow), so short choices such as
+        // "简体中文" no longer sit in a mostly empty field.
+        let field_space = (width - label_width).max(0);
+        let language_width = fitted_combo_width(self.language, self.font, dpi, field_space);
+        let mode_label_width = label_width;
+        let mode_x = settings_x;
+        let mode_width = fitted_combo_width(self.easy_mode, self.font, dpi, field_space);
         let language_closed_height = combo_closed_height(self.language, field_height);
         let language_row_height = language_closed_height.max(field_height);
         let half = (width - gap) / 2;
         // Two check boxes per row when every caption fits half the width; otherwise one per row.
-        let check_boxes = [
-            self.easy_mode,
-            self.logging,
-            self.automation_export,
-            self.automatic_feedback,
-        ];
+        let advanced = self.advanced.get();
+        let mut check_boxes: Vec<HWND> = Vec::new();
+        if lr_core::branding::feature::AUTOMATIC_FEEDBACK
+            || lr_core::branding::feature::INSTALL_STATS
+        {
+            check_boxes.push(self.automatic_feedback);
+        }
+        if advanced && lr_core::branding::feature::AUTOMATION_EXPORT {
+            check_boxes.push(self.automation_export);
+        }
         let widest = check_boxes
             .iter()
             .map(|check| crate::native_ui::layout::control_text_width(*check) + s(24))
@@ -1253,17 +1286,27 @@ impl AboutPage {
         let per_row = if widest <= half { 2 } else { 1 };
         let check_width = if per_row == 2 { half } else { width };
         let check_rows = (check_boxes.len() as i32 + per_row - 1) / per_row;
-        let engine_width = (width - label_width).min(s(280)).max(0);
+        let engine_width = fitted_combo_width(self.wim_engine, self.font, dpi, field_space);
         let engine_closed_height = combo_closed_height(self.wim_engine, field_height);
-        let engine_row_height = engine_closed_height.max(field_height);
-        let download_threads_width = s(88).min((width - label_width).max(0));
+        let engine_row_height = if advanced {
+            engine_closed_height.max(field_height)
+        } else {
+            0
+        };
+        let download_threads_width =
+            fitted_combo_width(self.download_threads, self.font, dpi, field_space);
         let threads_closed_height = combo_closed_height(self.download_threads, field_height);
-        let threads_row_height = threads_closed_height.max(field_height);
+        let threads_row_height = if advanced {
+            threads_closed_height.max(field_height)
+        } else {
+            0
+        };
+        // 关于页底部不再放项目主页等按钮；商业定制版在这里显示推广软件（最多 3 个）。
         let buttons: Vec<HWND> = self
             .link_buttons
             .iter()
-            .chain(self.action_buttons.iter())
             .copied()
+            .take(lr_core::branding::promotions().len())
             .collect();
         let caption_widths: Vec<i32> = buttons
             .iter()
@@ -1273,14 +1316,12 @@ impl AboutPage {
             available_height: rect.height.max(0),
             width,
             dpi,
-            language_row_height,
+            language_row_height: language_row_height * 2 + gap,
             check_rows,
             engine_row_height,
             threads_row_height,
-            help_text_height: crate::native_ui::layout::control_wrapped_height(
-                self.settings_help,
-                width,
-            ),
+            // 说明文字已移除，不再占位。
+            help_text_height: 0,
             credits_text_height: crate::native_ui::layout::control_wrapped_height(
                 self.credits,
                 width,
@@ -1341,12 +1382,21 @@ impl AboutPage {
             s(220),
             false,
         );
+        let mode_y = language_y + language_row_height + gap;
         let _ = MoveWindow(
-            self.refresh_languages,
-            settings_x + label_width + language_width + gap,
-            centered_control_y_ceil(language_y, language_row_height, language_closed_height),
-            refresh_width,
-            language_closed_height,
+            self.mode_label,
+            mode_x,
+            centered_control_y_ceil(mode_y, language_row_height, metrics.label_height),
+            mode_label_width,
+            metrics.label_height,
+            false,
+        );
+        let _ = MoveWindow(
+            self.easy_mode,
+            mode_x + mode_label_width,
+            centered_control_y_ceil(mode_y, language_row_height, language_closed_height),
+            mode_width,
+            s(220),
             false,
         );
         for (index, check) in check_boxes.into_iter().enumerate() {
@@ -1428,9 +1478,40 @@ impl AboutPage {
     }
 
     pub unsafe fn show(&self, visible: bool) {
-        let command = if visible { SW_SHOW } else { SW_HIDE };
+        let advanced = self.advanced.get();
+        let advanced_only = [
+            self.automation_export,
+            self.wim_engine_label,
+            self.wim_engine,
+            self.download_threads_label,
+            self.download_threads,
+        ];
         for hwnd in self.controls() {
-            let _ = ShowWindow(hwnd, command);
+            let shown = visible
+                && hwnd != self.settings_help
+                && (advanced || !advanced_only.contains(&hwnd))
+                && (hwnd != self.automation_export
+                    || lr_core::branding::feature::AUTOMATION_EXPORT)
+                && (hwnd != self.automatic_feedback
+                    || lr_core::branding::feature::AUTOMATIC_FEEDBACK
+                    || lr_core::branding::feature::INSTALL_STATS);
+            let _ = ShowWindow(hwnd, if shown { SW_SHOW } else { SW_HIDE });
+        }
+        // 说明文字和底部按钮已移除：控件仍保留以兼容原有消息处理，但始终隐藏。
+        let _ = ShowWindow(self.settings_help, SW_HIDE);
+        let promoted = lr_core::branding::promotions().len();
+        for (index, hwnd) in self.link_buttons.iter().enumerate() {
+            let _ = ShowWindow(
+                *hwnd,
+                if visible && index < promoted {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+        for hwnd in self.action_buttons.iter() {
+            let _ = ShowWindow(*hwnd, SW_HIDE);
         }
     }
 
@@ -1447,16 +1528,15 @@ impl AboutPage {
     }
 
     pub unsafe fn apply_theme(&self, palette: Palette) {
-        for control in [
-            self.easy_mode,
-            self.logging,
-            self.automation_export,
-            self.automatic_feedback,
-            self.refresh_languages,
-        ] {
+        for control in [self.automation_export, self.automatic_feedback] {
             apply_control_theme(control, palette, NativeControlKind::General);
         }
-        for control in [self.language, self.wim_engine, self.download_threads] {
+        for control in [
+            self.language,
+            self.easy_mode,
+            self.wim_engine,
+            self.download_threads,
+        ] {
             apply_control_theme(control, palette, NativeControlKind::Field);
         }
         for control in self
@@ -1477,9 +1557,8 @@ impl AboutPage {
             self.description,
             self.language_label,
             self.language,
-            self.refresh_languages,
+            self.mode_label,
             self.easy_mode,
-            self.logging,
             self.automation_export,
             self.automatic_feedback,
             self.wim_engine_label,
@@ -1511,6 +1590,36 @@ unsafe fn add_combo_item(combo: HWND, text: &str) {
         WPARAM(0),
         LPARAM(text.as_ptr() as isize),
     );
+}
+
+fn mode_index(mode: crate::core::app_config::UiMode) -> usize {
+    use crate::core::app_config::UiMode;
+    let offset = usize::from(lr_core::branding::feature::EASY_MODE);
+    match mode {
+        UiMode::Beginner => 0,
+        UiMode::Normal => offset,
+        UiMode::Advanced => offset + 1,
+    }
+}
+
+fn mode_from_index(index: isize) -> crate::core::app_config::UiMode {
+    use crate::core::app_config::UiMode;
+    let offset = isize::from(lr_core::branding::feature::EASY_MODE);
+    match index - offset {
+        -1 => UiMode::Beginner,
+        1 => UiMode::Advanced,
+        _ => UiMode::Normal,
+    }
+}
+
+unsafe fn fill_mode_combo(combo: HWND, mode: crate::core::app_config::UiMode) {
+    let _ = SendMessageW(combo, CB_RESETCONTENT, WPARAM(0), LPARAM(0));
+    if lr_core::branding::feature::EASY_MODE {
+        add_combo_item(combo, &crate::tr!("小白模式（只保留一键重装）"));
+    }
+    add_combo_item(combo, &crate::tr!("正常模式（推荐）"));
+    add_combo_item(combo, &crate::tr!("高级模式（显示全部选项）"));
+    let _ = SendMessageW(combo, CB_SETCURSEL, WPARAM(mode_index(mode)), LPARAM(0));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1659,18 +1768,18 @@ fn about_flow_layout_with(
     let check_y = language_y + input.language_row_height + gap;
     let check_step = s(26) + gap;
     let engine_y = check_y + input.check_rows.max(0) * check_step;
-    let threads_y = engine_y + input.engine_row_height + gap;
-    let help_y = threads_y + input.threads_row_height + gap;
-    let help_height = match (compaction.show_help, tight) {
+    // Hidden rows (the WIM engine and download-thread rows outside Advanced mode and the removed
+    // settings hint) take neither height nor a gap. Reserving them left an empty band of about
+    // 80 px at 100 % scale between the last setting and the copyright line.
+    let row_extent = |height: i32| if height > 0 { height + gap } else { 0 };
+    let threads_y = engine_y + row_extent(input.engine_row_height);
+    let help_y = threads_y + row_extent(input.threads_row_height);
+    let help_height = match (compaction.show_help && input.help_text_height > 0, tight) {
         (false, _) => 0,
-        (true, true) => input.help_text_height.max(0),
+        (true, true) => input.help_text_height,
         (true, false) => input.help_text_height.max(s(48)),
     };
-    let credits_y = if compaction.show_help {
-        help_y + help_height + gap
-    } else {
-        help_y
-    };
+    let credits_y = help_y + row_extent(help_height);
     let credits_height = if tight {
         input.credits_text_height.max(0)
     } else {
@@ -1771,6 +1880,46 @@ fn about_single_button_row(
             })
             .collect(),
     )
+}
+
+/// Closed ComboBox width that shows the longest item without a trailing empty field: the measured
+/// caption, the closed-field painter's 6 px text inset, a short gap before the arrow and the arrow
+/// button itself. Never wider than the space beside the label column.
+fn combo_width_for_widest_item(widest_item: i32, available: i32, dpi: u32) -> i32 {
+    let s = |value: i32| ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32;
+    (widest_item.max(0) + s(6) + s(14) + s(20) + s(2))
+        .max(s(64))
+        .min(available.max(0))
+}
+
+unsafe fn fitted_combo_width(combo: HWND, font: HFONT, dpi: u32, available: i32) -> i32 {
+    const CB_GETCOUNT_MESSAGE: u32 = 0x0146;
+    const CB_GETLBTEXT_MESSAGE: u32 = 0x0148;
+    const CB_GETLBTEXTLEN_MESSAGE: u32 = 0x0149;
+    let count = SendMessageW(combo, CB_GETCOUNT_MESSAGE, WPARAM(0), LPARAM(0))
+        .0
+        .max(0) as usize;
+    let mut widest = 0;
+    for index in 0..count {
+        let length = SendMessageW(combo, CB_GETLBTEXTLEN_MESSAGE, WPARAM(index), LPARAM(0)).0;
+        if length <= 0 {
+            continue;
+        }
+        let mut buffer = vec![0u16; length as usize + 1];
+        let copied = SendMessageW(
+            combo,
+            CB_GETLBTEXT_MESSAGE,
+            WPARAM(index),
+            LPARAM(buffer.as_mut_ptr() as isize),
+        )
+        .0;
+        if copied <= 0 {
+            continue;
+        }
+        let text = String::from_utf16_lossy(&buffer[..copied as usize]);
+        widest = widest.max(measure_text(combo, font, &text, None).width);
+    }
+    combo_width_for_widest_item(widest, available, dpi)
 }
 
 unsafe fn set_text(hwnd: HWND, value: &str) {
@@ -1930,6 +2079,37 @@ mod tests {
         assert_eq!(layout.help_height, 0);
         assert!(layout.description_height > 0);
         assert!(layout.bottom <= 540, "bottom {}", layout.bottom);
+    }
+
+    #[test]
+    fn copyright_follows_the_last_visible_setting_when_optional_rows_are_hidden() {
+        let input = AboutFlowInput {
+            available_height: 2_000,
+            width: 900,
+            dpi: 96,
+            language_row_height: 54,
+            check_rows: 1,
+            engine_row_height: 0,
+            threads_row_height: 0,
+            help_text_height: 0,
+            credits_text_height: 20,
+            button_caption_widths: &[],
+        };
+        let layout = about_flow_layout(&input);
+        assert_eq!(layout.help_height, 0);
+        assert_eq!(layout.credits_y, layout.check_y + layout.check_step);
+    }
+
+    #[test]
+    fn drop_down_width_follows_the_longest_item_and_the_available_space() {
+        // 56 px caption + 6 inset + 14 gap + 20 arrow + 2 frame.
+        assert_eq!(combo_width_for_widest_item(56, 600, 96), 98);
+        assert_eq!(
+            combo_width_for_widest_item(56, 600, 192),
+            56 + 12 + 28 + 40 + 4
+        );
+        assert_eq!(combo_width_for_widest_item(400, 300, 96), 300);
+        assert_eq!(combo_width_for_widest_item(8, 600, 96), 64);
     }
 
     #[test]

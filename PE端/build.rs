@@ -1,3 +1,11 @@
+fn brand(name: &str, default: &str) -> String {
+    println!("cargo:rerun-if-env-changed={name}");
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_owned())
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     // Keep the date-based version synchronized with the PE sources that produced the binary.
@@ -32,16 +40,21 @@ fn main() {
         }
 
         // 设置程序信息
-        res.set("ProductName", "LetRecovery PE");
+        // 定制版通过 LR_BRAND_* 环境变量改写文件属性；官方构建不设置这些变量。
+        let product = brand("LR_BRAND_PRODUCT_NAME", "LetRecovery");
+        res.set("ProductName", &format!("{product} PE"));
         res.set(
             "FileDescription",
-            if ci_automation {
-                "LetRecovery PE CI自动化测试版"
+            &if ci_automation {
+                format!("{product} PE CI自动化测试版")
             } else {
-                "LetRecovery PE安装助手"
+                format!("{product} PE安装助手")
             },
         );
-        res.set("LegalCopyright", "© 2026-present Cloud-PE Dev.");
+        res.set(
+            "LegalCopyright",
+            &brand("LR_BRAND_COPYRIGHT", "© 2026-present Cloud-PE Dev."),
+        );
         res.set("ProductVersion", &numeric_version);
         res.set("FileVersion", &numeric_version);
 

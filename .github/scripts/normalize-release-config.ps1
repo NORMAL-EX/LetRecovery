@@ -53,6 +53,8 @@ function New-ReleaseTemplate {
     # current username and passwords must never appear in a release package.
     return [pscustomobject][ordered]@{
         easy_mode_enabled = $false
+        ui_mode = "normal"
+        accepted_terms_version = 0
         easy_mode_tip_dismissed = $false
         easy_mode_settings_tip_dismissed = $false
         log_enabled = $true

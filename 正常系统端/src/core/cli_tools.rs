@@ -1425,7 +1425,10 @@ fn pe_maintenance_run() -> Result<Value> {
 fn select_cached_pe(official_only: bool) -> Result<crate::download::config::OnlinePE> {
     let mut catalogue = crate::download::config::PeCache::load_strict()?.unwrap_or_default();
     if official_only {
-        catalogue.retain(|pe| pe.filename.eq_ignore_ascii_case("LetRecovery_PE.wim"));
+        catalogue.retain(|pe| {
+            pe.filename
+                .eq_ignore_ascii_case(lr_core::branding::PE_WIM_NAME)
+        });
     }
     if let Some(pe) = catalogue.into_iter().find(|pe| {
         matches!(
@@ -1439,7 +1442,7 @@ fn select_cached_pe(official_only: bool) -> Result<crate::download::config::Onli
     }) {
         return Ok(pe);
     }
-    let filename = "LetRecovery_PE.wim";
+    let filename = lr_core::branding::PE_WIM_NAME;
     if matches!(
         super::pe::PeManager::find_cached_pe(filename, None, None),
         Ok(lr_core::cached_artifact::CachedArtifactPresence::Present { .. })

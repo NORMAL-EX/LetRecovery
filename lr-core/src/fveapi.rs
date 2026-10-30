@@ -443,6 +443,11 @@ mod imp {
         /// 通过路径获取卷状态。先按盘符查询，失败则按卷 GUID 路径查询，再失败则开卷查询。
         pub fn get_status_by_path(&self, volume_path: &str) -> Result<FveVolumeInfo, FveError> {
             let drive = normalize_volume_path(volume_path);
+            reconcile_lock_with_filesystem(&drive, self.query_status_with_fallbacks(&drive))
+        }
+
+        fn query_status_with_fallbacks(&self, drive: &str) -> Result<FveVolumeInfo, FveError> {
+            let drive = drive.to_string();
 
             let first = match self.query_status_by_path(&drive) {
                 Ok(info) => return Ok(info),
@@ -745,6 +750,82 @@ mod imp {
             FveVolumeStatus::FullyDecrypted => 0,
             _ => 50,
         }
+    }
+
+    /// FveGetStatus 的 ProtectionStatus 只表示“保护是否开启”，不是锁定状态。参考实现把它直接当成
+    /// 锁定，会让已解锁的加密卷、甚至根本没有加密的卷被要求输入密码，随后 FVEAPI 解锁报错而
+    /// manage-bde 却“成功”。文件系统能正常读取的卷一定没有被 BitLocker 锁住：这里只用这一个
+    /// 权威事实把推断出的“锁定”改回“未锁定”，读不到文件系统时保持原结论，不会把真正锁定的卷放行。
+    fn reconcile_lock_with_filesystem(
+        drive: &str,
+        status: Result<FveVolumeInfo, FveError>,
+    ) -> Result<FveVolumeInfo, FveError> {
+        let reported_locked = match &status {
+            Ok(info) => info.lock_status == FveLockStatus::Locked,
+            Err(FveError::VolumeLocked) | Err(FveError::KeyRequired) => true,
+            Err(_) => false,
+        };
+        if !reported_locked || !volume_filesystem_readable(drive) {
+            return status;
+        }
+        log::info!("[BITLOCKER] {drive} 的文件系统可以正常读取，按未锁定处理（FVE 报告的锁定状态不可靠）");
+        match status {
+            Ok(mut info) => {
+                info.lock_status = FveLockStatus::Unlocked;
+                if info.volume_status == FveVolumeStatus::FullyDecrypted {
+                    info.protection_status = FveProtectionStatus::Off;
+                }
+                Ok(info)
+            }
+            Err(_) => Ok(encrypted_unlocked_volume_info()),
+        }
+    }
+
+    /// 被 BitLocker 锁定的卷无法挂载文件系统，GetVolumeInformationW 会失败；能读到文件系统名称
+    /// 就说明卷当前可以访问。
+    fn volume_filesystem_readable(drive: &str) -> bool {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetVolumeInformationW(
+                root: *const u16,
+                volume_name: *mut u16,
+                volume_name_len: u32,
+                serial: *mut u32,
+                max_component: *mut u32,
+                flags: *mut u32,
+                fs_name: *mut u16,
+                fs_name_len: u32,
+            ) -> i32;
+        }
+        let root = if drive.contains("Volume{") {
+            let mut path = drive.trim_start_matches("\\\\.\\").to_string();
+            if !path.starts_with("\\\\?\\") {
+                path = format!("\\\\?\\{path}");
+            }
+            if !path.ends_with('\\') {
+                path.push('\\');
+            }
+            path
+        } else if drive.len() >= 2 && drive.as_bytes()[1] == b':' {
+            format!("{}\\", &drive[..2])
+        } else {
+            return false;
+        };
+        let wide = to_wide(&root);
+        let mut fs_name = [0u16; 32];
+        let ok = unsafe {
+            GetVolumeInformationW(
+                wide.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                fs_name.as_mut_ptr(),
+                fs_name.len() as u32,
+            )
+        };
+        ok != 0 && fs_name[0] != 0
     }
 
     fn volume_info_from_output(out: &FveGetStatusOutput) -> FveVolumeInfo {

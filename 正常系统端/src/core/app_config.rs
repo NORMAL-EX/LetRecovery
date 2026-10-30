@@ -21,6 +21,16 @@ pub struct AppConfig {
     #[serde(default)]
     pub easy_mode_enabled: bool,
 
+    /// 使用模式：beginner（小白）/ normal（正常，默认）/ advanced（高级）。小白模式与
+    /// `easy_mode_enabled` 始终同步；未知值按正常模式处理，不会让整个配置文件解析失败。
+    #[serde(default, deserialize_with = "deserialize_ui_mode")]
+    pub ui_mode: UiMode,
+
+
+    /// 已同意的用户协议版本。小于 [`CURRENT_TERMS_VERSION`] 时启动会先显示欢迎页。
+    #[serde(default)]
+    pub accepted_terms_version: u32,
+
     /// 是否已关闭小白模式提示（在非小白模式下显示的提示）
     #[serde(default)]
     pub easy_mode_tip_dismissed: bool,
@@ -92,6 +102,31 @@ pub struct AppConfig {
     pub scattered_staging_enabled: bool,
 }
 
+/// 当前用户协议版本。协议内容有实质变化时加一，所有用户会在下次启动时重新确认。
+pub const CURRENT_TERMS_VERSION: u32 = 1;
+
+/// 界面使用模式。小白模式只保留一键重装；正常模式隐藏少用的高级设置；高级模式显示全部。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiMode {
+    Beginner,
+    #[default]
+    Normal,
+    Advanced,
+}
+
+fn deserialize_ui_mode<'de, D>(deserializer: D) -> Result<UiMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value.as_str() {
+        Some("beginner") => UiMode::Beginner,
+        Some("advanced") => UiMode::Advanced,
+        _ => UiMode::Normal,
+    })
+}
+
 /// 日志默认启用
 fn default_log_enabled() -> bool {
     true
@@ -131,6 +166,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             easy_mode_enabled: false,
+            ui_mode: UiMode::Normal,
+            accepted_terms_version: 0,
             easy_mode_tip_dismissed: false,
             easy_mode_settings_tip_dismissed: false,
             log_enabled: true, // 日志默认启用
@@ -261,6 +298,13 @@ impl AppConfig {
     }
 
     fn normalized(mut self) -> Self {
+        // 日志是排查问题的唯一依据，界面不再提供关闭开关；旧配置里的 false 也按开启处理。
+        self.log_enabled = true;
+        if self.easy_mode_enabled {
+            self.ui_mode = UiMode::Beginner;
+        } else if self.ui_mode == UiMode::Beginner {
+            self.easy_mode_enabled = true;
+        }
         if !matches!(
             self.automatic_feedback_mode.as_str(),
             "disabled" | "normal" | "normal_and_pe"
@@ -277,9 +321,54 @@ impl AppConfig {
         self
     }
 
+    pub fn ui_mode(&self) -> UiMode {
+        self.ui_mode
+    }
+
+    /// 切换使用模式并保存。小白模式与旧的 `easy_mode_enabled` 同步。
+    pub fn set_ui_mode(&mut self, mode: UiMode) {
+        // Builds without easy mode never enter it, whatever an old config or dialog says.
+        let mode = if mode == UiMode::Beginner && !lr_core::branding::feature::EASY_MODE {
+            UiMode::Normal
+        } else {
+            mode
+        };
+        self.ui_mode = mode;
+        self.easy_mode_enabled = mode == UiMode::Beginner;
+        self.enable_advanced_options = false;
+        if let Err(e) = self.save() {
+            log::warn!("保存配置失败: {}", e);
+        }
+    }
+
+    /// 自动化导出按钮只在高级模式下出现，即使旧配置里打开过。
+    pub fn automation_export_visible(&self) -> bool {
+        lr_core::branding::feature::AUTOMATION_EXPORT
+            && self.automation_export_enabled
+            && self.ui_mode == UiMode::Advanced
+    }
+
+    /// 是否需要显示首次启动欢迎页（选择使用模式并同意当前版本的用户协议）。
+    pub fn needs_welcome(&self) -> bool {
+        self.accepted_terms_version < CURRENT_TERMS_VERSION
+    }
+
+    /// 记录欢迎页的选择并保存。
+    pub fn complete_welcome(&mut self, mode: UiMode) {
+        self.accepted_terms_version = CURRENT_TERMS_VERSION;
+        self.set_ui_mode(mode);
+    }
+
     /// 设置小白模式状态并保存
     pub fn set_easy_mode(&mut self, enabled: bool) {
         self.easy_mode_enabled = enabled;
+        self.ui_mode = if enabled {
+            UiMode::Beginner
+        } else if self.ui_mode == UiMode::Beginner {
+            UiMode::Normal
+        } else {
+            self.ui_mode
+        };
         self.enable_advanced_options = false;
         if let Err(e) = self.save() {
             log::warn!("保存配置失败: {}", e);
@@ -308,7 +397,7 @@ impl AppConfig {
     }
 
     pub fn automatic_feedback_enabled(&self) -> bool {
-        self.automatic_feedback_mode != "disabled"
+        lr_core::branding::feature::AUTOMATIC_FEEDBACK && self.automatic_feedback_mode != "disabled"
     }
 
     pub fn pe_network_enabled(&self) -> bool {
@@ -500,7 +589,7 @@ mod tests {
             pe_cache: crate::download::config::PeCache {
                 pe_list: vec![crate::download::config::CachedPE {
                     display_name: "LetRecovery PE".to_owned(),
-                    filename: "LetRecovery_PE.wim".to_owned(),
+                    filename: lr_core::branding::PE_WIM_NAME.to_owned(),
                     md5: Some("900150983CD24FB0D6963F7D28E17F72".to_owned()),
                     sha256: None,
                 }],

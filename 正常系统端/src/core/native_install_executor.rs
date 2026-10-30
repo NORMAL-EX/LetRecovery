@@ -351,6 +351,11 @@ impl InstallExecutionError {
             } if source.code == "no_data_partition" => crate::tr!(
                 "没有任何单个分区能容纳全部安装文件。多个分区末尾的空闲区彼此不连续，不能合并成一个普通数据分区；程序不会把磁盘转换为动态跨区卷。请释放一个分区的空间，或连接容量足够的外置磁盘。"
             ),
+            // The capacity precheck already wrote a translated, actionable sentence (required size,
+            // partition, available size); a generic phase message would hide it.
+            Self::Backend { source, .. } if source.code == "target_too_small" => {
+                source.detail.clone()
+            }
             Self::Backend { phase, .. } => phase.user_failure_message(),
         }
     }

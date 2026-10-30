@@ -1920,15 +1920,30 @@ mod windows_impl {
         let trusts_pca2023 = db_info.contains(PcaGeneration::Pca2023);
         let revokes_pca2011 = dbx_info.contains(PcaGeneration::Pca2011);
 
+        // GetFirmwareEnvironmentVariableW 在 Legacy BIOS 固件上固定返回 ERROR_INVALID_FUNCTION（1）：
+        // 本机根本没有 UEFI 变量，也就不存在 Secure Boot。这是确定的“关闭”，不是“未知”；旧逻辑
+        // 把它当成读取失败，导致 Legacy 机器的安装在格式化前被 PCA 预检拦下。
+        fn is_legacy_bios_error(text: &str) -> bool {
+            text.contains("(os error 1)") || text.contains("0x80070001")
+        }
+        let legacy_bios = secure_boot_result
+            .as_ref()
+            .err()
+            .is_some_and(|error| is_legacy_bios_error(&error.to_string()));
+        let secure_boot = if legacy_bios { Some(false) } else { secure_boot };
         let mut errors = Vec::new();
-        if let Err(error) = secure_boot_result {
-            errors.push(format!("读取 SecureBoot 失败: {error}"));
-        }
-        if let Err(error) = db {
-            errors.push(format!("读取 db 失败: {error}"));
-        }
-        if let Err(error) = dbx {
-            errors.push(format!("读取 dbx 失败: {error}"));
+        if legacy_bios {
+            log::info!("[BOOT PCA] 固件不支持 UEFI 变量（Legacy BIOS），按 Secure Boot 关闭处理");
+        } else {
+            if let Err(error) = secure_boot_result {
+                errors.push(format!("读取 SecureBoot 失败: {error}"));
+            }
+            if let Err(error) = db {
+                errors.push(format!("读取 db 失败: {error}"));
+            }
+            if let Err(error) = dbx {
+                errors.push(format!("读取 dbx 失败: {error}"));
+            }
         }
         FirmwarePcaInfo {
             secure_boot_enabled: secure_boot,

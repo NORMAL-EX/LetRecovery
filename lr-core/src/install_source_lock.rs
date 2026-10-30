@@ -451,9 +451,14 @@ impl LockedInstallSourceSet {
                 .map_err(|error| format!("create private install-source stage: {error}"))?;
         #[cfg(not(test))]
         {
-            crate::scoped_temp_file::restrict_to_system_and_administrators(stage.path())
-                .map_err(|error| format!("protect private install-source stage: {error}"))?;
-            prove_directory_rename_is_blocked(stage.path())?;
+            // FAT32/exFAT U 盘和部分网络位置不支持 ACL，收紧权限会报“拒绝访问”。这一步只是让同权限
+            // 进程更难替换暂存文件；镜像在使用前仍会完整校验。无法收紧时记录警告继续，而不是让安装失败。
+            match crate::scoped_temp_file::restrict_to_system_and_administrators(stage.path()) {
+                Ok(_) => prove_directory_rename_is_blocked(stage.path())?,
+                Err(error) => log::warn!(
+                    "[INSTALL SOURCE] 无法收紧安装源暂存目录权限，继续使用普通暂存目录: {error}"
+                ),
+            }
         }
 
         let mut staged_selected = None;

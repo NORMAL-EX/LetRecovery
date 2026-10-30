@@ -19,6 +19,7 @@ pub mod tool_dialogs;
 pub mod tool_dialogs_mutating;
 pub mod tools;
 pub(crate) mod ui_audit;
+pub mod welcome;
 mod window;
 
 pub(crate) use lr_core::windows_compat::{

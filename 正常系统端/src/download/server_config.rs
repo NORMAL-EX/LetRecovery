@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 /// v4 单文件资源目录。正常情况下只需要一次 HTTP 请求。
-pub const SERVER_V4_URL: &str = "https://letrecovery.cloud-pe.cn/v4/";
+pub const SERVER_V4_URL: &str = lr_core::branding::CATALOG_URL;
 
 type RemoteConfigContents = (
     Option<String>,

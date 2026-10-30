@@ -13,7 +13,7 @@ use lr_core::cached_artifact::{
 use crate::utils::encoding::gbk_to_utf8;
 use crate::utils::path::{get_bin_dir, get_exe_dir, get_pe_download_cache_dir};
 
-const PERSISTENT_PE_DIR_NAME: &str = "LetRecovery_PE";
+const PERSISTENT_PE_DIR_NAME: &str = lr_core::branding::PE_DIR_NAME;
 const ACTIVE_PE_JOURNAL_NAME: &str = "pe_guid.txt";
 const PENDING_PE_JOURNAL_NAME: &str = "pe_pending.txt";
 const HANDOFF_CAPSULE_WIM_PATH: &str = "\\LR_HandoffAuth.txt";
@@ -24,8 +24,12 @@ const HANDOFF_WIFI_WIM_PATH: &str = "\\LR_WifiProfile.xml";
 const HANDOFF_ADMINISTRATOR_WIM_PATH: &str =
     lr_core::unattend_account::PROTECTED_ADMINISTRATOR_SECRET_WIM_PATH;
 const HANDOFF_BITLOCKER_WIM_PATH: &str = lr_core::bl_passthrough::KEYS_WIM_PATH;
-const HANDOFF_CAPABILITIES_WIM_PATH: &str =
-    "\\Program Files\\LetRecoveryPE\\handoff-capabilities.txt";
+fn handoff_capabilities_wim_path() -> String {
+    format!(
+        "\\Program Files\\{}\\handoff-capabilities.txt",
+        lr_core::branding::PE_PROGRAM_DIR
+    )
+}
 const SOURCE_IMAGE_VERIFIED_CAPABILITY: &str = "source-image-verified-v1";
 const JOURNAL_VERSION: &str = "LRPE4";
 const PRE_AUTH_JOURNAL_VERSION: &str = "LRPE3";
@@ -76,14 +80,14 @@ fn read_pe_capabilities(pe_path: &Path) -> Result<Vec<u8>> {
             path,
             info.boot_index,
             extraction.path().to_string_lossy().as_ref(),
-            &[HANDOFF_CAPABILITIES_WIM_PATH],
+            &[handoff_capabilities_wim_path().as_str()],
         )
         .map_err(anyhow::Error::msg)?;
     let bytes = lr_core::scoped_temp_file::read_bounded_plain_file(
         &extraction
             .path()
             .join("Program Files")
-            .join("LetRecoveryPE")
+            .join(lr_core::branding::PE_PROGRAM_DIR)
             .join("handoff-capabilities.txt"),
         4096,
     )?;

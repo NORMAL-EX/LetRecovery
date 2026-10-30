@@ -203,14 +203,18 @@ impl BitLockerManageDialogState {
             .selected_volume
             .as_deref()
             .ok_or_else(|| crate::tr!("请选择一个分区进行操作。"))?;
-        build_intent(
-            &self.volumes,
-            volume,
-            self.action,
-            self.unlock_method,
-            self.credential.clone(),
-        )
-        .map_err(|error| error.to_string())
+        let (unlock_method, secret) = if self.action == BitLockerManageAction::Unlock {
+            match crate::core::native_bitlocker_gate::classify_unlock_secret(&self.credential)? {
+                (crate::core::native_bitlocker_gate::BitLockerCredentialKind::RecoveryKey, key) => {
+                    (BitLockerUnlockMethod::RecoveryKey, key)
+                }
+                (_, password) => (BitLockerUnlockMethod::Password, password),
+            }
+        } else {
+            (self.unlock_method, self.credential.clone())
+        };
+        build_intent(&self.volumes, volume, self.action, unlock_method, secret)
+            .map_err(|error| error.to_string())
     }
 
     pub fn set_recovery_key(&mut self, result: Result<String, String>) {
@@ -516,10 +520,7 @@ impl NativeBitLockerManageDialog {
         let locked = self.state.selected_status() == Some(VolumeStatus::EncryptedLocked);
         let unlocked = self.state.selected_status() == Some(VolumeStatus::EncryptedUnlocked);
         if locked {
-            for (label, control) in [
-                (self.controls.method_label, self.controls.method),
-                (self.controls.credential_label, self.controls.credential),
-            ] {
+            for (label, control) in [(self.controls.credential_label, self.controls.credential)] {
                 move_control(
                     label,
                     0,
@@ -636,17 +637,9 @@ impl NativeBitLockerManageDialog {
         let locked = self.state.selected_status() == Some(VolumeStatus::EncryptedLocked);
         let unlocked = self.state.selected_status() == Some(VolumeStatus::EncryptedUnlocked);
         let recovery_visible = self.state.recovery_key.is_some();
-        let credential_label = if self.state.unlock_method == BitLockerUnlockMethod::RecoveryKey {
-            crate::tr!("恢复密钥:")
-        } else {
-            crate::tr!("密码:")
-        };
+        let credential_label = crate::tr!("密码或恢复密钥:");
         set_text(self.controls.credential_label, &credential_label);
-        let password_character = if self.state.unlock_method == BitLockerUnlockMethod::Password {
-            0x25CF
-        } else {
-            0
-        };
+        let password_character = 0x25CF;
         let _ = SendMessageW(
             self.controls.credential,
             EM_SETPASSWORDCHAR,
@@ -670,12 +663,10 @@ impl NativeBitLockerManageDialog {
                 .map(DisplayedRecoveryKey::expose)
                 .unwrap_or(""),
         );
-        for control in [
-            self.controls.method_label,
-            self.controls.method,
-            self.controls.credential_label,
-            self.controls.credential,
-        ] {
+        // 解锁方式由输入内容自动识别，不再显示“解锁方式”下拉框。
+        let _ = ShowWindow(self.controls.method_label, SW_HIDE);
+        let _ = ShowWindow(self.controls.method, SW_HIDE);
+        for control in [self.controls.credential_label, self.controls.credential] {
             let _ = ShowWindow(control, if locked { SW_SHOW } else { SW_HIDE });
         }
         let _ = ShowWindow(

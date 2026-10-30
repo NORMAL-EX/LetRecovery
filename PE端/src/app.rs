@@ -619,7 +619,7 @@ fn cleanup_target_private_pe_residue(target_partition: &str) -> anyhow::Result<u
     {
         anyhow::bail!("invalid target partition before private PE cleanup");
     }
-    let root = std::path::PathBuf::from(format!(r"{drive}\LetRecovery_PE"));
+    let root = std::path::PathBuf::from(format!(r"{drive}\{}", lr_core::branding::PE_DIR_NAME));
     cleanup_private_pe_residue_root(&root)
 }
 
@@ -646,11 +646,27 @@ fn cleanup_private_pe_residue_root(root: &std::path::Path) -> anyhow::Result<usi
             retained.push(entry.file_name().to_string_lossy().into_owned());
             continue;
         };
+        // handoff-*：旧系统上正常端交接用的临时文件，可能含 BitLocker 恢复密钥或账户密码，
+        // 正常端在重启前来不及删除。它们只属于 LetRecovery，不能当成“非任务文件”留在新系统上。
+        let handoff_secret = name.to_ascii_lowercase().starts_with("handoff-");
         let product_file = matches!(name.as_str(), "pe_guid.txt" | "pe_pending.txt")
+            || handoff_secret
             || lr_core::handoff_auth::is_orphaned_private_pe_file_name(&name);
         if !product_file {
             retained.push(name);
             continue;
+        }
+        if handoff_secret {
+            let path = entry.path();
+            if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+                if metadata.is_file() && !metadata_is_reparse_point(&metadata) {
+                    if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(&path) {
+                        use std::io::Write;
+                        let _ = file.write_all(&vec![0u8; metadata.len().min(1 << 20) as usize]);
+                        let _ = file.sync_all();
+                    }
+                }
+            }
         }
         let path = entry.path();
         let metadata = std::fs::symlink_metadata(&path)
@@ -691,6 +707,56 @@ fn cleanup_private_pe_residue_root(root: &std::path::Path) -> anyhow::Result<usi
         );
     }
     Ok(removed)
+}
+
+/// 读取镜像元数据并按目标分区大小做容量规划。返回规划结果和镜像是否支持紧凑文件
+/// （Windows 10 及以上）。
+fn plan_target_capacity(
+    image_path: &str,
+    volume_index: u32,
+    partition_bytes: u64,
+) -> (lr_core::apply_capacity::ApplyPlan, bool) {
+    let info = lr_core::wimlib::WimlibManager::new()
+        .and_then(|manager| manager.get_image_info(image_path))
+        .ok()
+        .and_then(|images| images.into_iter().find(|image| image.index == volume_index));
+    let Some(info) = info else {
+        log::warn!("[PE安装] 无法读取镜像元数据，跳过目标分区容量预检");
+        return (lr_core::apply_capacity::ApplyPlan::Unknown, false);
+    };
+    let expanded = info.size_bytes.saturating_sub(info.hard_link_bytes);
+    let compact_supported = info
+        .build
+        .is_some_and(|build| build >= lr_core::apply_capacity::MIN_COMPACT_BUILD);
+    let image_bytes = std::fs::metadata(image_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let solid = image_path.to_ascii_lowercase().ends_with(".esd");
+    let plan = lr_core::apply_capacity::plan(
+        expanded,
+        image_bytes,
+        solid,
+        partition_bytes,
+        compact_supported,
+    );
+    log::info!(
+        "[PE安装] 容量预检: 展开={} 字节 镜像文件={} 字节 目标分区={} 字节 支持紧凑释放={} -> {:?}",
+        expanded,
+        image_bytes,
+        partition_bytes,
+        compact_supported,
+        plan
+    );
+    (plan, compact_supported)
+}
+
+fn is_disk_full_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("os error 112")
+        || lower.contains("not enough space")
+        || lower.contains("failed to write data")
+        || text.contains("磁盘空间不足")
+        || text.contains("错误码 72")
 }
 
 fn fail_install_before_destructive_write(
@@ -1558,6 +1624,9 @@ fn execute_install_workflow(
             &config.custom_install_plan,
             lr_core::custom_install::CustomInstallPlan::ReinstallPartition
         );
+    // 释放方式阶梯：先按容量规划选择最省事的方式；格式化路径下遇到“磁盘空间不足”时，
+    // 重新格式化后依次换用更省空间的 WOF 紧凑文件重试。
+    let mut apply_ladder: Vec<Option<lr_core::wimlib::CompactMode>> = vec![None];
     let personal_files_prepared = if let Some(plan) = personal_file_plan.as_ref() {
         let _ = tx.send(WorkerMessage::SetStatus(tr!(
             "正在保留个人文件并快速删除旧系统..."
@@ -1660,6 +1729,37 @@ fn execute_install_workflow(
             }
         }
     } else if format_target {
+        if !config.is_gho && !config.is_xp_i386 && !chunked_image {
+            let (plan, compact_supported) = plan_target_capacity(
+                &image_path,
+                config.volume_index,
+                expected_target.extent_length_bytes,
+            );
+            use lr_core::apply_capacity::ApplyPlan;
+            use lr_core::wimlib::CompactMode;
+            apply_ladder = match plan {
+                ApplyPlan::TooSmall { required_bytes } => {
+                    fail_prewrite!(tr!(
+                        "目标分区放不下这个镜像：展开后至少需要约 {} GB（已按压缩释放估算），目标分区只有 {} GB。请换一个更大的分区，或先扩大目标分区再安装。尚未格式化，原系统保持不变。",
+                        lr_core::apply_capacity::gib(required_bytes),
+                        lr_core::apply_capacity::gib(expected_target.extent_length_bytes)
+                    ));
+                }
+                ApplyPlan::CompactXpress4k => {
+                    vec![Some(CompactMode::Xpress4k), Some(CompactMode::Lzx)]
+                }
+                ApplyPlan::CompactLzx => vec![Some(CompactMode::Lzx)],
+                ApplyPlan::Normal | ApplyPlan::Unknown if compact_supported => {
+                    vec![None, Some(CompactMode::Xpress4k), Some(CompactMode::Lzx)]
+                }
+                ApplyPlan::Normal | ApplyPlan::Unknown => vec![None],
+            };
+            log::info!(
+                "[PE安装] 目标分区容量规划: {:?}，释放方式阶梯: {:?}",
+                plan,
+                apply_ladder
+            );
+        }
         let _ = tx.send(WorkerMessage::SetStatus(tr!("正在格式化目标分区...")));
         // Point of no return. A failed format can already have destroyed file-system metadata, so
         // no later error path is allowed to restore the old OS, old boot state, or pre-write
@@ -1971,15 +2071,52 @@ fn execute_install_workflow(
             Some(progress_tx),
         )
     } else {
-        // WIM/ESD使用DISM
+        // WIM/ESD：按释放方式阶梯写入。格式化路径下若磁盘写满，重新格式化后换用更省空间的
+        // WOF 紧凑文件重试；目标已经格式化，重试不会再损失任何数据，只会提高装下的机会。
         let dism = Dism::new();
-        dism.apply_image_with_exact_swm_resources(
-            &image_path,
-            &exact_image_spans,
-            &apply_dir,
-            config.volume_index,
-            Some(progress_tx),
-        )
+        let mut attempt = 0usize;
+        let result = loop {
+            let mode = apply_ladder.get(attempt).copied().flatten();
+            if let Some(mode) = mode {
+                log::info!("[PE安装] 使用压缩释放（WOF {}）写入目标分区", mode.label());
+                let _ = tx.send(WorkerMessage::SetStatus(tr!(
+                    "目标分区空间紧张，正在以压缩方式释放镜像..."
+                )));
+            }
+            match dism.apply_image_with_mode(
+                &image_path,
+                &exact_image_spans,
+                &apply_dir,
+                config.volume_index,
+                mode,
+                Some(progress_tx.clone()),
+            ) {
+                Err(error)
+                    if format_target
+                        && attempt + 1 < apply_ladder.len()
+                        && is_disk_full_error(&format!("{error:#}")) =>
+                {
+                    log::warn!(
+                        "[PE安装] 目标分区空间不足，重新格式化后改用更省空间的方式重试: {error:#}"
+                    );
+                    let label =
+                        (!config.volume_label.is_empty()).then_some(config.volume_label.as_str());
+                    if let Err(format_error) = DiskManager::format_partition_with_label(
+                        &target_partition,
+                        expected_target,
+                        label,
+                    ) {
+                        break Err(anyhow::anyhow!(
+                            "{error:#}; 重试前重新格式化目标分区失败: {format_error}"
+                        ));
+                    }
+                    attempt += 1;
+                }
+                other => break other,
+            }
+        };
+        drop(progress_tx);
+        result
     };
 
     // 等待进度监控线程结束
@@ -2886,6 +3023,12 @@ pub(crate) fn generate_unattend_xml(
         log::warn!(
             "[UNATTEND] 首次登录账户辅助程序暂存失败，仅跳过 defaultuser0 清理，安装继续: {error:#}"
         );
+    }
+    if let Some(ticket) = config.install_report.as_ref() {
+        match lr_core::first_logon::stage_install_report(target_partition, ticket) {
+            Ok(_) => log::info!("[INSTALL STATS] 已暂存新系统首次登录后的成功上报"),
+            Err(error) => log::warn!("[INSTALL STATS] 暂存成功上报失败（不影响安装）: {error:#}"),
+        }
     }
 
     let builtin = lr_core::unattend_account::render_builtin_administrator_unattend(

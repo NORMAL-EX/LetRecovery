@@ -1644,7 +1644,39 @@ fn verify_system_administrators_handle_custody(
     let is_custodian = |sid: PSID| unsafe {
         EqualSid(sid, administrators_sid).is_ok() || EqualSid(sid, system_sid).is_ok()
     };
-    if !is_custodian(owner) || !is_custodian(group) {
+    // 组策略“管理员组成员创建的对象的默认所有者”设为“对象创建者”时，提权进程创建的目录所有者是
+    // 当前管理员账户本身，主组也随之变化。该账户本来就拥有管理员权限，不是攻击者；旧检查在这类
+    // 机器上必然失败。所有者允许是当前进程用户，主组不参与访问控制，不再检查。
+    fn current_process_user_sid() -> Option<Vec<u8>> {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Security::{GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        unsafe {
+            let mut token = HANDLE::default();
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+            let mut needed = 0u32;
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+            let mut buffer = vec![0u8; needed as usize];
+            let queried = GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buffer.as_mut_ptr().cast()),
+                needed,
+                &mut needed,
+            );
+            let _ = CloseHandle(token);
+            queried.ok()?;
+            let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+            let length = GetLengthSid(user.User.Sid) as usize;
+            Some(std::slice::from_raw_parts(user.User.Sid.0 as *const u8, length).to_vec())
+        }
+    }
+    let _ = group;
+    let current_user = current_process_user_sid();
+    let owner_is_current_user = current_user.as_ref().is_some_and(|sid| unsafe {
+        EqualSid(owner, PSID(sid.as_ptr().cast_mut().cast())).is_ok()
+    });
+    if !is_custodian(owner) && !owner_is_current_user {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "secure custody owner/group is not SYSTEM or BUILTIN\\Administrators",

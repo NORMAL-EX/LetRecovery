@@ -587,10 +587,8 @@ fn main() -> anyhow::Result<()> {
     // 检查依赖文件完整性
     if let Err(missing_files) = check_dependencies() {
         log::error!("依赖文件缺失: {:?}", missing_files);
-        let message = format!(
-            "程序文件不完整，无法正常运行。\n\n\
-            缺少以下文件：\n{}\n\n\
-            请重新下载完整安装包或修复程序文件。",
+        let message = crate::tr!(
+            "程序文件不完整，无法正常运行。\n\n缺少以下文件：\n{}\n\n请重新下载完整安装包或修复程序文件。",
             missing_files.join("\n")
         );
         show_error_message(&message);
@@ -603,9 +601,8 @@ fn main() -> anyhow::Result<()> {
     // 检查系统核心组件（极限精简系统检测）
     if let Err(missing_components) = check_system_components() {
         log::error!("系统组件缺失: {:?}", missing_components);
-        let message = format!(
-            "很抱歉，该软件目前暂时不支持您所使用的极限精简系统使用。\n\n\
-            缺少以下系统组件：\n{}",
+        let message = crate::tr!(
+            "很抱歉，该软件目前暂时不支持您所使用的极限精简系统使用。\n\n缺少以下系统组件：\n{}",
             missing_components.join("\n")
         );
         show_error_message(&message);
@@ -632,6 +629,23 @@ fn main() -> anyhow::Result<()> {
             log::error!("创建互斥锁失败: {}", e);
             return Ok(());
         }
+    };
+
+    // 首次启动：问候用户、选择使用模式并同意用户协议。PE 中运行的正常端由维护人员使用，不显示。
+    #[cfg(not(feature = "non-elevated-tests"))]
+    let app_config = {
+        let mut app_config = app_config;
+        if app_config.needs_welcome() && !core::disk::DiskManager::is_pe_environment() {
+            match native_ui::welcome::run() {
+                Ok(Some(mode)) => app_config.complete_welcome(mode),
+                Ok(None) => {
+                    log::info!("用户没有同意用户协议，程序退出");
+                    return Ok(());
+                }
+                Err(error) => log::warn!("无法显示首次启动欢迎页，本次跳过: {error}"),
+            }
+        }
+        app_config
     };
 
     log::info!("正在预加载配置和系统信息...");
@@ -669,6 +683,10 @@ fn main() -> anyhow::Result<()> {
     log::info!("启动原生 Win32 窗口...");
     if let Err(error) = utils::dprk_easter_egg::sync_for_language(&app_config.language) {
         log::warn!("同步朝鲜文彩蛋失败: {error:#}");
+    }
+    #[cfg(windows)]
+    if !branding_startup_gate() {
+        return Ok(());
     }
     let run_result = native_ui::run(preloaded_config);
     utils::dprk_easter_egg::shutdown();
@@ -1130,8 +1148,51 @@ fn escape_xml_text(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Licence notices of customised builds, shown with the same dialog UI as the main window.
+#[cfg(windows)]
+fn branding_startup_gate() -> bool {
+    use lr_core::branding::{Edition, EDITION};
+    let product = crate::build_info::product_name();
+    if EDITION == Edition::Personal {
+        let _ = native_ui::welcome::show_startup_message(
+            &product,
+            &crate::tr!("本软件免费，仅供个人使用"),
+            &crate::tr!("本软件为免费软件，仅供个人使用，严禁用于任何商业用途。\r\n严禁倒卖、出租或捆绑销售；如果你是花钱买到的，请立即退款并举报卖家。"),
+        );
+    }
+    if !lr_core::branding::password_required() {
+        return true;
+    }
+    for attempt in 0..5 {
+        let message = if attempt == 0 {
+            crate::tr!("这个版本需要使用密码，请输入后继续。")
+        } else {
+            crate::tr!("密码不正确，请重新输入。")
+        };
+        match native_ui::welcome::show_password_prompt(
+            &product,
+            &crate::tr!("请输入使用密码"),
+            &message,
+        ) {
+            Some(input) if lr_core::branding::password_matches(&input) => return true,
+            Some(_) => continue,
+            None => return false,
+        }
+    }
+    false
+}
+
 /// 显示错误消息框
 fn show_error_message(message: &str) {
+    // 与程序其它窗口一样跟随系统深浅色；对话框创建失败时才退回系统消息框。
+    #[cfg(windows)]
+    if native_ui::welcome::show_startup_message(
+        "LetRecovery",
+        &crate::tr!("LetRecovery 无法启动"),
+        message,
+    ) {
+        return;
+    }
     #[cfg(windows)]
     {
         use std::ffi::OsStr;

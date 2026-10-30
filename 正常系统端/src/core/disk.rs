@@ -815,6 +815,8 @@ struct ShrinkAndCreateMarkerRequest {
 
 pub struct DiskManager;
 
+static TARGET_SHRINK_FLOOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl DiskManager {
     /// Prepare the dual-boot target entirely in normal Windows. A retry reuses the exact adjacent
     /// target/data extents and never shrinks the source a second time.
@@ -2152,6 +2154,11 @@ impl DiskManager {
     ///   PE 交接提交点的事务，现有分区则为 `None`
     /// * `Ok(None)` - 没有找到可用分区，且无法自动创建
     /// * `Err` - 发生错误
+    /// 自动暂存时目标分区缩小后必须保留的最小容量（由安装流程按镜像展开大小设置，0 表示不限制）。
+    pub(super) fn set_target_shrink_floor(bytes: u64) {
+        TARGET_SHRINK_FLOOR.store(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(super) fn find_suitable_data_partition(
         exclude_partition: &str,
         payload_size_bytes: u64,
@@ -2276,7 +2283,26 @@ impl DiskManager {
             target.as_ref().and_then(|target| {
                 let disk_number = target.disk_number?;
                 let partition_number = target.partition_number?;
-                let (free_bytes, _total_bytes) = Self::get_volume_space_bytes(exclude_letter)?;
+                let (free_bytes, total_bytes) = Self::get_volume_space_bytes(exclude_letter)?;
+                // 镜像要装回这个分区：缩出暂存空间后若放不下展开后的镜像，就不能从它缩卷。
+                let floor = TARGET_SHRINK_FLOOR.load(std::sync::atomic::Ordering::Relaxed);
+                let shrink_bytes = payload_size_bytes.saturating_add(2 * 1024 * 1024 * 1024);
+                if floor != 0 && total_bytes.saturating_sub(shrink_bytes) < floor {
+                    log::warn!(
+                        "[DISK] 不从 {}: 缩卷暂存：缩小后只剩 {} 字节，放不下展开后的镜像（需要 {} 字节）",
+                        exclude_letter,
+                        total_bytes.saturating_sub(shrink_bytes),
+                        floor
+                    );
+                    return Some(ShrinkCandidate {
+                        letter: exclude_letter,
+                        disk_number: target.disk_number,
+                        media: StorageMedia::Unknown,
+                        attachment: StorageAttachment::Unknown,
+                        free_bytes,
+                        shrink_is_safe: false,
+                    });
+                }
                 let (media, attachment) = *profiles
                     .entry(disk_number)
                     .or_insert_with(|| Self::get_storage_profile(disk_number));

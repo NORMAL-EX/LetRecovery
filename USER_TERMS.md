@@ -53,3 +53,7 @@ These project-specific terms supplement the [PolyForm Noncommercial License 1.0.
 - **NORMAL-EX reserves the final rights and interests concerning this project, customization licenses, and dispute handling.** This statement does not exclude any non-waivable rights granted to users by applicable law.
 
 For commercial authorization or official customization, contact the project through <https://github.com/NORMAL-EX/LetRecovery>.
+
+## 匿名统计与错误报告
+
+系统安装成功后，LetRecovery 会发送一次匿名安装计数（软件版本、安装方式和运行环境）；操作出错时会发送一份错误报告（出错原因和电脑环境摘要）。两者都不包含你的文件、账户和密码，可以随时在“关于”页面关闭。

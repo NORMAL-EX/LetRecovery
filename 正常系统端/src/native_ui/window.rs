@@ -174,7 +174,10 @@ fn catalogue_status_message(state: &CatalogueState) -> String {
 fn maintenance_pe_from_catalogue(catalogue: &[OnlinePE]) -> Option<OnlinePE> {
     catalogue
         .iter()
-        .find(|pe| pe.filename.eq_ignore_ascii_case("LetRecovery_PE.wim"))
+        .find(|pe| {
+            pe.filename
+                .eq_ignore_ascii_case(lr_core::branding::PE_WIM_NAME)
+        })
         .cloned()
 }
 
@@ -1390,12 +1393,14 @@ const fn navigation_visibility(easy_mode_enabled: bool, progress_visible: bool) 
     if progress_visible {
         [false; 6]
     } else {
+        use lr_core::branding::feature;
         [
             true,
-            true,
-            !easy_mode_enabled,
-            !easy_mode_enabled,
-            true,
+            // 小白模式只保留一键重装：系统备份、在线下载和工具箱都隐藏。定制版还可以关掉其中任意一项。
+            !easy_mode_enabled && feature::BACKUP,
+            !easy_mode_enabled && (feature::SYSTEM_DOWNLOAD || feature::SOFTWARE_DOWNLOAD),
+            !easy_mode_enabled && feature::TOOLS,
+            feature::HARDWARE_INFO,
             true,
         ]
     }
@@ -1650,6 +1655,15 @@ fn automation_information_layout(width: i32, height: i32, dpi: u32) -> Automatio
     }
 }
 
+/// Vertical band of the footer status STATIC below the command-bar top. The full layout and the
+/// chrome-only relayout (used when a setting shows or hides a footer button) must share it: they
+/// used to place the status 2 px and 6 px below the bar, so ticking "Show the Export automation
+/// config button" moved the boot-mode text down until the next page switch.
+fn footer_status_vertical(footer_y: i32, command_height: i32, dpi: u32) -> (i32, i32) {
+    let scale = |value: i32| value * dpi as i32 / 96;
+    (footer_y + scale(2), (command_height - scale(4)).max(0))
+}
+
 /// Vertically aligns the complete wrapped status block with the command buttons.
 ///
 /// The STATIC control draws wrapped text from its own top edge. Giving it the measured text
@@ -1707,7 +1721,7 @@ mod layout_tests {
         command_status_right_edge, confirmed_tool_backend_request, custom_install_mode_visibility,
         device_change_requests_partition_refresh, download_failure_message,
         effective_easy_mode_enabled, footer_state_refresh_for_page, footer_status_layout,
-        image_request_start_publishes_chrome, initial_mutating_tool_state,
+        footer_status_vertical, image_request_start_publishes_chrome, initial_mutating_tool_state,
         install_mode_supplement_layout, install_partition_heading_y, install_primary_enabled,
         list_view_item_became_selected, list_view_selection_state_changed,
         list_view_state_image_changed, main_window_ex_style_owns_input, may_publish_install_chrome,
@@ -1744,6 +1758,12 @@ mod layout_tests {
             catalogue_status_message(&CatalogueState::Failed("network failed".into())),
             "network failed"
         );
+    }
+
+    #[test]
+    fn footer_status_band_is_identical_for_full_and_chrome_relayouts() {
+        assert_eq!(footer_status_vertical(600, 56, 96), (602, 52));
+        assert_eq!(footer_status_vertical(900, 84, 144), (903, 78));
     }
 
     #[test]
@@ -1996,7 +2016,7 @@ mod layout_tests {
         );
         assert_eq!(
             navigation_visibility(true, false),
-            [true, true, false, false, true, true]
+            [true, false, false, false, true, true]
         );
         assert_eq!(navigation_visibility(true, true), [false; 6]);
     }
@@ -3269,6 +3289,55 @@ impl NativeWindow {
         effective_easy_mode_enabled(self.app_config.easy_mode_enabled, self.is_pe_environment)
     }
 
+    /// 关于页切换“使用模式”。小白模式沿用原来的简化安装界面；只有高级模式显示 WIM 引擎、
+    /// 下载线程和自动化导出等少用的设置。设置立即生效，不需要重启。
+    unsafe fn apply_ui_mode(&mut self, hwnd: HWND, mode: crate::core::app_config::UiMode) {
+        self.app_config.set_ui_mode(mode);
+        let easy = mode == crate::core::app_config::UiMode::Beginner;
+        if mode != crate::core::app_config::UiMode::Advanced
+            && !self.custom_unattend_path.trim().is_empty()
+        {
+            // The custom answer-file controls exist only in Advanced mode. Hidden means unused:
+            // drop the selection so the built-in unattend configuration applies again.
+            self.clear_custom_unattend();
+        }
+        // Expert rows of the advanced-options page follow the mode immediately.
+        self.update_advanced_install_context();
+        self.update_unattend_controls_visibility();
+        self.easy_controller.apply(EasyModeAction::SetEnabled(easy));
+        if let Some(page) = &self.about_page {
+            page.set_mode_state(mode, true);
+        }
+        if let Some(easy_page) = &mut self.easy_page {
+            easy_page.update(&self.easy_controller.view());
+            // 关于页仍是当前页：update 可能显示小白页的条件控件，这里立即恢复隐藏。
+            easy_page.show(false);
+        }
+        if self.page == Page::About {
+            if let Some(page) = &self.about_page {
+                page.show(true);
+            }
+        }
+        self.layout_page_switch_chrome(hwnd);
+        self.relayout_navigation_for_current_mode(hwnd);
+        // 模式切换会显示/隐藏关于页的多行控件；整页重绘一次，避免旧位置残留半个下拉框。
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+    }
+
+    /// Horizontal footer-status band (left inset and the command buttons' left edge).
+    fn footer_status_horizontal(
+        &self,
+        _hwnd: HWND,
+        status_right_edge: i32,
+    ) -> FooterStatusHorizontalLayout {
+        footer_status_horizontal_layout(status_right_edge, self.dpi)
+    }
+
     unsafe fn relayout_navigation_for_current_mode(&self, hwnd: HWND) {
         let Some(handles) = self.handles else {
             return;
@@ -4145,6 +4214,8 @@ impl NativeWindow {
             &self.app_config.install_prefs.advanced_options,
             AdvancedPageContext {
                 unattended_enabled: self.app_config.install_prefs.unattended_install,
+                expert_options_visible: self.app_config.ui_mode()
+                    == crate::core::app_config::UiMode::Advanced,
                 ..AdvancedPageContext::default()
             },
         )?;
@@ -4283,11 +4354,12 @@ impl NativeWindow {
                 link_labels: [
                     &crate::tr!("项目主页"),
                     &crate::tr!("问题反馈"),
-                    &crate::tr!("开源许可"),
+                    &crate::tr!("许可协议"),
                 ],
                 easy_mode: &crate::tr!("启用小白模式"),
                 easy_mode_enabled: self.easy_mode_enabled(),
                 easy_mode_available: !self.is_pe_environment,
+                mode: self.app_config.ui_mode(),
                 log_enabled: self.app_config.log_enabled,
                 automation_export_enabled: self.app_config.automation_export_enabled,
                 automatic_feedback_enabled: self.app_config.automatic_feedback_enabled(),
@@ -4311,16 +4383,18 @@ impl NativeWindow {
         if self.config.remote_config.is_none() {
             return crate::tr!("开发预览构建不会发起网络请求，在线资源目录未加载。");
         }
-        match self.config.remote_config.as_ref() {
-            Some(remote) if !remote.loaded => remote
-                .error
-                .clone()
-                .unwrap_or_else(|| crate::tr!("在线资源目录加载失败。")),
-            Some(_) if self.download_controller.rows().is_empty() => {
+        // 在线目录在窗口创建后异步刷新，预加载阶段的 config.remote_config 永远是 None。旧代码据此
+        // 显示“加载超时”，下载页被重建（例如切换语言）时，已经加载成功、表格里有内容的目录也会
+        // 被显示成失败，必须再点一次“刷新”。状态只能来自控制器的真实目录状态。
+        match self.download_controller.state() {
+            CatalogueState::Ready if self.download_controller.rows().is_empty() => {
                 crate::tr!("服务器未返回此分类的可用资源。")
             }
-            Some(_) => crate::tr!("选择要下载的资源。"),
-            None => crate::tr!("在线资源目录加载超时，请点击“刷新”重试。"),
+            CatalogueState::Ready => crate::tr!("选择要下载的资源。"),
+            CatalogueState::NotLoaded | CatalogueState::Loading => {
+                crate::tr!("正在刷新在线资源目录...")
+            }
+            CatalogueState::Failed(message) => message.clone(),
         }
     }
 
@@ -4981,8 +5055,12 @@ impl NativeWindow {
             // The hint stays beside the buttons only when it fits there on one line; a wrapped
             // second line would be cut off by the one-line label.
             let hint_width = control_text_width(h.unattend_path);
-            let path_on_own_row =
-                inline_path_width < self.scale(260) || hint_width > inline_path_width;
+            // The custom answer-file controls exist only in Advanced mode; outside it they are
+            // hidden and must not push the following option row down.
+            let custom_unattend_visible =
+                self.app_config.ui_mode() == crate::core::app_config::UiMode::Advanced;
+            let path_on_own_row = custom_unattend_visible
+                && (inline_path_width < self.scale(260) || hint_width > inline_path_width);
             let path_y = if path_on_own_row {
                 if very_compact_options {
                     driver_y + self.scale(34)
@@ -5157,7 +5235,7 @@ impl NativeWindow {
         let command_visibility = command_bar_visibility(
             self.page,
             self.easy_mode_enabled(),
-            self.app_config.automation_export_enabled,
+            self.app_config.automation_export_visible(),
             self.advanced_visible,
             self.progress_visible,
         );
@@ -5196,7 +5274,7 @@ impl NativeWindow {
         let primary_x = command_layout.x[3].unwrap_or(content_right);
         let status_right_edge =
             command_status_right_edge(self.advanced_visible, advanced_x, command_layout.left_edge);
-        let status_layout = footer_status_horizontal_layout(status_right_edge, self.dpi);
+        let status_layout = self.footer_status_horizontal(hwnd, status_right_edge);
         let _ = MoveWindow(
             h.automation_export,
             automation_x,
@@ -5231,12 +5309,13 @@ impl NativeWindow {
         );
         // A long translated status (boot mode, TPM, secure boot) may take three lines: give it
         // the whole command bar height instead of cutting off the last line.
+        let (status_y, status_height) = footer_status_vertical(footer_y, command, self.dpi);
         let _ = MoveWindow(
             h.status,
             status_layout.x,
-            footer_y + self.scale(2),
+            status_y,
             status_layout.width,
-            (command - self.scale(4)).max(0),
+            status_height,
             repaint,
         );
         let page_top = if self.progress_visible {
@@ -5334,7 +5413,7 @@ impl NativeWindow {
         let command_visibility = command_bar_visibility(
             self.page,
             self.easy_mode_enabled(),
-            self.app_config.automation_export_enabled,
+            self.app_config.automation_export_visible(),
             self.advanced_visible,
             self.progress_visible,
         );
@@ -5366,7 +5445,7 @@ impl NativeWindow {
         };
         let status_right_edge =
             command_status_right_edge(self.advanced_visible, advanced_x, command_layout.left_edge);
-        let status_layout = footer_status_horizontal_layout(status_right_edge, self.dpi);
+        let status_layout = self.footer_status_horizontal(hwnd, status_right_edge);
         for (control, x) in [
             (
                 h.automation_export,
@@ -5385,12 +5464,13 @@ impl NativeWindow {
                 false,
             );
         }
+        let (status_y, status_height) = footer_status_vertical(footer_y, command, self.dpi);
         let _ = MoveWindow(
             h.status,
             status_layout.x,
-            footer_y + self.scale(6),
+            status_y,
             status_layout.width,
-            (command - self.scale(12)).max(0),
+            status_height,
             false,
         );
     }
@@ -5919,7 +5999,7 @@ impl NativeWindow {
         }
         let _ = ShowWindow(
             h.automation_export,
-            if self.app_config.automation_export_enabled
+            if self.app_config.automation_export_visible()
                 && (install_visible || page == Page::Backup)
             {
                 SW_SHOW
@@ -6080,6 +6160,7 @@ impl NativeWindow {
             && !self.easy_mode_enabled()
             && !self.advanced_visible
             && !self.progress_visible
+            && self.app_config.ui_mode() == crate::core::app_config::UiMode::Advanced
             && SendMessageW(handles.unattend, 0x00F0, WPARAM(0), LPARAM(0)).0 == 1;
         let command = if visible { SW_SHOW } else { SW_HIDE };
         let _ = ShowWindow(handles.unattend_browse, command);
@@ -6607,6 +6688,8 @@ impl NativeWindow {
                 vmware_tools_available,
                 target_capabilities: capabilities,
                 personal_files_available,
+                expert_options_visible: self.app_config.ui_mode()
+                    == crate::core::app_config::UiMode::Advanced,
             });
         }
     }
@@ -8844,13 +8927,17 @@ impl NativeWindow {
         let _ = SetTimer(hwnd, TOOL_DIALOG_TIMER_ID, 100, None);
         let pe = maintenance_pe_from_catalogue(&self.pe_catalogue).or_else(|| {
             matches!(
-                crate::core::pe::PeManager::find_cached_pe("LetRecovery_PE.wim", None, None),
+                crate::core::pe::PeManager::find_cached_pe(
+                    lr_core::branding::PE_WIM_NAME,
+                    None,
+                    None
+                ),
                 Ok(lr_core::cached_artifact::CachedArtifactPresence::Present { .. })
             )
             .then(|| OnlinePE {
                 download_url: String::new(),
                 display_name: "LetRecovery PE".to_owned(),
-                filename: "LetRecovery_PE.wim".to_owned(),
+                filename: lr_core::branding::PE_WIM_NAME.to_owned(),
                 md5: None,
                 sha256: None,
             })
@@ -9706,7 +9793,7 @@ impl NativeWindow {
                     target: current_drive,
                     available_items: locked_volumes,
                     bitlocker_action: super::tool_dialogs_mutating::BitLockerAction::Unlock,
-                    status: crate::tr!("该卷已被 BitLocker 锁定。请输入密码或恢复密钥后解锁。"),
+                    status: crate::tr!("这个分区被 BitLocker 锁定了。输入它的解锁密码即可继续安装，也可以直接粘贴 48 位恢复密钥。"),
                     ..Default::default()
                 });
                 dialog.show_modeless();
@@ -12318,6 +12405,8 @@ impl NativeWindow {
                         state.step = ProgressValue::new(100, 100);
                     }
                     InstallWorkerMessage::Event(InstallExecutionEvent::Completed(outcome)) => {
+                        // 正常端的工作已交接完成；是否真正装好由新系统首次登录后确认。
+                        crate::core::install_stats::finish_handoff();
                         state.overall = ProgressValue::new(100, 100);
                         state.step = state.overall;
                         state.status = ProgressStatus::Succeeded;
@@ -12357,6 +12446,7 @@ impl NativeWindow {
                         message,
                         security_block,
                     } => {
+                        crate::core::install_stats::report_failed("error");
                         state.status = ProgressStatus::Failed;
                         state.current_step = crate::tr!("安装失败");
                         state.detail = message;
@@ -12368,6 +12458,7 @@ impl NativeWindow {
                         terminal = true;
                     }
                     InstallWorkerMessage::Cancelled => {
+                        crate::core::install_stats::report_failed("cancelled");
                         state.status = ProgressStatus::Cancelled;
                         state.cancellable = false;
                         state.current_step = crate::tr!("安装已取消");
@@ -13392,6 +13483,16 @@ impl NativeWindow {
                             intent.target_partition,
                             intent.volume_index
                         );
+                        // 匿名安装量统计：开始安装时登记一次，与错误报告共用“关于”页开关。
+                        crate::core::install_stats::begin_install(
+                            if format!("{:?}", intent.mode).eq_ignore_ascii_case("ViaPe") {
+                                "via_pe"
+                            } else {
+                                "direct"
+                            },
+                            self.is_pe_environment,
+                            self.app_config.automatic_feedback_enabled(),
+                        );
                         if let Some(remote) = self.remote_image_download.clone() {
                             let downloaded_path =
                                 remote.plan.save_directory.join(&remote.plan.filename);
@@ -13468,11 +13569,16 @@ impl NativeWindow {
     }
 
     unsafe fn open_about_link(&self, hwnd: HWND, link: AboutLink) {
-        let url = match link {
-            AboutLink::ProjectHomepage => "https://letrecovery.net",
-            AboutLink::Documentation => "https://github.com/NORMAL-EX/LetRecovery/issues",
-            AboutLink::License => "https://github.com/NORMAL-EX/LetRecovery/blob/main/LICENSE",
-        };
+        // Commercial builds reuse the three About buttons for their promoted software.
+        let promotions = lr_core::branding::promotions();
+        let url = promotions
+            .get(link as usize)
+            .map(|(_, url)| url.as_str())
+            .unwrap_or(match link {
+                AboutLink::ProjectHomepage => lr_core::branding::HOMEPAGE_URL,
+                AboutLink::Documentation => lr_core::branding::ISSUES_URL,
+                AboutLink::License => lr_core::branding::LICENSE_URL,
+            });
         let url = wide(url);
         let result = ShellExecuteW(
             hwnd,
@@ -13805,45 +13911,65 @@ impl NativeWindow {
             }
         };
         let log_path = snapshot.path().to_path_buf();
+        let mut report_note = String::new();
         if self.app_config.automatic_feedback_enabled() {
-            if let Ok(log) = std::fs::read_to_string(&log_path) {
-                match crate::core::feedback_client::upload_log(&log, "normal") {
-                    Ok(ticket) => {
-                        self.show_information(
-                            hwnd,
-                            crate::tr!("自动反馈成功"),
-                            crate::tr!("错误日志已安全上传。Ticket ID：{}", ticket),
-                        );
-                        return;
-                    }
-                    Err(error) => {
-                        log::warn!("[FEEDBACK] 自动反馈失败，保留手动日志流程: {error:#}")
-                    }
-                }
-            }
-        }
-        let content = crate::tr!(
-            "操作已停止。请将下面的日志文件提供给开发者，以便定位并解决问题。\r\n\r\n日志文件：{}",
-            log_path.display()
-        );
-        match lr_core::windows_diagnostics::show_error_log_prompt(
-            hwnd,
-            &crate::tr!("操作出错"),
-            &crate::tr!("LetRecovery 遇到错误"),
-            &content,
-            &crate::tr!("打开文件"),
-        ) {
-            Ok(true) => {
-                if let Err(error) =
-                    lr_core::windows_diagnostics::reveal_file_in_explorer(log_path.clone())
-                {
-                    log::error!(
-                        "[DIAGNOSTIC UI] 无法启动日志文件定位线程 {}: {error}",
-                        log_path.display()
+            // 只发送出错原因和电脑环境摘要。上传在后台线程进行，最多等 4 秒，窗口不会卡住。
+            match crate::core::feedback_client::send_error_report(
+                &log_path,
+                "normal",
+                std::time::Duration::from_secs(4),
+            ) {
+                Some(Ok(ticket)) => {
+                    report_note = crate::tr!(
+                        "\r\n\r\n错误报告已自动发送（编号 {}）。在交流群反馈时提供这个编号即可。",
+                        ticket
                     );
                 }
+                Some(Err(error)) => {
+                    log::warn!("[FEEDBACK] 自动发送错误报告失败，保留手动日志流程: {error:#}")
+                }
+                None => log::info!("[FEEDBACK] 错误报告仍在后台发送"),
             }
-            Ok(false) => {}
+        }
+        // 弹窗先写出错原因（本次运行的最后一条错误），用户不用打开日志就知道停在哪一步。
+        let failure_summary = std::fs::read(&log_path)
+            .ok()
+            .and_then(|bytes| lr_core::feedback::failure_summary(&String::from_utf8_lossy(&bytes)))
+            .map(|summary| crate::tr!("出错原因：{}", summary) + "\r\n\r\n")
+            .unwrap_or_default();
+        let content = failure_summary
+            + &crate::tr!(
+                "操作已停止。请将下面的日志文件提供给开发者，以便定位并解决问题。\r\n\r\n日志文件：{}",
+                log_path.display()
+            )
+            + &report_note;
+        // 使用程序自己的对话框（与主窗口相同的深浅色主题），不再用系统 TaskDialog。
+        let spec = DialogSpec {
+            window_title: crate::tr!("操作出错"),
+            title: crate::tr!("LetRecovery 遇到错误"),
+            description: content.clone(),
+            width: 640,
+            height: 280,
+            buttons: DialogButtons {
+                primary: crate::tr!("打开文件"),
+                secondary: None,
+                cancel: Some(crate::tr!("关闭")),
+            },
+        };
+        match DialogShell::create(hwnd, spec) {
+            Ok(mut dialog) => {
+                dialog.fit_content_height(0);
+                if dialog.show_modal() == super::dialog::DialogResult::Primary {
+                    if let Err(error) =
+                        lr_core::windows_diagnostics::reveal_file_in_explorer(log_path.clone())
+                    {
+                        log::error!(
+                            "[DIAGNOSTIC UI] 无法启动日志文件定位线程 {}: {error}",
+                            log_path.display()
+                        );
+                    }
+                }
+            }
             Err(error) => {
                 log::error!("[DIAGNOSTIC UI] 无法显示错误日志弹窗: {error}");
                 self.show_information(hwnd, crate::tr!("操作出错"), content);
@@ -15180,6 +15306,14 @@ unsafe extern "system" fn window_proc(
                 if state.handle_tool_content_action(command_id, source) {
                     return LRESULT(0);
                 }
+                if command_id == super::preinstall_dialog::ID_PREINSTALL_AUTO_SELECT {
+                    if notification == BN_CLICKED as u16 {
+                        if let Some(dialog) = &mut state.preinstall_dialog {
+                            dialog.toggle_auto_select();
+                        }
+                    }
+                    return LRESULT(0);
+                }
                 if NativeHardwareInspectorDialog::owns_command(command_id) {
                     if notification == BN_CLICKED as u16 {
                         if let Some(dialog) = &mut state.hardware_inspector_dialog {
@@ -15275,54 +15409,47 @@ unsafe extern "system" fn window_proc(
                             log::warn!("预装应用目录当前不可用，不显示选择窗口");
                             return LRESULT(0);
                         }
-                        let mut selected = state
+                        let selected = state
                             .app_config
                             .install_prefs
                             .advanced_options
                             .preinstalled_software
                             .clone();
-                        if selected.is_empty() && !state.preinstall_selection_user_set {
-                            if let Some(target) = state
-                                .selected_partition_record()
-                                .map(|partition| partition.letter.clone())
-                            {
-                                match crate::core::native_software_detection::detect_installed_display_names(&target)
-                                    .and_then(|installed| {
-                                        crate::core::native_software_detection::default_packages_for_installed_names(
-                                            &categories,
-                                            &installed,
-                                        )
-                                    })
-                                {
-                                    Ok(defaults) => {
-                                        if !defaults.is_empty() {
-                                            log::info!(
-                                                "[SOFTWARE DETECTION] target={} matched {} server-catalogue application(s) for the initial selection",
-                                                target,
-                                                defaults.len()
-                                            );
-                                            selected = defaults;
-                                            state
-                                                .app_config
-                                                .install_prefs
-                                                .advanced_options
-                                                .preinstalled_software = selected.clone();
-                                            if let Some(page) = &state.advanced_page {
-                                                page.set_preinstalled_software_selection(
-                                                    selected.len(),
-                                                    true,
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(error) => log::warn!(
-                                        "[SOFTWARE DETECTION] target={} default selection skipped: {error:#}",
-                                        target
-                                    ),
+                        // 打开时不再自动勾选。检测到的“目标系统已安装且在目录里”的软件只作为对话框
+                        // 顶部“自动勾选”按钮的建议，按一次勾上，再按一次取消。
+                        let suggested = match state
+                            .selected_partition_record()
+                            .map(|partition| partition.letter.clone())
+                        {
+                            Some(target) => match crate::core::native_software_detection::detect_installed_display_names(&target)
+                                .and_then(|installed| {
+                                    crate::core::native_software_detection::default_packages_for_installed_names(
+                                        &categories,
+                                        &installed,
+                                    )
+                                }) {
+                                Ok(defaults) => {
+                                    log::info!(
+                                        "[SOFTWARE DETECTION] target={} matched {} server-catalogue application(s) for the auto-select button",
+                                        target,
+                                        defaults.len()
+                                    );
+                                    defaults
                                 }
-                            }
-                        }
-                        match NativePreinstallDialog::create(hwnd, categories, &selected) {
+                                Err(error) => {
+                                    log::warn!(
+                                        "[SOFTWARE DETECTION] target={} auto-select suggestions unavailable: {error:#}",
+                                        target
+                                    );
+                                    Vec::new()
+                                }
+                            },
+                            None => Vec::new(),
+                        };
+                        let _ = state.preinstall_selection_user_set;
+                        match NativePreinstallDialog::create(
+                            hwnd, categories, &selected, &suggested,
+                        ) {
                             Ok(mut dialog) => {
                                 dialog.show_modeless();
                                 state.preinstall_dialog = Some(dialog);
@@ -15607,36 +15734,17 @@ unsafe extern "system" fn window_proc(
                 } else if state.page == Page::About {
                     match AboutPage::command_intent(command_id) {
                         Some(InfoIntent::OpenLink(link)) => state.open_about_link(hwnd, link),
-                        Some(InfoIntent::ToggleEasyMode) => {
+                        Some(InfoIntent::ToggleEasyMode)
+                            if notification == CBN_SELCHANGE as u16 =>
+                        {
                             let is_pe = state
                                 .config
                                 .system_info
                                 .as_ref()
                                 .is_some_and(|info| info.is_pe_environment);
-                            let mut changed = false;
-                            if !is_pe {
-                                if let Some(page) = &state.about_page {
-                                    let enabled = page.easy_mode_enabled();
-                                    state.app_config.set_easy_mode(enabled);
-                                    state
-                                        .easy_controller
-                                        .apply(EasyModeAction::SetEnabled(enabled));
-                                    page.set_easy_mode_state(enabled, true);
-                                    if let Some(easy) = &mut state.easy_page {
-                                        easy.update(&state.easy_controller.view());
-                                        // The About page remains active here. `update` may show
-                                        // conditional easy-mode children, so immediately restore
-                                        // the page-level visibility invariant.
-                                        easy.show(false);
-                                    }
-                                    changed = true;
-                                }
-                            }
-                            if changed {
-                                // The setting is immediate. Hide/show the real navigation HWNDs and
-                                // compact their rows in one redraw transaction instead of waiting for
-                                // a restart or another page click.
-                                state.relayout_navigation_for_current_mode(hwnd);
+                            let mode = state.about_page.as_ref().map(|page| page.selected_mode());
+                            if let (false, Some(mode)) = (is_pe, mode) {
+                                state.apply_ui_mode(hwnd, mode);
                             }
                         }
                         Some(InfoIntent::SelectLanguage)
@@ -15954,33 +16062,33 @@ unsafe extern "system" fn window_proc(
                 let original = &*(lparam.0 as *const DRAWITEMSTRUCT);
                 // Owner-drawn buttons and custom statics are composed off-screen and copied in
                 // one BitBlt, so their background never shows before their text and glyph.
-                redraw::draw_item_buffered(original, |item| {
-                    let handled = state
-                        .pe_maintenance_dialog
-                        .as_ref()
-                        .is_some_and(|dialog| dialog.draw_item(item, state.control_palette()))
-                        || state
-                            .advanced_page
-                            .as_ref()
-                            .is_some_and(|page| page.draw_item(item, state.control_palette()))
-                        || state
-                            .progress_page
-                            .as_ref()
-                            .is_some_and(|page| page.draw_item(item, state.control_palette()));
-                    if !handled {
-                        if state
-                            .handles
-                            .is_some_and(|handles| item.hwndItem == handles.status)
-                        {
-                            state.draw_footer_status(item);
-                        } else if item.CtlType.0 == ODT_HEADER {
-                            state.draw_list_header(item);
-                        } else {
-                            state.draw_button(item);
+                let draw =
+                    |item: &DRAWITEMSTRUCT| -> bool {
+                        let handled =
+                            state.pe_maintenance_dialog.as_ref().is_some_and(|dialog| {
+                                dialog.draw_item(item, state.control_palette())
+                            }) || state
+                                .advanced_page
+                                .as_ref()
+                                .is_some_and(|page| page.draw_item(item, state.control_palette()))
+                                || state.progress_page.as_ref().is_some_and(|page| {
+                                    page.draw_item(item, state.control_palette())
+                                });
+                        if !handled {
+                            if state
+                                .handles
+                                .is_some_and(|handles| item.hwndItem == handles.status)
+                            {
+                                state.draw_footer_status(item);
+                            } else if item.CtlType.0 == ODT_HEADER {
+                                state.draw_list_header(item);
+                            } else {
+                                state.draw_button(item);
+                            }
                         }
-                    }
-                    true
-                });
+                        true
+                    };
+                redraw::draw_item_buffered(original, draw);
                 return LRESULT(1);
             }
             DefWindowProcW(hwnd, message, wparam, lparam)
@@ -16275,7 +16383,8 @@ impl NativeWindow {
         } else {
             command_button_role(id)
         };
-        draw_inno_button(item, self.control_palette(), role, self.font, self.dpi);
+        let palette = self.control_palette();
+        draw_inno_button(item, palette, role, self.font, self.dpi);
     }
 }
 

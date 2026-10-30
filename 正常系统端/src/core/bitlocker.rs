@@ -353,8 +353,8 @@ impl BitLockerManager {
                 VolumeStatus::NotEncrypted
             }
             Err(FveError::AccessDenied) => {
-                log::warn!(
-                    "驱动器 {}: 访问被拒绝，可能需要管理员权限 (fveapi), 回退到 manage-bde",
+                log::info!(
+                    "驱动器 {}: FVEAPI 不允许读取状态，改用 manage-bde 查询",
                     drive_letter
                 );
                 self.get_status_manage_bde(drive_letter)
@@ -473,6 +473,10 @@ impl BitLockerManager {
                 continue;
             }
             let letter = char::from(b'A' + index as u8);
+            // 只向确实加密的卷要恢复密码；未加密的卷去问 manage-bde 只会产生一串报错日志。
+            if matches!(self.get_status(letter), VolumeStatus::NotEncrypted) {
+                continue;
+            }
             match self.get_recovery_key(&format!("{letter}:")) {
                 Ok(key) if !keys.contains(&key) => keys.push(key),
                 Ok(_) => {}
@@ -542,7 +546,8 @@ impl BitLockerManager {
 
         let status = self.get_status(drive_letter);
         if status == VolumeStatus::NotEncrypted {
-            return UnlockResult::failure(&letter, &tr!("该驱动器未启用 BitLocker 加密"), None);
+            // 未加密的卷不需要解锁：按“已可访问”返回成功，不再把它报告成解锁失败。
+            return UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"));
         }
         if status == VolumeStatus::EncryptedUnlocked {
             return UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"));
@@ -601,12 +606,20 @@ impl BitLockerManager {
                     UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"))
                 }
                 Err(e) => {
-                    log::error!("BitLocker 分区 {} 解锁失败: {} (fveapi)", letter, e);
+                    log::warn!(
+                        "BitLocker 分区 {} 解锁失败: {} (fveapi，随后回退 manage-bde)",
+                        letter,
+                        e
+                    );
                     UnlockResult::failure(&letter, &e.to_string(), None)
                 }
             },
             Err(e) => {
-                log::error!("BitLocker 分区 {} 打开失败: {} (fveapi)", letter, e);
+                log::warn!(
+                    "BitLocker 分区 {} 打开失败: {} (fveapi，随后回退 manage-bde)",
+                    letter,
+                    e
+                );
                 UnlockResult::failure(&letter, &e.to_string(), None)
             }
         }
@@ -679,7 +692,8 @@ impl BitLockerManager {
 
         let status = self.get_status(drive_letter);
         if status == VolumeStatus::NotEncrypted {
-            return UnlockResult::failure(&letter, &tr!("该驱动器未启用 BitLocker 加密"), None);
+            // 未加密的卷不需要解锁：按“已可访问”返回成功，不再把它报告成解锁失败。
+            return UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"));
         }
         if status == VolumeStatus::EncryptedUnlocked {
             return UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"));
@@ -745,12 +759,20 @@ impl BitLockerManager {
                     UnlockResult::success(&letter, &tr!("驱动器已经是解锁状态"))
                 }
                 Err(e) => {
-                    log::error!("BitLocker 分区 {} 解锁失败: {} (fveapi)", letter, e);
+                    log::warn!(
+                        "BitLocker 分区 {} 解锁失败: {} (fveapi，随后回退 manage-bde)",
+                        letter,
+                        e
+                    );
                     UnlockResult::failure(&letter, &e.to_string(), None)
                 }
             },
             Err(e) => {
-                log::error!("BitLocker 分区 {} 打开失败: {} (fveapi)", letter, e);
+                log::warn!(
+                    "BitLocker 分区 {} 打开失败: {} (fveapi，随后回退 manage-bde)",
+                    letter,
+                    e
+                );
                 UnlockResult::failure(&letter, &e.to_string(), None)
             }
         }

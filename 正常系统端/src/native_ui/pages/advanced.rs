@@ -571,6 +571,11 @@ pub struct AdvancedPageContext {
     /// Whether "keep personal files" can run for the current target/image/install mode. The
     /// install controller rejects the option otherwise, so it is hidden instead of offered.
     pub personal_files_available: bool,
+    /// Advanced mode shows every option. Normal mode hides the rarely used expert rows
+    /// (deployment scripts, custom driver/registry/file folders, the built-in Administrator
+    /// group, the system volume label and the Windows 7 0xA5 attempt). Hidden rows are cleared,
+    /// so they never apply invisibly.
+    pub expert_options_visible: bool,
 }
 
 impl Default for AdvancedPageContext {
@@ -583,6 +588,7 @@ impl Default for AdvancedPageContext {
             vmware_tools_available: false,
             target_capabilities: AdvancedOptionCapabilities::unknown(),
             personal_files_available: false,
+            expert_options_visible: true,
         }
     }
 }
@@ -1470,72 +1476,80 @@ impl AdvancedPage {
         }
         bottoms[column] += section_gap;
 
-        let column = shortest_column(&bottoms);
-        let x = grid.x(0, column);
-        layout_heading(
-            h.scripts_header,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        layout_pair(
-            h.deploy_script,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        layout_pair(
-            h.first_login_script,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        bottoms[column] += section_gap;
-
-        let column = shortest_column(&bottoms);
-        let x = grid.x(0, column);
-        layout_heading(
-            h.content_header,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        layout_pair(
-            h.custom_drivers,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        if self.context.target_capabilities.storage_controller_drivers {
-            layout_check(
-                h.storage_drivers,
+        let expert = self.context.expert_options_visible;
+        if expert {
+            let column = shortest_column(&bottoms);
+            let x = grid.x(0, column);
+            layout_heading(
+                h.scripts_header,
                 x,
                 &mut bottoms[column],
                 grid.column_width,
                 dpi,
             );
+            layout_pair(
+                h.deploy_script,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+            layout_pair(
+                h.first_login_script,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+            bottoms[column] += section_gap;
         }
-        layout_pair(
-            h.registry_file,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        layout_pair(
-            h.custom_files,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        bottoms[column] += section_gap;
-
+        let storage_supported = self.context.target_capabilities.storage_controller_drivers;
+        if expert || storage_supported {
+            let column = shortest_column(&bottoms);
+            let x = grid.x(0, column);
+            layout_heading(
+                h.content_header,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+            if expert {
+                layout_pair(
+                    h.custom_drivers,
+                    x,
+                    &mut bottoms[column],
+                    grid.column_width,
+                    dpi,
+                );
+            }
+            if storage_supported {
+                layout_check(
+                    h.storage_drivers,
+                    x,
+                    &mut bottoms[column],
+                    grid.column_width,
+                    dpi,
+                );
+            }
+            if expert {
+                layout_pair(
+                    h.registry_file,
+                    x,
+                    &mut bottoms[column],
+                    grid.column_width,
+                    dpi,
+                );
+                layout_pair(
+                    h.custom_files,
+                    x,
+                    &mut bottoms[column],
+                    grid.column_width,
+                    dpi,
+                );
+            }
+            bottoms[column] += section_gap;
+        }
         let column = shortest_column(&bottoms);
         let x = grid.x(0, column);
         layout_heading(
@@ -1546,49 +1560,50 @@ impl AdvancedPage {
             dpi,
         );
         layout_pair(h.username, x, &mut bottoms[column], grid.column_width, dpi);
-        layout_check(
-            h.builtin_administrator,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        layout_labeled_edit(
-            h.builtin_administrator_name_label,
-            h.builtin_administrator_name,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        layout_labeled_edit(
-            h.builtin_administrator_password_label,
-            h.builtin_administrator_password,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
-        layout_check(
-            h.builtin_administrator_auto_logon,
-            x + s(20),
-            &mut bottoms[column],
-            (grid.column_width - s(20)).max(0),
-            dpi,
-        );
-        layout_pair(
-            h.volume_label,
-            x,
-            &mut bottoms[column],
-            grid.column_width,
-            dpi,
-        );
+        if expert {
+            layout_check(
+                h.builtin_administrator,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+            layout_labeled_edit(
+                h.builtin_administrator_name_label,
+                h.builtin_administrator_name,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+            layout_labeled_edit(
+                h.builtin_administrator_password_label,
+                h.builtin_administrator_password,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+            layout_check(
+                h.builtin_administrator_auto_logon,
+                x + s(20),
+                &mut bottoms[column],
+                (grid.column_width - s(20)).max(0),
+                dpi,
+            );
+            layout_pair(
+                h.volume_label,
+                x,
+                &mut bottoms[column],
+                grid.column_width,
+                dpi,
+            );
+        }
         bottoms[column] += section_gap;
-
         // Windows 7 USB3/NVMe support is selected automatically from the locked built-in payload,
         // image architecture and target disk bus. Preserve the old processor-power workaround as
         // an explicit compatibility attempt; the broad 0x7B mutation and UefiSeven stay hidden.
-        if self.context.target_capabilities.windows_7 {
+        if self.context.target_capabilities.windows_7 && expert {
             let column = shortest_column(&bottoms);
             let x = grid.x(0, column);
             layout_heading(
@@ -1888,7 +1903,9 @@ impl AdvancedPage {
         if !vmware_visible {
             set_checked(h.vmware_tools, false);
         }
-        let builtin_available = unattended && self.context.builtin_administrator_available;
+        let builtin_available = unattended
+            && self.context.builtin_administrator_available
+            && self.context.expert_options_visible;
         let _ = EnableWindow(h.builtin_administrator, builtin_available);
         if !builtin_available {
             set_checked(h.builtin_administrator, false);
@@ -1905,7 +1922,8 @@ impl AdvancedPage {
         for control in self.windows_7_controls() {
             let _ = ShowWindow(control, SW_HIDE);
         }
-        let win7_compat_visible = self.context.target_capabilities.windows_7;
+        let win7_compat_visible =
+            self.context.target_capabilities.windows_7 && self.context.expert_options_visible;
         for control in [h.windows_7_header, h.windows_7_acpi] {
             let _ = ShowWindow(
                 control,
@@ -1917,6 +1935,10 @@ impl AdvancedPage {
             );
         }
         let _ = EnableWindow(h.windows_7_acpi, win7_compat_visible);
+        if !self.context.expert_options_visible {
+            // Hidden means unused: Normal mode must not keep the 0xA5 attempt selected.
+            set_checked(h.windows_7_acpi, false);
+        }
         for control in self.xp_controls() {
             let _ = ShowWindow(
                 control,
@@ -1926,6 +1948,40 @@ impl AdvancedPage {
                     SW_HIDE
                 },
             );
+        }
+        let expert = self.context.expert_options_visible;
+        for pair in [
+            h.deploy_script,
+            h.first_login_script,
+            h.custom_drivers,
+            h.registry_file,
+            h.custom_files,
+            h.volume_label,
+        ] {
+            set_check_edit_visible(pair, expert);
+            if !expert {
+                set_checked(pair.check, false);
+            }
+        }
+        let expert_command = if expert { SW_SHOW } else { SW_HIDE };
+        let _ = ShowWindow(h.scripts_header, expert_command);
+        let _ = ShowWindow(
+            h.content_header,
+            if expert || storage_supported {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+        for control in [
+            h.builtin_administrator,
+            h.builtin_administrator_name_label,
+            h.builtin_administrator_name,
+            h.builtin_administrator_password_label,
+            h.builtin_administrator_password,
+            h.builtin_administrator_auto_logon,
+        ] {
+            let _ = ShowWindow(control, expert_command);
         }
         self.update_dependencies();
     }
@@ -3062,6 +3118,15 @@ unsafe fn radio_edit(
             })
             .transpose()?,
     })
+}
+
+unsafe fn set_check_edit_visible(pair: CheckEdit, visible: bool) {
+    let command = if visible { SW_SHOW } else { SW_HIDE };
+    let _ = ShowWindow(pair.check, command);
+    let _ = ShowWindow(pair.edit, command);
+    if let Some(browse) = pair.browse {
+        let _ = ShowWindow(browse.button, command);
+    }
 }
 
 unsafe fn set_checked(control: HWND, checked: bool) {
