@@ -1,22 +1,4 @@
 {
   "schema_version": 1,
-  "entries": [
-    {
-      "de-DE": "Inkrementelle Updates hinzugefügt: LetRecovery sucht beim Start nach neuen Versionen, zeigt das Änderungsprotokoll an, lädt nur geänderte Dateien herunter (das integrierte PE wird dateiweise aktualisiert) und stellt bei einem Fehler automatisch die vorherige Version wieder her.",
-      "en-US": "Added incremental updates: LetRecovery checks for new versions at startup, shows the changelog, downloads only changed files (the built-in PE is updated file by file) and automatically restores the previous version if the update fails.",
-      "fr-FR": "Ajout des mises à jour incrémentielles : LetRecovery vérifie les nouvelles versions au démarrage, affiche le journal des modifications, ne télécharge que les fichiers modifiés (le PE intégré est mis à jour fichier par fichier) et restaure automatiquement la version précédente en cas d'échec.",
-      "ja-JP": "差分アップデートを追加：起動時に新しいバージョンを確認して更新履歴を表示し、変更されたファイルのみをダウンロードします（内蔵 PE もファイル単位で更新）。更新に失敗した場合は自動的に元のバージョンに戻ります。",
-      "ko-KR": "증분 업데이트 추가: 시작 시 새 버전을 확인하고 변경 내역을 표시하며, 변경된 파일만 다운로드합니다(내장 PE도 파일 단위로 업데이트). 업데이트에 실패하면 이전 버전으로 자동 복원됩니다.",
-      "zh-CN": "新增增量升级：启动时检查新版本并显示更新日志，只下载有变化的文件（内置 PE 也只更新变化的文件），升级失败会自动恢复原版本。",
-      "zh-TW": "新增增量升級：啟動時檢查新版本並顯示更新日誌，只下載有變化的檔案（內建 PE 也只更新變化的檔案），升級失敗會自動還原原版本。"
-    },
-    {
-      "de-DE": "Wurde das PE-Image in bin\\pe verändert, zeigt das Update jetzt die veränderten Images an und fragt zuerst: fortsetzen (das offizielle PE-Image der neuen Version herunterladen und sie ersetzen), Updates deaktivieren (das veränderte Image und die aktuelle Version behalten; Installation und andere Funktionen bleiben nutzbar) oder später entscheiden. Das Programm wird nicht mehr aktualisiert, während ein möglicherweise inkompatibles altes Image erhalten bleibt. Updates lassen sich auf der Seite „Info“ mit „Automatisch nach Updates suchen“ wieder einschalten.",
-      "en-US": "If the PE image in bin\\pe has been modified, the update now lists the modified images and asks first: continue (download the official PE image of the new version to replace them), disable updates (keep the modified image and the current version; installation and other features keep working) or decide later. The program is no longer updated while a possibly incompatible old image is kept. Updates can be turned back on with “Check for updates automatically” on the About page.",
-      "fr-FR": "Si l’image PE de bin\\pe a été modifiée, la mise à jour affiche désormais les images modifiées et demande d’abord : poursuivre (télécharger l’image PE officielle de la nouvelle version pour les remplacer), désactiver les mises à jour (conserver l’image modifiée et la version actuelle ; l’installation et les autres fonctions restent disponibles) ou décider plus tard. Le programme n’est plus mis à jour en conservant une ancienne image potentiellement incompatible. Les mises à jour peuvent être réactivées avec « Rechercher automatiquement les mises à jour » sur la page À propos.",
-      "ja-JP": "bin\\pe の PE イメージが変更されている場合、更新前に変更されたイメージを表示して確認するようになりました：更新を続ける（新しいバージョンの公式 PE イメージをダウンロードして置き換え）、更新機能を無効にする（変更したイメージと現在のバージョンをそのまま使用し、インストールなどの機能は引き続き使用可能）、または後で決める。互換性のない可能性がある古いイメージを残したままプログラムだけを更新することはなくなりました。無効にした後は「バージョン情報」ページの「更新を自動的に確認する」で再び有効にできます。",
-      "ko-KR": "bin\\pe의 PE 이미지가 수정된 경우 업데이트 전에 수정된 이미지를 표시하고 먼저 묻습니다: 업데이트 계속(새 버전의 공식 PE 이미지를 다운로드하여 교체), 업데이트 기능 사용 안 함(수정한 이미지와 현재 버전을 유지하며 설치 등 다른 기능은 그대로 사용 가능) 또는 나중에. 호환되지 않을 수 있는 이전 이미지를 둔 채 프로그램만 업데이트하지 않습니다. 사용 안 함으로 설정한 후에는 \"소개\" 페이지에서 \"업데이트 자동 확인\"을 다시 선택할 수 있습니다.",
-      "zh-CN": "升级时如果发现 bin\\pe 中的 PE 镜像被修改过，会先列出这些镜像并询问：继续更新（下载新版本的官方 PE 镜像替换它们）、禁用更新功能（保留修改过的镜像和当前版本，系统安装等功能照常使用）或以后再说，不再只升级程序而保留可能不兼容的旧镜像；禁用后可在“关于”页重新勾选“自动检查更新”。"
-    }
-  ]
+  "entries": []
 }
