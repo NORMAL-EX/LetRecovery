@@ -125,6 +125,7 @@ function New-ReleaseTemplate {
                 xp_inject_nvme_driver = $false
             }
         }
+        update_check_enabled = $true
     }
 }
 
@@ -141,6 +142,10 @@ function Assert-ReleaseTemplate {
     $logEnabled = $Template.PSObject.Properties["log_enabled"]
     if ($null -eq $logEnabled -or $logEnabled.Value -ne $true) {
         throw "Release template must explicitly set log_enabled to true"
+    }
+    $updateCheck = $Template.PSObject.Properties["update_check_enabled"]
+    if ($null -eq $updateCheck -or $updateCheck.Value -ne $true) {
+        throw "Release template must explicitly set update_check_enabled to true"
     }
     $feedbackMode = $Template.PSObject.Properties["automatic_feedback_mode"]
     if ($null -eq $feedbackMode -or [string]$feedbackMode.Value -notin @("disabled", "normal", "normal_and_pe")) {

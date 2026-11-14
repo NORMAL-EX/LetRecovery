@@ -99,6 +99,12 @@ pub struct AppConfig {
     /// 才自动改用分散暂存。
     #[serde(default)]
     pub scattered_staging_enabled: bool,
+
+    /// 自动检查更新：主窗口创建后在后台检查新版本并提示升级（默认开启）。bin\pe 中的 PE 镜像被修改后，
+    /// 升级提示里选择“禁用更新功能”会关闭此项并保留修改过的镜像和当前版本；它只停止检查和升级，
+    /// 系统安装、备份等功能不受影响。用户可在关于页重新勾选。
+    #[serde(default = "default_update_check_enabled")]
+    pub update_check_enabled: bool,
 }
 
 /// 当前用户协议版本。协议内容有实质变化时加一，所有用户会在下次启动时重新确认。
@@ -128,6 +134,11 @@ where
 
 /// 日志默认启用
 fn default_log_enabled() -> bool {
+    true
+}
+
+/// 自动检查更新默认开启；旧配置没有该字段时同样开启。
+fn default_update_check_enabled() -> bool {
     true
 }
 
@@ -183,6 +194,7 @@ impl Default for AppConfig {
             download_threads: default_download_threads(),
             install_prefs: crate::core::ui_state::InstallPrefs::default(),
             scattered_staging_enabled: false,
+            update_check_enabled: true,
         }
     }
 }
@@ -449,6 +461,14 @@ impl AppConfig {
         }
     }
 
+    /// 设置“自动检查更新”并立即保存。关闭后启动时不再检查和提示升级；安装、备份等功能不受影响。
+    pub fn set_update_check_enabled(&mut self, enabled: bool) {
+        self.update_check_enabled = enabled;
+        if let Err(e) = self.save() {
+            log::warn!("保存配置失败: {}", e);
+        }
+    }
+
     /// 设置界面语言并保存
     ///
     /// # Arguments
@@ -499,6 +519,19 @@ mod tests {
         assert!(!absent.pe_network_enabled);
         let enabled: AppConfig = serde_json::from_str(r#"{"pe_network_enabled":true}"#).unwrap();
         assert!(enabled.pe_network_enabled);
+    }
+
+    #[test]
+    fn update_check_is_on_by_default_and_round_trips() {
+        let absent: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(absent.update_check_enabled);
+        assert!(AppConfig::default().update_check_enabled);
+        let disabled: AppConfig =
+            serde_json::from_str(r#"{"update_check_enabled":false}"#).unwrap();
+        let disabled = disabled.normalized();
+        assert!(!disabled.update_check_enabled);
+        let saved = serde_json::to_string(&disabled).unwrap();
+        assert!(saved.contains(r#""update_check_enabled":false"#));
     }
 
     #[test]

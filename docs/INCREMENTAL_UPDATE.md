@@ -12,10 +12,15 @@ Release（main）
   publish-update-manifest.ps1 ──► update.php（letrecovery_app，HMAC）──► letrecovery.cloud-pe.cn/update/index.json
   发布全部成功 ──► 从最新 main 精确删除已发布的 PENDING_CHANGELOG.json 条目（[skip ci]）
 
-客户端（正常系统端，主窗口创建后后台执行）
+客户端（正常系统端，主窗口创建后后台执行；关于页“自动检查更新”关闭时不执行）
   GET https://letrecovery.cloud-pe.cn/update/index.json
   build_epoch > 本程序 BUILD_EPOCH ？──否──► 不提示
-                                   └─是──► 弹窗（更新日志）──用户同意──►
+                                   └─是──► bin/pe 的 WIM 与已安装清单记录一致？
+                                             ├─是──► 弹窗（更新日志）──用户同意──►
+                                             └─否（用户修改过）──► 弹窗列出修改过的镜像：
+                                                 ├─ 继续更新：下载完整官方 WIM 替换 ──►
+                                                 ├─ 禁用更新功能：保留镜像与当前版本，关闭“自动检查更新”
+                                                 └─ 以后再说：不做改动
   计算本地文件 SHA-256 → 只下载变化的对象 → 官方内置 PE 按逐文件索引重建并完整校验
   → update/journal.json 事务替换（主程序最后）→ 重启
 ```
@@ -45,9 +50,9 @@ Release（main）
 
 ## 客户端行为要点
 
-- 只在官方构建、非测试包、非 WinPE、程序目录存在合法 `bin/release-manifest.json` 时检查；有长任务时本次不提示。
+- 只在官方构建、非测试包、非 WinPE、用户没有关闭“自动检查更新”（`config.json` 的 `update_check_enabled`，默认开启）、程序目录存在合法 `bin/release-manifest.json` 时检查；有长任务时本次不提示。
 - 下载：系统 TLS/代理优先，失败改直连 Rustls；60 秒无数据视为停滞并用 HTTP Range 续传；每个对象校验大小与 SHA-256。
-- `bin/pe` 中的 WIM 被用户自定义（与已安装清单记录的身份不同）时保留不动，并在结果中提示。
+- `bin/pe` 中的 WIM 被用户修改过（与已安装清单记录的身份不同）时，不同版本的程序与 PE 可能不兼容，因此绝不只升级程序而保留它。发现新版本后，检查线程先计算这些 WIM 的 SHA-256，提示框列出修改过的镜像，只提供“继续更新”（下载新版本完整的官方 WIM 替换，不在修改过的镜像上做逐文件补丁）、“禁用更新功能”（保留镜像和当前版本，关闭“自动检查更新”；系统安装、备份等功能照常使用，可在关于页重新勾选）和“以后再说”（默认按钮，Esc 同此）。提示之后镜像若又被修改，安装阶段会在改动任何文件前中止。
 - 替换：先写日志，再用同卷不覆盖的 `MoveFileExW(MOVEFILE_WRITE_THROUGH)` 先备份后替换，主程序最后替换；失败立即回滚。断电或崩溃后，下次启动在依赖检查之前前滚或回滚。
 - 永不触碰：`config.json`、`log/`、`update/`、`downloads/`、`cli/`、`cache/`、`temp/`。
 

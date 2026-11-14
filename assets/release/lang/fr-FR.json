@@ -2951,10 +2951,18 @@
         "正在升级到 {}": "Mise à jour vers {}",
         "升级线程异常结束。": "Le processus de mise à jour s'est arrêté de manière inattendue.",
         "LetRecovery 已升级到 {}，将立即重新启动以完成升级。": "LetRecovery a été mis à jour vers {} et va redémarrer pour terminer la mise à jour.",
-        "bin\\pe 中的 PE 镜像已被自定义，已保留该文件，内置 PE 未随本次升级更新。": "L'image PE de bin\\pe a été personnalisée : elle a été conservée et le PE intégré n'a pas été mis à jour.",
         "程序文件没有被修改，可以继续正常使用。": "Aucun fichier du programme n'a été modifié. Vous pouvez continuer à l'utiliser normalement.",
         "已自动恢复到升级前的版本，程序可以继续正常使用。": "La version précédente a été restaurée automatiquement. Vous pouvez continuer à utiliser le programme normalement.",
         "自动恢复未能全部完成：{}\r\n请重新下载完整安装包覆盖安装。": "La restauration automatique n'a pas pu être terminée : {}\r\nVeuillez retélécharger le paquet complet et l'installer par-dessus.",
-        "升级失败": "Échec de la mise à jour"
+        "升级失败": "Échec de la mise à jour",
+        "bin\\pe 中已被修改的 PE 镜像：": "Images PE modifiées dans bin\\pe :",
+        "不同版本的程序与 PE 镜像可能不兼容。只升级程序而保留修改过的镜像，安装系统时可能出错。": "Des versions différentes du programme et de l’image PE peuvent être incompatibles. Mettre à jour uniquement le programme en conservant l’image modifiée peut provoquer des erreurs lors de l’installation d’un système.",
+        "继续更新\n重新下载新版本的官方 PE 镜像，替换修改过的镜像。你对镜像的修改不会保留。": "Poursuivre la mise à jour\nTélécharger l’image PE officielle de la nouvelle version et remplacer l’image modifiée. Vos modifications de l’image ne seront pas conservées.",
+        "禁用更新功能\n保留修改过的镜像，继续使用当前版本，以后不再自动检查更新。安装、备份等功能照常使用。": "Désactiver les mises à jour\nConserver l’image modifiée et la version actuelle, et ne plus rechercher automatiquement les mises à jour. L’installation, la sauvegarde et les autres fonctions restent disponibles.",
+        "以后再说\n这次不更新，下次启动时再询问。": "Plus tard\nNe pas mettre à jour cette fois. La question sera reposée au prochain démarrage.",
+        "选择禁用后，可以在“关于”页重新勾选“自动检查更新”。": "Après la désactivation, vous pouvez réactiver les mises à jour avec « Rechercher automatiquement les mises à jour » sur la page À propos.",
+        "以下修改过的 PE 镜像已替换为新版本的官方镜像：": "Les images PE modifiées suivantes ont été remplacées par les images officielles de la nouvelle version :",
+        "bin\\pe 中的 PE 镜像在检查更新后又被修改，为避免新程序与它不兼容，本次没有升级。请重新启动 LetRecovery，再按提示选择。": "L’image PE de bin\\pe a de nouveau été modifiée après la recherche de mises à jour. Pour éviter d’utiliser le nouveau programme avec une image incompatible, rien n’a été mis à jour. Redémarrez LetRecovery et faites votre choix lorsque la question s’affiche.",
+        "自动检查更新": "Rechercher automatiquement les mises à jour"
     }
 }

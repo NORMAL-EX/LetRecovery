@@ -2951,10 +2951,18 @@
         "正在升级到 {}": "Updating to {}",
         "升级线程异常结束。": "The update worker ended unexpectedly.",
         "LetRecovery 已升级到 {}，将立即重新启动以完成升级。": "LetRecovery has been updated to {} and will restart now to finish the update.",
-        "bin\\pe 中的 PE 镜像已被自定义，已保留该文件，内置 PE 未随本次升级更新。": "The PE image in bin\\pe has been customized, so it was kept and the built-in PE was not updated.",
         "程序文件没有被修改，可以继续正常使用。": "No program files were changed. You can continue to use the program normally.",
         "已自动恢复到升级前的版本，程序可以继续正常使用。": "The previous version has been restored automatically. You can continue to use the program normally.",
         "自动恢复未能全部完成：{}\r\n请重新下载完整安装包覆盖安装。": "Automatic restoration could not be completed: {}\r\nPlease download the complete package again and install it over this installation.",
-        "升级失败": "Update failed"
+        "升级失败": "Update failed",
+        "bin\\pe 中已被修改的 PE 镜像：": "Modified PE images in bin\\pe:",
+        "不同版本的程序与 PE 镜像可能不兼容。只升级程序而保留修改过的镜像，安装系统时可能出错。": "Different versions of the program and the PE image may not work together. Updating only the program while keeping the modified image may cause errors when installing a system.",
+        "继续更新\n重新下载新版本的官方 PE 镜像，替换修改过的镜像。你对镜像的修改不会保留。": "Continue update\nDownload the official PE image of the new version and replace the modified image. Your changes to the image will not be kept.",
+        "禁用更新功能\n保留修改过的镜像，继续使用当前版本，以后不再自动检查更新。安装、备份等功能照常使用。": "Disable updates\nKeep the modified image and the current version, and stop checking for updates automatically. Installation, backup and other features keep working.",
+        "以后再说\n这次不更新，下次启动时再询问。": "Later\nDo not update this time. You will be asked again at the next start.",
+        "选择禁用后，可以在“关于”页重新勾选“自动检查更新”。": "If you disable updates, you can turn them back on with “Check for updates automatically” on the About page.",
+        "以下修改过的 PE 镜像已替换为新版本的官方镜像：": "The following modified PE images were replaced with the official images of the new version:",
+        "bin\\pe 中的 PE 镜像在检查更新后又被修改，为避免新程序与它不兼容，本次没有升级。请重新启动 LetRecovery，再按提示选择。": "The PE image in bin\\pe was modified again after the update check. To avoid running the new program with an incompatible image, nothing was updated. Restart LetRecovery and choose again when prompted.",
+        "自动检查更新": "Check for updates automatically"
     }
 }

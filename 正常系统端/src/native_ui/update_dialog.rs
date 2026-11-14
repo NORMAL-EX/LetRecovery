@@ -1,5 +1,9 @@
 //! Native prompts for the incremental self-update: the "new version available" question with the
 //! changelog, a progress dialog driven by the worker's lock-free progress, and the final result.
+//! When the user modified the bundled PE (`bin/pe`), the question instead names the modified
+//! images and offers command links to continue (the complete official image replaces them), to
+//! disable the update feature (the image and the current version stay; installation is not
+//! affected) or to decide later.
 //!
 //! These are system TaskDialogs (comctl32 v6, available from Windows Vista), the same native family
 //! as the shared error-log prompt in `lr_core::windows_diagnostics`, so DPI scaling, keyboard
@@ -14,22 +18,25 @@ use lr_core::update_manifest::{changelog_text_for_language, ChangelogText};
 use windows::core::{HRESULT, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, S_FALSE, S_OK, WPARAM};
 use windows::Win32::UI::Controls::{
-    TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOG_BUTTON,
-    TASKDIALOG_NOTIFICATIONS, TDCBF_OK_BUTTON, TDE_CONTENT, TDF_ALLOW_DIALOG_CANCELLATION,
-    TDF_CALLBACK_TIMER, TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SHOW_PROGRESS_BAR, TDM_CLICK_BUTTON,
-    TDM_ENABLE_BUTTON, TDM_SET_ELEMENT_TEXT, TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE,
-    TDN_BUTTON_CLICKED, TDN_CREATED, TDN_TIMER, TD_ERROR_ICON, TD_INFORMATION_ICON,
+    TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1,
+    TASKDIALOG_BUTTON, TASKDIALOG_NOTIFICATIONS, TDCBF_OK_BUTTON, TDE_CONTENT,
+    TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER, TDF_POSITION_RELATIVE_TO_WINDOW,
+    TDF_SHOW_PROGRESS_BAR, TDF_USE_COMMAND_LINKS, TDM_CLICK_BUTTON, TDM_ENABLE_BUTTON,
+    TDM_SET_ELEMENT_TEXT, TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE, TDN_BUTTON_CLICKED,
+    TDN_CREATED, TDN_TIMER, TD_ERROR_ICON, TD_INFORMATION_ICON, TD_WARNING_ICON,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
 use crate::core::app_update::{
-    install_update, RollbackStatus, UpdateFailure, UpdateOffer, UpdatePhase, UpdateProgress,
-    UpdateProgressSnapshot, UpdateSuccess,
+    display_package_path, install_update, RollbackStatus, UpdateFailure, UpdateOffer, UpdatePhase,
+    UpdateProgress, UpdateProgressSnapshot, UpdateSuccess,
 };
 
 const UPGRADE_BUTTON: i32 = 41_001;
 const LATER_BUTTON: i32 = 41_002;
 const CANCEL_BUTTON: i32 = 41_003;
+const CONTINUE_WITH_OFFICIAL_PE_BUTTON: i32 = 41_004;
+const DISABLE_UPDATES_BUTTON: i32 = 41_005;
 const MAX_CHANGELOG_LINES: usize = 30;
 const PROGRESS_RANGE: u32 = 1000;
 
@@ -39,6 +46,17 @@ pub enum UpdateDialogOutcome {
     /// Files were replaced; the caller closes the main window and restarts the program.
     RestartRequired,
     NotInstalled,
+    /// The user keeps the modified bundled PE and the current version; the caller turns the
+    /// update feature off (`AppConfig::update_check_enabled`). Installation is unaffected.
+    DisableUpdates,
+}
+
+/// Answer to the prompt shown when the bundled PE was modified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CustomizedPeChoice {
+    ContinueWithOfficialImage,
+    DisableUpdates,
+    Later,
 }
 
 thread_local! {
@@ -131,6 +149,89 @@ fn ask_to_upgrade(owner: HWND, offer: &UpdateOffer) -> bool {
         Err(error) => {
             log::warn!("[UPDATE] 无法显示升级提示: {error}");
             false
+        }
+    }
+}
+
+/// Prompt for an offer whose bundled PE the user modified. Program and PE must come from the same
+/// release, so updating the program around the modified image is not offered.
+fn ask_about_customized_pe(owner: HWND, offer: &UpdateOffer) -> CustomizedPeChoice {
+    let images = offer
+        .customized_images
+        .iter()
+        .map(|path| display_package_path(path))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let title = wide(&crate::tr!("LetRecovery 更新"));
+    let instruction = wide(&crate::tr!("发现新版本 {}", offer.manifest.version));
+    let content = wide(&format!(
+        "{}\r\n{}\r\n\r\n{}\r\n\r\n{}\r\n\r\n{}\r\n{}",
+        crate::tr!("bin\\pe 中已被修改的 PE 镜像："),
+        images,
+        crate::tr!("不同版本的程序与 PE 镜像可能不兼容。只升级程序而保留修改过的镜像，安装系统时可能出错。"),
+        crate::tr!("当前版本：{}", offer.current_version),
+        crate::tr!("更新内容："),
+        changelog_text(offer)
+    ));
+    let footer = wide(&crate::tr!(
+        "选择禁用后，可以在“关于”页重新勾选“自动检查更新”。"
+    ));
+    // With TDF_USE_COMMAND_LINKS the text after the first '\n' is the note under each choice.
+    let continue_update = wide(&crate::tr!(
+        "继续更新\n重新下载新版本的官方 PE 镜像，替换修改过的镜像。你对镜像的修改不会保留。"
+    ));
+    let disable_updates = wide(&crate::tr!(
+        "禁用更新功能\n保留修改过的镜像，继续使用当前版本，以后不再自动检查更新。安装、备份等功能照常使用。"
+    ));
+    let later = wide(&crate::tr!("以后再说\n这次不更新，下次启动时再询问。"));
+    let buttons = [
+        TASKDIALOG_BUTTON {
+            nButtonID: CONTINUE_WITH_OFFICIAL_PE_BUTTON,
+            pszButtonText: PCWSTR(continue_update.as_ptr()),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: DISABLE_UPDATES_BUTTON,
+            pszButtonText: PCWSTR(disable_updates.as_ptr()),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: LATER_BUTTON,
+            pszButtonText: PCWSTR(later.as_ptr()),
+        },
+    ];
+    let config = TASKDIALOGCONFIG {
+        cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: owner,
+        // Esc, Alt+F4 and the close button mean "decide later".
+        dwFlags: TDF_POSITION_RELATIVE_TO_WINDOW
+            | TDF_ALLOW_DIALOG_CANCELLATION
+            | TDF_USE_COMMAND_LINKS,
+        pszWindowTitle: PCWSTR(title.as_ptr()),
+        Anonymous1: TASKDIALOGCONFIG_0 {
+            pszMainIcon: TD_WARNING_ICON,
+        },
+        pszMainInstruction: PCWSTR(instruction.as_ptr()),
+        pszContent: PCWSTR(content.as_ptr()),
+        cButtons: buttons.len() as u32,
+        pButtons: buttons.as_ptr(),
+        // Enter must neither discard the user's changes nor switch updates off by accident.
+        nDefaultButton: LATER_BUTTON,
+        Anonymous2: TASKDIALOGCONFIG_1 {
+            pszFooterIcon: TD_INFORMATION_ICON,
+        },
+        pszFooter: PCWSTR(footer.as_ptr()),
+        ..Default::default()
+    };
+    let mut pressed = 0;
+    // SAFETY: every string and the button array outlive the synchronous call.
+    match unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, None) } {
+        Ok(()) => match pressed {
+            CONTINUE_WITH_OFFICIAL_PE_BUTTON => CustomizedPeChoice::ContinueWithOfficialImage,
+            DISABLE_UPDATES_BUTTON => CustomizedPeChoice::DisableUpdates,
+            _ => CustomizedPeChoice::Later,
+        },
+        Err(error) => {
+            log::warn!("[UPDATE] 无法显示 PE 镜像已修改的升级提示: {error}");
+            CustomizedPeChoice::Later
         }
     }
 }
@@ -264,7 +365,11 @@ unsafe extern "system" fn progress_callback(
     }
 }
 
-fn run_progress(owner: HWND, offer: &UpdateOffer) -> Result<UpdateSuccess, UpdateFailure> {
+fn run_progress(
+    owner: HWND,
+    offer: &UpdateOffer,
+    replace_customized_images: bool,
+) -> Result<UpdateSuccess, UpdateFailure> {
     let progress = Arc::new(UpdateProgress::default());
     let cancel = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
@@ -281,7 +386,7 @@ fn run_progress(owner: HWND, offer: &UpdateOffer) -> Result<UpdateSuccess, Updat
         std::thread::Builder::new()
             .name("lr-app-update".to_owned())
             .spawn(move || {
-                let result = install_update(&offer, &progress, &cancel);
+                let result = install_update(&offer, replace_customized_images, &progress, &cancel);
                 *outcome
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
@@ -374,21 +479,52 @@ fn show_message(owner: HWND, icon: PCWSTR, instruction: &str, content: &str) {
 
 /// Asks whether to upgrade, runs the update with progress and reports the result.
 pub fn run(owner: HWND, offer: &UpdateOffer) -> UpdateDialogOutcome {
-    if !ask_to_upgrade(owner, offer) {
-        log::info!("[UPDATE] 用户选择暂不升级到 {}", offer.manifest.version);
-        return UpdateDialogOutcome::Declined;
-    }
-    match run_progress(owner, offer) {
+    let replace_customized_images = if offer.customized_images.is_empty() {
+        if !ask_to_upgrade(owner, offer) {
+            log::info!("[UPDATE] 用户选择暂不升级到 {}", offer.manifest.version);
+            return UpdateDialogOutcome::Declined;
+        }
+        false
+    } else {
+        match ask_about_customized_pe(owner, offer) {
+            CustomizedPeChoice::ContinueWithOfficialImage => {
+                log::info!(
+                    "[UPDATE] 用户选择继续升级到 {}，修改过的 PE 镜像将被新版本的官方镜像替换",
+                    offer.manifest.version
+                );
+                true
+            }
+            CustomizedPeChoice::DisableUpdates => {
+                log::info!(
+                    "[UPDATE] 用户选择保留修改过的 PE 镜像并禁用更新功能（未升级到 {}）",
+                    offer.manifest.version
+                );
+                return UpdateDialogOutcome::DisableUpdates;
+            }
+            CustomizedPeChoice::Later => {
+                log::info!(
+                    "[UPDATE] PE 镜像已被修改，用户选择以后再说（未升级到 {}）",
+                    offer.manifest.version
+                );
+                return UpdateDialogOutcome::Declined;
+            }
+        }
+    };
+    match run_progress(owner, offer, replace_customized_images) {
         Ok(success) => {
             let mut content = crate::tr!(
                 "LetRecovery 已升级到 {}，将立即重新启动以完成升级。",
                 success.version
             );
-            if success.preserved_custom_pe {
+            if !success.replaced_customized_images.is_empty() {
                 content.push_str("\r\n\r\n");
                 content.push_str(&crate::tr!(
-                    "bin\\pe 中的 PE 镜像已被自定义，已保留该文件，内置 PE 未随本次升级更新。"
+                    "以下修改过的 PE 镜像已替换为新版本的官方镜像："
                 ));
+                for path in &success.replaced_customized_images {
+                    content.push_str("\r\n");
+                    content.push_str(&display_package_path(path));
+                }
             }
             show_message(
                 owner,

@@ -3404,6 +3404,10 @@ impl NativeWindow {
         if !crate::core::app_update::is_enabled() {
             return;
         }
+        if !self.app_config.update_check_enabled {
+            log::info!("[UPDATE] 已关闭“自动检查更新”，本次启动不检查新版本");
+            return;
+        }
         let window = hwnd.0 as usize;
         let spawned = std::thread::Builder::new()
             .name("lr-update-check".to_owned())
@@ -3435,6 +3439,14 @@ impl NativeWindow {
         hwnd: HWND,
         offer: crate::core::app_update::UpdateOffer,
     ) {
+        if !self.app_config.update_check_enabled {
+            // Turned off on the About page while the check or a deferred prompt was pending.
+            log::info!(
+                "[UPDATE] 已关闭“自动检查更新”，不再提示新版本 {}",
+                offer.manifest.version
+            );
+            return;
+        }
         if self.has_active_long_task() || self.close_after_task {
             log::info!(
                 "[UPDATE] 发现新版本 {}，但当前有正在执行的任务，本次运行不再提示",
@@ -3449,11 +3461,21 @@ impl NativeWindow {
             let _ = SetTimer(hwnd, APP_UPDATE_RETRY_TIMER_ID, 3000, None);
             return;
         }
-        if super::update_dialog::run(hwnd, &offer)
-            == super::update_dialog::UpdateDialogOutcome::RestartRequired
-        {
-            crate::core::app_update::request_restart();
-            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        match super::update_dialog::run(hwnd, &offer) {
+            super::update_dialog::UpdateDialogOutcome::RestartRequired => {
+                crate::core::app_update::request_restart();
+                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+            super::update_dialog::UpdateDialogOutcome::DisableUpdates => {
+                // Only the update check stops; the modified bundled PE keeps serving installs.
+                self.app_config.set_update_check_enabled(false);
+                if let Some(page) = &self.about_page {
+                    page.set_update_check_enabled(false);
+                }
+                log::info!("[UPDATE] 已禁用更新功能，可在关于页重新勾选“自动检查更新”");
+            }
+            super::update_dialog::UpdateDialogOutcome::Declined
+            | super::update_dialog::UpdateDialogOutcome::NotInstalled => {}
         }
     }
 
@@ -4424,6 +4446,9 @@ impl NativeWindow {
                 log_enabled: self.app_config.log_enabled,
                 automation_export_enabled: self.app_config.automation_export_enabled,
                 automatic_feedback_enabled: self.app_config.automatic_feedback_enabled(),
+                update_check_available: !self.is_pe_environment
+                    && crate::core::app_update::is_available_in_build(),
+                update_check_enabled: self.app_config.update_check_enabled,
                 wim_engine: self.app_config.wim_engine,
                 download_threads: self.app_config.download_threads,
             },
@@ -15865,6 +15890,16 @@ unsafe extern "system" fn window_proc(
                                 let enabled = page.automatic_feedback_enabled();
                                 state.app_config.set_automatic_feedback_enabled(enabled);
                                 let _ = state.app_config.save();
+                            }
+                        }
+                        Some(InfoIntent::ToggleUpdateCheck) => {
+                            if let Some(page) = &state.about_page {
+                                let enabled = page.update_check_enabled();
+                                state.app_config.set_update_check_enabled(enabled);
+                                log::info!(
+                                    "[UPDATE] 用户{}了“自动检查更新”，下次启动生效",
+                                    if enabled { "开启" } else { "关闭" }
+                                );
                             }
                         }
                         Some(InfoIntent::SelectWimEngine) => {

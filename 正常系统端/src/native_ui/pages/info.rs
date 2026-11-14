@@ -3,8 +3,8 @@
 //! Hardware values are presented as a responsive category/item/value report ListView;
 //! the page also retains a complete tab-separated representation for copying. The about page
 //! exposes the existing persisted language, logging, easy-mode, download-connection,
-//! image-engine preferences. Link and settings controls emit intents; this
-//! module never starts a browser or opens filesystem locations.
+//! image-engine and automatic update-check preferences. Link and settings controls emit
+//! intents; this module never starts a browser or opens filesystem locations.
 
 use std::cell::{Cell, RefCell};
 
@@ -46,6 +46,7 @@ const ID_ABOUT_LOGGING: u16 = 5_252;
 const ID_ABOUT_WIM_ENGINE: u16 = 5_253;
 const ID_ABOUT_AUTOMATION_EXPORT: u16 = 5_254;
 const ID_ABOUT_AUTOMATIC_FEEDBACK: u16 = 5_261;
+const ID_ABOUT_UPDATE_CHECK: u16 = 5_263;
 const ID_ABOUT_DOWNLOAD_THREADS: u16 = 5_259;
 const DOWNLOAD_THREAD_OPTIONS: [u8; 3] = [8, 16, 32];
 // Unlike SS_LEFT (zero), this stock STATIC style never wraps a single-line settings label.  A
@@ -73,6 +74,7 @@ pub enum InfoIntent {
     ToggleLogging,
     ToggleAutomationExport,
     ToggleAutomaticFeedback,
+    ToggleUpdateCheck,
     SelectWimEngine,
     SelectDownloadThreads,
     OpenLogDirectory,
@@ -138,6 +140,9 @@ pub struct AboutLabels<'a> {
     pub log_enabled: bool,
     pub automation_export_enabled: bool,
     pub automatic_feedback_enabled: bool,
+    /// This build ships the updater and the program does not run in WinPE.
+    pub update_check_available: bool,
+    pub update_check_enabled: bool,
     pub wim_engine: u8,
     pub download_threads: u8,
 }
@@ -832,6 +837,7 @@ pub struct AboutPage {
     pub logging: HWND,
     pub automation_export: HWND,
     pub automatic_feedback: HWND,
+    pub update_check: HWND,
     pub wim_engine_label: HWND,
     pub wim_engine: HWND,
     pub download_threads_label: HWND,
@@ -841,6 +847,7 @@ pub struct AboutPage {
     pub link_buttons: [HWND; 3],
     pub action_buttons: [HWND; 1],
     advanced: Cell<bool>,
+    update_check_available: bool,
     font: HFONT,
     languages: RefCell<Vec<crate::utils::i18n::LanguageInfo>>,
 }
@@ -920,6 +927,14 @@ impl AboutPage {
             ID_ABOUT_AUTOMATIC_FEEDBACK,
         )?;
         set_checked(automatic_feedback, labels.automatic_feedback_enabled);
+        let update_check = child(
+            parent,
+            w!("BUTTON"),
+            &crate::tr!("自动检查更新"),
+            BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
+            ID_ABOUT_UPDATE_CHECK,
+        )?;
+        set_checked(update_check, labels.update_check_enabled);
         let wim_engine_label = child(
             parent,
             w!("STATIC"),
@@ -1031,6 +1046,7 @@ impl AboutPage {
             logging,
             automation_export,
             automatic_feedback,
+            update_check,
             wim_engine_label,
             wim_engine,
             download_threads_label,
@@ -1040,6 +1056,7 @@ impl AboutPage {
             link_buttons,
             action_buttons,
             advanced: Cell::new(labels.mode == crate::core::app_config::UiMode::Advanced),
+            update_check_available: labels.update_check_available,
             font,
             languages: RefCell::new(Vec::new()),
         };
@@ -1056,6 +1073,7 @@ impl AboutPage {
             ID_ABOUT_LOGGING => return Some(InfoIntent::ToggleLogging),
             ID_ABOUT_AUTOMATION_EXPORT => return Some(InfoIntent::ToggleAutomationExport),
             ID_ABOUT_AUTOMATIC_FEEDBACK => return Some(InfoIntent::ToggleAutomaticFeedback),
+            ID_ABOUT_UPDATE_CHECK => return Some(InfoIntent::ToggleUpdateCheck),
             ID_ABOUT_WIM_ENGINE => return Some(InfoIntent::SelectWimEngine),
             ID_ABOUT_DOWNLOAD_THREADS => return Some(InfoIntent::SelectDownloadThreads),
             _ => {}
@@ -1097,6 +1115,14 @@ impl AboutPage {
     }
     pub unsafe fn set_automatic_feedback_enabled(&self, enabled: bool) {
         set_checked(self.automatic_feedback, enabled);
+    }
+
+    pub unsafe fn update_check_enabled(&self) -> bool {
+        is_checked(self.update_check)
+    }
+
+    pub unsafe fn set_update_check_enabled(&self, enabled: bool) {
+        set_checked(self.update_check, enabled);
     }
 
     pub unsafe fn set_logging_enabled(&self, enabled: bool) {
@@ -1176,6 +1202,7 @@ impl AboutPage {
             &crate::tr!("显示“导出自动化配置”按钮"),
         );
         set_text(self.automatic_feedback, &crate::tr!("发送匿名统计"));
+        set_text(self.update_check, &crate::tr!("自动检查更新"));
         set_text(self.wim_engine_label, &crate::tr!("WIM 引擎:"));
         set_text(self.download_threads_label, &crate::tr!("下载线程:"));
         set_text(
@@ -1273,6 +1300,9 @@ impl AboutPage {
             || lr_core::branding::feature::INSTALL_STATS
         {
             check_boxes.push(self.automatic_feedback);
+        }
+        if self.update_check_available {
+            check_boxes.push(self.update_check);
         }
         if advanced && lr_core::branding::feature::AUTOMATION_EXPORT {
             check_boxes.push(self.automation_export);
@@ -1493,7 +1523,8 @@ impl AboutPage {
                     || lr_core::branding::feature::AUTOMATION_EXPORT)
                 && (hwnd != self.automatic_feedback
                     || lr_core::branding::feature::AUTOMATIC_FEEDBACK
-                    || lr_core::branding::feature::INSTALL_STATS);
+                    || lr_core::branding::feature::INSTALL_STATS)
+                && (hwnd != self.update_check || self.update_check_available);
             let _ = ShowWindow(hwnd, if shown { SW_SHOW } else { SW_HIDE });
         }
         // 说明文字和底部按钮已移除：控件仍保留以兼容原有消息处理，但始终隐藏。
@@ -1527,7 +1558,11 @@ impl AboutPage {
     }
 
     pub unsafe fn apply_theme(&self, palette: Palette) {
-        for control in [self.automation_export, self.automatic_feedback] {
+        for control in [
+            self.automation_export,
+            self.automatic_feedback,
+            self.update_check,
+        ] {
             apply_control_theme(control, palette, NativeControlKind::General);
         }
         for control in [
@@ -1560,6 +1595,7 @@ impl AboutPage {
             self.easy_mode,
             self.automation_export,
             self.automatic_feedback,
+            self.update_check,
             self.wim_engine_label,
             self.wim_engine,
             self.download_threads_label,

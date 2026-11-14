@@ -10,7 +10,10 @@
 //! 3. rebuilds an official bundled PE WIM from its per-file index — usually only
 //!    `LetRecoveryPE.exe` and `PECMD.INI` change — and proves the result equals the official index
 //!    and passes a full wimlib verification, falling back to the complete WIM otherwise. A PE the
-//!    user customised (`bin/pe` is a user-managed boundary) is preserved;
+//!    user customised (`bin/pe` is a user-managed boundary) is found by `check_for_update`
+//!    already: program and PE versions may not work together, so the prompt lets the user either
+//!    replace it with the complete official image of the new release or keep it and turn updates
+//!    off. It is never kept while the program around it is updated;
 //! 4. replaces files through a journaled rename transaction on the package volume with the main
 //!    executable last. Any failure before the commit moves every file back.
 //!
@@ -29,10 +32,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use lr_core::update_manifest::{
-    plan_image_patch, plan_obsolete_file, plan_package_file, validate_package_path,
-    verify_image_listing, ImagePatchPlan, LocalFileState, ObjectRef, PackageAction, PackageFile,
-    UpdateManifest, WimContentIndex, MAIN_EXECUTABLE, MAX_MANIFEST_BYTES, RELEASE_MANIFEST_PATH,
-    RESTORABLE_IMAGE_ATTRIBUTES,
+    is_user_managed_image, path_key, plan_image_patch, plan_obsolete_file, plan_package_file,
+    validate_package_path, verify_image_listing, ImagePatchPlan, LocalFileState, ObjectRef,
+    PackageAction, PackageFile, UpdateManifest, WimContentIndex, MAIN_EXECUTABLE,
+    MAX_MANIFEST_BYTES, RELEASE_MANIFEST_PATH, RESTORABLE_IMAGE_ATTRIBUTES,
 };
 use serde::{Deserialize, Serialize};
 
@@ -50,12 +53,24 @@ const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 static RELAUNCH_EXECUTABLE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// Whether this process may check for and install updates at all.
+/// Whether this build ships the updater: the official channel (or a customised build that enabled
+/// its own channel) and not a distributable test package. The About page offers the "check for
+/// updates automatically" switch only then.
+pub fn is_available_in_build() -> bool {
+    lr_core::branding::feature::SELF_UPDATE && !crate::build_info::DEV
+}
+
+/// Whether this process may check for and install updates at all. The user's own switch
+/// (`AppConfig::update_check_enabled`) is applied by the window on top of this.
 pub fn is_enabled() -> bool {
-    lr_core::branding::feature::SELF_UPDATE
-        && !crate::build_info::DEV
+    is_available_in_build()
         && !cfg!(feature = "non-elevated-tests")
         && !crate::core::disk::DiskManager::is_pe_environment()
+}
+
+/// `bin/pe/LetRecovery_PE.wim` the way the user sees it in Explorer.
+pub fn display_package_path(path: &str) -> String {
+    path.replace('/', "\\")
 }
 
 fn package_root() -> PathBuf {
@@ -316,12 +331,49 @@ fn download_object(
 pub struct UpdateOffer {
     pub manifest: UpdateManifest,
     pub current_version: String,
+    /// Bundled PE images (`bin/pe/*.wim`, package paths) that the user modified after the
+    /// installed release. The prompt names them and asks before anything happens to them.
+    pub customized_images: Vec<String>,
+}
+
+/// Bundled PE images of the new release whose local copy is neither the image recorded by the
+/// installed release nor the new official one: the user customised them. Uses the installation's
+/// own planner, so the prompt and the transaction can never disagree about an image.
+fn find_customized_images(
+    root: &Path,
+    installed: &UpdateManifest,
+    manifest: &UpdateManifest,
+) -> Result<Vec<String>> {
+    let never_cancelled = AtomicBool::new(false);
+    let mut customized = Vec::new();
+    for target in manifest
+        .files
+        .iter()
+        .filter(|file| is_user_managed_image(&file.path))
+    {
+        let local = local_state(root, &target.path, &never_cancelled, &mut |_| {})?;
+        if plan_package_file(target, local.as_ref(), installed.file(&target.path))
+            == PackageAction::CustomizedImage
+        {
+            customized.push(target.path.clone());
+        }
+    }
+    Ok(customized)
+}
+
+/// A customised bundled PE found while installing may only be replaced when the prompt named it
+/// and the user chose to continue. Anything else stops the update before a file changes.
+fn customized_image_approved(offered: &[String], replace_approved: bool, path: &str) -> bool {
+    replace_approved
+        && offered
+            .iter()
+            .any(|image| path_key(image) == path_key(path))
 }
 
 /// Returns an offer when the published release is newer than this executable.
 pub fn check_for_update() -> Result<Option<UpdateOffer>> {
     let root = package_root();
-    read_installed_manifest(&root).context("当前程序目录不是可增量升级的发布包")?;
+    let installed = read_installed_manifest(&root).context("当前程序目录不是可增量升级的发布包")?;
     let bytes = fetch_small(lr_core::branding::UPDATE_MANIFEST_URL, MAX_MANIFEST_BYTES)?;
     let manifest =
         UpdateManifest::parse(&bytes).map_err(|error| anyhow!("服务器升级清单无效: {error}"))?;
@@ -340,9 +392,20 @@ pub fn check_for_update() -> Result<Option<UpdateOffer>> {
         manifest.build_epoch,
         env!("BUILD_VERSION")
     );
+    // Hashing the bundled PE takes a few seconds. It only happens once an update is offered and
+    // runs on this background thread, never on the UI thread.
+    let customized_images = find_customized_images(&root, &installed, &manifest)
+        .context("无法检查 bin\\pe 中的 PE 镜像是否被修改")?;
+    if !customized_images.is_empty() {
+        log::warn!(
+            "[UPDATE] bin\\pe 中的 PE 镜像与已安装版本的发布清单不一致（已被修改）: {}；升级前由用户选择继续更新或禁用更新功能",
+            customized_images.join(", ")
+        );
+    }
     Ok(Some(UpdateOffer {
         manifest,
         current_version: crate::build_info::display_version(),
+        customized_images,
     }))
 }
 
@@ -449,7 +512,8 @@ pub enum UpdateFailure {
 #[derive(Clone, Debug)]
 pub struct UpdateSuccess {
     pub version: String,
-    pub preserved_custom_pe: bool,
+    /// Customised bundled PE images that the user agreed to replace with the official ones.
+    pub replaced_customized_images: Vec<String>,
     pub downloaded_bytes: u64,
 }
 
@@ -1003,8 +1067,13 @@ fn settle_previous_session(work: &Path) -> Result<()> {
 }
 
 /// Installs `offer`. Runs on a worker thread; `cancel` is honoured until files start moving.
+///
+/// `replace_customized_images` is the user's answer to the prompt about
+/// `offer.customized_images`: only those images may be replaced, by the complete official image of
+/// the new release.
 pub fn install_update(
     offer: &UpdateOffer,
+    replace_customized_images: bool,
     progress: &UpdateProgress,
     cancel: &Arc<AtomicBool>,
 ) -> std::result::Result<UpdateSuccess, UpdateFailure> {
@@ -1013,7 +1082,15 @@ pub fn install_update(
     settle_previous_session(&work).map_err(|error| failure(crate::tr!("准备升级失败。"), error))?;
     let session_name = new_session_name();
     let session = work.join(&session_name);
-    let result = install_in_session(&root, &work, &session_name, offer, progress, cancel);
+    let result = install_in_session(
+        &root,
+        &work,
+        &session_name,
+        offer,
+        replace_customized_images,
+        progress,
+        cancel,
+    );
     match &result {
         Ok(_) => {}
         Err(UpdateFailure::Failed {
@@ -1035,6 +1112,7 @@ fn install_in_session(
     work: &Path,
     session_name: &str,
     offer: &UpdateOffer,
+    replace_customized_images: bool,
     progress: &UpdateProgress,
     cancel: &Arc<AtomicBool>,
 ) -> std::result::Result<UpdateSuccess, UpdateFailure> {
@@ -1077,6 +1155,7 @@ fn install_in_session(
     let mut hashed_before = 0u64;
     let prepare_error = |error| failure(crate::tr!("检查本地文件失败。"), error);
     let mut planned: Vec<(PackageFile, PackageAction)> = Vec::new();
+    let mut replaced_customized_images: Vec<String> = Vec::new();
     let mut obsolete: Vec<PackageFile> = Vec::new();
     for (target, is_obsolete) in manifest
         .files
@@ -1097,15 +1176,35 @@ fn install_in_session(
             }
             continue;
         }
-        let action = plan_package_file(target, local.as_ref(), installed.file(&target.path));
+        let mut action = plan_package_file(target, local.as_ref(), installed.file(&target.path));
+        if action == PackageAction::CustomizedImage {
+            if !customized_image_approved(
+                &offer.customized_images,
+                replace_customized_images,
+                &target.path,
+            ) {
+                // The image changed after the prompt, or the prompt never named it. Updating the
+                // program around it is exactly the mismatch the prompt exists to prevent.
+                return Err(failure(
+                    crate::tr!("bin\\pe 中的 PE 镜像在检查更新后又被修改，为避免新程序与它不兼容，本次没有升级。请重新启动 LetRecovery，再按提示选择。"),
+                    anyhow!("{}", display_package_path(&target.path)),
+                ));
+            }
+            // A per-file patch built on a customised image could not be proven to equal the
+            // official image (its metadata and unchanged streams stay the user's), so the complete
+            // official WIM is downloaded instead.
+            log::warn!(
+                "[UPDATE] 用户同意用新版本的官方镜像替换修改过的 {}，将下载完整镜像",
+                target.path
+            );
+            replaced_customized_images.push(target.path.clone());
+            action = PackageAction::Download;
+        }
         if action != PackageAction::Unchanged {
             log::info!("[UPDATE] {} -> {action:?}", target.path);
         }
         planned.push((target.clone(), action));
     }
-    let preserved_custom_pe = planned
-        .iter()
-        .any(|(_, action)| *action == PackageAction::PreserveCustomizedImage);
 
     // 2. Prepare per-file patches of the official bundled PE.
     let mut patches = Vec::new();
@@ -1313,12 +1412,17 @@ fn install_in_session(
         *relaunch = Some(package_path(root, MAIN_EXECUTABLE));
     }
     log::info!(
-        "[UPDATE] 已升级到 {}，下载 {download_total} 字节；保留自定义 PE: {preserved_custom_pe}",
-        manifest.version
+        "[UPDATE] 已升级到 {}，下载 {download_total} 字节；替换修改过的 PE 镜像: {}",
+        manifest.version,
+        if replaced_customized_images.is_empty() {
+            "无".to_owned()
+        } else {
+            replaced_customized_images.join(", ")
+        }
     );
     Ok(UpdateSuccess {
         version: manifest.version.clone(),
-        preserved_custom_pe,
+        replaced_customized_images,
         downloaded_bytes: download_total,
     })
 }
@@ -1510,5 +1614,83 @@ mod tests {
         progress.set_phase(UpdatePhase::Applying, 960);
         assert_eq!(progress.snapshot().phase, UpdatePhase::Applying);
         assert_eq!(progress.snapshot().permille, 960);
+    }
+
+    fn package_file(path: &str, bytes: &[u8]) -> PackageFile {
+        PackageFile {
+            path: path.to_owned(),
+            size: bytes.len() as u64,
+            sha256: lr_core::hash::sha256_bytes(bytes),
+            wim_index: None,
+        }
+    }
+
+    fn release(files: Vec<PackageFile>) -> UpdateManifest {
+        UpdateManifest {
+            schema_version: lr_core::update_manifest::SCHEMA_VERSION,
+            product: lr_core::update_manifest::PRODUCT.to_owned(),
+            version: "v2026.11.13".to_owned(),
+            build_epoch: 1,
+            changelog: Vec::new(),
+            files,
+        }
+    }
+
+    #[test]
+    fn only_bundled_pe_images_unlike_both_releases_count_as_customized() {
+        let root = temporary_root("customized");
+        let pe = root.join("bin").join("pe");
+        fs::create_dir_all(&pe).unwrap();
+        fs::write(pe.join("Official.wim"), b"official old").unwrap();
+        fs::write(pe.join("Current.wim"), b"official new").unwrap();
+        fs::write(pe.join("Custom.wim"), b"edited by the user").unwrap();
+        fs::write(root.join("bin").join("tool.dll"), b"edited dll").unwrap();
+        let installed = release(vec![
+            package_file("bin/pe/Official.wim", b"official old"),
+            package_file("bin/pe/Current.wim", b"official old"),
+            package_file("bin/pe/Custom.wim", b"official old"),
+            package_file("bin/tool.dll", b"official dll"),
+        ]);
+        let target = release(vec![
+            package_file("bin/pe/Official.wim", b"official new"),
+            package_file("bin/pe/Current.wim", b"official new"),
+            package_file("bin/pe/Custom.wim", b"official new"),
+            package_file("bin/pe/Missing.wim", b"official new"),
+            package_file("bin/tool.dll", b"new dll"),
+        ]);
+        assert_eq!(
+            find_customized_images(&root, &installed, &target).unwrap(),
+            vec!["bin/pe/Custom.wim".to_owned()]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn customized_images_are_replaced_only_after_the_prompt_named_them() {
+        let offered = vec!["bin/pe/LetRecovery_PE.wim".to_owned()];
+        assert!(customized_image_approved(
+            &offered,
+            true,
+            "BIN/PE/letrecovery_pe.WIM"
+        ));
+        assert!(!customized_image_approved(
+            &offered,
+            false,
+            "bin/pe/LetRecovery_PE.wim"
+        ));
+        assert!(!customized_image_approved(
+            &offered,
+            true,
+            "bin/pe/Other.wim"
+        ));
+        assert!(!customized_image_approved(
+            &[],
+            true,
+            "bin/pe/LetRecovery_PE.wim"
+        ));
+        assert_eq!(
+            display_package_path("bin/pe/LetRecovery_PE.wim"),
+            "bin\\pe\\LetRecovery_PE.wim"
+        );
     }
 }

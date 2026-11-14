@@ -3,7 +3,7 @@
 //!
 //! This module is pure logic shared by the release tool (`examples/release_update_tool.rs`) and
 //! the normal-side updater (`正常系统端/src/core/app_update.rs`). It never touches the network or
-//! the file system, so every rule — path safety, preservation of a customised bundled PE,
+//! the file system, so every rule — path safety, detection of a customised bundled PE,
 //! removal of obsolete files and the per-file WIM diff — is covered by deterministic tests.
 //!
 //! Compatibility contract: `schema_version` stays 1 for additive changes. Readers ignore unknown
@@ -130,7 +130,9 @@ pub fn validate_package_path(path: &str) -> Result<(), String> {
 }
 
 /// The bundled PE (`bin/pe/*.wim`) is a documented user-managed boundary: users may replace or
-/// customise it, so an update only touches it when it is still the official installed image.
+/// customise it, so an update only replaces it without asking while it is still the official
+/// installed image. A customised image is never kept while the program around it is updated:
+/// different program and PE versions may not work together, so the user decides first.
 pub fn is_user_managed_image(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     lower
@@ -522,8 +524,10 @@ pub enum PackageAction {
     Download,
     /// Rebuild the official installed PE image from its per-file index.
     PatchImage,
-    /// The bundled PE was customised by the user; keep it.
-    PreserveCustomizedImage,
+    /// The bundled PE was customised by the user. The new program may not work with it, so the
+    /// updater neither keeps it silently nor overwrites it: the user either lets the complete
+    /// official image replace it or keeps it and does not update.
+    CustomizedImage,
     /// File of the installed release that the new release no longer ships.
     DeleteObsolete,
 }
@@ -531,8 +535,9 @@ pub enum PackageAction {
 /// Decides how one file of the new release reaches the disk.
 ///
 /// `installed` is the entry of the installed release manifest for the same path. The bundled PE
-/// image is only replaced while it still equals that official entry; any other content is a user
-/// customisation and is preserved.
+/// image is only replaced without asking while it still equals that official entry; any other
+/// content is a user customisation (`CustomizedImage`) that the caller must neither keep nor
+/// replace without the user's decision.
 pub fn plan_package_file(
     target: &PackageFile,
     local: Option<&LocalFileState>,
@@ -548,7 +553,7 @@ pub fn plan_package_file(
         let official =
             installed.is_some_and(|entry| entry.size == local.size && entry.sha256 == local.sha256);
         return if !official {
-            PackageAction::PreserveCustomizedImage
+            PackageAction::CustomizedImage
         } else if target.wim_index.is_some() {
             PackageAction::PatchImage
         } else {
@@ -1107,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn package_planning_preserves_customised_pe_and_patches_official_pe() {
+    fn package_planning_flags_customised_pe_and_patches_official_pe() {
         let mut pe = package("bin/pe/LetRecovery_PE.wim", 'n');
         pe.wim_index = Some(ObjectRef {
             sha256: sha('i', 64),
@@ -1124,11 +1129,11 @@ mod tests {
         );
         assert_eq!(
             plan_package_file(&pe, Some(&local('u')), Some(&installed_pe)),
-            PackageAction::PreserveCustomizedImage
+            PackageAction::CustomizedImage
         );
         assert_eq!(
             plan_package_file(&pe, Some(&local('o')), None),
-            PackageAction::PreserveCustomizedImage
+            PackageAction::CustomizedImage
         );
         assert_eq!(
             plan_package_file(&pe, None, Some(&installed_pe)),
