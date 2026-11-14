@@ -92,4 +92,8 @@ Filename: "{app}\LetRecovery.exe"; Description: "启动 LetRecovery"; WorkingDir
 
 [UninstallDelete]
 Type: files; Name: "{app}\config.json"
+; Incremental-update working directory, and bin files a later incremental update may have added
+; (Inno Setup only removes files it installed itself).
+Type: filesandordirs; Name: "{app}\update"
+Type: filesandordirs; Name: "{app}\bin"
 Type: dirifempty; Name: "{app}"

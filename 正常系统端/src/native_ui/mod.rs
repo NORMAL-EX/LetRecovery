@@ -19,6 +19,7 @@ pub mod tool_dialogs;
 pub mod tool_dialogs_mutating;
 pub mod tools;
 pub(crate) mod ui_audit;
+mod update_dialog;
 pub mod welcome;
 mod window;
 

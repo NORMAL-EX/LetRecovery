@@ -583,6 +583,30 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // 防止重复运行。互斥锁必须先于依赖检查取得：被中断的增量升级只能由独占实例恢复，
+    // 并且必须在依赖检查之前把升级事务移走的程序文件放回原位。
+    #[cfg(not(feature = "non-elevated-tests"))]
+    let mutex_name = "LetRecovery-mutex-2025";
+    #[cfg(feature = "non-elevated-tests")]
+    let mutex_name = "LetRecovery-native-ui-preview-mutex";
+
+    let _mutex = match single_instance::SingleInstance::new(mutex_name) {
+        Ok(m) => {
+            if !m.is_single() {
+                log::warn!("程序已在运行中");
+                return Ok(());
+            }
+            m
+        }
+        Err(e) => {
+            log::error!("创建互斥锁失败: {}", e);
+            return Ok(());
+        }
+    };
+
+    #[cfg(not(feature = "non-elevated-tests"))]
+    core::app_update::recover_interrupted_update_at_startup();
+
     #[cfg(not(feature = "non-elevated-tests"))]
     // 检查依赖文件完整性
     if let Err(missing_files) = check_dependencies() {
@@ -610,26 +634,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     log::info!("系统组件检查通过");
-
-    // 防止重复运行
-    #[cfg(not(feature = "non-elevated-tests"))]
-    let mutex_name = "LetRecovery-mutex-2025";
-    #[cfg(feature = "non-elevated-tests")]
-    let mutex_name = "LetRecovery-native-ui-preview-mutex";
-
-    let _mutex = match single_instance::SingleInstance::new(mutex_name) {
-        Ok(m) => {
-            if !m.is_single() {
-                log::warn!("程序已在运行中");
-                return Ok(());
-            }
-            m
-        }
-        Err(e) => {
-            log::error!("创建互斥锁失败: {}", e);
-            return Ok(());
-        }
-    };
 
     // 首次启动：问候用户、选择使用模式并同意用户协议。PE 中运行的正常端由维护人员使用，不显示。
     #[cfg(not(feature = "non-elevated-tests"))]
@@ -690,6 +694,11 @@ fn main() -> anyhow::Result<()> {
     }
     let run_result = native_ui::run(preloaded_config);
     utils::dprk_easter_egg::shutdown();
+    if core::app_update::restart_requested() {
+        // The updated executable checks the same single-instance mutex on startup.
+        drop(_mutex);
+        core::app_update::relaunch_updated_executable();
+    }
     run_result?;
     Ok(())
 }

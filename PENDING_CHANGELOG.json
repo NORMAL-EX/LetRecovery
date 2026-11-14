@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "de-DE": "Inkrementelle Updates hinzugefügt: LetRecovery sucht beim Start nach neuen Versionen, zeigt das Änderungsprotokoll an, lädt nur geänderte Dateien herunter (das integrierte PE wird dateiweise aktualisiert) und stellt bei einem Fehler automatisch die vorherige Version wieder her.",
+      "en-US": "Added incremental updates: LetRecovery checks for new versions at startup, shows the changelog, downloads only changed files (the built-in PE is updated file by file) and automatically restores the previous version if the update fails.",
+      "fr-FR": "Ajout des mises à jour incrémentielles : LetRecovery vérifie les nouvelles versions au démarrage, affiche le journal des modifications, ne télécharge que les fichiers modifiés (le PE intégré est mis à jour fichier par fichier) et restaure automatiquement la version précédente en cas d'échec.",
+      "ja-JP": "差分アップデートを追加：起動時に新しいバージョンを確認して更新履歴を表示し、変更されたファイルのみをダウンロードします（内蔵 PE もファイル単位で更新）。更新に失敗した場合は自動的に元のバージョンに戻ります。",
+      "ko-KR": "증분 업데이트 추가: 시작 시 새 버전을 확인하고 변경 내역을 표시하며, 변경된 파일만 다운로드합니다(내장 PE도 파일 단위로 업데이트). 업데이트에 실패하면 이전 버전으로 자동 복원됩니다.",
+      "zh-CN": "新增增量升级：启动时检查新版本并显示更新日志，只下载有变化的文件（内置 PE 也只更新变化的文件），升级失败会自动恢复原版本。",
+      "zh-TW": "新增增量升級：啟動時檢查新版本並顯示更新日誌，只下載有變化的檔案（內建 PE 也只更新變化的檔案），升級失敗會自動還原原版本。"
+    }
+  ]
+}

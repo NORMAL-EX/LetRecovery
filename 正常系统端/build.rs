@@ -55,7 +55,8 @@ fn main() {
     // 这里不再需要从 vendor 复制。
 
     // 按编译日期自动生成版本号（无需每次手动改版本）
-    let (y, m, d) = build_date();
+    let build_epoch = build_timestamp();
+    let (y, m, d) = civil_from_days(build_epoch.div_euclid(86400));
     let mut display_version = format!("v{}.{:02}.{:02}", y, m, d); // 如 v2026.06.07
     let mut numeric_version = format!("{}.{}.{}.0", y, m, d); // winres 需要 n.n.n.n
     if let Some(custom) = std::env::var("LR_BRAND_VERSION")
@@ -67,6 +68,9 @@ fn main() {
     }
     // 注入到编译环境，供代码用 env!("BUILD_VERSION") 读取
     println!("cargo:rustc-env=BUILD_VERSION={}", display_version);
+    // The incremental updater compares this exact build timestamp with the release manifest's
+    // `build_epoch` (the same SOURCE_DATE_EPOCH), so several releases on one day stay ordered.
+    println!("cargo:rustc-env=BUILD_EPOCH={build_epoch}");
 
     // 仅在 Windows 上设置资源
     #[cfg(windows)]
@@ -445,12 +449,6 @@ fn generate_icon_from_png() -> std::path::PathBuf {
 }
 
 /// 取当前 UTC 日期 (年, 月, 日)，无第三方依赖。
-fn build_date() -> (i64, u32, u32) {
-    let secs = build_timestamp();
-    let days = secs.div_euclid(86400);
-    civil_from_days(days)
-}
-
 fn build_timestamp() -> i64 {
     if let Some(value) = std::env::var_os("SOURCE_DATE_EPOCH") {
         let value = value

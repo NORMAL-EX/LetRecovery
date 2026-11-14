@@ -277,6 +277,7 @@ const WM_INSTALL_PARTITION_SELECTION_CHANGED: u32 = 0x8007;
 const WM_AUTO_IMAGE_DISCOVERY_READY: u32 = 0x8008;
 const WM_EASY_CATALOGUE_READY: u32 = 0x8009;
 const WM_REMOTE_IMAGE_INFO_READY: u32 = 0x800a;
+const WM_APP_UPDATE_READY: u32 = 0x800b;
 const BACKUP_TIMER_ID: usize = 1;
 const DOWNLOAD_TIMER_ID: usize = 2;
 const INSTALL_TIMER_ID: usize = 3;
@@ -287,6 +288,7 @@ const INSTALL_VOLUME_LAYOUT_TIMER_ID: usize = 7;
 const PARTITION_REFRESH_TIMER_ID: usize = 8;
 const ADVANCED_SCROLL_TIMER_ID: usize = 9;
 const PE_MAINTENANCE_ANIMATION_TIMER_ID: usize = 10;
+const APP_UPDATE_RETRY_TIMER_ID: usize = 11;
 const PE_MAINTENANCE_ANIMATION_INTERVAL_MS: u32 = 16;
 const INSTALL_VOLUME_LAYOUT_TICK_MS: u32 = 40;
 const INSTALL_VOLUME_LAYOUT_FRAMES: u8 = 3;
@@ -3394,6 +3396,65 @@ impl NativeWindow {
                 }
             }
         });
+    }
+
+    /// Starts the incremental-update check on a worker thread. The result arrives as
+    /// `WM_APP_UPDATE_READY`, so the network request never delays the first frame.
+    fn request_app_update_check(&self, hwnd: HWND) {
+        if !crate::core::app_update::is_enabled() {
+            return;
+        }
+        let window = hwnd.0 as usize;
+        let spawned = std::thread::Builder::new()
+            .name("lr-update-check".to_owned())
+            .spawn(move || {
+                let result = crate::core::app_update::check_for_update();
+                let payload = Box::into_raw(Box::new(result));
+                unsafe {
+                    if PostMessageW(
+                        HWND(window as *mut _),
+                        WM_APP_UPDATE_READY,
+                        WPARAM(0),
+                        LPARAM(payload as isize),
+                    )
+                    .is_err()
+                    {
+                        drop(Box::from_raw(payload));
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            log::warn!("[UPDATE] 无法启动更新检查线程: {error}");
+        }
+    }
+
+    /// Shows the update prompt unless a long task runs (then the offer waits for the next start)
+    /// or a modal dialog owns the window (then it is retried shortly).
+    unsafe fn present_app_update(
+        &mut self,
+        hwnd: HWND,
+        offer: crate::core::app_update::UpdateOffer,
+    ) {
+        if self.has_active_long_task() || self.close_after_task {
+            log::info!(
+                "[UPDATE] 发现新版本 {}，但当前有正在执行的任务，本次运行不再提示",
+                offer.manifest.version
+            );
+            return;
+        }
+        if !windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(hwnd).as_bool()
+            || self.progress_visible
+        {
+            super::update_dialog::defer(offer);
+            let _ = SetTimer(hwnd, APP_UPDATE_RETRY_TIMER_ID, 3000, None);
+            return;
+        }
+        if super::update_dialog::run(hwnd, &offer)
+            == super::update_dialog::UpdateDialogOutcome::RestartRequired
+        {
+            crate::core::app_update::request_restart();
+            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
     }
 
     fn has_active_long_task(&self) -> bool {
@@ -14764,6 +14825,8 @@ unsafe extern "system" fn window_proc(
                 state.request_auto_image_discovery(hwnd);
                 #[cfg(not(feature = "non-elevated-tests"))]
                 state.handle_download_intent(hwnd, DownloadIntent::RefreshCatalogue);
+                #[cfg(not(feature = "non-elevated-tests"))]
+                state.request_app_update_check(hwnd);
             }
             LRESULT(0)
         }
@@ -15266,6 +15329,22 @@ unsafe extern "system" fn window_proc(
                         }
                     }
                 }
+            }
+            LRESULT(0)
+        }
+        WM_APP_UPDATE_READY => {
+            // Always reclaim the payload, even when the window state is already gone.
+            let result = Box::from_raw(
+                lparam.0 as *mut anyhow::Result<Option<crate::core::app_update::UpdateOffer>>,
+            );
+            match *result {
+                Ok(Some(offer)) => {
+                    if let Some(state) = state {
+                        state.present_app_update(hwnd, offer);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => log::info!("[UPDATE] 检查更新失败（不影响使用）: {error:#}"),
             }
             LRESULT(0)
         }
@@ -15867,6 +15946,11 @@ unsafe extern "system" fn window_proc(
                         dialog.animate();
                     } else {
                         let _ = KillTimer(hwnd, PE_MAINTENANCE_ANIMATION_TIMER_ID);
+                    }
+                } else if wparam.0 == APP_UPDATE_RETRY_TIMER_ID {
+                    let _ = KillTimer(hwnd, APP_UPDATE_RETRY_TIMER_ID);
+                    if let Some(offer) = super::update_dialog::take_deferred() {
+                        state.present_app_update(hwnd, offer);
                     }
                 } else if wparam.0 == CATALOGUE_TIMER_ID {
                     state.poll_catalogue_messages(hwnd);

@@ -22,6 +22,12 @@ fn select(production: &'static str, dev: &'static str) -> &'static str {
     }
 }
 
+/// Unix timestamp of this build (`SOURCE_DATE_EPOCH` in the release pipeline). The incremental
+/// updater offers a release only when its manifest `build_epoch` is newer than this value.
+pub fn build_epoch() -> u64 {
+    env!("BUILD_EPOCH").parse().unwrap_or(0)
+}
+
 pub fn window_title() -> String {
     crate::tr!(select(PRODUCTION_WINDOW_TITLE, DEV_WINDOW_TITLE))
 }
@@ -72,6 +78,12 @@ pub fn credits() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_epoch_is_the_build_timestamp() {
+        // 2020-09-13; any real build of this source is newer.
+        assert!(build_epoch() > 1_600_000_000);
+    }
 
     #[test]
     fn dev_marker_matches_the_cargo_feature() {

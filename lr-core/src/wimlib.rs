@@ -240,7 +240,9 @@ type FnGetVersionString = unsafe extern "C" fn() -> *const u8;
 type FnUpdateImage = unsafe extern "C" fn(
     wim: WIMStruct,
     image: c_int,
-    cmds: *const WimlibUpdateCommandAdd,
+    // Points at an array of 40-byte `struct wimlib_update_command` values: either the ADD-only
+    // `WimlibUpdateCommandAdd` or the general `WimlibUpdateCommand` union below.
+    cmds: *const c_void,
     num_cmds: usize,
     update_flags: c_int,
 ) -> c_int;
@@ -252,6 +254,7 @@ type FnUpdateImage = unsafe extern "C" fn(
 /// 中 `op`(c_int) 之后会自动补 4 字节，使 `add` 落在偏移 8，布局与 C 端一致。
 /// 由于 ADD 是联合体里最大的成员，把指针指向本结构传给 wimlib 完全合法。
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct WimlibAddCommand {
     fs_source_path: *const u16,
     wim_target_path: *const u16,
@@ -1329,7 +1332,15 @@ impl WimlibManager {
                     add_flags: 0,
                 },
             };
-            let rc = unsafe { (self.update_image)(wim, image as c_int, &cmd, 1, 0) };
+            let rc = unsafe {
+                (self.update_image)(
+                    wim,
+                    image as c_int,
+                    &cmd as *const WimlibUpdateCommandAdd as *const c_void,
+                    1,
+                    0,
+                )
+            };
             if rc != WIMLIB_ERR_SUCCESS {
                 return Err(self.error_message(rc));
             }
@@ -1597,5 +1608,312 @@ mod cancellation_tests {
             parallel_decompression_policy_from_available(24, 8 * 1024 * 1024 * 1024),
             (24, PARALLEL_MEMORY_LIMIT)
         );
+    }
+}
+
+// ============================================================================
+// 增量升级：PE 镜像逐文件清单与补丁（wimlib_iterate_dir_tree / wimlib_update_image）
+// ============================================================================
+
+const WIMLIB_UPDATE_OP_DELETE: c_int = 1;
+const WIMLIB_DELETE_FLAG_RECURSIVE: c_int = 0x0000_0002;
+/// 写出完成前对输出文件执行 fsync（FlushFileBuffers），随后的原子替换才有持久化意义。
+const WIMLIB_WRITE_FLAG_FSYNC: c_int = 0x0000_0020;
+const WIMLIB_FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+const WIMLIB_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+// `struct wimlib_dir_entry`（wimlib.h 1.14.x）在 x86-64 Windows 上的字段偏移：
+// filename 0、dos_name 8、full_path 16、depth 24、security_descriptor 32、
+// security_descriptor_size 40、attributes 48、reparse_tag 52、num_links 56、num_named_streams 60、
+// hard_link_group_id 64、三个 wimlib_timespec（_WIN64 下为 int64 秒 + int32 纳秒，各 16 字节）
+// 72/88/104、unix_* 120..136、wimlib_object_id 136..200、*_time_high/reserved2 200..216、
+// reserved[4] 216..248，柔性数组 streams[] 自 248 起；streams[0] 恒为未命名数据流。
+// `struct wimlib_stream_entry` 的 resource 位于 8；`struct wimlib_resource_entry` 的
+// uncompressed_size 位于 0、sha1_hash[20] 位于 24。全部字段均为指针、size_t 或定长整数，
+// 已用同版本 wimlib.h 的 offsetof 实测核对，不含 LLP64/LP64 不同宽度的 long。
+const DIR_ENTRY_FULL_PATH: usize = 16;
+const DIR_ENTRY_ATTRIBUTES: usize = 48;
+const DIR_ENTRY_REPARSE_TAG: usize = 52;
+const DIR_ENTRY_NUM_NAMED_STREAMS: usize = 60;
+const DIR_ENTRY_STREAMS: usize = 248;
+const STREAM_ENTRY_RESOURCE: usize = 8;
+const RESOURCE_ENTRY_SHA1: usize = 24;
+
+/// `struct wimlib_delete_command`
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WimlibDeleteCommand {
+    wim_path: *const u16,
+    delete_flags: c_int,
+}
+
+/// `struct wimlib_update_command` 的联合体（rename 与 add 同为 32 字节，未使用）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+union WimlibUpdatePayload {
+    add: WimlibAddCommand,
+    delete: WimlibDeleteCommand,
+}
+
+/// 通用 `struct wimlib_update_command`：enum op 之后对齐到 8，联合体占 32 字节，共 40 字节。
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WimlibUpdateCommand {
+    op: c_int,
+    payload: WimlibUpdatePayload,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<WimlibAddCommand>() == 32);
+    assert!(std::mem::size_of::<WimlibUpdateCommandAdd>() == 40);
+    assert!(std::mem::size_of::<WimlibDeleteCommand>() == 16);
+    assert!(std::mem::size_of::<WimlibUpdateCommand>() == 40);
+    assert!(std::mem::offset_of!(WimlibUpdateCommand, payload) == 8);
+    assert!(std::mem::size_of::<WimInfo>() == 88);
+};
+
+/// 镜像目录树的逐项清单（不含根目录），路径统一为 `/` 分隔的相对路径。
+pub struct WimImageListing {
+    pub image_count: u32,
+    pub boot_index: u32,
+    pub entries: Vec<crate::update_manifest::ImageEntry>,
+}
+
+struct ImageListingContext {
+    entries: Vec<crate::update_manifest::ImageEntry>,
+    failure: Option<String>,
+}
+
+fn normalize_image_path(path: &str) -> String {
+    path.replace('\\', "/").trim_matches('/').to_owned()
+}
+
+fn image_path_for_wimlib(path: &str) -> String {
+    format!("\\{}", path.replace('/', "\\"))
+}
+
+/// 严格读取以 NUL 结尾的 UTF-16；非法代理项不能被有损替换，否则清单会把两个不同名字视为同一路径。
+unsafe fn utf16_ptr_to_string_strict(ptr: *const u16) -> Result<String, String> {
+    if ptr.is_null() {
+        return Err("wimlib 返回空路径".to_string());
+    }
+    let mut length = 0usize;
+    while *ptr.add(length) != 0 {
+        length += 1;
+        if length > 32_767 {
+            return Err("wimlib 返回的路径没有结束符".to_string());
+        }
+    }
+    String::from_utf16(std::slice::from_raw_parts(ptr, length))
+        .map_err(|_| "路径不是有效的 UTF-16".to_string())
+}
+
+unsafe extern "C" fn image_listing_callback(dentry: *const c_void, ctx: *mut c_void) -> c_int {
+    use crate::update_manifest::{ImageEntry, ImageEntryKind};
+    let context = ctx as *mut ImageListingContext;
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let base = dentry as *const u8;
+        let full_path =
+            std::ptr::read_unaligned(base.add(DIR_ENTRY_FULL_PATH) as *const *const u16);
+        let attributes = std::ptr::read_unaligned(base.add(DIR_ENTRY_ATTRIBUTES) as *const u32);
+        let reparse_tag = std::ptr::read_unaligned(base.add(DIR_ENTRY_REPARSE_TAG) as *const u32);
+        let named_streams =
+            std::ptr::read_unaligned(base.add(DIR_ENTRY_NUM_NAMED_STREAMS) as *const u32);
+        let resource = base.add(DIR_ENTRY_STREAMS + STREAM_ENTRY_RESOURCE);
+        let size = std::ptr::read_unaligned(resource as *const u64);
+        let sha1 = std::slice::from_raw_parts(resource.add(RESOURCE_ENTRY_SHA1), 20);
+        let (path, name_error) = match utf16_ptr_to_string_strict(full_path) {
+            Ok(path) => (normalize_image_path(&path), None),
+            Err(error) => (
+                normalize_image_path(&utf16_ptr_to_string(full_path).unwrap_or_default()),
+                Some(error),
+            ),
+        };
+        if path.is_empty() {
+            return; // 镜像根目录
+        }
+        let kind = if let Some(error) = name_error {
+            ImageEntryKind::Unsupported(error)
+        } else if attributes & WIMLIB_FILE_ATTRIBUTE_REPARSE_POINT != 0 || reparse_tag != 0 {
+            ImageEntryKind::Unsupported(format!("reparse point 0x{reparse_tag:08x}"))
+        } else if named_streams != 0 {
+            ImageEntryKind::Unsupported(format!("{named_streams} named data stream(s)"))
+        } else if attributes & WIMLIB_FILE_ATTRIBUTE_DIRECTORY != 0 {
+            ImageEntryKind::Directory
+        } else {
+            ImageEntryKind::File {
+                size,
+                sha1: sha1.iter().map(|byte| format!("{byte:02x}")).collect(),
+            }
+        };
+        (*context).entries.push(ImageEntry {
+            path,
+            attributes,
+            kind,
+        });
+    }));
+    match outcome {
+        Ok(()) => 0,
+        Err(_) => {
+            (*context).failure = Some("读取镜像目录树时回调异常".to_string());
+            // 非零返回值让 wimlib 立即停止遍历并原样返回该值。
+            1
+        }
+    }
+}
+
+impl WimlibManager {
+    /// 只读枚举镜像 `image` 的完整目录树：每个目录、普通文件的大小与 WIM 自带 SHA-1，
+    /// 以及无法安全补丁的项（重解析点、命名数据流、非法名称）。
+    pub fn list_image_entries(
+        &self,
+        image_file: &str,
+        image: i32,
+    ) -> Result<WimImageListing, String> {
+        let wim = self.open(image_file)?;
+        let result = (|| {
+            let mut info = WimInfo::default();
+            let rc = unsafe { (self.get_wim_info)(wim, &mut info) };
+            if rc != WIMLIB_ERR_SUCCESS {
+                return Err(self.error_message(rc));
+            }
+            if image < 1 || image as u32 > info.image_count {
+                return Err(format!(
+                    "镜像序号 {image} 超出范围（共 {} 个镜像）",
+                    info.image_count
+                ));
+            }
+            let mut context = ImageListingContext {
+                entries: Vec::new(),
+                failure: None,
+            };
+            let root = to_wide("\\");
+            let rc = unsafe {
+                (self.iterate_dir_tree)(
+                    wim,
+                    image as c_int,
+                    root.as_ptr(),
+                    WIMLIB_ITERATE_DIR_TREE_FLAG_RECURSIVE,
+                    image_listing_callback,
+                    &mut context as *mut ImageListingContext as *mut c_void,
+                )
+            };
+            if let Some(failure) = context.failure {
+                return Err(failure);
+            }
+            if rc != WIMLIB_ERR_SUCCESS {
+                return Err(self.error_message(rc));
+            }
+            Ok(WimImageListing {
+                image_count: info.image_count,
+                boot_index: info.boot_index,
+                entries: context.entries,
+            })
+        })();
+        unsafe { (self.free_wim)(wim) };
+        result
+    }
+
+    /// 以只读打开 `source_wim`，在内存中对镜像 `image` 依次执行补丁计划的删除、建目录和
+    /// 添加/替换文件命令，再用相同压缩格式写出到**新的** `output_wim`（保留启动索引与
+    /// 镜像元数据，未改动的资源按原压缩数据直接复制）。源 WIM 不会被修改。
+    ///
+    /// `file_sources[i]` 是 `plan.add_files[i]` 的本地内容文件；`empty_directory` 是用于
+    /// 创建空目录的本地空目录。ADD 命令按 wimlib 1.7+ 的默认语义替换已存在的非目录文件。
+    pub fn write_patched_image(
+        &self,
+        source_wim: &str,
+        image: i32,
+        plan: &crate::update_manifest::ImagePatchPlan,
+        file_sources: &[PathBuf],
+        empty_directory: &Path,
+        output_wim: &str,
+    ) -> Result<(), String> {
+        if file_sources.len() != plan.add_files.len() {
+            return Err("补丁文件来源数量与计划不一致".to_string());
+        }
+        let wim = self.open(source_wim)?;
+        let result = (|| {
+            // 所有宽字符串必须存活到 wimlib_update_image 返回；Vec 移动不会移动其堆缓冲区。
+            let mut strings: Vec<Vec<u16>> = Vec::new();
+            let mut commands: Vec<WimlibUpdateCommand> = Vec::with_capacity(
+                plan.delete.len() + plan.add_directories.len() + plan.add_files.len(),
+            );
+            for delete in &plan.delete {
+                let path = to_wide(&image_path_for_wimlib(&delete.path));
+                commands.push(WimlibUpdateCommand {
+                    op: WIMLIB_UPDATE_OP_DELETE,
+                    payload: WimlibUpdatePayload {
+                        delete: WimlibDeleteCommand {
+                            wim_path: path.as_ptr(),
+                            delete_flags: if delete.recursive {
+                                WIMLIB_DELETE_FLAG_RECURSIVE
+                            } else {
+                                0
+                            },
+                        },
+                    },
+                });
+                strings.push(path);
+            }
+            let empty = path_to_wide(empty_directory);
+            let additions = plan
+                .add_directories
+                .iter()
+                .map(|directory| (empty.clone(), directory.as_str()))
+                .chain(
+                    plan.add_files
+                        .iter()
+                        .zip(file_sources)
+                        .map(|(file, source)| (path_to_wide(source), file.path())),
+                );
+            for (source, target) in additions {
+                let target = to_wide(&image_path_for_wimlib(target));
+                commands.push(WimlibUpdateCommand {
+                    op: WIMLIB_UPDATE_OP_ADD,
+                    payload: WimlibUpdatePayload {
+                        add: WimlibAddCommand {
+                            fs_source_path: source.as_ptr(),
+                            wim_target_path: target.as_ptr(),
+                            config_file: std::ptr::null(),
+                            add_flags: 0,
+                        },
+                    },
+                });
+                strings.push(source);
+                strings.push(target);
+            }
+            if !commands.is_empty() {
+                let rc = unsafe {
+                    (self.update_image)(
+                        wim,
+                        image as c_int,
+                        commands.as_ptr() as *const c_void,
+                        commands.len(),
+                        0,
+                    )
+                };
+                if rc != WIMLIB_ERR_SUCCESS {
+                    return Err(self.error_message(rc));
+                }
+            }
+            let output = to_wide(output_wim);
+            let rc = unsafe {
+                (self.write)(
+                    wim,
+                    output.as_ptr(),
+                    WIMLIB_ALL_IMAGES,
+                    WIMLIB_WRITE_FLAG_FSYNC,
+                    optimal_threads(),
+                )
+            };
+            drop(strings);
+            if rc != WIMLIB_ERR_SUCCESS {
+                return Err(self.error_message(rc));
+            }
+            Ok(())
+        })();
+        unsafe { (self.free_wim)(wim) };
+        result
     }
 }

@@ -61,6 +61,46 @@ jobs:
           cargo test -p letrecovery-pe --locked --features non-elevated-tests
           cargo test -p LetRecovery --locked --features non-elevated-tests
 
+      - name: Validate pending changelog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & cargo run --locked -p lr-core --example release_update_tool -- validate-changelog PENDING_CHANGELOG.json
+          if ($LASTEXITCODE -ne 0) {
+            throw "PENDING_CHANGELOG.json is invalid"
+          }
+
+      - name: Determine tag
+        id: tag
+        shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:REQUESTED_TAG.Trim()
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            # Same UTC date as the BUILD_VERSION that build.rs derives from SOURCE_DATE_EPOCH,
+            # so the tag, both executables and the update manifest always agree.
+            $epoch = [int64]$env:SOURCE_DATE_EPOCH
+            $tag = [DateTimeOffset]::FromUnixTimeSeconds($epoch).UtcDateTime.ToString(
+              'yyyy.M.d', [Globalization.CultureInfo]::InvariantCulture)
+          }
+          & git check-ref-format "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Invalid Release tag: $tag"
+          }
+          $version = if ($tag.StartsWith("v", [StringComparison]::OrdinalIgnoreCase)) {
+            "v" + $tag.Substring(1)
+          } else {
+            "v" + $tag
+          }
+          if ($version -cnotmatch '^v[0-9A-Za-z][0-9A-Za-z.-]{0,62}$') {
+            throw "Release tag cannot be used as an update version: $tag"
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Tag: $tag (update version $version, build epoch $env:SOURCE_DATE_EPOCH)"
+
       - name: Build and verify system-side exe (LetRecovery.exe)
         shell: pwsh
         run: |
@@ -757,6 +797,31 @@ jobs:
           echo "--- package README ---"
           ls -la pkg/README.txt 2>/dev/null || true
 
+      - name: Generate incremental update manifest and objects
+        # Runs on every branch so each package carries bin/release-manifest.json (the installed
+        # release identity the desktop updater compares against); objects are uploaded only on main.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $objects = Join-Path $env:RUNNER_TEMP "update-objects"
+          if (Test-Path -LiteralPath $objects) {
+            Remove-Item -LiteralPath $objects -Recurse -Force
+          }
+          & cargo run --locked -p lr-core --example release_update_tool -- generate `
+            pkg PENDING_CHANGELOG.json "${{ steps.tag.outputs.version }}" $env:SOURCE_DATE_EPOCH $objects
+          if ($LASTEXITCODE -ne 0) {
+            throw "Incremental update manifest generation failed"
+          }
+          $notes = Join-Path $env:RUNNER_TEMP "changelog-notes.md"
+          & cargo run --locked -p lr-core --example release_update_tool -- release-notes PENDING_CHANGELOG.json $notes
+          if ($LASTEXITCODE -ne 0) {
+            throw "Changelog release notes generation failed"
+          }
+          if (-not (Test-Path -LiteralPath "pkg\bin\release-manifest.json" -PathType Leaf)) {
+            throw "pkg\bin\release-manifest.json was not generated"
+          }
+          "UPDATE_OBJECTS_DIR=$objects" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Repackage into LetRecovery.7z
         shell: pwsh
         run: |
@@ -891,23 +956,35 @@ jobs:
             -Path ".\LetRecovery.7z", ".\installer\output\LetRecovery-Setup-x64.exe" `
             -PublicBaseUrl "https://r2.cloud-pe.cn"
 
-      - name: Determine tag
-        id: tag
+      - name: Publish incremental update objects to Cloudflare R2
+        # Content-addressed and immutable: existing objects are skipped, nothing is overwritten
+        # or deleted. Must finish before the manifest below becomes visible to clients.
+        if: ${{ (inputs.branch || github.ref_name) == 'main' }}
         shell: pwsh
         env:
-          REQUESTED_TAG: ${{ inputs.tag }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = $env:REQUESTED_TAG.Trim()
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = (Get-Date).ToUniversalTime().ToString('yyyy.M.d')
-          }
-          & git check-ref-format "refs/tags/$tag"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Invalid Release tag: $tag"
-          }
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "Tag: $tag"
+          & .\.github\scripts\publish-update-objects.ps1 `
+            -ObjectsDirectory $env:UPDATE_OBJECTS_DIR `
+            -Prefix "LetRecovery/update/objects" `
+            -PublicBaseUrl "https://r2.cloud-pe.cn"
+
+      - name: Publish incremental update manifest
+        if: ${{ (inputs.branch || github.ref_name) == 'main' }}
+        shell: pwsh
+        env:
+          UPDATE_API_SECRET: ${{ secrets.UPDATE_API_SECRET }}
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          LETRECOVERY_UPDATE_API: ${{ secrets.LETRECOVERY_UPDATE_API }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\.github\scripts\publish-update-manifest.ps1 `
+            -ManifestPath ".\pkg\bin\release-manifest.json" `
+            -Version "${{ steps.tag.outputs.version }}"
 
       - name: Create Release
         shell: bash
@@ -927,6 +1004,11 @@ jobs:
               printf '%s\n\n' "此 release 由非 main 分支（${BR}）构建，仅供测试，可能不稳定。"
             fi
             printf '%s\n' "Automated build from branch ${BR} (commit ${SHA})."
+            NOTES="$(cygpath -u "$RUNNER_TEMP")/changelog-notes.md"
+            if [ -s "$NOTES" ]; then
+              printf '\n'
+              cat "$NOTES"
+            fi
           } > release_notes.md
           gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag || true
           gh release create "$TAG" \
@@ -1010,3 +1092,46 @@ jobs:
           } finally {
             Pop-Location
           }
+
+      - name: Clear released changelog entries
+        # Runs only after everything above succeeded. Works on the latest remote branch in a
+        # separate worktree and removes exactly the entries of the released commit, so entries
+        # merged while this release was building stay pending for the next release.
+        if: ${{ (inputs.branch || github.ref_name) == 'main' }}
+        shell: bash
+        env:
+          RELEASE_BRANCH: ${{ inputs.branch || github.ref_name }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TOOL="$(cygpath -u "$GITHUB_WORKSPACE")/target/debug/examples/release_update_tool.exe"
+          TEMP_DIR="$(cygpath -u "$RUNNER_TEMP")"
+          RELEASED="$TEMP_DIR/released-changelog.json"
+          WORKTREE="$TEMP_DIR/changelog-clear"
+          test -x "$TOOL" || { echo "release_update_tool was not built"; exit 1; }
+          git cat-file blob "HEAD:PENDING_CHANGELOG.json" > "$RELEASED"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            git fetch --no-tags origin "$RELEASE_BRANCH"
+            git worktree remove --force "$WORKTREE" 2>/dev/null || rm -rf "$WORKTREE"
+            git worktree prune
+            git worktree add --detach "$WORKTREE" FETCH_HEAD
+            "$TOOL" clear-changelog "$(cygpath -w "$RELEASED")" "$(cygpath -w "$WORKTREE/PENDING_CHANGELOG.json")"
+            if git -C "$WORKTREE" diff --quiet -- PENDING_CHANGELOG.json; then
+              echo "No released changelog entries left on $RELEASE_BRANCH."
+              break
+            fi
+            git -C "$WORKTREE" add -- PENDING_CHANGELOG.json
+            git -C "$WORKTREE" commit -m "chore: clear changelog released in $RELEASE_TAG [skip ci]"
+            if git -C "$WORKTREE" push origin "HEAD:refs/heads/$RELEASE_BRANCH"; then
+              echo "Cleared the changelog entries released in $RELEASE_TAG."
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::Could not push the cleared PENDING_CHANGELOG.json to $RELEASE_BRANCH"
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+          git worktree remove --force "$WORKTREE" 2>/dev/null || true

@@ -84,6 +84,16 @@ pub const INSTALL_STATS_URL: &str = text(
     option_env!("LR_BRAND_INSTALL_STATS_URL"),
     "https://api.cloud-pe.cn/v1/install",
 );
+/// Incremental self-update manifest, written only by the authenticated release callback.
+pub const UPDATE_MANIFEST_URL: &str = text(
+    option_env!("LR_BRAND_UPDATE_MANIFEST_URL"),
+    "https://letrecovery.cloud-pe.cn/update/index.json",
+);
+/// Content-addressed update objects (`<base><sha256>`) uploaded by the release workflow.
+pub const UPDATE_OBJECT_BASE_URL: &str = text(
+    option_env!("LR_BRAND_UPDATE_OBJECT_BASE_URL"),
+    "https://r2.cloud-pe.cn/LetRecovery/update/objects/",
+);
 pub const HOMEPAGE_URL: &str = text(
     option_env!("LR_BRAND_HOMEPAGE_URL"),
     "https://letrecovery.net",
@@ -123,10 +133,39 @@ pub mod feature {
     pub const BACKUP: bool = flag(option_env!("LR_BRAND_FEATURE_BACKUP"), true);
     pub const TOOLS: bool = flag(option_env!("LR_BRAND_FEATURE_TOOLS"), true);
     pub const HARDWARE_INFO: bool = flag(option_env!("LR_BRAND_FEATURE_HARDWARE_INFO"), true);
+    /// Incremental self-update from the release channel. A customised build is produced from the
+    /// official package with replaced executables, so updating it from the official channel would
+    /// silently replace the customisation. Customised builds therefore keep it off unless the
+    /// customisation pipeline enables it explicitly together with its own update URLs.
+    pub const SELF_UPDATE: bool = flag(
+        option_env!("LR_BRAND_FEATURE_SELF_UPDATE"),
+        super::is_official_release_channel(),
+    );
 }
 
 pub const fn is_customized() -> bool {
     !matches!(EDITION, Edition::Official)
+}
+
+const fn same_text(left: &str, right: &str) -> bool {
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Whether this executable is an unmodified official build that may follow the official update
+/// channel: official edition, official product name and the build-date version.
+pub const fn is_official_release_channel() -> bool {
+    !is_customized() && same_text(PRODUCT_NAME, OFFICIAL_PRODUCT_NAME) && VERSION.is_none()
 }
 
 /// Replaces the official product name in user-visible text of a customised build.
@@ -205,5 +244,21 @@ mod tests {
             assert_eq!(PE_WIM_NAME, "LetRecovery_PE.wim");
             assert!(password_matches("anything"));
         }
+        if is_official_release_channel() {
+            // An unmodified official build follows the official update channel unless the
+            // pipeline explicitly switched it off.
+            assert_eq!(
+                feature::SELF_UPDATE,
+                !matches!(
+                    option_env!("LR_BRAND_FEATURE_SELF_UPDATE"),
+                    Some("0" | "false")
+                )
+            );
+            assert!(UPDATE_MANIFEST_URL.starts_with("https://"));
+            assert!(UPDATE_OBJECT_BASE_URL.starts_with("https://"));
+            assert!(UPDATE_OBJECT_BASE_URL.ends_with('/'));
+        }
+        assert!(same_text("LetRecovery", OFFICIAL_PRODUCT_NAME));
+        assert!(!same_text("LetRecoveryX", OFFICIAL_PRODUCT_NAME));
     }
 }

@@ -1,5 +1,6 @@
 pub mod advanced_options;
 pub mod app_config;
+pub mod app_update;
 mod appx_legacy_impl;
 pub mod automation_export;
 pub mod bcdedit;

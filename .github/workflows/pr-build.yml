@@ -51,6 +51,11 @@ jobs:
       - name: Compile all test targets
         run: cargo test --workspace --no-run --locked --features "LetRecovery/non-elevated-tests,letrecovery-pe/non-elevated-tests"
 
+      # 待发布更新日志（PENDING_CHANGELOG.json）由 Release 写入升级清单并在发布成功后清理；
+      # 格式错误必须在合并前暴露，不能等到发布时才失败。
+      - name: Validate pending changelog
+        run: cargo run --locked -p lr-core --example release_update_tool -- validate-changelog PENDING_CHANGELOG.json
+
       # 运行两端完整的确定性单元测试。依赖真实 Windows 主机状态的测试必须显式 #[ignore]，
       # CI 不使用 --ignored，也不执行真实磁盘、BitLocker、DISM、BCD 或注册表写入操作。
       - name: Run pure-logic unit tests
