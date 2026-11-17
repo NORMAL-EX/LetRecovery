@@ -4,7 +4,7 @@
 
 **A Source-Available Windows Reinstallation Tool Free for Noncommercial Use**
 
-English | [简体中文](README.md)
+English | [简体中文](README.md) | [日本語](README_ja.md)
 
 [![License](https://img.shields.io/badge/License-PolyForm%20NC-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)

@@ -4,7 +4,7 @@
 
 **一款免费用于非商业场景、源代码公开的 Windows 系统重装工具**
 
-[English](README_en.md) | 简体中文
+[English](README_en.md) | 简体中文 | [日本語](README_ja.md)
 
 [![License](https://img.shields.io/badge/License-PolyForm%20NC-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
